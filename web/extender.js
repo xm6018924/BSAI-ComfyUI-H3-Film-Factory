@@ -3726,13 +3726,11 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         renderAssetPanel(gpLeftPanel, gpPseudoClip, node, runtime, gpTextarea);
         renderGlobalThumbnails();
     }
-    runtime.renderGlobalAssetPanel = renderGlobalAssetPanel;
 
     // Thumbnail preview strip: shows @图N thumbnails below the textarea
     // 全局提示词内@图N缩略图预览条
     const gpThumbStrip = document.createElement("div");
     gpThumbStrip.style.cssText = "display:flex;flex-direction:row;gap:4px;padding:3px 4px;flex-wrap:wrap;min-height:0;border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.12);";
-    runtime._gpThumbStrip = gpThumbStrip;
 
     function renderGlobalThumbnails() {
         gpThumbStrip.replaceChildren();
@@ -3908,6 +3906,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         ready: false,
         _gpPollTimer: null,
     };
+    runtime.renderGlobalAssetPanel = renderGlobalAssetPanel;
+    runtime._gpThumbStrip = gpThumbStrip;
 
     renderGlobalAssetPanel();
 
