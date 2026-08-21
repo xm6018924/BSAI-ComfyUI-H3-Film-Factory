@@ -15,11 +15,17 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 - **Per-CLIP Cards** — Vertical card layout with prompt, subtitle, duration, seed, audio mode, context reference, and color tag per clip
 - **Per-CLIP Regeneration** — Regenerate any single CLIP without affecting others; manual merge via "合并输出 / Merge Output" button
 - **Per-CLIP Refresh Button** — Blue ↻ button on each CLIP header to re-sync from external source
+- **Live Latent Preview** — Real-time latent-space preview during rendering, showing progress per step
+- **Per-CLIP Video Preview with Audio** — Each clip preview includes both video and audio; overlap frames are trimmed so clips merge seamlessly
+- **Seamless Merge Output** — One-click merge of all clips into a single MP4 with no duplicate frames at boundaries
 
 - **分镜驱动生成** — 连接 Text Multiline 节点，包含 `[整体风格]`、`[角色档案]`、`[分镜N]` 标记；系统自动拆分全局提示词与分镜段，自动创建CLIP，同步每个CLIP的提示词和时长
 - **独立CLIP卡片** — 竖排卡片布局，每个片段独立设置提示词、字幕、时长、种子、音频模式、上下文参考、颜色标签
 - **单CLIP重新生成** — 可单独重新生成某个CLIP而不影响其他片段；通过"合并输出"按钮手动合并
 - **单CLIP刷新按钮** — 每个CLIP头部有蓝色↻按钮，可从外部输入源重新同步
+- **潜空间实时预览** — 渲染过程中实时显示潜空间预览帧，展示每步进度
+- **带音频的单CLIP视频预览** — 每个CLIP预览同时包含视频和音频；上下文重叠帧已自动去除，确保合并时无缝衔接
+- **一键合并输出** — 一键将所有CLIP合并为单个MP4，连接处无重复画面
 
 ### Asset Library | 资产库
 - **Upload & Index** — Upload images/videos/audio via node UI; auto-indexed as `@图N` / `@视频N` / `@音频N`
@@ -81,7 +87,7 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 | Node | Description |
 |------|-------------|
-| **BSAI ComfyUI H3 Film Factory** (MiniMaxH3Extender) | Core engine: storyboard-driven multi-CLIP generation with asset library, subtitles, and per-CLIP control |
+| **BSAI ComfyUI H3 Film Factory** (`BSAIH3FilmFactory`) | Core engine: storyboard-driven multi-CLIP generation with asset library, subtitles, and per-CLIP control |
 | **Final Decode & Preview** (MiniMaxH3MotionContextDiskFinalDecode) | Decode H3 motion cache to H.264 video |
 | **H3 Latent Upscale 2x** (MiniMaxH3LatentUpscaleCombined) | 2x latent upscaling using H3 learned upscaler |
 | **BSAI Asset Library** (BSAI_AssetLibraryInput) | Upload/manage images, videos, audio for @图N/@视频N/@音频N references |
@@ -102,12 +108,12 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 1. Clone or download to `ComfyUI/custom_nodes/BSAI-ComfyUI-H3-Film-Factory/`
 2. Install dependencies: `pip install -r requirements.txt`
 3. Restart ComfyUI
-4. Load example workflow from `workflows/BSAI_H3_Film_Factory_Template.json`
+4. Load example workflow from `workflows/BSAI_H3_Film_Factory_v1.2.json`
 
 1. 克隆或下载到 `ComfyUI/custom_nodes/BSAI-ComfyUI-H3-Film-Factory/`
 2. 安装依赖：`pip install -r requirements.txt`
 3. 重启 ComfyUI
-4. 从 `workflows/BSAI_H3_Film_Factory_Template.json` 加载示例工作流
+4. 从 `workflows/BSAI_H3_Film_Factory_v1.2.json` 加载示例工作流
 
 ---
 
@@ -128,7 +134,7 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 ## Quick Start | 快速开始
 
 ### 1. Load the Template Workflow | 加载模板工作流
-Drag `workflows/BSAI_H3_Film_Factory_Template.json` into ComfyUI.
+Drag `workflows/BSAI_H3_Film_Factory_v1.2.json` into ComfyUI.
 
 ### 2. Connect Prompt Source | 连接提示词源
 Connect a **Text Multiline** node to the `prompt_source` input port. Write your script:
@@ -250,20 +256,41 @@ Text Multiline → prompt_source → [BSAI Film Factory]
 
 ---
 
+## Output Mode | 输出模式
+
+The `output_mode` dropdown controls what video files are saved to the output folder after each run.
+
+`output_mode` 下拉菜单控制每次运行后保存哪些视频文件到输出目录。
+
+| Mode | Description | 说明 |
+|------|-------------|------|
+| **none** | Cache only, no direct video output. Use downstream Final Decode node for output. | 仅缓存，不直接输出视频。通过下游 Final Decode 节点输出。 |
+| **per_clip** | Save each clip as a separate MP4 file. | 每个CLIP单独保存为一个MP4文件。 |
+| **merged** | Save all clips merged into a single MP4 file. | 所有CLIP合并为一个MP4文件输出。 |
+| **both** | Save both per-clip MP4s and the merged MP4. | 同时输出单CLIP视频和合并视频。 |
+
+File prefix is controlled by the `filename_prefix` widget.
+
+文件前缀由 `filename_prefix` 控件设置。
+
+---
+
 ## Technical Details | 技术细节
 
 - **Extension Name**: `BSAIMiniMaxH3.Extender` (unique prefix avoids conflicts)
 - **Category**: `BSAI/H3 Film Factory`
-- **Node Class**: `MiniMaxH3Extender`
+- **Node Class**: `BSAIH3FilmFactory`
 - **Node Display**: `BSAI ComfyUI H3 Film Factory`
+- **Note**: The node type `BSAIH3FilmFactory` is independent from the original `MiniMaxH3Extender` plugin — both can coexist without conflict
 - **Overlay Technique**: Transparent textarea (caret visible) + visible overlay div (text + inline thumbnails), scroll-synced
 - **Auto-Sync Timing**: 800ms polling + 5 retries at 100/500/1200/2500/4000ms on page load
 - **Storyboard Parser**: Regex `/\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/` for segment detection; `/\d+-\d+秒/` for duration extraction
 
 - **扩展名**：`BSAIMiniMaxH3.Extender`（唯一前缀，避免冲突）
 - **类别**：`BSAI/H3 Film Factory`
-- **节点类**：`MiniMaxH3Extender`
+- **节点类**：`BSAIH3FilmFactory`
 - **节点显示名**：`BSAI ComfyUI H3 Film Factory`
+- **注意**：节点类型 `BSAIH3FilmFactory` 与原始 `MiniMaxH3Extender` 插件完全独立，两者可共存不冲突
 - **覆盖层技术**：透明textarea（光标可见）+ 可见overlay div（文本+内联缩略图），滚动同步
 - **自动同步时机**：800ms轮询 + 页面加载时5次重试（100/500/1200/2500/4000ms）
 - **分镜解析器**：正则 `/\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/` 检测分镜段；`/\d+-\d+秒/` 提取时长
