@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-// extender.js v2.3.0 — cache-bust marker (2026-08-21-final-rename)
+// extender.js v2.3.1 — cache-bust marker (2026-08-21-fix-node-match)
 import { api } from "../../scripts/api.js";
 
 const TARGET = "BSAIH3FilmFactory";
@@ -4444,7 +4444,7 @@ function findExtenderNodeByExecutionId(nodeId) {
     for (const node of graph._nodes || []) {
         if (
             String(node?.id) === wanted &&
-            (node?.comfyClass === TARGET || node?.type === TARGET)
+            (ALL_TARGETS.has(node?.comfyClass) || ALL_TARGETS.has(node?.type))
         ) {
             return node;
         }
@@ -4481,7 +4481,7 @@ function clearTransientRenderingState(statusText = null) {
     if (!graph) return;
 
     for (const node of graph._nodes || []) {
-        if (!(node?.comfyClass === TARGET || node?.type === TARGET)) continue;
+        if (!(ALL_TARGETS.has(node?.comfyClass) || ALL_TARGETS.has(node?.type))) continue;
 
         const runtime = node.__h3Extender;
         if (!runtime) continue;
