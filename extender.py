@@ -2039,16 +2039,27 @@ class BSAIH3FilmFactory:
                 data_path, manifest_path, manifest, len(clips)
             )
 
-        # Clear stale tail latents when clip count differs from cache.
-        # This prevents auto-merge_output from being triggered by tail
-        # latents left over from a previous replace operation when the
-        # user has since changed the storyboard (added/removed clips).
+        # Clear stale tail latents before a full render pass.
+        # Tail latents are only valid between a "per-clip replace" operation
+        # and the next "合并输出 / Merge Output" click.  Any other execution
+        # path (full re-render, storyboard edit, prompt change, etc.) means
+        # the tail latents on disk are stale and must be discarded — otherwise
+        # the auto-merge_output guard can trigger and skip the entire render,
+        # producing a merged video from the old cached content.
         if not merge_output and _has_tail_latents_on_disk(owner):
-            cached_seg_count = len(manifest.get("segments", []))
-            if cached_seg_count != len(clips):
+            any_replace = any(c.get("replace_mode", False) for c in clips)
+            if not any_replace:
                 _delete_tail_latents_from_disk(owner)
-                print(f"[H3 Extender] Cleared stale tail latents "
-                      f"(clips={len(clips)}, cache={cached_seg_count})")
+                print(f"[H3 Extender] Cleared stale tail latents before full re-render "
+                      f"(clips={len(clips)})")
+            else:
+                # In per-clip replace mode, still clear tail if clip count
+                # changed since the tail was saved.
+                cached_seg_count = len(manifest.get("segments", []))
+                if cached_seg_count != len(clips):
+                    _delete_tail_latents_from_disk(owner)
+                    print(f"[H3 Extender] Cleared stale tail latents "
+                          f"(clips={len(clips)}, cache={cached_seg_count})")
 
         segments = manifest.get("segments", [])
 
