@@ -2039,6 +2039,17 @@ class MiniMaxH3Extender:
                 data_path, manifest_path, manifest, len(clips)
             )
 
+        # Clear stale tail latents when clip count differs from cache.
+        # This prevents auto-merge_output from being triggered by tail
+        # latents left over from a previous replace operation when the
+        # user has since changed the storyboard (added/removed clips).
+        if not merge_output and _has_tail_latents_on_disk(owner):
+            cached_seg_count = len(manifest.get("segments", []))
+            if cached_seg_count != len(clips):
+                _delete_tail_latents_from_disk(owner)
+                print(f"[H3 Extender] Cleared stale tail latents "
+                      f"(clips={len(clips)}, cache={cached_seg_count})")
+
         segments = manifest.get("segments", [])
 
         # A TRUE toggle can only validate a clip that actually exists on disk.
@@ -2898,6 +2909,8 @@ class MiniMaxH3Extender:
             "global_prompt_value": str(global_prompt or "")[:200],
             "prompt_source_connected": bool(prompt_source),
             "prompt_source_value": str(prompt_source or "")[:200],
+            "asset_library_connected": bool(asset_library),
+            "asset_image_count": len(resolved_img_paths) if 'resolved_img_paths' in locals() else 0,
             "build": BUILD,
         }
 
