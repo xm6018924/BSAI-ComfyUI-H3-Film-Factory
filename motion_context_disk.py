@@ -1896,6 +1896,12 @@ def _decode_single_clip_to_blob(
 
     Unlike _export_live_candidate_preview, this does NOT require the clip to be
     the single unvalidated tail candidate. It works on any cached clip index.
+
+    For clip_index > 0, the leading trim_frames (context overlap with the
+    previous clip) are removed from both video and audio so that:
+      1. Per-clip previews show only the clip's unique content
+      2. Simple ffmpeg-concat of per-clip MP4s produces a correct merged video
+         without duplicated frames at clip boundaries
     """
     data_path, manifest_path = _chain_paths(f"extender_{_safe_name(str(owner_id))}")
     manifest = _load_manifest_from_paths(data_path, manifest_path)
@@ -1909,11 +1915,17 @@ def _decode_single_clip_to_blob(
         return None
     curr = segments[i]
 
-    # If already decoded, skip
-    if curr.get("decoded_mp4_blob") is not None:
+    # If already decoded with the current version, skip.
+    # v2 = trimmed overlap + audio included.  Old blobs (no version marker)
+    # contained full frames (with overlap) and no audio, so we must rebuild.
+    if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 2:
         return curr
 
     print(f"[H3 Extender] _decode_single_clip_to_blob: clip={i} data_path={data_path} ffmpeg={ffmpeg}")
+
+    trim = int(curr.get("trim_frames", 0)) if i > 0 else 0
+    total_frames = int(curr["frames"])
+    out_frames = total_frames - trim
 
     # Decode video latent
     print(f"[H3 Extender]   step 1: loading segment video...")
@@ -1926,6 +1938,11 @@ def _decode_single_clip_to_blob(
         )
     print(f"[H3 Extender]   step 2 done: video shape={tuple(video.shape)}")
 
+    # Trim leading context overlap (clip 2+)
+    if trim > 0:
+        video = video[trim:]
+        print(f"[H3 Extender]   trimmed {trim} leading overlap frames -> {video.shape[0]} frames")
+
     # Decode audio
     print(f"[H3 Extender]   step 3: decoding audio (audio_vae={type(audio_vae).__name__ if audio_vae else 'None'})...")
     try:
@@ -1934,18 +1951,114 @@ def _decode_single_clip_to_blob(
         print(f"[H3 Extender]   audio decode failed (non-fatal): {_aud_err}")
         audio = {"waveform": torch.zeros(1, 1, 1), "sample_rate": 32000}
 
-    # Encode to MP4
+    # Trim audio to match video
+    if trim > 0 and audio.get("waveform") is not None:
+        sr = int(audio["sample_rate"])
+        trim_samples = int(round(float(trim) / float(fps) * sr))
+        wave = audio["waveform"]
+        if trim_samples < int(wave.shape[-1]):
+            audio = dict(audio)
+            audio["waveform"] = wave[..., trim_samples:]
+            print(f"[H3 Extender]   trimmed {trim_samples} audio samples ({trim} frames @ {sr}Hz)")
+
+    # Encode to MP4 (video + audio)
     root = _ensure_cache_root()
     token = f"clipdec_{_safe_name(str(owner_id))}_{i}_{uuid.uuid4().hex[:8]}"
     temp_mp4 = root / f"_{token}.mp4"
 
-    print(f"[H3 Extender]   step 4: encoding MP4 (ffmpeg={ffmpeg}, temp={temp_mp4})...")
+    print(f"[H3 Extender]   step 4: encoding MP4 with audio (ffmpeg={ffmpeg}, temp={temp_mp4}, frames={out_frames})...")
     if ffmpeg is None:
         raise TypeError(f"ffmpeg is None — cannot encode preview. _find_ffmpeg() should have raised RuntimeError.")
-    # Write raw video frames to temp file then encode with ffmpeg
-    _encode_corrected_segment_video_mp4(
-        ffmpeg, video, fps, temp_mp4, token,
-    )
+
+    # Write raw PCM audio to a temp file for ffmpeg
+    temp_wav = None
+    has_audio = audio.get("waveform") is not None and int(audio["waveform"].shape[-1]) > 1
+    if has_audio:
+        try:
+            sr = int(audio["sample_rate"])
+            wave = audio["waveform"]
+            # Ensure stereo
+            if wave.ndim == 3:
+                wave = wave.squeeze(0)
+            if wave.shape[0] == 1:
+                wave = wave.repeat(2, 1)
+            # Convert float -> int16
+            wav_np = (wave.detach().float().clamp(-1.0, 1.0) * 32767.0).to(torch.int16).cpu().numpy()
+            import wave as _wave
+            temp_wav = root / f"_{token}.wav"
+            with _wave.open(str(temp_wav), "wb") as wf:
+                wf.setnchannels(2)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(wav_np.T.tobytes())
+            print(f"[H3 Extender]   audio PCM ready: {temp_wav.name}, {wav_np.shape[1]} samples @ {sr}Hz")
+        except Exception as _wav_err:
+            print(f"[H3 Extender]   audio PCM write failed, falling back to video-only: {_wav_err}")
+            has_audio = False
+            if temp_wav and temp_wav.exists():
+                try:
+                    temp_wav.unlink()
+                except Exception:
+                    pass
+            temp_wav = None
+
+    # Encode video and mux audio in one pass
+    h, w = int(video.shape[1]), int(video.shape[2])
+    video_log = root / f"_{token}_video.log"
+    proc = None
+    log_f = None
+    try:
+        cmd = [
+            ffmpeg, "-y",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s:v", f"{w}x{h}",
+            "-r", f"{float(fps):.9f}",
+            "-i", "pipe:0",
+        ]
+        if has_audio and temp_wav is not None:
+            cmd += ["-i", str(temp_wav)]
+            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "17", "-pix_fmt", "yuv420p"]
+            cmd += ["-c:a", "aac", "-b:a", "192k"]
+            cmd += ["-shortest"]
+        else:
+            cmd += ["-an"]
+            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "17", "-pix_fmt", "yuv420p"]
+        cmd += [str(temp_mp4)]
+
+        log_f = open(video_log, "wb")
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log_f)
+        _write_image_frames(proc, video)
+        _finish_process(proc, log_f, video_log, "H3 clip preview encoder")
+        proc = None
+        log_f = None
+    finally:
+        if proc is not None:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        if log_f is not None:
+            try:
+                log_f.close()
+            except Exception:
+                pass
+        try:
+            if video_log.exists():
+                video_log.unlink()
+        except OSError:
+            pass
+        if temp_wav and temp_wav.exists():
+            try:
+                temp_wav.unlink()
+            except Exception:
+                pass
+
     if not temp_mp4.exists():
         print(f"[H3 Extender]   step 4 failed: temp_mp4 does not exist after encode")
         return None
@@ -1972,6 +2085,8 @@ def _decode_single_clip_to_blob(
     # Update manifest
     curr["latent_end"] = latent_end
     curr["decoded_mp4_blob"] = render_spec
+    curr["decoded_mp4_version"] = 2
+    curr["decoded_mp4_has_audio"] = has_audio
     curr["decoded_audio"] = {
         "waveform": audio_spec,
         "sample_rate": int(audio["sample_rate"]),
