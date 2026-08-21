@@ -2632,6 +2632,46 @@ function render(node, runtime) {
 
         clipActions.append(renderToggle, replaceBtn);
 
+        // ── Refresh button: re-sync this CLIP from external source ──
+        const clipRefreshBtn = document.createElement("button");
+        clipRefreshBtn.type = "button";
+        clipRefreshBtn.textContent = "↻";
+        clipRefreshBtn.title = "刷新：从外部输入源同步此CLIP / Refresh: sync this CLIP from external source";
+        clipRefreshBtn.style.cssText = "width:22px;height:22px;padding:0;font-size:13px;border-radius:4px;border:1px solid rgba(80,160,255,.5);background:rgba(30,60,100,.55);color:#8cf;cursor:pointer;flex:0 0 auto;margin-left:4px;";
+        clipRefreshBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            try {
+                const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
+                if (!psInput || psInput.link == null) return;
+                const link = app.graph.links[psInput.link];
+                if (!link || link.origin_id == null) return;
+                const srcNode = app.graph.getNodeById(link.origin_id);
+                if (!srcNode) return;
+                let text = null;
+                const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
+                if (srcWidget && srcWidget.value != null) text = srcWidget.value;
+                else text = srcNode.widgets_values?.[0];
+                if (text == null) return;
+                const fullText = String(text);
+                const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
+                const sbMatch = fullText.match(sbMarkerRe);
+                if (!sbMatch) return;
+                const storyboardText = fullText.slice(sbMatch.index).trim();
+                const segments = parseStoryboard(storyboardText);
+                if (index < segments.length) {
+                    const seg = segments[index];
+                    clip.prompt = seg.prompt;
+                    clip.duration = String(seg.duration);
+                    updateHidden(node, runtime);
+                    renderClipOverlay();
+                    if (typeof renderAssetPanel === "function") {
+                        renderAssetPanel(leftPanel, clip, node, runtime, prompt);
+                    }
+                }
+            } catch(err) { /* source not ready */ }
+        });
+
         // ── Red X delete button (rightmost) ─────────────────────────
         const delBtn = document.createElement("button");
         delBtn.type = "button";
@@ -2639,7 +2679,7 @@ function render(node, runtime) {
         delBtn.title = "删除此CLIP / Delete this CLIP";
         delBtn.style.cssText = "width:26px;height:22px;padding:0;font-size:13px;font-weight:bold;border-radius:4px;border:1px solid rgba(255,80,80,.7);background:rgba(180,30,30,.55);color:rgba(255,210,210,.95);cursor:pointer;flex:0 0 auto;margin-left:4px;";
 
-        head.append(toggle, title, name, colorWrap, clipActions, badge, delBtn);
+        head.append(toggle, title, name, colorWrap, clipActions, badge, clipRefreshBtn, delBtn);
 
         delBtn.addEventListener("click", (e) => {
             e.preventDefault();
