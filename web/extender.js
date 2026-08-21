@@ -4267,9 +4267,63 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                 );
             }
             render(this, runtime);
+            // Restore global prompt textarea value (render doesn't update it)
+            // 恢复全局提示词textarea值（render不更新它）
+            if (runtime.globalPromptTextarea) {
+                runtime.globalPromptTextarea.value = runtime.state.global_prompt || "";
+            }
+            if (typeof runtime.renderGlobalAssetPanel === "function") {
+                runtime.renderGlobalAssetPanel();
+            }
             restoreCacheState(this, runtime);
             syncResolutionMirror(this, runtime);
             syncDomHeight(this, runtime, true);
+            // Aggressive initial sync: try multiple times to catch source node loading
+            // 激进的初始同步：多次尝试以捕获源节点加载完成
+            [100, 500, 1200, 2500, 4000].forEach(delay => {
+                setTimeout(() => {
+                    try {
+                        const psInput = this.inputs?.find(inp => inp.name === "prompt_source");
+                        if (!psInput || psInput.link == null) return;
+                        const link = app.graph.links[psInput.link];
+                        if (!link || link.origin_id == null) return;
+                        const srcNode = app.graph.getNodeById(link.origin_id);
+                        if (!srcNode) return;
+                        let text = null;
+                        const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
+                        if (srcWidget && srcWidget.value != null) {
+                            text = srcWidget.value;
+                        } else {
+                            text = srcNode.widgets_values?.[0];
+                        }
+                        if (text == null) return;
+                        const newText = String(text);
+                        if (newText === runtime._lastPromptSourceText) return;
+                        runtime._lastPromptSourceText = newText;
+                        const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
+                        const sbMatch = newText.match(sbMarkerRe);
+                        const globalText = sbMatch ? newText.slice(0, sbMatch.index).trim() : newText.trim();
+                        const storyboardText = sbMatch ? newText.slice(sbMatch.index).trim() : "";
+                        if (globalText) {
+                            runtime.state.global_prompt = globalText;
+                            if (runtime.globalPromptTextarea) runtime.globalPromptTextarea.value = globalText;
+                            if (typeof runtime.renderGlobalAssetPanel === "function") runtime.renderGlobalAssetPanel();
+                        }
+                        if (storyboardText) {
+                            const segments = parseStoryboard(storyboardText);
+                            for (let i = 0; i < segments.length; i++) {
+                                while (runtime.state.clips.length <= i) {
+                                    runtime.state.clips.push(newClip(runtime.state.clips.length));
+                                }
+                                runtime.state.clips[i].prompt = segments[i].prompt;
+                                runtime.state.clips[i].duration = String(segments[i].duration);
+                            }
+                        }
+                        updateHidden(this, runtime);
+                        render(this, runtime);
+                    } catch(e) { /* source not ready yet */ }
+                }, delay);
+            });
         });
     };
 
