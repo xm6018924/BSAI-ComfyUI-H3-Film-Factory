@@ -1,9 +1,9 @@
 import { app } from "../../scripts/app.js";
-// extender.js v2.2.0 — cache-bust marker (2026-08-21-rename-class)
+// extender.js v2.3.0 — cache-bust marker (2026-08-21-final-rename)
 import { api } from "../../scripts/api.js";
 
-const TARGET = "BSAIMiniMaxH3Extender";
-const TARGET_LEGACY = "MiniMaxH3Extender";
+const TARGET = "BSAIH3FilmFactory";
+const ALL_TARGETS = new Set([TARGET, "BSAIMiniMaxH3Extender", "MiniMaxH3Extender"]);
 const FINAL_TARGET = "MiniMaxH3MotionContextDiskFinalDecode";
 const PROGRESS_EVENT = "h3_extender_progress";
 const LATENT_PREVIEW_EVENT = "h3_extender_latent_preview";
@@ -2163,7 +2163,7 @@ async function h3FetchAssets() {
         const resp = await fetch("/bsai/list_all_assets");
         const data = await resp.json();
         app.graph._nodes.forEach(function(n) {
-            if ((n.type === TARGET || n.type === TARGET_LEGACY) && n.__h3Extender) {
+            if (ALL_TARGETS.has(n.type) && n.__h3Extender) {
                 n.__h3Extender._h3_assetCache = data;
             }
         });
@@ -4617,7 +4617,7 @@ app.registerExtension({
 
         window.addEventListener("bsai-assets-changed", () => {
             app.graph._nodes.forEach(node => {
-                if ((node.type === TARGET || node.type === TARGET_LEGACY) && node.__h3Extender) {
+                if (ALL_TARGETS.has(node.type) && node.__h3Extender) {
                     delete node.__h3Extender._assetCache;
                     delete node.__h3Extender._h3_assetCache;
                 }
@@ -4628,7 +4628,7 @@ app.registerExtension({
         // Pre-load the asset list for the referenced-assets left panel.
         h3FetchAssets().then(() => {
             app.graph?._nodes.forEach(node => {
-                if ((node.type === TARGET || node.type === TARGET_LEGACY) && node.__h3Extender?.renderGlobalAssetPanel) {
+                if (ALL_TARGETS.has(node.type) && node.__h3Extender?.renderGlobalAssetPanel) {
                     node.__h3Extender.renderGlobalAssetPanel();
                 }
             });
@@ -4649,7 +4649,7 @@ app.registerExtension({
             return;
         }
 
-        if (nodeData.name !== TARGET && nodeData.name !== TARGET_LEGACY) return;
+        if (!ALL_TARGETS.has(nodeData.name)) return;
 
         const oldConnChange = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function (side, slot, connected, link_info, ioSlot) {

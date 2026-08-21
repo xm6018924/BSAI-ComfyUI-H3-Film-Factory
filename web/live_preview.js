@@ -3,7 +3,8 @@ import { api } from "../../scripts/api.js";
 
 const TARGET = "MiniMaxH3MotionContextDiskFinalDecode";
 const DISK_JOIN_TARGET = "MiniMaxH3MotionContextDiskJoin";
-const EXTENDER_TARGET = "MiniMaxH3Extender";
+const EXTENDER_TARGET = "BSAIH3FilmFactory";
+const EXTENDER_ALL_TARGETS = new Set(["BSAIH3FilmFactory", "BSAIMiniMaxH3Extender", "MiniMaxH3Extender"]);
 
 function ensureSavePreviewButtonStyle() {
     if (document.getElementById("h3-save-preview-button-style")) return;
@@ -246,8 +247,8 @@ function findUpstreamExtenderId(node) {
     if (!origin) return null;
 
     if (
-        origin?.comfyClass === EXTENDER_TARGET ||
-        origin?.type === EXTENDER_TARGET
+        EXTENDER_ALL_TARGETS.has(origin?.comfyClass) ||
+        EXTENDER_ALL_TARGETS.has(origin?.type)
     ) {
         return origin.id;
     }
