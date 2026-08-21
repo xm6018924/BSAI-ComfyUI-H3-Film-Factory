@@ -3862,8 +3862,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     // Pseudo-clip that proxies prompt get/set to the global prompt state
     const gpPseudoClip = {
-        get prompt() { return state.global_prompt || ""; },
-        set prompt(v) { state.global_prompt = v; },
+        get prompt() { return gpTextarea.value || ""; },
+        set prompt(v) { gpTextarea.value = v; state.global_prompt = v; },
     };
 
     function renderGlobalAssetPanel() {
@@ -3901,7 +3901,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     window._h3_escHtml = escHtml;
 
     function renderGlobalOverlay() {
-        const text = state.global_prompt || "";
+        const text = gpTextarea.value || "";
         const refs = parseAssetRefs(text);
         if (refs.length === 0) { gpOverlay.textContent = text; return; }
         let html = "";
@@ -4110,8 +4110,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
             let changed = false;
 
-            // 1. Update global prompt
-            if (globalText && runtime.state.global_prompt !== globalText) {
+            // 1. Update global prompt (always sync, even if empty)
+            if (runtime.state.global_prompt !== globalText) {
                 runtime.state.global_prompt = globalText;
                 if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
                     runtime.globalPromptTextarea.value = globalText;
@@ -4119,8 +4119,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                 changed = true;
             }
 
-            // 1b. Refresh global asset panel (thumbnails + referenced assets)
-            if (changed && typeof runtime.renderGlobalAssetPanel === "function") {
+            // 1b. Always refresh global asset panel (overlay + thumbnails)
+            if (typeof runtime.renderGlobalAssetPanel === "function") {
                 runtime.renderGlobalAssetPanel();
             }
 
