@@ -1,9 +1,9 @@
 import { app } from "../../scripts/app.js";
-// extender.js v2.3.1 — cache-bust marker (2026-08-21-fix-node-match)
+// extender.js v2.4.0 — cache-bust marker (2026-08-22-clean-break-from-original)
 import { api } from "../../scripts/api.js";
 
 const TARGET = "BSAIH3FilmFactory";
-const ALL_TARGETS = new Set([TARGET, "BSAIMiniMaxH3Extender", "MiniMaxH3Extender"]);
+const ALL_TARGETS = new Set([TARGET, "BSAIMiniMaxH3Extender"]);
 const FINAL_TARGET = "MiniMaxH3MotionContextDiskFinalDecode";
 const PROGRESS_EVENT = "h3_extender_progress";
 const LATENT_PREVIEW_EVENT = "h3_extender_latent_preview";

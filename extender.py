@@ -2944,15 +2944,14 @@ class BSAIH3FilmFactory:
 
 NODE_CLASS_MAPPINGS = {
     "BSAIH3FilmFactory": BSAIH3FilmFactory,
-    # Backward compatibility: old workflows still load with our enhanced class.
+    # Intermediate name kept for backward compat with workflows
+    # created during the rename transition period.
     "BSAIMiniMaxH3Extender": BSAIH3FilmFactory,
-    "MiniMaxH3Extender": BSAIH3FilmFactory,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
     "BSAIMiniMaxH3Extender": "BSAI ComfyUI H3 Film Factory",
-    "MiniMaxH3Extender": "BSAI ComfyUI H3 Film Factory",
 }
 
 
