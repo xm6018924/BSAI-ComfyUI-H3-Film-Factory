@@ -3694,7 +3694,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     // ── Bottom section: CLIPS total duration (left) + Add/Del buttons (right) ──
     const bottomBar = document.createElement("div");
-    bottomBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:2px solid rgba(255,255,255,.25);margin-top:4px;margin-bottom:8px;flex-shrink:0;background:#152030;";
+    bottomBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:2px solid rgba(255,255,255,.25);margin-top:auto;margin-bottom:8px;flex-shrink:0;background:#152030;";
 
     const clipsTotalLabel = document.createElement("span");
     clipsTotalLabel.style.cssText = "font-size:12px;font-weight:bold;color:#8ab4f8;white-space:nowrap;";
