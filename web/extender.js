@@ -2370,14 +2370,12 @@ function showAssetPicker(parentEl, clip, node, runtime, textarea) {
 
 function syncGlobalPromptFromInput(node, runtime) {
     try {
-        const gpInput = node.inputs?.find(inp => inp.name === "global_prompt");
-        if (!gpInput || gpInput.link == null) return;
-        const link = app.graph.links[gpInput.link];
+        const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
+        if (!psInput || psInput.link == null) return;
+        const link = app.graph.links[psInput.link];
         if (!link || link.origin_id == null) return;
         const srcNode = app.graph.getNodeById(link.origin_id);
         if (!srcNode) return;
-        // Read the widget's live .value property instead of widgets_values,
-        // which only updates on blur/serialize. Fall back to widgets_values.
         let text = null;
         const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
         if (srcWidget && srcWidget.value != null) {
@@ -2386,13 +2384,20 @@ function syncGlobalPromptFromInput(node, runtime) {
             text = srcNode.widgets_values?.[0];
         }
         if (text != null && String(text).trim()) {
-            const newVal = String(text);
-            if (runtime.state.global_prompt !== newVal) {
-                runtime.state.global_prompt = newVal;
+            const fullText = String(text);
+            // Split at first [分镜N] marker: before → global prompt
+            const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
+            const sbMatch = fullText.match(sbMarkerRe);
+            const globalText = sbMatch ? fullText.slice(0, sbMatch.index).trim() : fullText.trim();
+            if (globalText && runtime.state.global_prompt !== globalText) {
+                runtime.state.global_prompt = globalText;
                 updateHidden(node, runtime);
             }
-            if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== newVal) {
-                runtime.globalPromptTextarea.value = newVal;
+            if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
+                runtime.globalPromptTextarea.value = globalText;
+            }
+            if (typeof runtime.renderGlobalAssetPanel === "function") {
+                runtime.renderGlobalAssetPanel();
             }
         }
     } catch (e) { /* ignore */ }
@@ -3658,18 +3663,79 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     function renderGlobalAssetPanel() {
         renderAssetPanel(gpLeftPanel, gpPseudoClip, node, runtime, gpTextarea);
+        renderGlobalThumbnails();
+    }
+    runtime.renderGlobalAssetPanel = renderGlobalAssetPanel;
+
+    // Thumbnail preview strip: shows @图N thumbnails below the textarea
+    // 全局提示词内@图N缩略图预览条
+    const gpThumbStrip = document.createElement("div");
+    gpThumbStrip.style.cssText = "display:flex;flex-direction:row;gap:4px;padding:3px 4px;flex-wrap:wrap;min-height:0;border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.12);";
+    runtime._gpThumbStrip = gpThumbStrip;
+
+    function renderGlobalThumbnails() {
+        gpThumbStrip.replaceChildren();
+        const refs = parseAssetRefs(state.global_prompt || "");
+        if (refs.length === 0) {
+            gpThumbStrip.style.display = "none";
+            return;
+        }
+        gpThumbStrip.style.display = "flex";
+        const assetList = runtime._h3_assetCache;
+        refs.forEach(function(ref) {
+            const item = document.createElement("div");
+            item.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;flex-shrink:0;";
+
+            const thumb = document.createElement("div");
+            thumb.style.cssText = "width:36px;height:36px;border:1px solid #444;border-radius:3px;overflow:hidden;background:#1a1a1a;";
+            if (ref.type !== "audios") {
+                const img = document.createElement("img");
+                img.style.cssText = "width:100%;height:100%;object-fit:cover;";
+                img.loading = "lazy";
+                if (assetList) {
+                    const items = assetList[ref.type] || [];
+                    const assetItem = items.find(i => i.index === ref.index);
+                    if (assetItem) {
+                        if (ref.type === "videos") {
+                            img.src = "/bsai/video_frame?filename=" + encodeURIComponent(assetItem.name);
+                        } else {
+                            img.src = "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(assetItem.name);
+                        }
+                    }
+                }
+                img.onerror = function() {
+                    img.style.display = "none";
+                    thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#555;font-size:9px;">IMG</div>';
+                };
+                thumb.appendChild(img);
+            } else {
+                thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;">♪</div>';
+            }
+            item.appendChild(thumb);
+
+            const label = document.createElement("span");
+            label.textContent = ref.tag;
+            label.style.cssText = "font-size:9px;color:#8ab4f8;";
+            item.appendChild(label);
+
+            gpThumbStrip.appendChild(item);
+        });
     }
 
-    globalPromptSection.append(gpLeftPanel, gpLabel, gpTextarea, gpRefreshBtn, gpExpandBtn);
+    globalPromptSection.append(gpLeftPanel, gpLabel, gpTextarea, gpThumbStrip, gpRefreshBtn, gpExpandBtn);
 
-    // Sync external global_prompt input to the textarea
-    const gpWidget = node.widgets?.find(w => w.name === "global_prompt");
+    // Sync external prompt_source input to the textarea (legacy widget callback)
+    const gpWidget = node.widgets?.find(w => w.name === "global_prompt" || w.name === "prompt_source");
     if (gpWidget) {
         const origGpWidgetChanged = gpWidget.callback;
         gpWidget.callback = function(v) {
             if (v !== undefined && v !== null) {
-                gpTextarea.value = String(v);
-                state.global_prompt = String(v);
+                const fullText = String(v);
+                const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
+                const sbMatch = fullText.match(sbMarkerRe);
+                const globalText = sbMatch ? fullText.slice(0, sbMatch.index).trim() : fullText.trim();
+                gpTextarea.value = globalText;
+                state.global_prompt = globalText;
                 updateHidden(node, runtime);
                 renderGlobalAssetPanel();
             }
@@ -3844,6 +3910,11 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                     runtime.globalPromptTextarea.value = globalText;
                 }
                 changed = true;
+            }
+
+            // 1b. Refresh global asset panel (thumbnails + referenced assets)
+            if (changed && typeof runtime.renderGlobalAssetPanel === "function") {
+                runtime.renderGlobalAssetPanel();
             }
 
             // 2. Parse storyboard segments and auto-create/update CLIPs
@@ -4187,7 +4258,11 @@ app.registerExtension({
         });
 
         // Pre-load the asset list for the referenced-assets left panel.
-        h3FetchAssets();
+        h3FetchAssets().then(() => {
+            if (typeof runtime.renderGlobalAssetPanel === "function") {
+                runtime.renderGlobalAssetPanel();
+            }
+        });
     },
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
