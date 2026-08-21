@@ -3806,45 +3806,14 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         render(node, runtime);
     });
 
-    // Poll for external global_prompt input changes every 800ms
-    runtime._gpPollTimer = setInterval(() => {
+    // Poll for unified prompt_source input changes every 800ms
+    // 轮询统一外部提示词输入，自动拆分全局提示词和分镜内容
+    runtime._lastPromptSourceText = "";
+    runtime._psPollTimer = setInterval(() => {
         try {
-            const gpInput = node.inputs?.find(inp => inp.name === "global_prompt");
-            if (!gpInput || gpInput.link == null) return;
-            const link = app.graph.links[gpInput.link];
-            if (!link || link.origin_id == null) return;
-            const srcNode = app.graph.getNodeById(link.origin_id);
-            if (!srcNode) return;
-            // Read widget's live .value — widgets_values[] is stale until blur
-            let text = null;
-            const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
-            if (srcWidget && srcWidget.value != null) {
-                text = srcWidget.value;
-            } else {
-                text = srcNode.widgets_values?.[0];
-            }
-            if (text != null && String(text).trim()) {
-                const newVal = String(text);
-                if (runtime.state.global_prompt !== newVal) {
-                    runtime.state.global_prompt = newVal;
-                    updateHidden(node, runtime);
-                    if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== newVal) {
-                        runtime.globalPromptTextarea.value = newVal;
-                        render(node, runtime);
-                    }
-                }
-            }
-        } catch (e) { /* ignore */ }
-    }, 800);
-
-    // Poll for external storyboard_prompt input changes every 800ms
-    // 轮询外部分镜提示词输入，自动同步CLIP数量、提示词和时长
-    runtime._lastStoryboardText = "";
-    runtime._sbPollTimer = setInterval(() => {
-        try {
-            const sbInput = node.inputs?.find(inp => inp.name === "storyboard_prompt");
-            if (!sbInput || sbInput.link == null) return;
-            const link = app.graph.links[sbInput.link];
+            const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
+            if (!psInput || psInput.link == null) return;
+            const link = app.graph.links[psInput.link];
             if (!link || link.origin_id == null) return;
             const srcNode = app.graph.getNodeById(link.origin_id);
             if (!srcNode) return;
@@ -3857,33 +3826,53 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
             }
             if (text == null) return;
             const newText = String(text);
-            if (newText === runtime._lastStoryboardText) return;
-            runtime._lastStoryboardText = newText;
+            if (newText === runtime._lastPromptSourceText) return;
+            runtime._lastPromptSourceText = newText;
 
-            const segments = parseStoryboard(newText);
-            if (segments.length === 0) return;
+            // Split at first [分镜N] marker
+            const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
+            const sbMatch = newText.match(sbMarkerRe);
+            const globalText = sbMatch ? newText.slice(0, sbMatch.index).trim() : newText.trim();
+            const storyboardText = sbMatch ? newText.slice(sbMatch.index).trim() : "";
 
             let changed = false;
-            // Add CLIPs to match segment count
-            while (runtime.state.clips.length < segments.length) {
-                runtime.state.clips.push(newClip(runtime.state.clips.length));
+
+            // 1. Update global prompt
+            if (globalText && runtime.state.global_prompt !== globalText) {
+                runtime.state.global_prompt = globalText;
+                if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
+                    runtime.globalPromptTextarea.value = globalText;
+                }
                 changed = true;
             }
-            // Update each CLIP's prompt and duration from segments
-            for (let i = 0; i < segments.length && i < runtime.state.clips.length; i++) {
-                const seg = segments[i];
-                const clip = runtime.state.clips[i];
-                if (clip.prompt !== seg.prompt) {
-                    clip.prompt = seg.prompt;
-                    changed = true;
+
+            // 2. Parse storyboard segments and auto-create/update CLIPs
+            if (storyboardText) {
+                const segments = parseStoryboard(storyboardText);
+                if (segments.length > 0) {
+                    // Add CLIPs to match segment count
+                    while (runtime.state.clips.length < segments.length) {
+                        runtime.state.clips.push(newClip(runtime.state.clips.length));
+                        changed = true;
+                    }
+                    // Update each CLIP's prompt and duration from segments
+                    for (let i = 0; i < segments.length && i < runtime.state.clips.length; i++) {
+                        const seg = segments[i];
+                        const clip = runtime.state.clips[i];
+                        if (clip.prompt !== seg.prompt) {
+                            clip.prompt = seg.prompt;
+                            changed = true;
+                        }
+                        const newDur = String(seg.duration);
+                        if (String(clip.duration) !== newDur) {
+                            clip.duration = newDur;
+                            changed = true;
+                        }
+                        clip.validated = false;
+                    }
                 }
-                const newDur = String(seg.duration);
-                if (String(clip.duration) !== newDur) {
-                    clip.duration = newDur;
-                    changed = true;
-                }
-                clip.validated = false;
             }
+
             if (changed) {
                 updateHidden(node, runtime);
                 render(node, runtime);

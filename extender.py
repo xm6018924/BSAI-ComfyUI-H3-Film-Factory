@@ -1833,8 +1833,7 @@ class MiniMaxH3Extender:
         optional = {
             "audio_vae": ("VAE", {"forceInput": True}),
             "ref_audio": ("AUDIO", {"forceInput": True}),
-            "global_prompt": ("STRING", {"forceInput": True, "tooltip": "Optional global prompt prepended to every CLIP's prompt."}),
-            "storyboard_prompt": ("STRING", {"forceInput": True, "tooltip": "External storyboard prompt. Parse [分镜N] markers to auto-create N CLIPs, fill each CLIP's prompt, and set Duration from the last time range in each segment."}),
+            "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [分镜N] marker: text before → global prompt, text from [分镜N] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
                 {
@@ -1982,14 +1981,26 @@ class MiniMaxH3Extender:
         filename_prefix="H3_Extender",
         prompt_pack=None,
         asset_library=None,
-        global_prompt=None,
-        storyboard_prompt=None,
+        prompt_source=None,
         unique_id=None,
         **kwargs,
     ):
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
         clips = _parse_clips_json(clips_json)
         merge_output = _merge_output_from_state(clips_json)
+
+        # Split unified prompt_source at first [分镜N] marker:
+        # text before → global_prompt, text from [分镜N] onwards → storyboard
+        # (storyboard segments are handled by frontend JS auto-CLIP creation)
+        global_prompt = None
+        if prompt_source:
+            import re as _re
+            sb_match = _re.search(r'\[(?:分镜|Shot|shot|SHOT)\s*\d+\]', str(prompt_source))
+            if sb_match:
+                global_prompt = str(prompt_source)[:sb_match.start()].strip()
+            else:
+                global_prompt = str(prompt_source).strip()
+
         # Resolve @图N/@视频N/@音频N from connected Asset Library.
         # Include the global prompt as a pseudo-clip so its @图N tags are
         # resolved with the same image numbering as clip prompts.
@@ -2879,10 +2890,10 @@ class MiniMaxH3Extender:
             "prompt_pack_imported": bool(prompt_pack_imported),
             "prompt_pack_count": int(len(external_prompt_pack.get("prompts") or [])) if external_prompt_pack is not None else 0,
             "prompt_pack_signature": str(active_prompt_pack_signature or ""),
-            "global_prompt_connected": bool(global_prompt),
-            "global_prompt_value": str(global_prompt or ""),
-            "storyboard_prompt_connected": bool(storyboard_prompt),
-            "storyboard_prompt_value": str(storyboard_prompt or "")[:200],
+            "global_prompt_connected": bool(prompt_source),
+            "global_prompt_value": str(global_prompt or "")[:200],
+            "prompt_source_connected": bool(prompt_source),
+            "prompt_source_value": str(prompt_source or "")[:200],
             "build": BUILD,
         }
 
