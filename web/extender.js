@@ -4320,9 +4320,11 @@ app.registerExtension({
 
         // Pre-load the asset list for the referenced-assets left panel.
         h3FetchAssets().then(() => {
-            if (typeof runtime.renderGlobalAssetPanel === "function") {
-                runtime.renderGlobalAssetPanel();
-            }
+            app.graph?._nodes.forEach(node => {
+                if (node.type === "MiniMaxH3Extender" && node.__h3Extender?.renderGlobalAssetPanel) {
+                    node.__h3Extender.renderGlobalAssetPanel();
+                }
+            });
         });
     },
 
