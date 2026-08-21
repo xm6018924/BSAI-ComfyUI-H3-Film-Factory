@@ -55,8 +55,7 @@ function calculateMinHeight(runtime) {
                 : CARD_MIN_HEIGHT + CARD_SCROLLBAR_SPACE;
         }
     }
-    // Cap cards height at MAX_CARDS_VISIBLE_HEIGHT so node doesn't grow infinitely
-    height += Math.min(cardsHeight, MAX_CARDS_VISIBLE_HEIGHT);
+    height += cardsHeight;
     return Math.max(COLLAPSED_MIN_HEIGHT, Math.min(height + BASE_PADDING, MAX_AUTO_NODE_HEIGHT));
 }
 
@@ -3264,7 +3263,7 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         runtime.cards.style.height = "auto";
         runtime.cards.style.flex = "1 1 auto";
         runtime.cards.style.minHeight = `${Math.max(COLLAPSED_MIN_HEIGHT, dynMinH - NON_CARD_FIXED)}px`;
-        runtime.cards.style.maxHeight = `${MAX_CARDS_VISIBLE_HEIGHT}px`;
+        runtime.cards.style.maxHeight = "none";
         return;
     }
 
@@ -3322,10 +3321,10 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         const available = Math.max(legacyMinH, actualH - y - BOTTOM_PAD);
         runtime.root.style.height = `${available}px`;
         const cardsMin = Math.max(COLLAPSED_MIN_HEIGHT, legacyMinH - NON_CARD_FIXED);
-        runtime.cards.style.height = `${Math.min(Math.max(cardsMin, available - NON_CARD_FIXED), MAX_CARDS_VISIBLE_HEIGHT)}px`;
-        runtime.cards.style.flex = "0 0 auto";
+        runtime.cards.style.height = `${Math.max(cardsMin, available - NON_CARD_FIXED)}px`;
+        runtime.cards.style.flex = "1 1 auto";
         runtime.cards.style.minHeight = "";
-        runtime.cards.style.maxHeight = `${MAX_CARDS_VISIBLE_HEIGHT}px`;
+        runtime.cards.style.maxHeight = "none";
         runtime.domHeight = available;
         if (!obviouslyPoisonedHeight(actualH, minNodeH)) {
             runtime.legacyNodeHeight = actualH;
@@ -3374,7 +3373,7 @@ function buildUi(node) {
     root.style.boxSizing = "border-box";
     root.style.display = "flex";
     root.style.flexDirection = "column";
-    root.style.padding = "5px 0 16px";
+    root.style.padding = "5px 0 4px";
     root.style.overflow = "visible";
 
     const toolbar = document.createElement("div");
@@ -3694,7 +3693,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     // ── Bottom section: CLIPS total duration (left) + Add/Del buttons (right) ──
     const bottomBar = document.createElement("div");
-    bottomBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:2px solid rgba(255,255,255,.25);margin-top:auto;margin-bottom:8px;flex-shrink:0;background:#152030;";
+    bottomBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 4px;border-top:2px solid rgba(255,255,255,.25);margin-top:auto;margin-bottom:2px;flex-shrink:0;background:#152030;";
 
     const clipsTotalLabel = document.createElement("span");
     clipsTotalLabel.style.cssText = "font-size:12px;font-weight:bold;color:#8ab4f8;white-space:nowrap;";
