@@ -2632,44 +2632,30 @@ function render(node, runtime) {
 
         clipActions.append(renderToggle, replaceBtn);
 
-        // ── Refresh button: re-sync this CLIP from external source ──
-        const clipRefreshBtn = document.createElement("button");
-        clipRefreshBtn.type = "button";
-        clipRefreshBtn.textContent = "↻";
-        clipRefreshBtn.title = "刷新：从外部输入源同步此CLIP / Refresh: sync this CLIP from external source";
-        clipRefreshBtn.style.cssText = "width:22px;height:22px;padding:0;font-size:13px;border-radius:4px;border:1px solid rgba(80,160,255,.5);background:rgba(30,60,100,.55);color:#8cf;cursor:pointer;flex:0 0 auto;margin-left:4px;";
-        clipRefreshBtn.addEventListener("click", (e) => {
+        // ── Independent Render button: render ONLY this CLIP ──
+        const clipRenderBtn = document.createElement("button");
+        clipRenderBtn.type = "button";
+        clipRenderBtn.textContent = "▶";
+        clipRenderBtn.title = "独立渲染此CLIP / Render this CLIP only (others unaffected)";
+        clipRenderBtn.style.cssText = "width:26px;height:22px;padding:0;font-size:12px;border-radius:4px;border:1px solid rgba(80,200,80,.6);background:rgba(30,100,40,.6);color:#8f8;cursor:pointer;flex:0 0 auto;margin-left:4px;font-weight:bold;";
+        clipRenderBtn.addEventListener("click", (e) => {
             e.preventDefault();
             e.stopPropagation();
+            clip.replace_mode = true;
+            updateHidden(node, runtime);
+            runtime.statusText = `渲染 CLIP ${index + 1} / Rendering CLIP ${index + 1}`;
+            if (runtime.counter) runtime.counter.textContent = `${runtime.state.clips.length} clips • ${refCount(runtime)} refs`;
+            if (runtime.status) runtime.status.textContent = runtime.statusText;
             try {
-                const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
-                if (!psInput || psInput.link == null) return;
-                const link = app.graph.links[psInput.link];
-                if (!link || link.origin_id == null) return;
-                const srcNode = app.graph.getNodeById(link.origin_id);
-                if (!srcNode) return;
-                let text = null;
-                const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
-                if (srcWidget && srcWidget.value != null) text = srcWidget.value;
-                else text = srcNode.widgets_values?.[0];
-                if (text == null) return;
-                const fullText = String(text);
-                const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
-                const sbMatch = fullText.match(sbMarkerRe);
-                if (!sbMatch) return;
-                const storyboardText = fullText.slice(sbMatch.index).trim();
-                const segments = parseStoryboard(storyboardText);
-                if (index < segments.length) {
-                    const seg = segments[index];
-                    clip.prompt = seg.prompt;
-                    clip.duration = String(seg.duration);
-                    updateHidden(node, runtime);
-                    renderClipOverlay();
-                    if (typeof renderAssetPanel === "function") {
-                        renderAssetPanel(leftPanel, clip, node, runtime, prompt);
-                    }
-                }
-            } catch(err) { /* source not ready */ }
+                if (window.app?.queuePrompt) window.app.queuePrompt();
+                else if (app?.queuePrompt) app.queuePrompt();
+            } catch(qe) {
+                console.warn("[H3] Could not auto-queue for single CLIP render", qe);
+            }
+            setTimeout(() => {
+                clip.replace_mode = false;
+                updateHidden(node, runtime);
+            }, 1000);
         });
 
         // ── Red X delete button (rightmost) ─────────────────────────
@@ -2679,7 +2665,7 @@ function render(node, runtime) {
         delBtn.title = "删除此CLIP / Delete this CLIP";
         delBtn.style.cssText = "width:26px;height:22px;padding:0;font-size:13px;font-weight:bold;border-radius:4px;border:1px solid rgba(255,80,80,.7);background:rgba(180,30,30,.55);color:rgba(255,210,210,.95);cursor:pointer;flex:0 0 auto;margin-left:4px;";
 
-        head.append(toggle, title, name, colorWrap, clipActions, badge, clipRefreshBtn, delBtn);
+        head.append(toggle, title, name, colorWrap, clipActions, badge, clipRenderBtn, delBtn);
 
         delBtn.addEventListener("click", (e) => {
             e.preventDefault();
@@ -3726,9 +3712,64 @@ counter.style.opacity = ".8";
 counter.style.marginLeft = "6px";
 
 const mergeOutputBtn = document.createElement("button");
-mergeOutputBtn.textContent = "合并输出 / Merge Output";
-mergeOutputBtn.title = "将所有已生成好的CLIP合并为一个视频输出（不会重新生成任何CLIP）";
-mergeOutputBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a6a3a;border:1px solid #3a7a4a;border-radius:4px;color:#cde;cursor:pointer;margin-left:6px;font-weight:bold;";
+    mergeOutputBtn.textContent = "合并输出 / Merge Output";
+    mergeOutputBtn.title = "将所有已生成好的CLIP合并为一个视频输出（不会重新生成任何CLIP）";
+    mergeOutputBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a6a3a;border:1px solid #3a7a4a;border-radius:4px;color:#cde;cursor:pointer;margin-left:6px;font-weight:bold;";
+
+    // Unified sync button: re-sync ALL clips from external prompt_source
+    // 统一刷新按钮：从外部输入源重新同步所有CLIP
+    const syncAllClipsBtn = document.createElement("button");
+    syncAllClipsBtn.textContent = "统一刷新 / Sync All";
+    syncAllClipsBtn.title = "从外部输入源重新同步全局提示词和所有CLIP\nRe-sync global prompt and all CLIPs from external source";
+    syncAllClipsBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#8a4a2a;border:1px solid #aa5a3a;border-radius:4px;color:#fcd;cursor:pointer;margin-left:6px;font-weight:bold;";
+    syncAllClipsBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        try {
+            const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
+            if (!psInput || psInput.link == null) {
+                runtime.statusText = "未连接外部输入源 / No external source";
+                status.textContent = runtime.statusText;
+                return;
+            }
+            const link = app.graph.links[psInput.link];
+            if (!link || link.origin_id == null) return;
+            const srcNode = app.graph.getNodeById(link.origin_id);
+            if (!srcNode) return;
+            let text = null;
+            const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
+            if (srcWidget && srcWidget.value != null) text = srcWidget.value;
+            else text = srcNode.widgets_values?.[0];
+            if (text == null) return;
+            const newText = String(text);
+            runtime._lastPromptSourceText = newText;
+            const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
+            const sbMatch = newText.match(sbMarkerRe);
+            const globalText = sbMatch ? newText.slice(0, sbMatch.index).trim() : newText.trim();
+            const storyboardText = sbMatch ? newText.slice(sbMatch.index).trim() : "";
+            if (globalText !== undefined) {
+                runtime.state.global_prompt = globalText;
+                if (runtime.globalPromptTextarea) runtime.globalPromptTextarea.value = globalText;
+            }
+            if (storyboardText) {
+                const segments = parseStoryboard(storyboardText);
+                for (let i = 0; i < segments.length; i++) {
+                    while (runtime.state.clips.length <= i) {
+                        runtime.state.clips.push(newClip(runtime.state.clips.length));
+                    }
+                    runtime.state.clips[i].prompt = segments[i].prompt;
+                    runtime.state.clips[i].duration = String(segments[i].duration);
+                }
+            }
+            updateHidden(node, runtime);
+            if (typeof runtime.renderGlobalAssetPanel === "function") runtime.renderGlobalAssetPanel();
+            render(node, runtime);
+            runtime.statusText = "已同步 / Synced";
+            status.textContent = runtime.statusText;
+        } catch(err) {
+            runtime.statusText = "同步失败 / Sync failed";
+            status.textContent = runtime.statusText;
+        }
+    });
 mergeOutputBtn.addEventListener("click", (e) => {
     e.preventDefault();
     // Check if any clip is selected for replacement
@@ -3766,7 +3807,7 @@ status.style.overflow = "hidden";
 status.style.textOverflow = "ellipsis";
 status.style.maxWidth = "45%";
 
-toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, status, projectFileInput);
+toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, status, projectFileInput);
 
     // Store merge output button reference for later updates
 
