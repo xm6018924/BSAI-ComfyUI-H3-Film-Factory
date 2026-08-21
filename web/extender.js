@@ -863,6 +863,53 @@ function invalidateFrom(state, index) {
     }
 }
 
+/**
+ * Parse storyboard text into segments.
+ * Looks for [分镜N] markers and splits text accordingly.
+ * For each segment, extracts the full prompt text and the last time range
+ * (e.g. "6-9秒" → 9) as the clip duration.
+ *
+ * 解析分镜文本：按 [分镜N] 标记拆分为多段，提取每段提示词和时长。
+ */
+function parseStoryboard(text) {
+    if (!text || !String(text).trim()) return [];
+    const raw = String(text);
+    // Match [分镜1], [分镜2], etc. (also support [Shot1], [shot1])
+    const markerRe = /\[(?:分镜|Shot|shot|SHOT)\s*(\d+)\]/g;
+    const segments = [];
+    let match;
+    const indices = [];
+    while ((match = markerRe.exec(raw)) !== null) {
+        indices.push({ num: parseInt(match[1], 10), pos: match.index, markerLen: match[0].length });
+    }
+    if (indices.length === 0) return [];
+    for (let i = 0; i < indices.length; i++) {
+        const start = indices[i].pos + indices[i].markerLen;
+        const end = i + 1 < indices.length ? indices[i + 1].pos : raw.length;
+        let segmentText = raw.slice(start, end).trim();
+        // Extract the last time range like "N-Ns" or "N-N秒" from the segment
+        // e.g. "0-3秒...3-6秒...6-9秒" → 9
+        let duration = 15; // default
+        const timeRe = /(\d+(?:\.\d+)?)\s*[-–—~至到]\s*(\d+(?:\.\d+)?)\s*(?:秒|s|sec)/gi;
+        let lastTimeMatch;
+        let tm;
+        while ((tm = timeRe.exec(segmentText)) !== null) {
+            lastTimeMatch = tm;
+        }
+        if (lastTimeMatch) {
+            duration = parseFloat(lastTimeMatch[2]);
+        }
+        // Clean up: remove the segment title line (e.g. "初始的觊觎\n")
+        // but keep the rest as the prompt
+        segments.push({
+            num: indices[i].num,
+            prompt: segmentText,
+            duration: duration,
+        });
+    }
+    return segments;
+}
+
 function currentResolutionFromWidgets(node) {
     const width = Number(getWidget(node, "width")?.value || 0);
     const height = Number(getWidget(node, "height")?.value || 0);
@@ -3787,6 +3834,60 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                         render(node, runtime);
                     }
                 }
+            }
+        } catch (e) { /* ignore */ }
+    }, 800);
+
+    // Poll for external storyboard_prompt input changes every 800ms
+    // 轮询外部分镜提示词输入，自动同步CLIP数量、提示词和时长
+    runtime._lastStoryboardText = "";
+    runtime._sbPollTimer = setInterval(() => {
+        try {
+            const sbInput = node.inputs?.find(inp => inp.name === "storyboard_prompt");
+            if (!sbInput || sbInput.link == null) return;
+            const link = app.graph.links[sbInput.link];
+            if (!link || link.origin_id == null) return;
+            const srcNode = app.graph.getNodeById(link.origin_id);
+            if (!srcNode) return;
+            let text = null;
+            const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
+            if (srcWidget && srcWidget.value != null) {
+                text = srcWidget.value;
+            } else {
+                text = srcNode.widgets_values?.[0];
+            }
+            if (text == null) return;
+            const newText = String(text);
+            if (newText === runtime._lastStoryboardText) return;
+            runtime._lastStoryboardText = newText;
+
+            const segments = parseStoryboard(newText);
+            if (segments.length === 0) return;
+
+            let changed = false;
+            // Add CLIPs to match segment count
+            while (runtime.state.clips.length < segments.length) {
+                runtime.state.clips.push(newClip(runtime.state.clips.length));
+                changed = true;
+            }
+            // Update each CLIP's prompt and duration from segments
+            for (let i = 0; i < segments.length && i < runtime.state.clips.length; i++) {
+                const seg = segments[i];
+                const clip = runtime.state.clips[i];
+                if (clip.prompt !== seg.prompt) {
+                    clip.prompt = seg.prompt;
+                    changed = true;
+                }
+                const newDur = String(seg.duration);
+                if (String(clip.duration) !== newDur) {
+                    clip.duration = newDur;
+                    changed = true;
+                }
+                clip.validated = false;
+            }
+            if (changed) {
+                updateHidden(node, runtime);
+                render(node, runtime);
             }
         } catch (e) { /* ignore */ }
     }, 800);

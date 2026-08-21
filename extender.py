@@ -1834,6 +1834,7 @@ class MiniMaxH3Extender:
             "audio_vae": ("VAE", {"forceInput": True}),
             "ref_audio": ("AUDIO", {"forceInput": True}),
             "global_prompt": ("STRING", {"forceInput": True, "tooltip": "Optional global prompt prepended to every CLIP's prompt."}),
+            "storyboard_prompt": ("STRING", {"forceInput": True, "tooltip": "External storyboard prompt. Parse [分镜N] markers to auto-create N CLIPs, fill each CLIP's prompt, and set Duration from the last time range in each segment."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
                 {
@@ -1982,6 +1983,7 @@ class MiniMaxH3Extender:
         prompt_pack=None,
         asset_library=None,
         global_prompt=None,
+        storyboard_prompt=None,
         unique_id=None,
         **kwargs,
     ):
@@ -2879,6 +2881,8 @@ class MiniMaxH3Extender:
             "prompt_pack_signature": str(active_prompt_pack_signature or ""),
             "global_prompt_connected": bool(global_prompt),
             "global_prompt_value": str(global_prompt or ""),
+            "storyboard_prompt_connected": bool(storyboard_prompt),
+            "storyboard_prompt_value": str(storyboard_prompt or "")[:200],
             "build": BUILD,
         }
 
