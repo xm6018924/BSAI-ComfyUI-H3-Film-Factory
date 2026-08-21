@@ -2731,70 +2731,64 @@ function render(node, runtime) {
         promptRow.appendChild(promptExpandBtn);
         rightPanel.appendChild(promptRow);
 
-        // Thumbnail preview strip for this CLIP's @图N references
-        // 分镜提示词内@图N缩略图预览条
-        const clipThumbStrip = document.createElement("div");
-        clipThumbStrip.style.cssText = "display:none;flex-direction:row;gap:4px;padding:3px 4px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.12);";
-        rightPanel.appendChild(clipThumbStrip);
+        // Overlay for CLIP prompt: inline @图N thumbnails
+        // 分镜提示词覆盖层：@图N内联缩略图
+        const clipOverlay = document.createElement("div");
+        clipOverlay.style.cssText = "position:absolute;top:0;left:0;width:100%;height:120px;font-size:inherit;border:1px solid rgba(255,255,255,.15);color:inherit;border-radius:5px;padding:6px;box-sizing:border-box;overflow-y:auto;pointer-events:none;white-space:pre-wrap;word-wrap:break-word;z-index:1;background:rgba(0,0,0,.27);";
+        prompt.style.color = "transparent";
+        prompt.style.background = "transparent";
+        prompt.style.caretColor = "white";
+        prompt.style.position = "absolute";
+        prompt.style.top = "0";
+        prompt.style.left = "0";
+        prompt.style.width = "100%";
+        prompt.style.height = "120px";
+        prompt.style.zIndex = "2";
+        prompt.style.resize = "none";
+        prompt.style.outline = "none";
+        promptRow.appendChild(clipOverlay);
+        prompt.addEventListener("scroll", () => {
+            clipOverlay.scrollTop = prompt.scrollTop;
+            clipOverlay.scrollLeft = prompt.scrollLeft;
+        });
 
-        function renderClipThumbnails() {
-            clipThumbStrip.replaceChildren();
-            const refs = parseAssetRefs(clip.prompt || "");
-            if (refs.length === 0) {
-                clipThumbStrip.style.display = "none";
-                return;
-            }
-            clipThumbStrip.style.display = "flex";
+        function renderClipOverlay() {
+            const text = clip.prompt || "";
+            const refs = parseAssetRefs(text);
+            if (refs.length === 0) { clipOverlay.textContent = text; return; }
+            let html = "";
+            let lastIdx = 0;
             const assetList = runtime._h3_assetCache;
+            const esc = window._h3_escHtml || (s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"));
             refs.forEach(function(ref) {
-                const item = document.createElement("div");
-                item.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;flex-shrink:0;";
-
-                const thumb = document.createElement("div");
-                thumb.style.cssText = "width:36px;height:36px;border:1px solid #444;border-radius:3px;overflow:hidden;background:#1a1a1a;";
-                if (ref.type !== "audios") {
-                    const img = document.createElement("img");
-                    img.style.cssText = "width:100%;height:100%;object-fit:cover;";
-                    img.loading = "lazy";
-                    if (assetList) {
-                        const items = assetList[ref.type] || [];
-                        const assetItem = items.find(i => i.index === ref.index);
-                        if (assetItem) {
-                            if (ref.type === "videos") {
-                                img.src = "/bsai/video_frame?filename=" + encodeURIComponent(assetItem.name);
-                            } else {
-                                img.src = "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(assetItem.name);
-                            }
-                        }
+                const idx = text.indexOf(ref.tag, lastIdx);
+                if (idx < 0) return;
+                html += esc(text.slice(lastIdx, idx + ref.tag.length));
+                if (ref.type !== "audios" && assetList) {
+                    const items = assetList[ref.type] || [];
+                    const assetItem = items.find(i => i.index === ref.index);
+                    if (assetItem) {
+                        const src = ref.type === "videos"
+                            ? "/bsai/video_frame?filename=" + encodeURIComponent(assetItem.name)
+                            : "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(assetItem.name);
+                        html += '<img src="' + src + '" style="width:18px;height:18px;object-fit:cover;border:1px solid #555;border-radius:2px;vertical-align:middle;margin:0 1px;" alt="">';
                     }
-                    img.onerror = function() {
-                        img.style.display = "none";
-                        thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#555;font-size:9px;">IMG</div>';
-                    };
-                    thumb.appendChild(img);
-                } else {
-                    thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;">♪</div>';
                 }
-                item.appendChild(thumb);
-
-                const label = document.createElement("span");
-                label.textContent = ref.tag;
-                label.style.cssText = "font-size:9px;color:#8ab4f8;";
-                item.appendChild(label);
-
-                clipThumbStrip.appendChild(item);
+                lastIdx = idx + ref.tag.length;
             });
+            html += esc(text.slice(lastIdx));
+            clipOverlay.innerHTML = html;
         }
-        renderClipThumbnails();
+        renderClipOverlay();
         if (!runtime._h3_assetCache) {
-            h3FetchAssets().then(() => renderClipThumbnails());
+            h3FetchAssets().then(() => renderClipOverlay());
         }
 
         prompt.addEventListener("input", () => {
             if (prompt.value === clip.prompt) return;
             clip.prompt = prompt.value;
             updateHidden(node, runtime);
-            renderClipThumbnails();
+            renderClipOverlay();
         });
         prompt.addEventListener("focus", () => {
             window._h3_activeTextarea = prompt;
@@ -2805,7 +2799,7 @@ function render(node, runtime) {
             window._h3_refreshAssetPanel = () => {
                 updateHidden(node, runtime);
                 renderAssetPanel(leftPanel, clip, node, runtime, prompt);
-                renderClipThumbnails();
+                renderClipOverlay();
             };
         });
         prompt.addEventListener("click", () => {
@@ -3645,7 +3639,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     gpTextarea.addEventListener("input", () => {
         state.global_prompt = gpTextarea.value;
         updateHidden(node, runtime);
-        renderGlobalAssetPanel();
+        renderGlobalOverlay();
+        renderAssetPanel(gpLeftPanel, gpPseudoClip, node, runtime, gpTextarea);
     });
     // Make global prompt textarea work with asset library @图N clicks
     gpTextarea.addEventListener("focus", () => {
@@ -3725,64 +3720,66 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     function renderGlobalAssetPanel() {
         renderAssetPanel(gpLeftPanel, gpPseudoClip, node, runtime, gpTextarea);
-        renderGlobalThumbnails();
+        renderGlobalOverlay();
     }
 
-    // Thumbnail preview strip: shows @图N thumbnails below the textarea
-    // 全局提示词内@图N缩略图预览条
-    const gpThumbStrip = document.createElement("div");
-    gpThumbStrip.style.cssText = "display:flex;flex-direction:row;gap:4px;padding:3px 4px;flex-wrap:wrap;min-height:0;border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.12);";
+    // Overlay technique: textarea (transparent text, visible caret) on top,
+    // overlay div (visible text + inline thumbnails) behind.
+    // 覆盖层技术：textarea文本透明+可见光标在上层，div显示文本+内联缩略图在下层
+    const gpOverlay = document.createElement("div");
+    gpOverlay.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;font-size:11px;border:1px solid rgba(255,255,255,.15);color:inherit;border-radius:5px;padding:4px 6px;box-sizing:border-box;overflow-y:auto;pointer-events:none;white-space:pre-wrap;word-wrap:break-word;z-index:1;background:rgba(0,0,0,.27);";
+    gpTextarea.style.color = "transparent";
+    gpTextarea.style.background = "transparent";
+    gpTextarea.style.caretColor = "white";
+    gpTextarea.style.position = "absolute";
+    gpTextarea.style.top = "0";
+    gpTextarea.style.left = "0";
+    gpTextarea.style.width = "100%";
+    gpTextarea.style.height = "100%";
+    gpTextarea.style.zIndex = "2";
+    gpTextarea.style.resize = "none";
+    gpTextarea.style.outline = "none";
+    const gpEditorWrap = document.createElement("div");
+    gpEditorWrap.style.cssText = "position:relative;flex:1 1 auto;min-height:180px;max-height:400px;align-self:stretch;";
+    gpEditorWrap.append(gpOverlay, gpTextarea);
+    gpTextarea.addEventListener("scroll", () => {
+        gpOverlay.scrollTop = gpTextarea.scrollTop;
+        gpOverlay.scrollLeft = gpTextarea.scrollLeft;
+    });
 
-    function renderGlobalThumbnails() {
-        gpThumbStrip.replaceChildren();
-        const refs = parseAssetRefs(state.global_prompt || "");
-        if (refs.length === 0) {
-            gpThumbStrip.style.display = "none";
-            return;
-        }
-        gpThumbStrip.style.display = "flex";
+    function escHtml(s) {
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    window._h3_escHtml = escHtml;
+
+    function renderGlobalOverlay() {
+        const text = state.global_prompt || "";
+        const refs = parseAssetRefs(text);
+        if (refs.length === 0) { gpOverlay.textContent = text; return; }
+        let html = "";
+        let lastIdx = 0;
         const assetList = runtime._h3_assetCache;
         refs.forEach(function(ref) {
-            const item = document.createElement("div");
-            item.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;flex-shrink:0;";
-
-            const thumb = document.createElement("div");
-            thumb.style.cssText = "width:36px;height:36px;border:1px solid #444;border-radius:3px;overflow:hidden;background:#1a1a1a;";
-            if (ref.type !== "audios") {
-                const img = document.createElement("img");
-                img.style.cssText = "width:100%;height:100%;object-fit:cover;";
-                img.loading = "lazy";
-                if (assetList) {
-                    const items = assetList[ref.type] || [];
-                    const assetItem = items.find(i => i.index === ref.index);
-                    if (assetItem) {
-                        if (ref.type === "videos") {
-                            img.src = "/bsai/video_frame?filename=" + encodeURIComponent(assetItem.name);
-                        } else {
-                            img.src = "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(assetItem.name);
-                        }
-                    }
+            const idx = text.indexOf(ref.tag, lastIdx);
+            if (idx < 0) return;
+            html += escHtml(text.slice(lastIdx, idx + ref.tag.length));
+            if (ref.type !== "audios" && assetList) {
+                const items = assetList[ref.type] || [];
+                const assetItem = items.find(i => i.index === ref.index);
+                if (assetItem) {
+                    const src = ref.type === "videos"
+                        ? "/bsai/video_frame?filename=" + encodeURIComponent(assetItem.name)
+                        : "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(assetItem.name);
+                    html += '<img src="' + src + '" style="width:20px;height:20px;object-fit:cover;border:1px solid #555;border-radius:2px;vertical-align:middle;margin:0 1px;" alt="">';
                 }
-                img.onerror = function() {
-                    img.style.display = "none";
-                    thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#555;font-size:9px;">IMG</div>';
-                };
-                thumb.appendChild(img);
-            } else {
-                thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;">♪</div>';
             }
-            item.appendChild(thumb);
-
-            const label = document.createElement("span");
-            label.textContent = ref.tag;
-            label.style.cssText = "font-size:9px;color:#8ab4f8;";
-            item.appendChild(label);
-
-            gpThumbStrip.appendChild(item);
+            lastIdx = idx + ref.tag.length;
         });
+        html += escHtml(text.slice(lastIdx));
+        gpOverlay.innerHTML = html;
     }
 
-    globalPromptSection.append(gpLeftPanel, gpLabel, gpTextarea, gpThumbStrip, gpRefreshBtn, gpExpandBtn);
+    globalPromptSection.append(gpLeftPanel, gpLabel, gpEditorWrap, gpRefreshBtn, gpExpandBtn);
 
     // Sync external prompt_source input to the textarea (legacy widget callback)
     const gpWidget = node.widgets?.find(w => w.name === "global_prompt" || w.name === "prompt_source");
@@ -3908,7 +3905,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         _gpPollTimer: null,
     };
     runtime.renderGlobalAssetPanel = renderGlobalAssetPanel;
-    runtime._gpThumbStrip = gpThumbStrip;
+    runtime._gpOverlay = gpOverlay;
 
     renderGlobalAssetPanel();
 
