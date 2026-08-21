@@ -2729,11 +2729,71 @@ function render(node, runtime) {
         promptRow.appendChild(prompt);
         promptRow.appendChild(promptExpandBtn);
         rightPanel.appendChild(promptRow);
+
+        // Thumbnail preview strip for this CLIP's @图N references
+        // 分镜提示词内@图N缩略图预览条
+        const clipThumbStrip = document.createElement("div");
+        clipThumbStrip.style.cssText = "display:none;flex-direction:row;gap:4px;padding:3px 4px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.12);";
+        rightPanel.appendChild(clipThumbStrip);
+
+        function renderClipThumbnails() {
+            clipThumbStrip.replaceChildren();
+            const refs = parseAssetRefs(clip.prompt || "");
+            if (refs.length === 0) {
+                clipThumbStrip.style.display = "none";
+                return;
+            }
+            clipThumbStrip.style.display = "flex";
+            const assetList = runtime._h3_assetCache;
+            refs.forEach(function(ref) {
+                const item = document.createElement("div");
+                item.style.cssText = "display:flex;flex-direction:column;align-items:center;gap:1px;flex-shrink:0;";
+
+                const thumb = document.createElement("div");
+                thumb.style.cssText = "width:36px;height:36px;border:1px solid #444;border-radius:3px;overflow:hidden;background:#1a1a1a;";
+                if (ref.type !== "audios") {
+                    const img = document.createElement("img");
+                    img.style.cssText = "width:100%;height:100%;object-fit:cover;";
+                    img.loading = "lazy";
+                    if (assetList) {
+                        const items = assetList[ref.type] || [];
+                        const assetItem = items.find(i => i.index === ref.index);
+                        if (assetItem) {
+                            if (ref.type === "videos") {
+                                img.src = "/bsai/video_frame?filename=" + encodeURIComponent(assetItem.name);
+                            } else {
+                                img.src = "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(assetItem.name);
+                            }
+                        }
+                    }
+                    img.onerror = function() {
+                        img.style.display = "none";
+                        thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#555;font-size:9px;">IMG</div>';
+                    };
+                    thumb.appendChild(img);
+                } else {
+                    thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;">♪</div>';
+                }
+                item.appendChild(thumb);
+
+                const label = document.createElement("span");
+                label.textContent = ref.tag;
+                label.style.cssText = "font-size:9px;color:#8ab4f8;";
+                item.appendChild(label);
+
+                clipThumbStrip.appendChild(item);
+            });
+        }
+        renderClipThumbnails();
+        if (!runtime._h3_assetCache) {
+            h3FetchAssets().then(() => renderClipThumbnails());
+        }
+
         prompt.addEventListener("input", () => {
             if (prompt.value === clip.prompt) return;
             clip.prompt = prompt.value;
             updateHidden(node, runtime);
-            // Do not rebuild the DOM while typing: that would steal focus.
+            renderClipThumbnails();
         });
         prompt.addEventListener("focus", () => {
             window._h3_activeTextarea = prompt;
@@ -2744,6 +2804,7 @@ function render(node, runtime) {
             window._h3_refreshAssetPanel = () => {
                 updateHidden(node, runtime);
                 renderAssetPanel(leftPanel, clip, node, runtime, prompt);
+                renderClipThumbnails();
             };
         });
         prompt.addEventListener("click", () => {
