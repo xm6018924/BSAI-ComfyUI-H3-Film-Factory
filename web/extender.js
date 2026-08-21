@@ -2727,6 +2727,7 @@ function render(node, runtime) {
             syncDomHeight(runtime);
         });
         promptRow.style.position = "relative";
+        promptRow.style.minHeight = "120px";
         promptRow.appendChild(prompt);
         promptRow.appendChild(promptExpandBtn);
         rightPanel.appendChild(promptRow);
@@ -2734,7 +2735,7 @@ function render(node, runtime) {
         // Overlay for CLIP prompt: inline @图N thumbnails
         // 分镜提示词覆盖层：@图N内联缩略图
         const clipOverlay = document.createElement("div");
-        clipOverlay.style.cssText = "position:absolute;top:0;left:0;width:100%;height:120px;font-size:inherit;border:1px solid rgba(255,255,255,.15);color:inherit;border-radius:5px;padding:6px;box-sizing:border-box;overflow-y:auto;pointer-events:none;white-space:pre-wrap;word-wrap:break-word;z-index:1;background:rgba(0,0,0,.27);";
+        clipOverlay.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;font-size:inherit;border:1px solid rgba(255,255,255,.15);color:inherit;border-radius:5px;padding:6px;box-sizing:border-box;overflow-y:auto;pointer-events:none;white-space:pre-wrap;word-wrap:break-word;z-index:1;background:rgba(0,0,0,.27);";
         prompt.style.color = "transparent";
         prompt.style.background = "transparent";
         prompt.style.caretColor = "white";
@@ -2742,7 +2743,9 @@ function render(node, runtime) {
         prompt.style.top = "0";
         prompt.style.left = "0";
         prompt.style.width = "100%";
-        prompt.style.height = "120px";
+        prompt.style.height = "100%";
+        prompt.style.minHeight = "120px";
+        prompt.style.maxHeight = "400px";
         prompt.style.zIndex = "2";
         prompt.style.resize = "none";
         prompt.style.outline = "none";
