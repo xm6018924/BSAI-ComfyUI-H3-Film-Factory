@@ -1748,7 +1748,7 @@ def _import_project_archive(owner_id, archive_path):
 
 
 
-class MiniMaxH3Extender:
+class BSAIMiniMaxH3Extender:
     @classmethod
     def INPUT_TYPES(cls):
         sampler_names = list(comfy.samplers.SAMPLER_NAMES)
@@ -2932,10 +2932,14 @@ class MiniMaxH3Extender:
 
 
 NODE_CLASS_MAPPINGS = {
-    "MiniMaxH3Extender": MiniMaxH3Extender,
+    "BSAIMiniMaxH3Extender": BSAIMiniMaxH3Extender,
+    # Backward compatibility: old workflows referencing "MiniMaxH3Extender"
+    # still work if the original plugin is not installed.
+    "MiniMaxH3Extender": BSAIMiniMaxH3Extender,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "BSAIMiniMaxH3Extender": "BSAI ComfyUI H3 Film Factory",
     "MiniMaxH3Extender": "BSAI ComfyUI H3 Film Factory",
 }
 
