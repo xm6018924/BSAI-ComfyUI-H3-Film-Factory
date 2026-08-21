@@ -388,6 +388,10 @@ function newClip(index) {
         collapsed: false,
         subtitle: "",
         subtitle_enabled: false,
+        subtitle_mode: "manual",
+        subtitle_auto_dialogue: true,
+        subtitle_auto_narration: false,
+        subtitle_auto_lyrics: false,
         subtitle_font: "msyh.ttc",
         subtitle_font_size: 24,
         subtitle_color: "#FFFFFF",
@@ -437,6 +441,10 @@ function parseState(raw) {
                     clip.collapsed = c?.collapsed || false;
                     clip.subtitle = c?.subtitle || "";
                     clip.subtitle_enabled = c?.subtitle_enabled || false;
+                    clip.subtitle_mode = c?.subtitle_mode || "manual";
+                    clip.subtitle_auto_dialogue = c?.subtitle_auto_dialogue !== undefined ? c.subtitle_auto_dialogue : true;
+                    clip.subtitle_auto_narration = c?.subtitle_auto_narration || false;
+                    clip.subtitle_auto_lyrics = c?.subtitle_auto_lyrics || false;
                     clip.subtitle_font = c?.subtitle_font || "msyh.ttc";
                     clip.subtitle_font_size = c?.subtitle_font_size || 24;
                     clip.subtitle_color = c?.subtitle_color || "#FFFFFF";
@@ -2829,6 +2837,53 @@ function render(node, runtime) {
 
         // Subtitle section
         rightPanel.appendChild(makeFieldLabel("字幕 / Subtitle"));
+
+        // Subtitle mode selector: Manual vs Auto Extract
+        // 字幕模式选择：手动 vs 自动提取
+        const subModeRow = document.createElement("div");
+        subModeRow.style.cssText = "display:flex;gap:4px;margin-bottom:4px;";
+        const subManualBtn = document.createElement("button");
+        subManualBtn.textContent = "手动字幕 / Manual";
+        subManualBtn.style.cssText = "flex:1;font-size:10px;padding:2px 4px;border-radius:3px;cursor:pointer;";
+        const subAutoBtn = document.createElement("button");
+        subAutoBtn.textContent = "自动提取 / Auto Extract";
+        subAutoBtn.style.cssText = "flex:1;font-size:10px;padding:2px 4px;border-radius:3px;cursor:pointer;";
+        subModeRow.append(subManualBtn, subAutoBtn);
+        rightPanel.appendChild(subModeRow);
+
+        // Auto extract type checkboxes
+        const subAutoTypes = document.createElement("div");
+        subAutoTypes.style.cssText = "display:none;flex-wrap:wrap;gap:8px;margin-bottom:4px;font-size:10px;align-items:center;";
+        const dlgLabel = document.createElement("label");
+        dlgLabel.style.cssText = "display:flex;align-items:center;gap:2px;color:#c8c8c8;";
+        const dlgCheck = document.createElement("input");
+        dlgCheck.type = "checkbox";
+        dlgCheck.checked = clip.subtitle_auto_dialogue;
+        dlgCheck.style.cssText = "width:12px;height:12px;";
+        dlgLabel.append(dlgCheck, document.createTextNode("对白 / Dialogue"));
+        const narLabel = document.createElement("label");
+        narLabel.style.cssText = "display:flex;align-items:center;gap:2px;color:#c8c8c8;";
+        const narCheck = document.createElement("input");
+        narCheck.type = "checkbox";
+        narCheck.checked = clip.subtitle_auto_narration;
+        narCheck.style.cssText = "width:12px;height:12px;";
+        narLabel.append(narCheck, document.createTextNode("旁白 / Narration"));
+        const lyrLabel = document.createElement("label");
+        lyrLabel.style.cssText = "display:flex;align-items:center;gap:2px;color:#c8c8c8;";
+        const lyrCheck = document.createElement("input");
+        lyrCheck.type = "checkbox";
+        lyrCheck.checked = clip.subtitle_auto_lyrics;
+        lyrCheck.style.cssText = "width:12px;height:12px;";
+        lyrLabel.append(lyrCheck, document.createTextNode("歌词 / Lyrics"));
+        subAutoTypes.append(dlgLabel, narLabel, lyrLabel);
+        rightPanel.appendChild(subAutoTypes);
+
+        // Auto-extract preview (read-only)
+        const subAutoPreview = document.createElement("div");
+        subAutoPreview.style.cssText = "display:none;width:100%;min-height:24px;max-height:60px;overflow-y:auto;background:#111;color:#8c8;border:1px solid #333;border-radius:3px;padding:4px 6px;font-size:11px;margin-bottom:4px;white-space:pre-wrap;";
+        rightPanel.appendChild(subAutoPreview);
+
+        // Manual subtitle input
         const subtitleInput = document.createElement("textarea");
         subtitleInput.value = clip.subtitle || "";
         subtitleInput.placeholder = "输入字幕文本 / Enter subtitle text";
@@ -2838,6 +2893,96 @@ function render(node, runtime) {
             updateHidden(node, runtime);
         });
         rightPanel.appendChild(subtitleInput);
+
+        // Auto-extract function: parses clip.prompt for dialogue/narration/lyrics
+        function autoExtractSubtitles() {
+            const text = clip.prompt || "";
+            const parts = [];
+            // 对白: 角色N说："..." or 角色N说："..."
+            if (dlgCheck.checked) {
+                const dlgRe = /(?:角色\d|[^\s，。]+)说[：:]\s*["""「『]([^"""」』]+)["""」』]/g;
+                let m;
+                while ((m = dlgRe.exec(text)) !== null) {
+                    parts.push(m[1]);
+                }
+            }
+            // 旁白: description text (lines without 说：, 音效：, 声线：)
+            if (narCheck.checked) {
+                const lines = text.split(/[\n。]/);
+                lines.forEach(line => {
+                    const trimmed = line.trim();
+                    if (!trimmed) return;
+                    if (/说[：:]/.test(trimmed)) return;
+                    if (/音效[：:]/.test(trimmed)) return;
+                    if (/声线[：:]/.test(trimmed)) return;
+                    if (/语速[：:]/.test(trimmed)) return;
+                    if (/情绪[：:]/.test(trimmed)) return;
+                    if (/^\d+-\d+秒[：:]/.test(trimmed)) return;
+                    if (/^\[/.test(trimmed)) return;
+                    if (trimmed.length > 10) parts.push(trimmed);
+                });
+            }
+            // 歌词: text within ♪ symbols
+            if (lyrCheck.checked) {
+                const lyrRe = /♪([^♪]+)♪/g;
+                let m;
+                while ((m = lyrRe.exec(text)) !== null) {
+                    parts.push(m[1].trim());
+                }
+            }
+            return parts.join("\n");
+        }
+
+        function refreshAutoSubtitles() {
+            const extracted = autoExtractSubtitles();
+            clip.subtitle = extracted;
+            subtitleInput.value = extracted;
+            subAutoPreview.textContent = extracted || "(无匹配内容 / No match)";
+            updateHidden(node, runtime);
+        }
+
+        function updateSubModeUI() {
+            const isAuto = clip.subtitle_mode === "auto";
+            subManualBtn.style.background = isAuto ? "#2a2a2a" : "#3a5a8a";
+            subManualBtn.style.color = isAuto ? "#888" : "#cde";
+            subManualBtn.style.border = isAuto ? "1px solid #333" : "1px solid #5a7aaa";
+            subAutoBtn.style.background = isAuto ? "#5a8a3a" : "#2a2a2a";
+            subAutoBtn.style.color = isAuto ? "#cde" : "#888";
+            subAutoBtn.style.border = isAuto ? "1px solid #7aaa5a" : "1px solid #333";
+            subAutoTypes.style.display = isAuto ? "flex" : "none";
+            subAutoPreview.style.display = isAuto ? "block" : "none";
+            subtitleInput.style.display = isAuto ? "none" : "block";
+            if (isAuto) refreshAutoSubtitles();
+        }
+
+        subManualBtn.addEventListener("click", () => {
+            clip.subtitle_mode = "manual";
+            updateSubModeUI();
+            updateHidden(node, runtime);
+        });
+        subAutoBtn.addEventListener("click", () => {
+            clip.subtitle_mode = "auto";
+            updateSubModeUI();
+            updateHidden(node, runtime);
+        });
+        [dlgCheck, narCheck, lyrCheck].forEach(cb => {
+            cb.addEventListener("change", () => {
+                clip.subtitle_auto_dialogue = dlgCheck.checked;
+                clip.subtitle_auto_narration = narCheck.checked;
+                clip.subtitle_auto_lyrics = lyrCheck.checked;
+                if (clip.subtitle_mode === "auto") refreshAutoSubtitles();
+                updateHidden(node, runtime);
+            });
+        });
+
+        // Auto-refresh when prompt changes (if in auto mode)
+        const origRenderClipOverlay = renderClipOverlay;
+        renderClipOverlay = function() {
+            origRenderClipOverlay.call(this);
+            if (clip.subtitle_mode === "auto") refreshAutoSubtitles();
+        };
+
+        updateSubModeUI();
 
         // Subtitle controls row
         const subCtrlRow = document.createElement("div");
