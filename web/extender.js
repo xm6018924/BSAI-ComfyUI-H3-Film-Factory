@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-// extender.js v2.1.1 — cache-bust marker (2026-08-21-preview-fix)
+// extender.js v2.1.2 — cache-bust marker (2026-08-21-clip-trim)
 import { api } from "../../scripts/api.js";
 
 const TARGET = "MiniMaxH3Extender";
@@ -3759,6 +3759,10 @@ const mergeOutputBtn = document.createElement("button");
                     runtime.state.clips[i].prompt = segments[i].prompt;
                     runtime.state.clips[i].duration = String(segments[i].duration);
                 }
+                // Remove excess CLIPs when storyboard has fewer segments
+                if (runtime.state.clips.length > segments.length) {
+                    runtime.state.clips.splice(segments.length);
+                }
             }
             updateHidden(node, runtime);
             if (typeof runtime.renderGlobalAssetPanel === "function") runtime.renderGlobalAssetPanel();
@@ -4229,6 +4233,11 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                         }
                         clip.validated = false;
                     }
+                    // Remove excess CLIPs when storyboard has fewer segments
+                    if (runtime.state.clips.length > segments.length) {
+                        runtime.state.clips.splice(segments.length);
+                        changed = true;
+                    }
                 }
             }
 
@@ -4398,6 +4407,10 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                                 }
                                 runtime.state.clips[i].prompt = segments[i].prompt;
                                 runtime.state.clips[i].duration = String(segments[i].duration);
+                            }
+                            // Remove excess CLIPs when storyboard has fewer segments
+                            if (runtime.state.clips.length > segments.length) {
+                                runtime.state.clips.splice(segments.length);
                             }
                         }
                         updateHidden(this, runtime);
