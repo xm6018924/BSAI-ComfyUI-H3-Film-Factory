@@ -850,10 +850,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     if hasattr(preview_x0, "is_nested") and preview_x0.is_nested:
                         preview_x0 = preview_x0.tensors[0]
                     if previewer is not None:
-                        img = previewer.decode_latent_to_preview("JPEG", preview_x0)
+                        img = previewer.decode_latent_to_preview(preview_x0)
                     else:
                         # Manual fallback: take first 3 channels, normalize to 0-255
-                        t = preview_x0[:1, :3] if preview_x0.shape[1] >= 3 else preview_x0[:1, :1].expand(1, 3, -1, -1)
+                        # Handle 5D video latents by taking the first time step
+                        t = preview_x0
+                        if t.ndim == 5:
+                            t = t[:, :, 0]
+                        t = t[:1, :3] if t.shape[1] >= 3 else t[:1, :1].expand(1, 3, -1, -1)
                         t = ((t - t.min()) / (t.max() - t.min() + 1e-8) * 255).clamp(0, 255)
                         t = t.to(device="cpu", dtype=torch.uint8)
                         img = Image.fromarray(t[0].movedim(0, 2).numpy())
@@ -1218,8 +1222,8 @@ def _send_latent_preview_frame(node_id, clip_index, step, total_steps, jpeg_byte
             payload,
             getattr(server, "client_id", None),
         )
-    except Exception:
-        pass
+    except Exception as _e:
+        print(f"[H3 Extender] _send_latent_preview_frame error: {_e}")
 
 
 def _project_now_iso():

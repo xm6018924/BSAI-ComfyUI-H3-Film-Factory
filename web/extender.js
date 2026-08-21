@@ -1,5 +1,5 @@
 import { app } from "../../scripts/app.js";
-// extender.js v2.1.0 — cache-bust marker (2026-08-21)
+// extender.js v2.1.1 — cache-bust marker (2026-08-21-preview-fix)
 import { api } from "../../scripts/api.js";
 
 const TARGET = "MiniMaxH3Extender";
@@ -4570,16 +4570,28 @@ app.registerExtension({
 
         api.addEventListener(LATENT_PREVIEW_EVENT, ({ detail }) => {
             const node = findExtenderNodeByExecutionId(detail?.node);
-            if (!node) return;
+            if (!node) {
+                console.warn("[H3 Extender] latent preview: node not found for id", detail?.node);
+                return;
+            }
 
             const runtime = buildUi(node);
-            if (!runtime) return;
+            if (!runtime) {
+                console.warn("[H3 Extender] latent preview: runtime null for node", node?.id);
+                return;
+            }
 
             const index = Number(detail?.clip_index ?? -1);
-            if (index < 0 || index >= runtime.state.clips.length) return;
+            if (index < 0 || index >= runtime.state.clips.length) {
+                console.warn("[H3 Extender] latent preview: clip_index out of range", index, runtime.state.clips.length);
+                return;
+            }
 
             const clip = runtime.state.clips[index];
-            if (!clip) return;
+            if (!clip) {
+                console.warn("[H3 Extender] latent preview: clip null at index", index);
+                return;
+            }
 
             clip._latentPreviewUrl = String(detail?.image || "");
             clip._latentStep = Number(detail?.step ?? 0);

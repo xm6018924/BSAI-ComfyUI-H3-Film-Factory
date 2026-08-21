@@ -3171,9 +3171,13 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
             if blob is None:
                 return web.json_response({"ok": False, "error": "Clip has no decoded video yet."}, status=404)
             fps = float(manifest.get("fps", FPS))
-            root = _ensure_cache_root()
+            if folder_paths is not None:
+                temp_dir = Path(folder_paths.get_temp_directory())
+            else:
+                temp_dir = _ensure_cache_root()
+            temp_dir.mkdir(parents=True, exist_ok=True)
             token = f"clippv_{_safe_name(owner_id)}_{idx}_{uuid.uuid4().hex[:8]}"
-            temp_mp4 = root / f"_{token}.mp4"
+            temp_mp4 = temp_dir / f"_{token}.mp4"
             _copy_blob_to_file(data_path, blob, temp_mp4)
             item = _comfy_media_item(temp_mp4, fps, "temp")
             return web.json_response({
