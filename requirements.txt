@@ -1,3 +1,5 @@
 torch
+torchaudio
 numpy
 Pillow
+imageio-ffmpeg

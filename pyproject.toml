@@ -1,20 +1,21 @@
 [project]
 name = "bsai-comfyui-h3-film-factory"
 version = "1.0.0"
-description = "Complete film production toolkit for MiniMax H3: asset library, storyboard clip management, subtitle rendering, media combining, and contextual frame extraction."
+description = "Complete film production toolkit for MiniMax H3: full H3 video generation pipeline (extender, motion context, disk join, final decode, tail extraction, prompt bridge), plus asset library, storyboard clip management, subtitle rendering, media combining, and contextual frame extraction."
 authors = [{ name = "BSAI", email = "xm6018924@users.noreply.github.com" }]
 license = "MIT"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "torch",
+    "torchaudio",
     "numpy",
     "Pillow",
+    "imageio-ffmpeg",
 ]
 
 [project.optional-dependencies]
 video = ["opencv-python"]
-audio = ["torchaudio"]
 
 [project.urls]
 Repository = "https://github.com/xm6018924/BSAI-ComfyUI-H3-Film-Factory"

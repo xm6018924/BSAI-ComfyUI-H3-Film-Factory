@@ -1,4 +1,4 @@
-# BSAI-ComfyUI-H3 Film Factory
+# BSAI ComfyUI H3 Film Factory
 
 **H3 电影工厂 — MiniMax H3 全流程影视制作工具包**
 
@@ -15,12 +15,16 @@ A complete film production toolkit for [MiniMax H3](https://www.minimax.io/blog/
 - **Subtitle System** — Burn-in narration (旁白) and dialogue (对白) subtitles with Windows font support
 - **Media Combiner** — Concatenate up to 16 video clips or audio streams into one continuous output
 - **Contextual Frame Extraction** — Extract reference frames from generated video for cross-clip visual consistency
+- **Per-CLIP Regeneration** — Regenerate individual clips without affecting others; manual merge via button
+- **Bilingual UI** — All buttons and labels in Chinese/English dual language
 
 - **资产库** — 通过节点 UI 上传图片、视频、音频；自动编号为 `@图N` / `@视频N` / `@音频N`
 - **分镜编排器** — 竖排 CLIP 卡片，每个片段独立设置提示词、字幕、音频模式、时长和种子
 - **字幕系统** — 使用 Windows 系统字体烧录旁白和对白字幕
 - **媒体拼接器** — 最多拼接 16 段视频或音频流为一条连续输出
 - **上下文帧提取** — 从已生成视频中提取参考帧，保持跨片段视觉一致性
+- **单CLIP重新生成** — 可单独重新生成某个CLIP而不影响其他片段；通过按钮手动合并
+- **双语界面** — 所有按钮和标签均为中英双语对照
 
 ---
 
@@ -49,6 +53,79 @@ A complete film production toolkit for [MiniMax H3](https://www.minimax.io/blog/
 All nodes are categorized under `BSAI/H3 Film Factory` in the ComfyUI node menu.
 
 所有节点均位于 ComfyUI 节点菜单的 `BSAI/H3 Film Factory` 分类下。
+
+### 0. BSAI ComfyUI H3 Film Factory (Main Node) | 主节点
+
+| | |
+|---|---|
+| **Type** | `MiniMaxH3Extender` |
+| **Display Name** | BSAI ComfyUI H3 Film Factory |
+| **Category** | BSAI/H3 Film Factory |
+| **Web Extension** | `BSAIMiniMaxH3.Extender` |
+
+The core node for MiniMax H3 video generation with a full-featured custom UI. Supports multi-CLIP storyboard sequencing, per-CLIP rendering, preview, and merging.
+
+MiniMax H3 视频生成的核心节点，配备全功能自定义界面。支持多CLIP分镜编排、逐CLIP渲染、预览和合并。
+
+**UI Layout | 界面布局:**
+
+```
+┌─────────────────────────────────────────────────┐
+│ Toolbar: 保存/加载 | 时长 | 应用全部 | 上下文 | 合并 │
+├─────────────────────────────────────────────────┤
+│ Global Prompt Section                            │
+│ ┌──────────┬──────────────────────────────────┐ │
+│ │ 已引用资产 │ 全局提示词 (与左侧同高)            │ │
+│ │ @图1      │                                    │ │
+│ │ @图2      │                                    │ │
+│ └──────────┴──────────────────────────────────┘ │
+├─────────────────────────────────────────────────┤
+│ CLIP Cards (scrollable)                           │
+│ ┌─ CLIP 1 ────────────────────── ✕ ─────────────┐│
+│ │ Prompt | Subtitle | Context | Seed | Duration ││
+│ └─────────────────────────────────────────────────┘│
+│ ┌─ CLIP 2 ────────────────────── ✕ ─────────────┐│
+│ │ ...                                              ││
+│ └─────────────────────────────────────────────────┘│
+├─────────────────────────────────────────────────┤
+│ CLIPS | 总时长 45s (3 clips)   [添加CLIP] [全部删除] │
+└─────────────────────────────────────────────────┘
+```
+
+**Toolbar Buttons | 工具栏按钮:**
+
+| Button | Description | 说明 |
+|--------|-------------|------|
+| 保存 / Save | Save project as portable .ext file | 保存项目为 .ext 文件 |
+| 加载 / Load | Load .ext project file | 加载 .ext 项目文件 |
+| 时长(s) / Dur | Batch set duration for all clips | 批量设置所有片段时长 |
+| 应用全部 / Apply All | Apply batch duration to all clips | 应用批量时长到所有片段 |
+| 上下文 / Context | Toggle context reference for all clips | 切换所有片段的上下文参考 |
+| 合并输出 / Merge Output | Merge all generated clips into one video | 合并所有已生成片段 |
+
+**Bottom Bar | 底部栏:**
+
+- **Left side**: `CLIPS | 总时长 Ns (N clips)` — total duration across all clips | 所有片段时长统计
+- **Right side**: `[添加CLIP / Add CLIP]` + `[全部删除CLIP / DEL ALL CLIP]` — add/delete buttons grouped together | 添加/删除按钮紧靠一起
+
+**Per-CLIP Features | 单CLIP功能:**
+
+- Red ✕ button on each CLIP header to delete that clip | 每个CLIP头部的红色✕按钮可删除该片段
+- Per-CLIP render toggle (Generate) | 单CLIP渲染开关
+- Per-CLIP replace button (Regenerate) — only regenerates the selected clip | 单CLIP重新生成按钮，仅重新生成选中的片段
+- Per-CLIP collapsed/expanded toggle | 单CLIP折叠/展开切换
+- Per-CLIP subtitle settings (font, size, color, bold) | 单CLIP字幕设置
+- Per-CLIP seed and duration | 单CLIP种子和时长
+- Per-CLIP context reference checkbox and frame extraction | 单CLIP上下文参考和帧提取
+- Per-CLIP asset panel with @ notation support | 单CLIP资产面板支持@标记
+
+**Global Prompt | 全局提示词:**
+
+- Textarea auto-stretches to match the left asset panel height | 文本框自动拉伸至与左侧资产面板同高
+- Expand button (⤢) for full-screen editing | 展开按钮用于全屏编辑
+- Auto-syncs with external `global_prompt` input | 自动与外部输入同步
+
+---
 
 ### 1. BSAI Asset Library Input | 资产库输入
 
@@ -150,19 +227,6 @@ Self-contained storyboard sequencer with vertical CLIP cards. Define clips direc
 
 自带竖排 CLIP 卡片的分镜编排器。直接在节点 UI 中定义片段（从上到下排列）。每张卡片包含提示词文本框、时长、音频模式、字幕来源，以及可展开的高级设置（旁白、对白、宽高、种子）。
 
-**Inputs | 输入:**
-- `clips_json` (STRING): JSON array of clip definitions (managed by UI) | 片段定义的 JSON 数组（由 UI 管理）
-- `clip_1` – `clip_4` (CLIP_INFO, optional): External clips from BSAI_ClipComposer | 来自 BSAI_ClipComposer 的外部片段
-- `asset_library` (ASSET_LIBRARY, optional): Connect for `@` notation resolution | 连接以支持 `@` 标记解析
-
-**UI Features | UI 特性:**
-- "+ 添加 CLIP / Add CLIP" button for manual clip addition | 手动添加片段按钮
-- Per-clip delete button (✕) with auto-renumbering | 每段独立删除按钮，自动重新编号
-- Bottom summary: clip count + total duration | 底部汇总：片段数 + 总时长
-- "↻ 刷新资产库" button per clip to reload assets | 每段刷新资产库按钮
-- Left panel: asset selection with thumbnails and @ labels | 左侧面板：资产选择带缩略图和 @ 标签
-- Collapsible "字幕/高级设置" section per clip | 可折叠的字幕/高级设置
-
 ---
 
 ### 6. BSAI Subtitle Config | 字幕配置
@@ -176,16 +240,6 @@ Self-contained storyboard sequencer with vertical CLIP cards. Define clips direc
 Configure subtitle font, color, size, and position. Font selection from `C:\Windows\Fonts`. Supports two subtitle types: narration (旁白) and dialogue (对白).
 
 配置字幕字体、颜色、大小和位置。字体选自 `C:\Windows\Fonts`。支持两种字幕类型：旁白和对白。
-
-**Inputs | 输入:**
-- `font_name`: Font file from Windows Fonts directory | Windows 字体目录中的字体文件
-- `font_size` (INT): Font size in pixels (8–200) | 字体大小（像素）
-- `narration_color` (STRING): Narration subtitle color (hex, e.g. `#FFFFFF`) | 旁白字幕颜色
-- `dialogue_color` (STRING): Dialogue subtitle color (hex, e.g. `#FFEE88`) | 对白字幕颜色
-- `narration_position`: `top` / `center` / `bottom` | 旁白位置
-- `dialogue_position`: `top` / `center` / `bottom` | 对白位置
-- `background_box` (BOOLEAN): Draw semi-transparent background behind text | 绘制半透明背景
-- `margin` (INT): Margin from screen edge in pixels | 距屏幕边缘的边距（像素）
 
 ---
 
@@ -201,19 +255,6 @@ Render narration (旁白) and dialogue (对白) subtitles on video frames. Can e
 
 在视频帧上渲染旁白和对白字幕。可从 `CLIP_INFO` 提取字幕文本或接受直接文本输入。
 
-**Inputs | 输入:**
-- `images` (IMAGE): Video frames to render subtitles on | 要渲染字幕的视频帧
-- `subtitle_config` (SUBTITLE_CONFIG): Subtitle styling configuration | 字幕样式配置
-- `clip_info` (CLIP_INFO, optional): Clip info with narration/dialogue text | 包含旁白/对白文本的片段信息
-- `narration` (STRING, optional): Manual narration text (used if clip_info not connected) | 手动旁白文本
-- `dialogue` (STRING, optional): Manual dialogue text (used if clip_info not connected) | 手动对白文本
-
-**Features | 特性:**
-- CJK text wrapping (auto line-break for Chinese) | 中文自动换行
-- Word-based wrapping for English | 英文按词换行
-- Semi-transparent background box option | 半透明背景选项
-- Supports multiple paragraphs | 支持多段落
-
 ---
 
 ### 8. BSAI Video Combiner | 视频拼接器
@@ -224,12 +265,9 @@ Render narration (旁白) and dialogue (对白) subtitles on video frames. Can e
 | **Category** | BSAI/H3 Film Factory |
 | **Output** | `IMAGE` |
 
-Combine multiple video clips (IMAGE batches) into a single continuous video. All clips are resized to match the first clip's resolution using bilinear interpolation. Connect clips top-to-bottom for storyboard-style sequencing.
+Combine multiple video clips (IMAGE batches) into a single continuous video. All clips are resized to match the first clip's resolution using bilinear interpolation.
 
-将多段视频（IMAGE 批次）拼接为一条连续视频。所有片段使用双线性插值缩放到第一段的分辨率。从上到下连接片段实现分镜式排列。
-
-**Inputs | 输入:**
-- `clip_1` – `clip_16` (IMAGE, optional): Up to 16 video clips | 最多 16 段视频
+将多段视频（IMAGE 批次）拼接为一条连续视频。所有片段使用双线性插值缩放到第一段的分辨率。
 
 ---
 
@@ -245,9 +283,6 @@ Combine multiple audio streams into a single continuous audio track. All audio i
 
 将多段音频流拼接为一条连续音频轨道。所有音频重采样以匹配第一段的采样率。
 
-**Inputs | 输入:**
-- `audio_1` – `audio_16` (AUDIO, optional): Up to 16 audio streams | 最多 16 段音频
-
 ---
 
 ### 10. BSAI Contextual Series Extract | 上下文系列提取
@@ -262,17 +297,6 @@ Extract reference frames from a previously generated video to maintain visual co
 
 从已生成的视频中提取参考帧，以保持跨片段的视觉一致性（角色、场景、道具、光照、色彩）。专为 MiniMax H3 Omni Reference 模式设计，支持最多 9 张参考图。
 
-**Inputs | 输入:**
-- `images` (IMAGE): Input video frames | 输入视频帧
-- `selection_mode`: `last_n` / `first_n` / `middle_n` / `custom_range` | 选择模式
-- `frame_count` (INT): Number of frames to extract | 提取帧数
-- `start_frame` / `end_frame` (INT): For custom_range mode | 用于自定义范围模式
-- `max_output_frames` (INT): Max frames after subsampling (default 9) | 子采样后最大帧数
-- `sampling_method`: `even` / `sequential` | 采样方法
-- `save_frames` (BOOLEAN, optional): Save extracted frames as PNG | 保存提取帧为 PNG
-- `output_subdir` (STRING, optional): Output subdirectory | 输出子目录
-- `filename_prefix` (STRING, optional): Saved frame filename prefix | 保存帧文件名前缀
-
 ---
 
 ### 11. BSAI Contextual Series Load | 上下文系列加载
@@ -283,15 +307,9 @@ Extract reference frames from a previously generated video to maintain visual co
 | **Category** | BSAI/H3 Film Factory |
 | **Outputs** | `IMAGE`, `INT` |
 
-Load previously saved contextual reference frames from disk. Pairs with BSAI_ContextualSeriesExtract for cross-session workflows where run 1 and run 2 happen in separate ComfyUI sessions.
+Load previously saved contextual reference frames from disk. Pairs with BSAI_ContextualSeriesExtract for cross-session workflows.
 
-从磁盘加载之前保存的上下文参考帧。与 BSAI_ContextualSeriesExtract 配对使用，适用于跨会话工作流（第一次和第二次运行在不同的 ComfyUI 会话中）。
-
-**Inputs | 输入:**
-- `directory` (STRING): Directory containing saved frame PNG files | 包含已保存帧 PNG 文件的目录
-- `filename_prefix` (STRING): Only load files starting with this prefix | 仅加载以此前缀开头的文件
-- `max_frames` (INT): Maximum number of frames to load | 最大加载帧数
-- `sampling_method`: `even` / `sequential` / `all` | 采样方法
+从磁盘加载之前保存的上下文参考帧。与 BSAI_ContextualSeriesExtract 配对使用，适用于跨会话工作流。
 
 ---
 
@@ -302,12 +320,6 @@ Load previously saved contextual reference frames from disk. Pairs with BSAI_Con
 | `@图N` | Image | `@图1` | `<Picture 1>` |
 | `@视频N` | Video | `@视频1` | `<Video 1>` |
 | `@音频N` | Audio | `@音频1` | `<Audio 1>` |
-
-| 标记 | 类型 | 示例 | 替换为 |
-|---|---|---|---|
-| `@图N` | 图片 | `@图1` | `<Picture 1>` |
-| `@视频N` | 视频 | `@视频1` | `<Video 1>` |
-| `@音频N` | 音频 | `@音频1` | `<Audio 1>` |
 
 ---
 
@@ -322,10 +334,6 @@ Use `【旁白】` and `【对白】` markers in the prompt to automatically ext
 【对白】我先看到它的了
 ```
 
-When `subtitle_source = extract_from_prompt`, these lines are extracted into the narration and dialogue fields respectively.
-
-当 `subtitle_source = extract_from_prompt` 时，这些行分别被提取到旁白和对白字段中。
-
 ---
 
 ## H3 Frame Grid | H3 帧网格
@@ -333,14 +341,6 @@ When `subtitle_source = extract_from_prompt`, these lines are extracted into the
 Clip durations are snapped to MiniMax H3's frame grid: `5, 22, 39, 56, 73, 90, 107, 124, 141, 158, 175, 192, 209, 226, 243` frames at 24fps.
 
 片段时长会对齐到 MiniMax H3 的帧网格：24fps 下为 `5, 22, 39, 56, 73, 90, 107, 124, 141, 158, 175, 192, 209, 226, 243` 帧。
-
-| Duration (s) | Frames | Duration (s) | Frames |
-|---|---|---|---|
-| 0.21 | 5 | 3.63 | 87→90 |
-| 0.92 | 22 | 5.71 | 137→141 |
-| 1.63 | 39 | 7.29 | 175 |
-| 2.33 | 56 | 9.54 | 226 |
-| 3.04 | 73 | 10.13 | 243 |
 
 ---
 
@@ -351,9 +351,9 @@ A complete example workflow is included in `example_workflows/`. Load it in Comf
 完整示例工作流位于 `example_workflows/` 目录。在 ComfyUI 中通过 **Load** 按钮加载，查看完整的影视制作流程：
 
 ```
-BSAI_AssetLibraryInput → BSAI_ClipSequencer → [H3 Generation] → BSAI_SubtitleRenderer → BSAI_VideoCombiner
-                                ↑                                                        ↑
-                    BSAI_ContextualSeriesExtract ──────────────────────────────────────┘
+BSAI_AssetLibraryInput → BSAI ComfyUI H3 Film Factory → [H3 Generation] → BSAI_SubtitleRenderer → BSAI_VideoCombiner
+                                     ↑                                                        ↑
+                           BSAI_ContextualSeriesExtract ──────────────────────────────────────┘
 ```
 
 ---
@@ -362,9 +362,10 @@ BSAI_AssetLibraryInput → BSAI_ClipSequencer → [H3 Generation] → BSAI_Subti
 
 - **Asset storage**: `ComfyUI/input/bsai_assets/{images,videos,audio}/` | 资产存储路径
 - **Asset ordering**: `asset_order.json` manifest | 资产排序清单
-- **Web extensions**: `web/js/asset_library.js`, `web/js/clip_sequencer.js` | 前端扩展
+- **Web extensions**: `web/extender.js` (main node UI), `web/js/asset_library.js`, `web/js/clip_sequencer.js`, `web/live_preview.js` | 前端扩展
+- **Extension name**: `BSAIMiniMaxH3.Extender` (unique to avoid conflicts) | 扩展名称（唯一避免冲突）
 - **API endpoints**: `/bsai/upload_asset`, `/bsai/list_all_assets`, `/bsai/asset_file`, `/bsai/video_frame`, `/bsai/replace_asset`, `/bsai/save_asset_order`, `/bsai/list_fonts` | API 端点
-- **Compatibility**: Designed for MiniMax H3 workflows with `MiniMaxH3Extender` and `MiniMaxH3MotionContextDiskFinalDecode` nodes | 兼容性
+- **Compatibility**: Designed for MiniMax H3 workflows | 兼容性：专为 MiniMax H3 工作流设计
 
 ---
 
