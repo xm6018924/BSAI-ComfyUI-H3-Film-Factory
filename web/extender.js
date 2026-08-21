@@ -38,21 +38,25 @@ const BASE_PADDING = BOTTOM_PAD + 20;
 const COLLAPSED_MIN_HEIGHT = 160;
 const PREVIEW_PANEL_WIDTH = 130;
 const MAX_AUTO_NODE_HEIGHT = 2000;
+const MAX_CARDS_VISIBLE_HEIGHT = 3 * (CARD_MIN_HEIGHT + 9) + CARD_SCROLLBAR_SPACE;
 
 function calculateMinHeight(runtime) {
     if (!runtime?.state?.clips?.length) {
         return COLLAPSED_MIN_HEIGHT;
     }
     let height = NON_CARD_FIXED;
+    let cardsHeight = 0;
     for (const clip of runtime.state.clips) {
         if (clip.collapsed) {
-            height += COLLAPSED_CLIP_HEIGHT;
+            cardsHeight += COLLAPSED_CLIP_HEIGHT;
         } else {
-            height += clip.card_height > 0
+            cardsHeight += clip.card_height > 0
                 ? Math.max(CARD_MIN_HEIGHT, clip.card_height)
                 : CARD_MIN_HEIGHT + CARD_SCROLLBAR_SPACE;
         }
     }
+    // Cap cards height at MAX_CARDS_VISIBLE_HEIGHT so node doesn't grow infinitely
+    height += Math.min(cardsHeight, MAX_CARDS_VISIBLE_HEIGHT);
     return Math.max(COLLAPSED_MIN_HEIGHT, Math.min(height + BASE_PADDING, MAX_AUTO_NODE_HEIGHT));
 }
 
@@ -3213,6 +3217,7 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         runtime.cards.style.height = "auto";
         runtime.cards.style.flex = "1 1 auto";
         runtime.cards.style.minHeight = `${Math.max(COLLAPSED_MIN_HEIGHT, dynMinH - NON_CARD_FIXED)}px`;
+        runtime.cards.style.maxHeight = `${MAX_CARDS_VISIBLE_HEIGHT}px`;
         return;
     }
 
@@ -3270,9 +3275,10 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         const available = Math.max(legacyMinH, actualH - y - BOTTOM_PAD);
         runtime.root.style.height = `${available}px`;
         const cardsMin = Math.max(COLLAPSED_MIN_HEIGHT, legacyMinH - NON_CARD_FIXED);
-        runtime.cards.style.height = `${Math.max(cardsMin, available - NON_CARD_FIXED)}px`;
+        runtime.cards.style.height = `${Math.min(Math.max(cardsMin, available - NON_CARD_FIXED), MAX_CARDS_VISIBLE_HEIGHT)}px`;
         runtime.cards.style.flex = "0 0 auto";
         runtime.cards.style.minHeight = "";
+        runtime.cards.style.maxHeight = `${MAX_CARDS_VISIBLE_HEIGHT}px`;
         runtime.domHeight = available;
         if (!obviouslyPoisonedHeight(actualH, minNodeH)) {
             runtime.legacyNodeHeight = actualH;
@@ -3321,8 +3327,8 @@ function buildUi(node) {
     root.style.boxSizing = "border-box";
     root.style.display = "flex";
     root.style.flexDirection = "column";
-    root.style.padding = "5px 0 0";
-    root.style.overflow = "hidden";
+    root.style.padding = "5px 0 16px";
+    root.style.overflow = "visible";
 
     const toolbar = document.createElement("div");
     toolbar.style.display = "flex";
@@ -3641,7 +3647,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     // ── Bottom section: CLIPS total duration (left) + Add/Del buttons (right) ──
     const bottomBar = document.createElement("div");
-    bottomBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:2px solid rgba(255,255,255,.25);margin-top:4px;flex-shrink:0;background:#152030;";
+    bottomBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:2px solid rgba(255,255,255,.25);margin-top:4px;margin-bottom:8px;flex-shrink:0;background:#152030;";
 
     const clipsTotalLabel = document.createElement("span");
     clipsTotalLabel.style.cssText = "font-size:12px;font-weight:bold;color:#8ab4f8;white-space:nowrap;";
@@ -3736,9 +3742,6 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     runtime.addClipBtn.addEventListener("click", (e) => {
         e.preventDefault();
         const newClipData = newClip(runtime.state.clips.length);
-        if (runtime.state.clips.length >= 3) {
-            newClipData.collapsed = true;
-        }
         runtime.state.clips.push(newClipData);
         updateHidden(node, runtime);
         render(node, runtime);
