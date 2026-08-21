@@ -1,4 +1,5 @@
 import { app } from "../../scripts/app.js";
+// extender.js v2.1.0 — cache-bust marker (2026-08-21)
 import { api } from "../../scripts/api.js";
 
 const TARGET = "MiniMaxH3Extender";
