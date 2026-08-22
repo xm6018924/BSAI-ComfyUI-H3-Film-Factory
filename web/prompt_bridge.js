@@ -121,7 +121,7 @@ function deferSync(node) {
 }
 
 app.registerExtension({
-    name: "MiniMaxH3.PromptPackBridge.DynamicInputs",
+    name: "BSAIMiniMaxH3.PromptPackBridge.DynamicInputs",
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== TARGET) return;

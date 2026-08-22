@@ -88,7 +88,7 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 | Node | Description |
 |------|-------------|
 | **BSAI ComfyUI H3 Film Factory** (`BSAIH3FilmFactory`) | Core engine: storyboard-driven multi-CLIP generation with asset library, subtitles, and per-CLIP control |
-| **Final Decode & Preview** (MiniMaxH3MotionContextDiskFinalDecode) | Decode H3 motion cache to H.264 video |
+| **BSAI H3 Final Decode & Export** (`BSAIH3FilmFactoryFinalDecode`) | Decode cached H3 motion latents to H.264 video (our plugin's cache, no conflict) |
 | **H3 Latent Upscale 2x** (MiniMaxH3LatentUpscaleCombined) | 2x latent upscaling using H3 learned upscaler |
 | **BSAI Asset Library** (BSAI_AssetLibraryInput) | Upload/manage images, videos, audio for @图N/@视频N/@音频N references |
 | **H3 Face Track + Crop** (H3FaceTrackCrop) | Face detection and crop from video frames |
@@ -108,12 +108,12 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 1. Clone or download to `ComfyUI/custom_nodes/BSAI-ComfyUI-H3-Film-Factory/`
 2. Install dependencies: `pip install -r requirements.txt`
 3. Restart ComfyUI
-4. Load example workflow from `workflows/BSAI_H3_Film_Factory_v1.2.json`
+4. Load example workflow from `workflows/BSAI_H3_Film_Factory_v1.3.json`
 
 1. 克隆或下载到 `ComfyUI/custom_nodes/BSAI-ComfyUI-H3-Film-Factory/`
 2. 安装依赖：`pip install -r requirements.txt`
 3. 重启 ComfyUI
-4. 从 `workflows/BSAI_H3_Film_Factory_v1.2.json` 加载示例工作流
+4. 从 `workflows/BSAI_H3_Film_Factory_v1.3.json` 加载示例工作流
 
 ---
 
@@ -134,7 +134,7 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 ## Quick Start | 快速开始
 
 ### 1. Load the Template Workflow | 加载模板工作流
-Drag `workflows/BSAI_H3_Film_Factory_v1.2.json` into ComfyUI.
+Drag `workflows/BSAI_H3_Film_Factory_v1.3.json` into ComfyUI.
 
 ### 2. Connect Prompt Source | 连接提示词源
 Connect a **Text Multiline** node to the `prompt_source` input port. Write your script:
@@ -294,6 +294,56 @@ File prefix is controlled by the `filename_prefix` widget.
 - **覆盖层技术**：透明textarea（光标可见）+ 可见overlay div（文本+内联缩略图），滚动同步
 - **自动同步时机**：800ms轮询 + 页面加载时5次重试（100/500/1200/2500/4000ms）
 - **分镜解析器**：正则 `/\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/` 检测分镜段；`/\d+-\d+秒/` 提取时长
+
+---
+
+## Changelog | 更新日志
+
+### v1.3 — Independent Final Decode Node & Conflict Resolution
+
+**What's New | 更新内容:**
+
+1. **Independent Final Decode Node** — Added `BSAIH3FilmFactoryFinalDecode` (display name: "BSAI H3 Final Decode & Export"), a standalone final decode node that uses our plugin's own cache directory. This eliminates conflicts with the original `MiniMaxH3MotionContextDiskFinalDecode` node when both plugins are installed.
+
+2. **Extension Name Unification** — Renamed all JS extension names to use the `BSAIMiniMaxH3.*` prefix for consistency:
+   - `BSAIMiniMaxH3.Extender` — main extender extension
+   - `BSAIMiniMaxH3.MotionContext.LivePreview` — live preview player
+   - `BSAIMiniMaxH3.PromptPackBridge.DynamicInputs` — prompt bridge
+   
+   This prevents extension name conflicts with the original MiniMax H3 Extender plugin, which could cause custom widgets (video player, etc.) to fail loading.
+
+3. **Dual Node Support** — The `live_preview.js` and `extender.js` now support both Final Decode node types via `ALL_FINAL_TARGETS`:
+   - `MiniMaxH3MotionContextDiskFinalDecode` (original, backward compatible)
+   - `BSAIH3FilmFactoryFinalDecode` (new, BSAI-specific)
+
+4. **Updated Example Workflow** — `BSAI_H3_Film_Factory_v1.3.json` uses the new `BSAIH3FilmFactoryFinalDecode` node.
+
+5. **Project Export/Import** — Project files now export using `BSAI_FINAL_TARGET` (`BSAIH3FilmFactoryFinalDecode`), ensuring projects use the BSAI version of the Final Decode node.
+
+**Bug Fixes | 修复:**
+- Fixed blank node issue caused by extension name conflicts when both BSAI Film Factory and the original MiniMax H3 Extender are installed
+- Fixed `connectedFinalDecode` function to recognize both Final Decode node types
+
+1. **独立的 Final Decode 节点** — 新增 `BSAIH3FilmFactoryFinalDecode`（显示名："BSAI H3 Final Decode & Export"），使用本插件独立的缓存目录。当两个插件同时安装时，彻底消除与原始 `MiniMaxH3MotionContextDiskFinalDecode` 节点的冲突。
+
+2. **扩展名称统一** — 将所有 JS 扩展名称统一为 `BSAIMiniMaxH3.*` 前缀：
+   - `BSAIMiniMaxH3.Extender` — 主扩展
+   - `BSAIMiniMaxH3.MotionContext.LivePreview` — 实时预览播放器
+   - `BSAIMiniMaxH3.PromptPackBridge.DynamicInputs` — 提示词桥接
+   
+   这避免了与原始 MiniMax H3 Extender 插件的扩展名称冲突，该冲突可能导致自定义组件（视频播放器等）无法加载。
+
+3. **双节点支持** — `live_preview.js` 和 `extender.js` 现在通过 `ALL_FINAL_TARGETS` 同时支持两种 Final Decode 节点类型：
+   - `MiniMaxH3MotionContextDiskFinalDecode`（原始，向后兼容）
+   - `BSAIH3FilmFactoryFinalDecode`（新增，BSAI专用）
+
+4. **更新示例工作流** — `BSAI_H3_Film_Factory_v1.3.json` 使用新的 `BSAIH3FilmFactoryFinalDecode` 节点。
+
+5. **项目导出/导入** — 项目文件现在使用 `BSAI_FINAL_TARGET`（`BSAIH3FilmFactoryFinalDecode`）导出，确保项目使用 BSAI 版本的 Final Decode 节点。
+
+**问题修复:**
+- 修复了当同时安装 BSAI Film Factory 和原始 MiniMax H3 Extender 时，因扩展名称冲突导致节点空白的问题
+- 修复 `connectedFinalDecode` 函数以识别两种 Final Decode 节点类型
 
 ---
 

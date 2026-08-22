@@ -58,6 +58,7 @@ from .motion_context_disk import (
     _safe_name,
     _write_json_atomic,
     MiniMaxH3MotionContextDiskJoin,
+    MiniMaxH3MotionContextDiskFinalDecode,
     _cache_size_mb,
     _load_manifest_from_paths,
     _manifest_for_first,
@@ -2947,11 +2948,14 @@ NODE_CLASS_MAPPINGS = {
     # Intermediate name kept for backward compat with workflows
     # created during the rename transition period.
     "BSAIMiniMaxH3Extender": BSAIH3FilmFactory,
+    # Final Decode node — reads from our plugin's cache directory
+    "BSAIH3FilmFactoryFinalDecode": MiniMaxH3MotionContextDiskFinalDecode,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
     "BSAIMiniMaxH3Extender": "BSAI ComfyUI H3 Film Factory",
+    "BSAIH3FilmFactoryFinalDecode": "BSAI H3 Final Decode & Export",
 }
 
 

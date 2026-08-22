@@ -2,6 +2,8 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const TARGET = "MiniMaxH3MotionContextDiskFinalDecode";
+const BSAI_FINAL_TARGET = "BSAIH3FilmFactoryFinalDecode";
+const ALL_FINAL_TARGETS = new Set([TARGET, BSAI_FINAL_TARGET]);
 const DISK_JOIN_TARGET = "MiniMaxH3MotionContextDiskJoin";
 const EXTENDER_TARGET = "BSAIH3FilmFactory";
 const EXTENDER_ALL_TARGETS = new Set(["BSAIH3FilmFactory", "BSAIMiniMaxH3Extender", "MiniMaxH3Extender"]);
@@ -670,7 +672,7 @@ function refreshImportedProjectPreview(ownerId) {
     if (!graph) return;
     const wanted = String(ownerId);
     for (const node of graph._nodes || []) {
-        if (!(node?.comfyClass === TARGET || node?.type === TARGET)) continue;
+        if (!(ALL_FINAL_TARGETS.has(node?.comfyClass) || ALL_FINAL_TARGETS.has(node?.type))) continue;
         if (String(findUpstreamExtenderId(node)) !== wanted) continue;
 
         const state = makePlayer(node);
@@ -692,7 +694,7 @@ function refreshImportedProjectPreview(ownerId) {
 }
 
 app.registerExtension({
-    name: "MiniMaxH3.MotionContext.LivePreview",
+    name: "BSAIMiniMaxH3.MotionContext.LivePreview",
 
     setup() {
         window.addEventListener("h3-extender-project-loaded", (event) => {
@@ -706,7 +708,7 @@ app.registerExtension({
             if (ownerId == null || !Array.isArray(timeline)) return;
             const graph = app.graph;
             for (const node of graph?._nodes || []) {
-                if (!(node?.comfyClass === TARGET || node?.type === TARGET)) continue;
+                if (!(ALL_FINAL_TARGETS.has(node?.comfyClass) || ALL_FINAL_TARGETS.has(node?.type))) continue;
                 if (String(findUpstreamExtenderId(node)) !== String(ownerId)) continue;
                 const state = makePlayer(node);
                 state.colorTimeline = timeline;
@@ -738,7 +740,7 @@ app.registerExtension({
             return;
         }
 
-        if (nodeData.name !== TARGET) return;
+        if (!ALL_FINAL_TARGETS.has(nodeData.name)) return;
 
         const oldCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {

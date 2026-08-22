@@ -5,6 +5,8 @@ import { api } from "../../scripts/api.js";
 const TARGET = "BSAIH3FilmFactory";
 const ALL_TARGETS = new Set([TARGET, "BSAIMiniMaxH3Extender"]);
 const FINAL_TARGET = "MiniMaxH3MotionContextDiskFinalDecode";
+const BSAI_FINAL_TARGET = "BSAIH3FilmFactoryFinalDecode";
+const ALL_FINAL_TARGETS = new Set([FINAL_TARGET, BSAI_FINAL_TARGET]);
 const PROGRESS_EVENT = "h3_extender_progress";
 const LATENT_PREVIEW_EVENT = "h3_extender_latent_preview";
 const PROMPT_PACK_EVENT = "h3_extender_prompt_pack_import";
@@ -1415,7 +1417,7 @@ function connectedFinalDecode(node) {
         if (!link) continue;
         const target = graph.getNodeById?.(link.target_id)
             || (graph._nodes || []).find((n) => String(n?.id) === String(link.target_id));
-        if (target && nodeIs(target, FINAL_TARGET)) return target;
+        if (target && (ALL_FINAL_TARGETS.has(target?.comfyClass) || ALL_FINAL_TARGETS.has(target?.type))) return target;
     }
     return null;
 }
@@ -1777,7 +1779,7 @@ function collectProjectPayload(node, runtime) {
             connections: collectConnectionSummary(node),
         },
         final_decode: finalNode ? {
-            class_name: FINAL_TARGET,
+            class_name: BSAI_FINAL_TARGET,
             settings: collectWidgetValues(finalNode, FINAL_PROJECT_WIDGETS),
         } : null,
     };
@@ -4637,7 +4639,7 @@ app.registerExtension({
 
     async beforeRegisterNodeDef(nodeType, nodeData) {
         // FinalDecode: migrate old workflows missing export_clips widget
-        if (nodeData.name === FINAL_TARGET) {
+        if (ALL_FINAL_TARGETS.has(nodeData.name)) {
             const oldFinalConfigure = nodeType.prototype.onConfigure;
             nodeType.prototype.onConfigure = function (info) {
                 if (oldFinalConfigure) oldFinalConfigure.apply(this, arguments);

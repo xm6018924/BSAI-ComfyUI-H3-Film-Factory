@@ -3362,6 +3362,28 @@ class MiniMaxH3MotionContextDiskFinalDecode:
         segments = [dict(x) for x in manifest.get("segments", [])]
         if not segments:
             raise ValueError("Disk Final Decode: empty cache.")
+
+        # ── Validate all unvalidated segments upfront ────────────────
+        # The Extender renders clips with validated=False in clip_by_clip
+        # mode.  Before any export path (progressive preview, full batch,
+        # or selective), ensure every segment is marked validated so the
+        # downstream code can take the "all committed" fast path and does
+        # not trip the "expects one unvalidated tail candidate" guard.
+        unvalidated = [i for i, s in enumerate(segments)
+                       if not bool(s.get("validated", False))]
+        if unvalidated:
+            for i in unvalidated:
+                segments[i]["validated"] = True
+            manifest = dict(manifest)
+            manifest["segments"] = segments
+            manifest["build"] = BUILD
+            manifest["updated_at"] = time.time()
+            _write_json_atomic(manifest_path, manifest)
+            _LOG.info(
+                "H3 Final Decode: validated %d pending segment(s) before export.",
+                len(unvalidated),
+            )
+
         color_timeline = _color_timeline(segments, float(fps))
 
         ffmpeg = _find_ffmpeg()
@@ -3452,21 +3474,6 @@ class MiniMaxH3MotionContextDiskFinalDecode:
         effective_mode = str(cache.get("run_mode", "full_batch")) if isinstance(cache, dict) else "full_batch"
         if effective_mode == "clip_by_clip":
             progress = _FinalDecodeNativeProgress(unique_id, total=6)
-
-            # The Extender renders all clips with validated=False. Validate
-            # every segment here so _export_live_candidate_preview takes the
-            # "all validated" committed-cache path instead of raising the
-            # "expects one unvalidated tail candidate" error.
-            unvalidated = [i for i, s in enumerate(segments)
-                           if not bool(s.get("validated", False))]
-            if unvalidated:
-                for i in unvalidated:
-                    segments[i]["validated"] = True
-                manifest = dict(manifest)
-                manifest["segments"] = segments
-                manifest["build"] = BUILD
-                manifest["updated_at"] = time.time()
-                _write_json_atomic(manifest_path, manifest)
 
             (
                 preview_path,
