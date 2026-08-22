@@ -2472,7 +2472,7 @@ class BSAIH3FilmFactory:
             # their cached latent (if any) and are not re-rendered.  This lets
             # the user turn off generation for specific clips without removing
             # them from the sequence.
-            if not cfg.get("render_enabled", True) and cfg.get("validated", False):
+            if not cfg.get("render_enabled", True):
                 current_manifest = _load_manifest_from_paths(data_path, manifest_path)
                 existing_count = len(current_manifest.get("segments", [])) if current_manifest else 0
                 if i < existing_count:
@@ -2488,7 +2488,7 @@ class BSAIH3FilmFactory:
                     previous_handle = result[0]
                     previous_proxy = result[1]
                     statuses.append(result[4])
-                    continue
+                continue
 
             # Refresh manifest state every iteration because Disk Join can
             # truncate or append the physical chain.

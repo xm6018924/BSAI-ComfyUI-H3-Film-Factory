@@ -2644,7 +2644,14 @@ function render(node, runtime) {
         clipRenderBtn.addEventListener("click", (e) => {
             e.preventDefault();
             e.stopPropagation();
+            // Set replace_mode on the selected clip and disable rendering
+            // for all other clips. This ensures only this CLIP is generated
+            // even if the queue runs multiple times.
             clip.replace_mode = true;
+            clip.render_enabled = true;
+            runtime.state.clips.forEach((c, ci) => {
+                if (ci !== index) c.render_enabled = false;
+            });
             updateHidden(node, runtime);
             runtime.statusText = `渲染 CLIP ${index + 1} / Rendering CLIP ${index + 1}`;
             if (runtime.counter) runtime.counter.textContent = `${runtime.state.clips.length} clips • ${refCount(runtime)} refs`;
@@ -2655,10 +2662,6 @@ function render(node, runtime) {
             } catch(qe) {
                 console.warn("[H3] Could not auto-queue for single CLIP render", qe);
             }
-            setTimeout(() => {
-                clip.replace_mode = false;
-                updateHidden(node, runtime);
-            }, 1000);
         });
 
         // ── Red X delete button (rightmost) ─────────────────────────
@@ -4716,10 +4719,13 @@ app.registerExtension({
                 runtime.jsonWidget.value = info.clips_json;
                 runtime.state = parseState(info.clips_json);
             }
-            // Safety: clear replace_mode and merge_output after execution
+            // Safety: clear replace_mode, merge_output, and restore render_enabled after execution
             runtime.state.merge_output = false;
             if (runtime.state.clips) {
-                runtime.state.clips.forEach((c) => { c.replace_mode = false; });
+                runtime.state.clips.forEach((c) => {
+                    c.replace_mode = false;
+                    c.render_enabled = true;
+                });
             }
             if (info.refs_json) {
                 runtime.refsWidget.value = info.refs_json;

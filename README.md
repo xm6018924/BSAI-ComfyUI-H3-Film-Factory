@@ -299,6 +299,18 @@ File prefix is controlled by the `filename_prefix` widget.
 
 ## Changelog | 更新日志
 
+### v1.6 — Cache Token & Single-CLIP Render Fix
+
+**Bug Fixes | 问题修复:**
+
+1. **Fixed: Final Decode outputs stale results on second run** — Added `run_token` field (based on manifest `updated_at`) to the cache handle. Previously, the cache handle dict was identical between runs (same `data_path`, `manifest_path`, `next_index`), causing ComfyUI's execution cache to skip the Final Decode node and reuse the first run's output. The `run_token` changes whenever the manifest is modified, forcing ComfyUI to re-execute the Final Decode node every time.
+
+2. **Fixed: Single-CLIP render button triggers all CLIPs** — The green ▶ button now sets `render_enabled=false` on all other clips, ensuring only the selected CLIP is generated even if the queue runs multiple times. The `setTimeout` that reset `replace_mode` after 1 second has been removed (cleanup is handled by `onExecuted`). Backend logic updated to skip `render_enabled=false` clips regardless of `validated` state.
+
+1. **修复：第二次运行时 Final Decode 输出第一次的合并结果** — 在缓存句柄中添加 `run_token` 字段（基于 manifest 的 `updated_at`）。此前两次运行的缓存句柄字典完全相同（`data_path`、`manifest_path`、`next_index` 一致），导致 ComfyUI 执行缓存认为 Final Decode 节点输入未变化而跳过执行，复用第一次的输出。`run_token` 在每次 manifest 修改时都会变化，强制 ComfyUI 每次都重新执行 Final Decode 节点。
+
+2. **修复：单独渲染CLIP按钮会触发全部CLIP生成** — 绿色 ▶ 按钮现在会将其他所有CLIP的 `render_enabled` 设为 `false`，确保即使队列多次执行也只生成选中的CLIP。移除了1秒后重置 `replace_mode` 的 `setTimeout`（清理由 `onExecuted` 回调处理）。后端逻辑更新为无论 `validated` 状态如何，`render_enabled=false` 的CLIP都会被跳过。
+
 ### v1.5 — Updated Example Workflow & Cleaned Example Directory
 
 **What's New | 更新内容:**

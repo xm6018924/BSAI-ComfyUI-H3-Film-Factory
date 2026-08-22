@@ -382,6 +382,7 @@ def _make_handle(
         "stop": bool(stop),
         "next_index": int(next_index),
         "status": str(status),
+        "run_token": float(manifest.get("updated_at", 0)),
     }
 
 
