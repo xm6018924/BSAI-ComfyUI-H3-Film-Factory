@@ -108,12 +108,12 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 1. Clone or download to `ComfyUI/custom_nodes/BSAI-ComfyUI-H3-Film-Factory/`
 2. Install dependencies: `pip install -r requirements.txt`
 3. Restart ComfyUI
-4. Load example workflow from `workflows/BSAI_H3_Film_Factory_v1.3.json`
+4. Load example workflow from `example_workflows/BSAI_H3_Film_Factory_v1.5.json`
 
 1. 克隆或下载到 `ComfyUI/custom_nodes/BSAI-ComfyUI-H3-Film-Factory/`
 2. 安装依赖：`pip install -r requirements.txt`
 3. 重启 ComfyUI
-4. 从 `workflows/BSAI_H3_Film_Factory_v1.3.json` 加载示例工作流
+4. 从 `example_workflows/BSAI_H3_Film_Factory_v1.5.json` 加载示例工作流
 
 ---
 
@@ -134,7 +134,7 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 ## Quick Start | 快速开始
 
 ### 1. Load the Template Workflow | 加载模板工作流
-Drag `workflows/BSAI_H3_Film_Factory_v1.3.json` into ComfyUI.
+Drag `example_workflows/BSAI_H3_Film_Factory_v1.5.json` into ComfyUI.
 
 ### 2. Connect Prompt Source | 连接提示词源
 Connect a **Text Multiline** node to the `prompt_source` input port. Write your script:
@@ -298,6 +298,18 @@ File prefix is controlled by the `filename_prefix` widget.
 ---
 
 ## Changelog | 更新日志
+
+### v1.5 — Updated Example Workflow & Cleaned Example Directory
+
+**What's New | 更新内容:**
+
+1. **Updated Example Workflow to v1.5** — Replaced all example workflows with the latest `BSAI_H3_Film_Factory_v1.5.json` in `example_workflows/` directory.
+2. **Cleaned Example Directory** — Removed all legacy workflow files and utility scripts from `example_workflows/`, keeping only the latest v1.5 workflow.
+3. **Updated Documentation** — All README references now point to `example_workflows/BSAI_H3_Film_Factory_v1.5.json`.
+
+1. **更新示例工作流至 v1.5** — 将 `example_workflows/` 目录中所有旧工作流替换为最新的 `BSAI_H3_Film_Factory_v1.5.json`。
+2. **清理示例目录** — 移除 `example_workflows/` 中所有旧版工作流文件和工具脚本，仅保留最新 v1.5 工作流。
+3. **更新文档** — README 中所有引用已更新为 `example_workflows/BSAI_H3_Film_Factory_v1.5.json`。
 
 ### v1.3 — Independent Final Decode Node & Conflict Resolution
 
