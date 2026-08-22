@@ -520,9 +520,20 @@ def _truncate_chain(data_path, manifest_path, manifest, index):
     reduced["final_frame_count"] = _final_frame_count(prefix)
     # Clamp preview_committed_count to the new chain length: any committed
     # preview content beyond the truncation point is no longer valid.
+    # Also delete the committed preview files so that _sync_committed_preview
+    # rebuilds from scratch instead of using a stale prefix that contains
+    # more clips than the truncated chain.
     old_commit = int(reduced.get("preview_committed_count", 0))
     if old_commit > index:
         reduced["preview_committed_count"] = int(index)
+        # Delete committed preview files to force full rebuild
+        for p in (_decoded_preview_cache_path(data_path),
+                  _decoded_preview_video_cache_path(data_path)):
+            try:
+                if p.exists():
+                    p.unlink()
+            except OSError:
+                pass
     reduced["updated_at"] = time.time()
     _write_json_atomic(manifest_path, reduced)
 
