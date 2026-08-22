@@ -518,6 +518,11 @@ def _truncate_chain(data_path, manifest_path, manifest, index):
     if index == 0:
         reduced["geometry"] = None
     reduced["final_frame_count"] = _final_frame_count(prefix)
+    # Clamp preview_committed_count to the new chain length: any committed
+    # preview content beyond the truncation point is no longer valid.
+    old_commit = int(reduced.get("preview_committed_count", 0))
+    if old_commit > index:
+        reduced["preview_committed_count"] = int(index)
     reduced["updated_at"] = time.time()
     _write_json_atomic(manifest_path, reduced)
 
@@ -2615,7 +2620,21 @@ def _sync_committed_preview(
         and committed_path.exists()
         and committed_video_path.exists()
     ):
-        return manifest, committed_path, committed_video_path
+        # Guard: only fast-return when every committed segment has its
+        # decoded caches (decoded_mp4_blob AND decoded_audio).  If any
+        # segment is missing either one, the committed preview file may
+        # be stale (e.g. after a per-clip replace + tail restore where
+        # the count matches but content changed).
+        cache_ok = True
+        for i in range(current_count):
+            seg = segments[i]
+            has_blob = seg.get("decoded_mp4_blob") is not None
+            has_audio = isinstance(seg.get("decoded_audio"), dict)
+            if not has_blob or not has_audio:
+                cache_ok = False
+                break
+        if cache_ok:
+            return manifest, committed_path, committed_video_path
 
     rebuild = (
         current_audio_mode != PREVIEW_AUDIO_MODE
