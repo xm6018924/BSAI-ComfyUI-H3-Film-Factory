@@ -2697,6 +2697,60 @@ class BSAIH3FilmFactory:
                     m["updated_at"] = time.time()
                     _write_json_atomic(manifest_path, m)
 
+        # ── Auto-restore tail latents after per-clip replace ──────────
+        # After a single CLIP is regenerated, the tail latents (CLIP3, CLIP4,
+        # etc.) were saved to disk and the chain was truncated. Now that the
+        # re-rendered CLIP is validated, automatically restore the tail back
+        # into the chain so the Final Decode & Export node sees ALL clips.
+        auto_merged = False
+        if single_clip_replace and _has_tail_latents_on_disk(owner):
+            print("[H3 Extender] auto-restoring tail latents after per-clip replace")
+            disk_tail = _load_tail_latents_from_disk(owner)
+            if disk_tail is not None:
+                tail_count = len(disk_tail)
+                restored_manifest = _restore_tail_latents(data_path, manifest_path, disk_tail)
+                if restored_manifest is not None:
+                    print(f"[H3 Extender] restored {tail_count} tail clip(s) → full chain restored")
+                    manifest = restored_manifest
+                _delete_tail_latents_from_disk(owner)
+
+                # Walk the restored tail segments to update previous_handle
+                current_m = _load_manifest_from_paths(data_path, manifest_path)
+                if current_m is not None:
+                    total_segs = len(current_m.get("segments", []))
+                    tail_start = total_segs - tail_count
+                    for _ in range(tail_start, total_segs):
+                        result = disk_join.join(
+                            samples=None,
+                            trim_frames=None,
+                            validated=True,
+                            run_mode=str(run_mode),
+                            fps=float(FPS),
+                            previous_cache=previous_handle,
+                            unique_id=f"extender_{owner}",
+                        )
+                        previous_handle = result[0]
+                        previous_proxy = result[1]
+                        statuses.append(result[4])
+
+                # Mark all clips as validated in the in-memory config
+                for cfg in clips:
+                    cfg["validated"] = True
+                    cfg["replace_mode"] = False
+
+                single_clip_replace = False
+                auto_merged = True
+                print("[H3 Extender] per-clip replace complete → tail restored, merge auto-triggered")
+        elif single_clip_replace:
+            # No tail latents on disk — the regenerated clip was the last one
+            # (or tail was already consumed). The chain is already complete.
+            single_clip_replace = False
+            auto_merged = True
+            for cfg in clips:
+                cfg["validated"] = True
+                cfg["replace_mode"] = False
+            print("[H3 Extender] per-clip replace complete → no tail to restore, chain already complete")
+
         final_manifest = _load_manifest_from_paths(data_path, manifest_path)
         # Color grading is montage metadata only. Keep it attached to each cached
         # decoded segment without invalidating latents or validation state.
@@ -2749,7 +2803,10 @@ class BSAIH3FilmFactory:
                 + (" imported" if prompt_pack_imported else " linked")
             )
         clip_select_text = ""
-        if single_clip_replace:
+        if auto_merged:
+            replaced = ",".join(str(i + 1) for i in sorted(selected_set))
+            clip_select_text = f" | regenerated {replaced} | auto-merged"
+        elif single_clip_replace:
             replaced = ",".join(str(i + 1) for i in sorted(selected_set))
             clip_select_text = f" | regenerated {replaced} | pending merge"
         elif any_replace:
@@ -2778,8 +2835,9 @@ class BSAIH3FilmFactory:
         )
 
         # ── Direct video output (per_clip / merged / both) ──────────────
-        # Skip output in single-clip replace mode: user must click
-        # "合并输出" (merge_output) to produce the final merged video.
+        # Skip output only when single-clip replace is still pending (tail
+        # latents not yet restored). After auto-restore, single_clip_replace
+        # is set to False so output proceeds normally.
         output_ui_videos = []
         if str(output_mode) != "none" and final_manifest is not None and not single_clip_replace:
             try:
