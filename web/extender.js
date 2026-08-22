@@ -4502,6 +4502,16 @@ function clearTransientRenderingState(statusText = null) {
         runtime.activePhase = "idle";
         if (statusText) runtime.statusText = statusText;
 
+        // Clear per-clip transient rendering state for all clips.
+        // This ensures no clip is left stuck showing "渲染中" after
+        // execution ends or is interrupted.
+        runtime.state.clips.forEach((clip) => {
+            delete clip._latentPreviewUrl;
+            delete clip._latentStep;
+            delete clip._latentTotal;
+            delete clip._renderComplete;
+        });
+
         render(node, runtime);
         node.graph?.setDirtyCanvas(true, true);
     }
@@ -4552,9 +4562,23 @@ app.registerExtension({
             if (!runtime) return;
 
             const index = Number(detail?.clip_index ?? -1);
+            const prevActiveIndex = runtime.activeClipIndex;
             runtime.activeClipIndex = Number.isFinite(index) ? index : -1;
             runtime.activePhase = String(detail?.phase || "idle");
             runtime.statusText = String(detail?.message || runtime.statusText || "Ready");
+
+            // When switching to a new active clip, clear latent preview state
+            // on the previously active clip. This prevents a race condition
+            // where the last latent preview frame arrives after the "complete"
+            // event, leaving the finished clip stuck showing "渲染中".
+            if (prevActiveIndex !== runtime.activeClipIndex && prevActiveIndex >= 0) {
+                const prevClip = runtime.state.clips[prevActiveIndex];
+                if (prevClip) {
+                    delete prevClip._latentPreviewUrl;
+                    delete prevClip._latentStep;
+                    delete prevClip._latentTotal;
+                }
+            }
 
             if (runtime.activePhase === "complete" && index >= 0) {
                 const clip = runtime.state.clips[index];
@@ -4562,6 +4586,7 @@ app.registerExtension({
                     delete clip._latentPreviewUrl;
                     delete clip._latentStep;
                     delete clip._latentTotal;
+                    clip._renderComplete = true;
                     const msg = String(detail?.message || "");
                     if (msg.includes("preview error")) {
                         // Preview decode failed — don't mark as loaded
@@ -4609,6 +4634,13 @@ app.registerExtension({
             const clip = runtime.state.clips[index];
             if (!clip) {
                 console.warn("[H3 Extender] latent preview: clip null at index", index);
+                return;
+            }
+
+            // Guard: ignore latent preview frames for clips that have already
+            // completed. This handles the race condition where the last frame
+            // arrives after the "complete" progress event.
+            if (clip._renderComplete) {
                 return;
             }
 
