@@ -383,6 +383,7 @@ def _make_handle(
         "next_index": int(next_index),
         "status": str(status),
         "run_token": float(manifest.get("updated_at", 0)),
+        "exec_nonce": str(uuid.uuid4()),
     }
 
 
@@ -3355,7 +3356,9 @@ class MiniMaxH3MotionContextDiskFinalDecode:
         export_clips="all",
         unique_id=None,
     ):
+        print(f"[H3 Final Decode] export() CALLED: nonce={cache.get('exec_nonce','N/A') if isinstance(cache, dict) else 'N/A'}")
         data_path, manifest_path, manifest = _load_manifest(cache)
+        print(f"[H3 Final Decode] manifest loaded: {manifest_path} segments={len(manifest.get('segments',[]))} updated_at={manifest.get('updated_at','N/A')}")
         if abs(float(manifest["fps"]) - float(fps)) > 1e-6:
             raise ValueError(
                 f"Disk Final Decode fps is {manifest['fps']}, export requested {fps}."

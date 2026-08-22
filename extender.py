@@ -2930,6 +2930,8 @@ class BSAIH3FilmFactory:
         if output_ui_videos:
             ui_payload["h3_video"] = output_ui_videos
 
+        if previous_handle and isinstance(previous_handle, dict):
+            print(f"[H3 Extender] RETURNING cache handle: nonce={previous_handle.get('exec_nonce','N/A')} run_token={previous_handle.get('run_token','N/A')} next_index={previous_handle.get('next_index','N/A')}")
         return {
             "ui": ui_payload,
             "result": (
