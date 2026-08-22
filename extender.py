@@ -1854,7 +1854,7 @@ class BSAIH3FilmFactory:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = (CACHE_TYPE, "INT", "INT", "STRING", "FLOAT", "STRING")
+    RETURN_TYPES = (CACHE_TYPE, "INT", "INT", "STRING", "FLOAT", "STRING", "STRING")
     RETURN_NAMES = (
         "cache",
         "clip_count",
@@ -1862,6 +1862,7 @@ class BSAIH3FilmFactory:
         "status",
         "cache_size_mb",
         "build",
+        "clip_videos",
     )
     FUNCTION = "extend"
     CATEGORY = "BSAI/H3 Film Factory"
@@ -2990,6 +2991,58 @@ class BSAIH3FilmFactory:
 
         if previous_handle and isinstance(previous_handle, dict):
             print(f"[H3 Extender] RETURNING cache handle: nonce={previous_handle.get('exec_nonce','N/A')} run_token={previous_handle.get('run_token','N/A')} next_index={previous_handle.get('next_index','N/A')}")
+
+        # ── Extract per-clip preview MP4 files for BSAI Premiere Pro ──
+        # Each clip's decoded MP4 blob is extracted from the .h3cache data
+        # file to a standalone MP4 in ComfyUI's temp directory. The file
+        # paths + metadata are returned as a JSON string so the Premiere
+        # Pro node can add them to its timeline.
+        clip_videos_json = "[]"
+        try:
+            final_manifest = _load_manifest_from_paths(data_path, manifest_path)
+            if final_manifest and final_manifest.get("segments"):
+                segments = [dict(x) for x in final_manifest["segments"]]
+                root = _ensure_cache_root()
+                import folder_paths as _fp
+                temp_dir = Path(_fp.get_temp_directory())
+                clips_info = []
+                for si, seg in enumerate(segments):
+                    blob = seg.get("decoded_mp4_blob")
+                    if blob is None:
+                        print(f"[H3 Extender] clip_videos: segment {si} has no decoded blob, skipping")
+                        continue
+                    clip_name = clips[si].get("name", f"CLIP{si+1}") if si < len(clips) else f"CLIP{si+1}"
+                    out_name = f"h3_clip_{owner}_{si+1}_{int(time.time())}.mp4"
+                    out_path = temp_dir / out_name
+                    _copy_blob_to_file(data_path, blob, out_path)
+                    trim = int(seg.get("trim_frames", 0)) if si > 0 else 0
+                    total_frames = int(seg.get("frames", 0))
+                    out_frames = total_frames - trim
+                    clip_fps = float(final_manifest.get("fps", FPS))
+                    duration = float(out_frames) / clip_fps if clip_fps > 0 else 0.0
+                    has_audio = bool(seg.get("decoded_mp4_has_audio", False))
+                    w = int(seg.get("width", resolved_width))
+                    h = int(seg.get("height", resolved_height))
+                    clips_info.append({
+                        "clip_index": si,
+                        "clip_name": clip_name,
+                        "file_path": str(out_path),
+                        "file_name": out_name,
+                        "duration": round(duration, 3),
+                        "width": w,
+                        "height": h,
+                        "fps": clip_fps,
+                        "has_audio": has_audio,
+                        "frames": out_frames,
+                    })
+                    print(f"[H3 Extender] clip_videos: extracted clip {si+1} -> {out_path} ({out_frames} frames, {duration:.1f}s)")
+                clip_videos_json = json.dumps(clips_info, ensure_ascii=False)
+                print(f"[H3 Extender] clip_videos: {len(clips_info)} clip(s) ready for Premiere Pro")
+        except Exception as _cv_err:
+            print(f"[H3 Extender] clip_videos extraction failed: {_cv_err}")
+            import traceback
+            traceback.print_exc()
+
         return {
             "ui": ui_payload,
             "result": (
@@ -2999,6 +3052,7 @@ class BSAIH3FilmFactory:
                 status,
                 float(cache_mb),
                 BUILD,
+                clip_videos_json,
             ),
         }
 
