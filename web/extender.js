@@ -4475,9 +4475,13 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                     for (let i = 0; i < segments.length && i < runtime.state.clips.length; i++) {
                         const seg = segments[i];
                         const clip = runtime.state.clips[i];
-                        // Only overwrite prompt for freshly-added CLIPs that
-                        // were created above (they already have seg.prompt).
-                        // Existing CLIPs keep their user-edited prompt.
+                        // If the existing CLIP's prompt is empty (e.g. after a
+                        // reset triggered by clearing the prompt source), fill
+                        // it from the segment. Otherwise keep user edits.
+                        if ((!clip.prompt || !clip.prompt.trim()) && seg.prompt) {
+                            clip.prompt = seg.prompt;
+                            changed = true;
+                        }
                         const newDur = String(seg.duration);
                         if (String(clip.duration) !== newDur) {
                             clip.duration = newDur;
