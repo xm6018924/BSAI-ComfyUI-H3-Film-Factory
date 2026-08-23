@@ -223,10 +223,15 @@ if _HAS_SERVER:
                 continue
             all_files = [f for f in os.listdir(d) if f.lower().endswith(exts)]
 
-            # Use manifest order if available; new files (not in manifest) appended at end
+            # Use manifest as filter+order: if the manifest has this key,
+            # only return files listed in the manifest. This respects
+            # "Remove All" which clears the manifest entry. Files not yet
+            # in the manifest (just uploaded) are added by saveManifestAndNotify.
             ordered = manifest.get(key, [])
-            files = [f for f in ordered if f in all_files]
-            files += [f for f in all_files if f not in ordered]
+            if key in manifest:
+                files = [f for f in ordered if f in all_files]
+            else:
+                files = list(all_files)
 
             for i, fname in enumerate(files):
                 entry = {"index": i + 1, "name": fname}
@@ -248,6 +253,28 @@ if _HAS_SERVER:
         except Exception as e:
             return web.json_response({"error": str(e)}, status=500)
         return web.json_response({"ok": True})
+
+    @PromptServer.instance.routes.post("/bsai/remove_all_assets")
+    async def remove_all_assets(request):
+        """Delete all files of a given asset type from disk."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        asset_type = str(body.get("asset_type", ""))
+        if asset_type not in ("images", "videos", "audio"):
+            return web.json_response({"error": "Invalid asset_type"}, status=400)
+        d = _get_asset_dir(asset_type)
+        deleted = 0
+        for fname in os.listdir(d):
+            filepath = os.path.join(d, fname)
+            try:
+                if os.path.isfile(filepath):
+                    os.remove(filepath)
+                    deleted += 1
+            except OSError:
+                pass
+        return web.json_response({"ok": True, "deleted": deleted})
 
     @PromptServer.instance.routes.get("/bsai/list_fonts")
     async def list_fonts(request):

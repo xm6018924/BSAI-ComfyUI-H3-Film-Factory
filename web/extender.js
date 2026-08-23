@@ -2162,7 +2162,7 @@ function renderReferences(node, runtime) {
 
 async function h3FetchAssets() {
     try {
-        const resp = await fetch("/bsai/list_all_assets");
+        const resp = await fetch("/bsai/list_all_assets?t=" + Date.now());
         const data = await resp.json();
         app.graph._nodes.forEach(function(n) {
             if (ALL_TARGETS.has(n.type) && n.__h3Extender) {
@@ -2183,6 +2183,19 @@ function parseAssetRefs(prompt) {
         refs.push({ type: type, index: parseInt(match[2]), tag: match[0] });
     }
     return refs;
+}
+
+function cleanStaleAssetRefs(text, assetList) {
+    const refs = parseAssetRefs(text);
+    let result = text;
+    refs.forEach(function(ref) {
+        const items = assetList[ref.type] || [];
+        const exists = items.some(function(i) { return i.index === ref.index; });
+        if (!exists) {
+            result = result.split(ref.tag).join("").replace(/\s+/g, " ").trim();
+        }
+    });
+    return result;
 }
 
 function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
@@ -4909,7 +4922,45 @@ app.registerExtension({
                     delete node.__h3Extender._h3_assetCache;
                 }
             });
-            h3FetchAssets();
+            h3FetchAssets().then(() => {
+                // Clean up stale @图N/@视频N/@音频N references in prompts
+                // after assets are removed from the library
+                app.graph._nodes.forEach(node => {
+                    if (!ALL_TARGETS.has(node.type) || !node.__h3Extender) return;
+                    const runtime = node.__h3Extender;
+                    const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
+                    let changed = false;
+
+                    // Clean global prompt
+                    if (runtime.state?.global_prompt) {
+                        const cleaned = cleanStaleAssetRefs(runtime.state.global_prompt, assetList);
+                        if (cleaned !== runtime.state.global_prompt) {
+                            runtime.state.global_prompt = cleaned;
+                            if (runtime.globalPromptTextarea) runtime.globalPromptTextarea.value = cleaned;
+                            changed = true;
+                        }
+                    }
+
+                    // Clean all CLIP prompts
+                    if (runtime.state?.clips) {
+                        runtime.state.clips.forEach(clip => {
+                            if (clip.prompt) {
+                                const cleaned = cleanStaleAssetRefs(clip.prompt, assetList);
+                                if (cleaned !== clip.prompt) {
+                                    clip.prompt = cleaned;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    }
+
+                    if (changed) {
+                        updateHidden(node, runtime);
+                        if (typeof runtime.renderGlobalAssetPanel === "function") runtime.renderGlobalAssetPanel();
+                        render(node, runtime);
+                    }
+                });
+            });
         });
 
         // Pre-load the asset list for the referenced-assets left panel.

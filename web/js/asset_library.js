@@ -600,6 +600,15 @@ function renumberThumbnails(sec, sectionEl) {
 }
 
 function removeAllInSection(sec, node, sectionEl) {
+    // Delete actual files from disk via backend
+    var assetType = sec.id === "audios" ? "audio" : sec.id;
+    fetch("/bsai/remove_all_assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ asset_type: assetType }),
+    }).catch(function (e) {
+        console.warn("[BSAI] Failed to remove assets from disk:", e);
+    });
     var grid = sectionEl.querySelector('[data-grid="' + sec.id + '"]');
     grid.innerHTML = "";
     updateCount(sec, sectionEl);

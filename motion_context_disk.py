@@ -1486,6 +1486,17 @@ def _reserve_preview_temp_path(unique_id):
         except OSError:
             pass
 
+    # Clean up ALL rotation slots first — the browser may have released
+    # locks on older slots since the last restore. This prevents temp
+    # files from accumulating across multiple page refreshes.
+    for idx in range(int(PREVIEW_ROTATION_SLOTS)):
+        p = _preview_temp_path(unique_id, idx)
+        if p.exists():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
     last_error = None
     for idx in _preview_rotation_order(unique_id):
         candidate = _preview_temp_path(unique_id, idx)
