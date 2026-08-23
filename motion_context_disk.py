@@ -3298,6 +3298,73 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
                 "reason": "restore_failed",
             })
 
+    @PromptServer.instance.routes.post("/h3_extender/clear_preview")
+    async def h3_extender_clear_preview(request):
+        """
+        Delete all cached preview files (temp rotation slots, committed
+        preview cache, and manifest segments) for a given Extender owner and
+        Final Decode node. Called when the user clears the external prompt
+        source so that a page refresh does not restore a stale preview.
+        """
+        body = await request.json()
+        owner_id = str(body.get("owner_id", ""))
+        final_id = str(body.get("final_id", ""))
+        if not owner_id or not final_id:
+            return web.json_response({"ok": False, "error": "missing_id"})
+
+        try:
+            # 1. Delete temp directory preview files for final_id
+            for slot in range(int(PREVIEW_ROTATION_SLOTS)):
+                p = _preview_temp_path(final_id, slot)
+                try:
+                    if p.exists():
+                        p.unlink()
+                except OSError:
+                    pass
+            legacy = _preview_temp_legacy_path(final_id)
+            try:
+                if legacy.exists():
+                    legacy.unlink()
+            except OSError:
+                pass
+
+            # 2. Delete committed preview cache files and reset manifest
+            data_path, manifest_path = _chain_paths(
+                f"extender_{_safe_name(owner_id)}"
+            )
+            for p in (
+                _decoded_preview_cache_path(data_path),
+                _decoded_preview_video_cache_path(data_path),
+            ):
+                try:
+                    if p.exists():
+                        p.unlink()
+                except OSError:
+                    pass
+
+            if manifest_path.exists():
+                manifest = _load_manifest_from_paths(data_path, manifest_path)
+                if manifest is not None:
+                    manifest["segments"] = []
+                    manifest["final_frame_count"] = 0
+                    manifest["geometry"] = None
+                    manifest["preview_committed_count"] = 0
+                    manifest.pop("preview_audio_mode", None)
+                    manifest["build"] = BUILD
+                    manifest["updated_at"] = time.time()
+                    _write_json_atomic(manifest_path, manifest)
+
+                    _ensure_data_file(data_path)
+                    with open(data_path, "r+b") as f:
+                        f.truncate(_DATA_START)
+                        f.flush()
+                        os.fsync(f.fileno())
+
+            return web.json_response({"ok": True})
+        except Exception as exc:
+            _LOG.warning("H3 clear preview failed: %s", exc)
+            return web.json_response({"ok": False, "error": str(exc)})
+
     @PromptServer.instance.routes.get("/h3_extender/clip_preview")
     async def h3_extender_clip_preview(request):
         """Return a playable MP4 for a single cached clip's decoded video blob."""

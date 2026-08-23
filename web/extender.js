@@ -2380,6 +2380,147 @@ function showAssetPicker(parentEl, clip, node, runtime, textarea) {
     parentEl.appendChild(popup);
 }
 
+/**
+ * Show asset picker triggered by typing @ in a textarea.
+ * Filters assets by the keyword typed after @, inserts selected tag at cursor.
+ * Works with both CLIP prompts (clip.prompt) and global prompt (state.global_prompt).
+ */
+function showAssetPickerForTextarea(parentEl, clipOrState, node, runtime, textarea, keyword) {
+    const existing = parentEl.querySelector(".bsai-asset-picker");
+    if (existing) existing.remove();
+
+    // Record the @ position at the time the picker was opened — much more
+    // reliable than re-computing from selectionStart on mousedown (the
+    // textarea may lose focus and selectionStart becomes unreliable).
+    const pos = textarea.selectionStart;
+    const val = textarea.value;
+    const beforeText = val.substring(0, pos);
+    const atMatch = beforeText.match(/@([^\s@]*)$/);
+    if (!atMatch) return;
+    const atPos = beforeText.length - atMatch[0].length;
+
+    const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
+    const groups = [
+        { label: "图片 / Images", items: assetList.images || [], type: "images", prefix: "图" },
+        { label: "视频 / Videos", items: assetList.videos || [], type: "videos", prefix: "视频" },
+        { label: "音频 / Audio", items: assetList.audios || [], type: "audios", prefix: "音频" },
+    ];
+
+    // Filter by keyword
+    const kw = (keyword || "").toLowerCase();
+    const filteredGroups = groups.map(g => ({
+        ...g,
+        items: g.items.filter(item =>
+            !kw || String(item.index).includes(kw) || (item.name || "").toLowerCase().includes(kw)
+        ),
+    })).filter(g => g.items.length > 0);
+
+    const popup = document.createElement("div");
+    popup.className = "bsai-asset-picker";
+    popup.style.cssText = "position:absolute;z-index:1000;background:#1a1a1a;border:1px solid #444;border-radius:4px;padding:8px;max-height:280px;overflow-y:auto;width:200px;box-shadow:0 4px 12px rgba(0,0,0,0.5);top:100%;left:0;";
+
+    filteredGroups.forEach(function(g) {
+        const hdr = document.createElement("div");
+        hdr.style.cssText = "font-size:11px;color:#888;margin-bottom:3px;margin-top:6px;";
+        hdr.textContent = g.label;
+        popup.appendChild(hdr);
+
+        g.items.forEach(function(item) {
+            const row = document.createElement("div");
+            row.style.cssText = "display:flex;align-items:center;gap:4px;margin-bottom:2px;cursor:pointer;padding:2px;border-radius:2px;";
+            row.addEventListener("mouseenter", function() { row.style.background = "#2a3a5a"; });
+            row.addEventListener("mouseleave", function() { row.style.background = ""; });
+
+            const tag = "@" + g.prefix + item.index;
+
+            const thumb = document.createElement("div");
+            thumb.style.cssText = "width:24px;height:24px;border:1px solid #333;border-radius:2px;overflow:hidden;flex-shrink:0;";
+            if (g.type !== "audios") {
+                const img = document.createElement("img");
+                img.style.cssText = "width:100%;height:100%;object-fit:cover;";
+                img.src = "/bsai/asset_file?type=" + g.type + "&filename=" + encodeURIComponent(item.name);
+                thumb.appendChild(img);
+            } else {
+                thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;font-size:12px;">♪</div>';
+            }
+            row.appendChild(thumb);
+
+            const lbl = document.createElement("span");
+            lbl.textContent = tag;
+            lbl.style.cssText = "font-size:11px;color:#ccc;";
+            row.appendChild(lbl);
+
+            row.addEventListener("mousedown", function(e) {
+                e.preventDefault();
+                e.stopPropagation();
+                textarea.focus();
+                // Use the pre-recorded @ position (atPos) and cursor position (pos)
+                // from when the picker was opened — this is reliable because
+                // selectionStart doesn't change when focus is retained.
+                const fullVal = textarea.value;
+                // Re-read current selection in case user typed more chars
+                let curPos = textarea.selectionStart;
+                // Validate: if cursor moved past pos, use the new position
+                // but still find the @ that opened the picker
+                let atPosition = atPos;
+                // If the @ at atPos was deleted, scan backward from cursor
+                if (atPosition >= fullVal.length || fullVal[atPosition] !== "@") {
+                    atPosition = -1;
+                    for (let i = curPos - 1; i >= 0; i--) {
+                        if (fullVal[i] === "@") {
+                            atPosition = i;
+                            break;
+                        }
+                    }
+                    if (atPosition < 0) { popup.remove(); return; }
+                }
+                // Find the end of the @keyword (first space or cursor, whichever is first)
+                let kwEnd = atPosition + 1;
+                while (kwEnd < fullVal.length && kwEnd < curPos && !/[\s@]/.test(fullVal[kwEnd])) {
+                    kwEnd++;
+                }
+                // Build the new value: everything before @ + tag + everything after keyword
+                const beforePart = fullVal.substring(0, atPosition);
+                const afterPart = fullVal.substring(kwEnd);
+                const needSpaceBefore = beforePart.length > 0 && !beforePart.endsWith(" ") && !beforePart.endsWith("\n");
+                const needSpaceAfter = afterPart.length > 0 && !afterPart.startsWith(" ") && !afterPart.startsWith("\n");
+                const insertText = (needSpaceBefore ? " " : "") + tag + (needSpaceAfter ? " " : "");
+                const newVal = beforePart + insertText + afterPart;
+                textarea.value = newVal;
+                const newPos = beforePart.length + insertText.length;
+                textarea.setSelectionRange(newPos, newPos);
+                // Dispatch native input event — the listener will update
+                // clip.prompt / state.global_prompt and render the overlay.
+                // No _justInsertedAsset flag needed: after inserting "@图3 ",
+                // the text before cursor ends with a space, so the @ picker
+                // regex /@([^\s@]*)$/ won't match and won't re-trigger.
+                textarea.dispatchEvent(new Event("input", { bubbles: true }));
+                popup.remove();
+            });
+
+            popup.appendChild(row);
+        });
+    });
+
+    if (!popup.children.length) {
+        popup.innerHTML = '<div style="color:#555;font-size:11px;text-align:center;padding:12px;">无匹配资产</div>';
+    }
+
+    // Close on click outside
+    setTimeout(() => {
+        const closeHandler = function(e) {
+            if (!popup.contains(e.target) && e.target !== textarea) {
+                popup.remove();
+                document.removeEventListener("mousedown", closeHandler, true);
+            }
+        };
+        document.addEventListener("mousedown", closeHandler, true);
+    }, 0);
+
+    parentEl.style.position = "relative";
+    parentEl.appendChild(popup);
+}
+
 function syncGlobalPromptFromInput(node, runtime) {
     try {
         const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
@@ -2774,21 +2915,47 @@ function render(node, runtime) {
 
         // Overlay for CLIP prompt: inline @图N thumbnails
         // 分镜提示词覆盖层：@图N内联缩略图
+        // IMPORTANT: all font/text metrics must match the textarea exactly
+        // so the overlay text aligns perfectly with the cursor position.
         const clipOverlay = document.createElement("div");
-        clipOverlay.style.cssText = "position:absolute;top:0;left:0;width:100%;height:100%;font-size:inherit;border:1px solid rgba(255,255,255,.15);color:inherit;border-radius:5px;padding:6px;box-sizing:border-box;overflow-y:auto;pointer-events:none;white-space:pre-wrap;word-wrap:break-word;z-index:1;background:rgba(0,0,0,.27);";
-        prompt.style.color = "transparent";
-        prompt.style.background = "transparent";
-        prompt.style.caretColor = "white";
-        prompt.style.position = "absolute";
-        prompt.style.top = "0";
-        prompt.style.left = "0";
-        prompt.style.width = "100%";
-        prompt.style.height = "100%";
-        prompt.style.minHeight = "120px";
-        prompt.style.maxHeight = "400px";
-        prompt.style.zIndex = "2";
-        prompt.style.resize = "none";
-        prompt.style.outline = "none";
+        clipOverlay.style.cssText = [
+            "position:absolute", "top:0", "left:0", "width:100%", "height:100%",
+            "min-height:120px", "max-height:400px",
+            "font-size:11px", "line-height:1.4",
+            "font-family: inherit", "font-weight: inherit",
+            "letter-spacing: normal", "word-spacing: normal",
+            "text-indent: 0", "text-transform: none",
+            "border:1px solid rgba(255,255,255,.15)", "border-radius:5px",
+            "padding:4px 6px", "box-sizing:border-box",
+            "overflow-y:auto", "overflow-x:hidden",
+            "pointer-events:none", "white-space:pre-wrap", "word-wrap:break-word",
+            "word-break: normal",
+            "z-index:1", "background:rgba(0,0,0,.27)",
+            "color:inherit",
+            "margin: 0",
+        ].join(";") + ";";
+        // Match textarea styles to the overlay EXACTLY — any difference in
+        // font metrics causes the cursor to drift away from the text position
+        // as the user types, especially in long CLIP prompts.
+        prompt.style.cssText = [
+            "position:absolute", "top:0", "left:0", "width:100%", "height:100%",
+            "min-height:120px", "max-height:400px",
+            "font-size:11px", "line-height:1.4",
+            "font-family: inherit", "font-weight: inherit",
+            "letter-spacing: normal", "word-spacing: normal",
+            "text-indent: 0", "text-transform: none",
+            "border:1px solid rgba(255,255,255,.15)", "border-radius:5px",
+            "padding:4px 6px !important", "box-sizing:border-box",
+            "overflow-y:auto", "overflow-x:hidden",
+            "z-index:2", "background:transparent",
+            "resize:none", "outline:none",
+            "caret-color:white",
+            "word-wrap:break-word",
+            "word-break: normal",
+            "white-space:pre-wrap",
+            "margin: 0",
+        ].join(";") + ";";
+        prompt.style.setProperty("color", "transparent", "important");
         promptRow.appendChild(clipOverlay);
         prompt.addEventListener("scroll", () => {
             clipOverlay.scrollTop = prompt.scrollTop;
@@ -2828,10 +2995,19 @@ function render(node, runtime) {
         }
 
         prompt.addEventListener("input", () => {
-            if (prompt.value === clip.prompt) return;
             clip.prompt = prompt.value;
             updateHidden(node, runtime);
             renderClipOverlay();
+            // Check if user just typed @ — show asset picker
+            const pos = prompt.selectionStart;
+            const before = prompt.value.substring(0, pos);
+            const atMatch = before.match(/@([^\s@]*)$/);
+            if (atMatch && atMatch[0].length <= 20) {
+                showAssetPickerForTextarea(promptRow, clip, node, runtime, prompt, atMatch[1]);
+            } else {
+                const existing = promptRow.querySelector(".bsai-asset-picker");
+                if (existing) existing.remove();
+            }
         });
         prompt.addEventListener("focus", () => {
             window._h3_activeTextarea = prompt;
@@ -2861,7 +3037,12 @@ function render(node, runtime) {
                 }
             }, 300);
             setTimeout(() => {
-                if (document.activeElement !== prompt) {
+                // Don't re-render if the asset picker is open — the user is
+                // clicking inside the picker, which causes textarea blur.
+                // Re-rendering would destroy the picker mid-interaction and
+                // can also wipe pending prompt changes (e.g. second @tag).
+                const pickerOpen = promptRow.querySelector(".bsai-asset-picker");
+                if (document.activeElement !== prompt && !pickerOpen) {
                     render(node, runtime);
                 }
             }, 200);
@@ -3880,6 +4061,16 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         updateHidden(node, runtime);
         renderGlobalOverlay();
         renderAssetPanel(gpLeftPanel, gpPseudoClip, node, runtime, gpTextarea);
+        // Check if user typed @ — show asset picker
+        const pos = gpTextarea.selectionStart;
+        const before = gpTextarea.value.substring(0, pos);
+        const atMatch = before.match(/@([^\s@]*)$/);
+        if (atMatch && atMatch[0].length <= 20) {
+            showAssetPickerForTextarea(globalPromptSection, null, node, runtime, gpTextarea, atMatch[1]);
+        } else {
+            const existing = globalPromptSection.querySelector(".bsai-asset-picker");
+            if (existing) existing.remove();
+        }
     });
     // Make global prompt textarea work with asset library @图N clicks
     gpTextarea.addEventListener("focus", () => {
@@ -4172,7 +4363,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     // Poll for unified prompt_source input changes every 800ms
     // 轮询统一外部提示词输入，自动拆分全局提示词和分镜内容
-    runtime._lastPromptSourceText = "";
+    runtime._lastPromptSourceText = null;
     runtime._psPollTimer = setInterval(() => {
         try {
             const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
@@ -4215,23 +4406,78 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                 runtime.renderGlobalAssetPanel();
             }
 
+            // 1c. If external prompt source is completely empty, reset all CLIPs to one empty CLIP
+            if (!newText.trim()) {
+                if (runtime.state.clips.length !== 1 || runtime.state.clips[0]?.prompt?.trim()) {
+                    const freshClip = newClip(0);
+                    runtime.state.clips = [freshClip];
+                    changed = true;
+                }
+                // Also clear the Final Decode & Export node's video preview
+                const finalNode = connectedFinalDecode(node);
+                if (finalNode && finalNode.__h3LivePreview) {
+                    const ps = finalNode.__h3LivePreview;
+                    try {
+                        ps.video.pause();
+                        ps.video.removeAttribute("src");
+                        ps.video.load();
+                        ps.video.style.filter = "none";
+                        ps.label.textContent = "";
+                        ps.currentVideoInfo = null;
+                        ps.colorTimeline = [];
+                        ps.liveLoaded = false;
+                        ps.restoreLoaded = false;
+                        ps.restoreRequestRunning = false;
+                        if (ps.saveButton) ps.saveButton.disabled = true;
+                    } catch (_) {}
+                }
+                // Also clear any ComfyUI built-in image/video preview widgets
+                if (finalNode) {
+                    try {
+                        const imgs = finalNode.dom?.querySelectorAll("img, video");
+                        if (imgs) imgs.forEach(el => { el.removeAttribute("src"); el.load?.(); });
+                    } catch (_) {}
+                }
+                // Notify backend to delete cached preview files so a page
+                // refresh does not restore the stale preview
+                if (finalNode) {
+                    try {
+                        fetch(api.apiURL("/h3_extender/clear_preview"), {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                owner_id: String(node.id),
+                                final_id: String(finalNode.id),
+                            }),
+                        }).catch(() => {});
+                    } catch (_) {}
+                }
+            }
+
             // 2. Parse storyboard segments and auto-create/update CLIPs
             if (storyboardText) {
                 const segments = parseStoryboard(storyboardText);
                 if (segments.length > 0) {
-                    // Add CLIPs to match segment count
+                    // Add CLIPs to match segment count — new CLIPs get the segment prompt
                     while (runtime.state.clips.length < segments.length) {
-                        runtime.state.clips.push(newClip(runtime.state.clips.length));
+                        const newIdx = runtime.state.clips.length;
+                        const fresh = newClip(newIdx);
+                        const seg = segments[newIdx];
+                        if (seg) {
+                            fresh.prompt = seg.prompt || "";
+                            fresh.duration = String(seg.duration || fresh.duration);
+                        }
+                        runtime.state.clips.push(fresh);
                         changed = true;
                     }
-                    // Update each CLIP's prompt and duration from segments
+                    // Update each existing CLIP's duration from segments,
+                    // but PRESERVE the user's prompt (manually added @图N tags etc.)
                     for (let i = 0; i < segments.length && i < runtime.state.clips.length; i++) {
                         const seg = segments[i];
                         const clip = runtime.state.clips[i];
-                        if (clip.prompt !== seg.prompt) {
-                            clip.prompt = seg.prompt;
-                            changed = true;
-                        }
+                        // Only overwrite prompt for freshly-added CLIPs that
+                        // were created above (they already have seg.prompt).
+                        // Existing CLIPs keep their user-edited prompt.
                         const newDur = String(seg.duration);
                         if (String(clip.duration) !== newDur) {
                             clip.duration = newDur;

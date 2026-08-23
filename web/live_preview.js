@@ -270,6 +270,34 @@ async function restorePreviewOnLoad(node, state, attempt = 0) {
         return;
     }
 
+    // Skip restore if the upstream Extender's prompt_source is connected but
+    // empty. The user has cleared the external prompt, so the preview should
+    // not be rebuilt from stale cache on page refresh.
+    const graph = node?.graph || app.graph;
+    if (graph) {
+        const extenderNode = graph.getNodeById?.(ownerId)
+            || (graph._nodes || []).find((n) => String(n?.id) === String(ownerId));
+        if (extenderNode) {
+            const psInput = extenderNode.inputs?.find((inp) => inp.name === "prompt_source");
+            if (psInput && psInput.link != null) {
+                const psLink = graph.links?.[psInput.link];
+                if (psLink && psLink.origin_id != null) {
+                    const srcNode = graph.getNodeById?.(psLink.origin_id)
+                        || (graph._nodes || []).find((n) => String(n?.id) === String(psLink.origin_id));
+                    if (srcNode) {
+                        const srcWidget = srcNode.widgets?.find(
+                            (w) => w.name === "text" || w.type === "text_multiline" || w.type === "customtext"
+                        );
+                        const psText = srcWidget?.value ?? srcNode.widgets_values?.[0];
+                        if (psText == null || !String(psText).trim()) {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if (state.restoreRequestRunning) return;
     state.restoreRequestRunning = true;
 
