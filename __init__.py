@@ -108,6 +108,16 @@ try:
 except Exception as e:
     print(f"[H3 Film Factory] nodes_media.py import failed: {e}")
 
+try:
+    from .bsai_h3_3dlatent_upscale import (
+        NODE_CLASS_MAPPINGS as H3_3D_UPSCALE_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as H3_3D_UPSCALE_DISPLAY,
+    )
+    NODE_CLASS_MAPPINGS.update(H3_3D_UPSCALE_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(H3_3D_UPSCALE_DISPLAY)
+except Exception as e:
+    print(f"[H3 Film Factory] bsai_h3_3dlatent_upscale.py import failed: {e}")
+
 # === Server-side API endpoints ===
 try:
     from . import server

@@ -65,6 +65,9 @@ from .motion_context_disk import (
     _truncate_chain,
     _export_live_candidate_preview,
     _decode_single_clip_to_blob,
+    _load_segment_video,
+    _load_segment_audio,
+    _decode_single_audio,
     _find_ffmpeg,
     _copy_blob_to_file,
     _next_output_path,
@@ -92,6 +95,214 @@ def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=N
         fps=fps,
         ffmpeg=ffmpeg,
     )
+
+
+# ---------------------------------------------------------------------------
+# IMAGE + AUDIO per-CLIP streaming outputs (BSAI H3 Film Factory v14.70)
+#
+# Every clip is decoded to an IMAGE tensor [T,H,W,C] (float32, 0..1) plus an
+# AUDIO dict as soon as it finishes sampling, pushed to the frontend over
+# WebSocket (h3_extender_clip_av) and accumulated into the final IMAGE/AUDIO
+# output ports.  This lets downstream upscale nodes (e.g. BSAI-H3-upscale-4K)
+# consume the film as soon as the run returns, without a second VAE decode.
+# ---------------------------------------------------------------------------
+
+
+def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
+    """Decode one cached clip to (IMAGE tensor, AUDIO dict), trimmed of the
+    leading context overlap so downstream concatenation matches the Final
+    Decode & Export output exactly."""
+    data_path, manifest_path = _chain_paths(f"extender_{_safe_name(str(owner))}")
+    manifest = _load_manifest_from_paths(data_path, manifest_path)
+    if manifest is None:
+        return None, None
+    segments = [dict(x) for x in manifest.get("segments", [])]
+    i = int(clip_index)
+    if i < 0 or i >= len(segments):
+        return None, None
+    curr = segments[i]
+
+    # Video latent -> pixels [T,C,H,W] in [0,1]
+    try:
+        v = _load_segment_video(data_path, curr)
+        video = vae.decode(v)
+        if video.ndim == 5:
+            video = video.reshape(-1, video.shape[-3], video.shape[-2], video.shape[-1])
+    except Exception as _e:
+        print(f"[H3 Extender] _decode_clip_to_av video decode failed clip={i}: {_e}")
+        return None, None
+
+    trim = int(curr.get("trim_frames", 0)) if i > 0 else 0
+    if trim > 0:
+        video = video[trim:]
+    if video.shape[0] == 0:
+        return None, None
+    images = video.movedim(1, -1).float().cpu().contiguous()  # [T,H,W,C]
+
+    # Audio latent -> {waveform [B,C,L], sample_rate}
+    audio = None
+    try:
+        if audio_vae is not None:
+            audio = _decode_single_audio(data_path, curr, audio_vae, float(fps))
+            if audio is not None and trim > 0:
+                sr = int(audio["sample_rate"])
+                trim_samples = int(round(float(trim) / float(fps) * sr))
+                wave = audio["waveform"]
+                if trim_samples > 0 and trim_samples < int(wave.shape[-1]):
+                    audio = dict(audio)
+                    audio["waveform"] = wave[..., trim_samples:]
+    except Exception as _e:
+        print(f"[H3 Extender] _decode_clip_to_av audio decode failed clip={i}: {_e}")
+        audio = None
+
+    return images, audio
+
+
+def _send_clip_av_output(node_id, clip_index, clip_count, images, audio):
+    """Lightweight per-clip readiness signal for the frontend.  The heavy
+    IMAGE/AUDIO payloads travel through the node output ports; this event only
+    tells the UI which clip just became available (each CLIP finishes -> its
+    IMAGE+AUDIO are emitted before the next clip starts)."""
+    try:
+        server = PromptServer.instance
+        if server is None:
+            return
+        payload = {
+            "node": str(node_id),
+            "clip_index": int(clip_index),
+            "clip_count": int(clip_count),
+            "frames": int(images.shape[0]) if images is not None else 0,
+            "width": int(images.shape[2]) if images is not None else 0,
+            "height": int(images.shape[1]) if images is not None else 0,
+            "sample_rate": int(audio["sample_rate"]) if audio is not None else 0,
+            "ready": True,
+        }
+        server.send_sync(
+            "h3_extender_clip_av",
+            payload,
+            getattr(server, "client_id", None),
+        )
+    except Exception as _e:
+        print(f"[H3 Extender] _send_clip_av_output error: {_e}")
+
+
+def _concat_clip_av(images_list, audios_list):
+    """Concatenate per-clip IMAGE tensors and AUDIO dicts into one IMAGE batch
+    + one AUDIO dict (same format as ComfyUI IMAGE/AUDIO)."""
+    imgs = [im for im in images_list if im is not None and int(im.shape[0]) > 0]
+    if imgs:
+        images = torch.cat(imgs, dim=0).float().cpu().contiguous()
+    else:
+        images = torch.zeros((0, 64, 64, 3), dtype=torch.float32)
+
+    audios = [a for a in audios_list if a is not None and int(a["waveform"].shape[-1]) > 1]
+    if audios:
+        sr = int(audios[0]["sample_rate"])
+        waves = [a["waveform"].cpu().float() for a in audios]
+        max_ch = max(int(w.shape[1]) for w in waves)
+        padded = []
+        for w in waves:
+            if int(w.shape[1]) < max_ch:
+                pad = torch.zeros((w.shape[0], max_ch, w.shape[2]), dtype=w.dtype)
+                pad[:, :w.shape[1], :] = w
+                w = pad
+            padded.append(w)
+        waveform = torch.cat(padded, dim=-1)
+        audio = {"waveform": waveform, "sample_rate": sr}
+    else:
+        audio = {"waveform": torch.zeros(1, 1, 1), "sample_rate": 32000}
+    return images, audio
+
+
+def _apply_h3_block_cache(model, residual_diff_threshold=0.12, cache_device="cpu"):
+    """Best-effort integration of the F1B0 block-cache acceleration (from the
+    T8 MiniMax H3 Block Cache plugin) straight into the Extender's own
+    sequential clip sampling.  Reuses the proven residual cache so consecutive
+    clips that stay temporally stable skip most DiT blocks.  If the T8 plugin
+    is not installed, sampling silently continues without acceleration."""
+    try:
+        from comfy.ldm.minimax.model import MiniMaxH3Model
+        diffusion_model = model.model.diffusion_model
+        if not isinstance(diffusion_model, MiniMaxH3Model):
+            print("[H3 Extender] block cache skipped: not a native MiniMax H3 model")
+            return model
+
+        import os as _os
+        import sys as _sys
+        t8_dir = None
+        try:
+            cnode_paths = folder_paths.get_folder_paths("custom_nodes")
+        except Exception:
+            cnode_paths = []
+        for base in list(cnode_paths) + [os.path.join(folder_paths.base_path, "custom_nodes")]:
+            cand = os.path.join(str(base), "comfyui-minimax-h3-blockcache-T8")
+            if os.path.isdir(cand):
+                t8_dir = cand
+                break
+        if t8_dir is None:
+            raise RuntimeError("comfyui-minimax-h3-blockcache-T8 not installed")
+        if t8_dir not in _sys.path:
+            _sys.path.insert(0, t8_dir)
+
+        import importlib.util as _ilu
+        import types as _types
+        cache_spec = _ilu.spec_from_file_location("_t8_h3_block_cache", os.path.join(t8_dir, "h3_block_cache.py"))
+        cache_mod = _ilu.module_from_spec(cache_spec)
+        cache_spec.loader.exec_module(cache_mod)
+        CACHE_KEY = cache_mod.CACHE_KEY
+        H3BlockCache = cache_mod.H3BlockCache
+        H3BlockCacheConfig = cache_mod.H3BlockCacheConfig
+        H3BlockPatch = cache_mod.H3BlockPatch
+        _pkg = _types.ModuleType("_t8_plugin")
+        _pkg.__path__ = [t8_dir]
+        _sys.modules["_t8_plugin"] = _pkg
+        _sys.modules["_t8_plugin.h3_block_cache"] = cache_mod
+        nodes_spec = _ilu.spec_from_file_location("_t8_plugin.nodes", os.path.join(t8_dir, "nodes.py"))
+        nodes_mod = _ilu.module_from_spec(nodes_spec)
+        nodes_spec.loader.exec_module(nodes_mod)
+        h3_block_cache_sample_wrapper = nodes_mod.h3_block_cache_sample_wrapper
+        h3_block_cache_diffusion_wrapper = nodes_mod.h3_block_cache_diffusion_wrapper
+        import comfy.patcher_extension as _pe
+
+        total_blocks = len(diffusion_model.blocks)
+        if total_blocks < 2:
+            raise RuntimeError("H3 model has fewer than 2 DiT blocks")
+
+        transformer_options = model.model_options["transformer_options"]
+        if CACHE_KEY in transformer_options or "easycache" in transformer_options:
+            print("[H3 Extender] block cache skipped: another cache already active")
+            return model
+
+        model = model.clone()
+        config = H3BlockCacheConfig(
+            residual_diff_threshold=float(residual_diff_threshold),
+            start_percent=0.08,
+            end_percent=0.95,
+            max_consecutive_hits=2,
+            cache_device=str(cache_device),
+            metric_stride=8,
+            verbose=False,
+        )
+        to = model.model_options["transformer_options"].copy()
+        to[CACHE_KEY] = H3BlockCache(config, total_blocks)
+        model.model_options["transformer_options"] = to
+
+        model.set_model_patch_replace(H3BlockPatch(0), "dit", "double_block", 0)
+        model.set_model_patch_replace(
+            H3BlockPatch(total_blocks - 1), "dit", "double_block", total_blocks - 1
+        )
+        model.add_wrapper_with_key(
+            _pe.WrappersMP.OUTER_SAMPLE, "minimax_h3_block_cache_t8", h3_block_cache_sample_wrapper
+        )
+        model.add_wrapper_with_key(
+            _pe.WrappersMP.DIFFUSION_MODEL, "minimax_h3_block_cache_t8", h3_block_cache_diffusion_wrapper
+        )
+        print(f"[H3 Extender] block cache ACTIVE threshold={residual_diff_threshold} device={cache_device}")
+        return model
+    except Exception as _e:
+        print(f"[H3 Extender] block cache unavailable, running without acceleration: {_e}")
+        return model
+
 
 CANVAS_MULTIPLE = 32
 REF_IMAGE_SHORT_EDGE = 2048
@@ -1830,6 +2041,34 @@ class BSAIH3FilmFactory:
                     "tooltip": "输出文件名前缀。分段输出时自动追加_clipN.mp4。",
                 },
             ),
+            "output_image_audio": (
+                "BOOLEAN",
+                {
+                    "default": True,
+                    "tooltip": "每个CLIP生成好立即解码为IMAGE+AUDIO，经image/audio输出端口流出（可接超分放大节点）。关闭则仅缓存、用Final Decode导出。",
+                },
+            ),
+            "block_cache": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "tooltip": "启用MiniMax H3 Block Cache（F1B0残差缓存）加速：顺序CLIP画面稳定时跳过大部分DiT块，多CLIP连续生成显著提速。依赖已安装的comfyui-minimax-h3-blockcache-T8插件。",
+                },
+            ),
+            "block_cache_threshold": (
+                "FLOAT",
+                {
+                    "default": 0.12, "min": 0.0, "max": 1.0, "step": 0.01,
+                    "tooltip": "Block Cache命中阈值。越高越容易命中、加速越多，但结果可能变化。",
+                },
+            ),
+            "block_cache_device": (
+                ["cpu", "gpu"],
+                {
+                    "default": "cpu",
+                    "tooltip": "Block Cache缓存设备。cpu省显存，gpu减少传输但占显存。",
+                },
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -1854,7 +2093,7 @@ class BSAIH3FilmFactory:
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = (CACHE_TYPE, "INT", "INT", "STRING", "FLOAT", "STRING", "STRING")
+    RETURN_TYPES = (CACHE_TYPE, "INT", "INT", "STRING", "FLOAT", "STRING", "STRING", "IMAGE", "AUDIO")
     RETURN_NAMES = (
         "cache",
         "clip_count",
@@ -1863,6 +2102,8 @@ class BSAIH3FilmFactory:
         "cache_size_mb",
         "build",
         "clip_videos",
+        "images",
+        "audios",
     )
     FUNCTION = "extend"
     CATEGORY = "BSAI/H3 Film Factory"
@@ -1988,6 +2229,10 @@ class BSAIH3FilmFactory:
         prompt_pack=None,
         asset_library=None,
         prompt_source=None,
+        output_image_audio=True,
+        block_cache=False,
+        block_cache_threshold=0.12,
+        block_cache_device="cpu",
         unique_id=None,
         **kwargs,
     ):
@@ -2466,6 +2711,20 @@ class BSAIH3FilmFactory:
                     # not in the chain. They'll be restored on merge_output.
                     cfg["validated"] = False
 
+        # Build the accelerated sampling model once for the whole pass.
+        sampling_model = model
+        if int(block_cache):
+            sampling_model = _apply_h3_block_cache(
+                model,
+                residual_diff_threshold=float(block_cache_threshold),
+                cache_device=str(block_cache_device),
+            )
+
+        # Per-CLIP IMAGE+AUDIO streaming outputs.
+        out_images = []
+        out_audios = []
+        _av_decoded = set()
+
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
         for i, cfg in enumerate(clips[:loop_end]):
@@ -2581,7 +2840,7 @@ class BSAIH3FilmFactory:
             )
 
             sampled = _sample_h3(
-                model,
+                sampling_model,
                 positive,
                 latent,
                 cfg["seed"],
@@ -2640,6 +2899,20 @@ class BSAIH3FilmFactory:
                 f"Clip {i + 1}/{len(clips)} complete"
                 + (f" (preview error: {_preview_error})" if _preview_error else ""),
             )
+
+            # Each CLIP is decoded to IMAGE+AUDIO as soon as it finishes and
+            # emitted before the next clip starts (streaming output).
+            if int(output_image_audio):
+                try:
+                    cimg, caud = _decode_clip_to_av(owner, i, vae, audio_vae, float(FPS))
+                    if cimg is not None and int(cimg.shape[0]) > 0:
+                        out_images.append(cimg)
+                        _av_decoded.add(i)
+                    if caud is not None:
+                        out_audios.append(caud)
+                    _send_clip_av_output(owner, i, len(clips), cimg, caud)
+                except Exception as _av_err:
+                    print(f"[H3 Extender] per-clip AV output failed clip={i}: {_av_err}")
 
             # Drop full sampled/conditioning references before the next clip.
             del sampled, positive, latent
@@ -3043,6 +3316,30 @@ class BSAIH3FilmFactory:
             import traceback
             traceback.print_exc()
 
+        # Decode any validated (cached, not re-generated) clips so the
+        # IMAGE/AUDIO outputs always carry the complete film.
+        if int(output_image_audio):
+            try:
+                final_m = _load_manifest_from_paths(data_path, manifest_path)
+                if final_m is not None:
+                    segs = [dict(x) for x in final_m.get("segments", [])]
+                    for ci in range(len(segs)):
+                        if ci in _av_decoded:
+                            continue
+                        cimg, caud = _decode_clip_to_av(owner, ci, vae, audio_vae, float(FPS))
+                        if cimg is not None and int(cimg.shape[0]) > 0:
+                            out_images.append(cimg)
+                        if caud is not None:
+                            out_audios.append(caud)
+            except Exception as _av2:
+                print(f"[H3 Extender] cached-clip AV decode failed: {_av2}")
+
+        out_images_t, out_audios_t = _concat_clip_av(out_images, out_audios)
+        if len(out_images) > 0:
+            print(f"[H3 Extender] AV outputs: {int(out_images_t.shape[0])} frames, "
+                  f"audio {int(out_audios_t['waveform'].shape[-1])} samples @ "
+                  f"{int(out_audios_t['sample_rate'])}Hz")
+
         return {
             "ui": ui_payload,
             "result": (
@@ -3053,6 +3350,8 @@ class BSAIH3FilmFactory:
                 float(cache_mb),
                 BUILD,
                 clip_videos_json,
+                out_images_t,
+                out_audios_t,
             ),
         }
 

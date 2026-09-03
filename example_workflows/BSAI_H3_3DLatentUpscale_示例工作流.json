@@ -1,0 +1,647 @@
+{
+ "id": null,
+ "revision": null,
+ "last_node_id": 11,
+ "last_link_id": 14,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "UNETLoader",
+   "pos": [
+    -1500,
+    -1200
+   ],
+   "size": [
+    210,
+    60
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      11
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "UNETLoader"
+   },
+   "widgets_values": [
+    "minimax_h3_ref2va_int8_convrot.safetensors",
+    "default"
+   ]
+  },
+  {
+   "id": 2,
+   "type": "CLIPLoader",
+   "pos": [
+    -1500,
+    -1100
+   ],
+   "size": [
+    210,
+    60
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      2
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "CLIPLoader"
+   },
+   "widgets_values": [
+    "qwen3vl_32b_minimax_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+    "minimax",
+    "default"
+   ]
+  },
+  {
+   "id": 3,
+   "type": "VAELoader",
+   "pos": [
+    -1500,
+    -1000
+   ],
+   "size": [
+    210,
+    60
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      3,
+      6,
+      9
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "minimax_h3_video_vae_int8_convrot.safetensors"
+   ]
+  },
+  {
+   "id": 4,
+   "type": "VAELoader",
+   "pos": [
+    -1500,
+    -900
+   ],
+   "size": [
+    210,
+    60
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [
+    {
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      4,
+      7,
+      10
+     ]
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VAELoader"
+   },
+   "widgets_values": [
+    "minimax_h3_audio_vae_fp32.safetensors"
+   ]
+  },
+  {
+   "id": 5,
+   "type": "BSAIH3FilmFactory",
+   "pos": [
+    -700,
+    -1200
+   ],
+   "size": [
+    400,
+    300
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 1
+    },
+    {
+     "name": "clip",
+     "type": "CLIP",
+     "link": 2
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 3
+    },
+    {
+     "name": "audio_vae",
+     "type": "VAE",
+     "link": 4
+    },
+    {
+     "name": "ref_audio",
+     "type": "AUDIO",
+     "link": null
+    },
+    {
+     "name": "prompt_source",
+     "type": "STRING",
+     "link": null
+    },
+    {
+     "name": "prompt_pack",
+     "type": "H3_PROMPT_PACK",
+     "link": null
+    },
+    {
+     "name": "asset_library",
+     "type": "ASSET_LIBRARY",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "cache",
+     "type": "H3_MOTION_DISK_CACHE",
+     "links": [
+      5,
+      8
+     ]
+    },
+    {
+     "name": "INT",
+     "type": "INT",
+     "links": []
+    },
+    {
+     "name": "INT",
+     "type": "INT",
+     "links": []
+    },
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": []
+    },
+    {
+     "name": "FLOAT",
+     "type": "FLOAT",
+     "links": []
+    },
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": []
+    },
+    {
+     "name": "STRING",
+     "type": "STRING",
+     "links": []
+    },
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [
+      14
+     ]
+    },
+    {
+     "name": "audios",
+     "type": "AUDIO",
+     "links": []
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "BSAIH3FilmFactory"
+   },
+   "widgets_values": [
+    "clip_by_clip",
+    896,
+    576,
+    "match",
+    4,
+    "euler",
+    "beta",
+    1.0,
+    "22",
+    0,
+    "{\"version\": 1, \"clips\": [{\"id\": \"clip_1\", \"name\": \"\", \"prompt\": \"示例：城市夜景雨幕中，霓虹灯光斑驳，一辆黑色轿车驶过湿润街道，电影级写实。\\n0-5秒：极缓推、中全景。雨幕中霓虹光斑驳，黑色轿车车灯切开雨幕，轮胎碾起水花。音效：雨声、发动机低鸣。\\n5-10秒：微移、近景。车窗内一双眼睛在仪表盘光中闪烁，手指轻敲方向盘。音效：雨声、敲击声。\", \"seed\": 123456789, \"seed_mode\": \"randomize\", \"duration\": \"10\", \"validated\": false, \"context_enabled\": true, \"color_adjustment\": {\"saturation\": 100, \"contrast\": 100, \"brightness\": 100}, \"card_height\": 0, \"collapsed\": false, \"subtitle\": \"\", \"subtitle_enabled\": false, \"subtitle_mode\": \"manual\", \"subtitle_auto_dialogue\": true, \"subtitle_auto_narration\": false, \"subtitle_auto_lyrics\": false, \"subtitle_font\": \"msyh.ttc\", \"subtitle_font_size\": 24, \"subtitle_color\": \"#FFFFFF\", \"subtitle_box\": false, \"subtitle_box_color\": \"#000000\", \"subtitle_box_width\": 2, \"rfe_frame_count\": 15, \"rfe_selection_mode\": \"last_n\", \"rfe_start_frame\": 0, \"rfe_end_frame\": 0, \"rfe_max_output_frames\": 9, \"rfe_sampling_method\": \"even\", \"rfe_save_frames\": false, \"rfe_output_subdir\": \"contextual_series\", \"rfe_filename_prefix\": \"frame\", \"render_enabled\": true, \"replace_mode\": false}]}",
+    "auto_from_ref",
+    1.0,
+    "{\"version\": 2, \"refs\": [null, null, null, null, null, null, null, null, null]}",
+    "both",
+    "BSAI_H3_Extender",
+    true,
+    true,
+    0.12,
+    "cpu"
+   ],
+   "title": "BSAI H3 Film Factory (Block-Cache + AV输出)"
+  },
+  {
+   "id": 6,
+   "type": "BSAIH3FilmFactoryFinalDecode",
+   "pos": [
+    -700,
+    -600
+   ],
+   "size": [
+    400,
+    120
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "cache",
+     "type": "H3_MOTION_DISK_CACHE",
+     "link": 5
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 6
+    },
+    {
+     "name": "audio_vae",
+     "type": "VAE",
+     "link": 7
+    }
+   ],
+   "outputs": [
+    {
+     "name": "filenames",
+     "type": "VHS_FILENAMES",
+     "links": []
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "BSAIH3FilmFactoryFinalDecode"
+   },
+   "widgets_values": [
+    24,
+    "BSAI_H3_Storyboard",
+    "",
+    "H.264",
+    17,
+    "medium",
+    "320k",
+    "all"
+   ],
+   "title": "BSAI H3 最终解码导出 (原路径)"
+  },
+  {
+   "id": 7,
+   "type": "BSAI_H3_3DLatentUpscale",
+   "pos": [
+    -200,
+    -600
+   ],
+   "size": [
+    360,
+    300
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "cache",
+     "type": "H3_MOTION_DISK_CACHE",
+     "link": 8
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": 9
+    },
+    {
+     "name": "audio_vae",
+     "type": "VAE",
+     "link": 10
+    },
+    {
+     "name": "model",
+     "type": "MODEL",
+     "link": 11
+    },
+    {
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "latent",
+     "type": "LATENT",
+     "links": []
+    },
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "links": [
+      12
+     ]
+    },
+    {
+     "name": "audios",
+     "type": "AUDIO",
+     "links": [
+      13
+     ]
+    },
+    {
+     "name": "status",
+     "type": "STRING",
+     "links": []
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "BSAI_H3_3DLatentUpscale"
+   },
+   "widgets_values": [
+    "model_3d",
+    "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+    1280,
+    704,
+    136,
+    17,
+    true,
+    0.45,
+    8,
+    "euler",
+    "simple",
+    512,
+    128,
+    0,
+    "both"
+   ],
+   "title": "BSAI H3 3D Latent 分块超清 (HD Upscale)"
+  },
+  {
+   "id": 8,
+   "type": "VHS_VideoCombine",
+   "pos": [
+    260,
+    -600
+   ],
+   "size": [
+    360,
+    120
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 12
+    },
+    {
+     "name": "audio",
+     "type": "AUDIO",
+     "link": 13
+    },
+    {
+     "name": "meta_batch",
+     "type": "VHS_BatchManager",
+     "link": null
+    },
+    {
+     "name": "vae",
+     "type": "VAE",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "name": "Filenames",
+     "type": "VHS_FILENAMES",
+     "links": []
+    }
+   ],
+   "properties": {
+    "Node name for S&R": "VHS_VideoCombine"
+   },
+   "widgets_values": [
+    {
+     "frame_rate": 24,
+     "loop_count": 0,
+     "filename_prefix": "BSAI_H3_HD_3D",
+     "format": "H.264",
+     "pingpong": "fast",
+     "save_output": 17,
+     "videopreview": "192k"
+    }
+   ],
+   "title": "Video Combine (超清视频输出)"
+  },
+  {
+   "id": 9,
+   "type": "SaveImage",
+   "pos": [
+    -200,
+    -1200
+   ],
+   "size": [
+    300,
+    80
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "name": "images",
+     "type": "IMAGE",
+     "link": 14
+    }
+   ],
+   "outputs": [],
+   "properties": {
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "BSAI_H3_AV_Output"
+   ],
+   "title": "直接预览 image 输出端口 (逐CLIP)"
+  },
+  {
+   "id": 10,
+   "type": "Note",
+   "pos": [
+    -1200,
+    -300
+   ],
+   "size": [
+    700,
+    260
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [],
+   "outputs": [],
+   "properties": {
+    "Node name for S&R": "Note"
+   },
+   "widgets_values": [
+    "【BSAI H3 Film Factory 升级版示例工作流】\n\n1) Block-Cache 加速：主节点已开启 block_cache=True（F1B0 残差缓存，T8 插件）。顺序 CLIP 画面稳定时跨 CLIP 复用残差，跳过大部分 DiT 块，显著提速。\n\n2) 新增 image / audio 输出端口：每个 CLIP 生成好即解码为 IMAGE+AUDIO 流出（主节点最下方 images/audios 两个端口），可直接接超分放大节点，无需等全片生成。\n\n3) 3D Latent 分块超清（主路径）：主节点 cache → BSAI H3 3D Latent 分块超清节点，在潜空间内做时间分块+3D Latent 放大+空间分块二采，峰值显存=单 tile，低配显卡也能跑高清。model 已接 UNETLoader；conditioning 需连接你生成时所用的 H3 提示词/参考图编码节点（不接则二采自动跳过，仅做 3D Latent 放大）。3D upscaler 模型放 models/latent_upscale_models/。\n\n4) 输出：3D 节点 images/audios → Video Combine 输出 mp4；主节点 image 端口 → SaveImage 预览。\n\n显存参考：8G 卡 tile_size 320-384 / chunk 34-68；12G 卡 384-512；16G 卡 512-576。"
+   ],
+   "title": "使用说明"
+  }
+ ],
+ "links": [
+  [
+   1,
+   1,
+   0,
+   5,
+   0,
+   "MODEL"
+  ],
+  [
+   2,
+   2,
+   0,
+   5,
+   1,
+   "CLIP"
+  ],
+  [
+   3,
+   3,
+   0,
+   5,
+   2,
+   "VAE"
+  ],
+  [
+   4,
+   4,
+   0,
+   5,
+   3,
+   "VAE"
+  ],
+  [
+   5,
+   5,
+   0,
+   6,
+   0,
+   "H3_MOTION_DISK_CACHE"
+  ],
+  [
+   6,
+   3,
+   0,
+   6,
+   1,
+   "VAE"
+  ],
+  [
+   7,
+   4,
+   0,
+   6,
+   2,
+   "VAE"
+  ],
+  [
+   8,
+   5,
+   0,
+   7,
+   0,
+   "H3_MOTION_DISK_CACHE"
+  ],
+  [
+   9,
+   3,
+   0,
+   7,
+   1,
+   "VAE"
+  ],
+  [
+   10,
+   4,
+   0,
+   7,
+   2,
+   "VAE"
+  ],
+  [
+   11,
+   1,
+   0,
+   7,
+   3,
+   "MODEL"
+  ],
+  [
+   12,
+   7,
+   1,
+   8,
+   0,
+   "IMAGE"
+  ],
+  [
+   13,
+   7,
+   2,
+   8,
+   1,
+   "AUDIO"
+  ],
+  [
+   14,
+   5,
+   7,
+   9,
+   0,
+   "IMAGE"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {},
+ "version": 0.4
+}

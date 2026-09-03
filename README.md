@@ -8,7 +8,45 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 ---
 
-## Features | 功能特性
+## 2026-09 升级：Block-Cache 加速 + AV 即时输出 + 3D Latent 分块超清
+> **v1.6 新增（对应工作流：`example_workflows/BSAI_H3_3DLatentUpscale_示例工作流.json`）**
+
+### 1. Block-Cache 加速（主节点内置）
+`BSAIH3FilmFactory` 新增 `block_cache` 开关（默认关），开启后复用已安装的
+`comfyui-minimax-h3-blockcache-T8` 插件，以 F1B0 残差缓存跨 CLIP 复用——
+画面稳定的顺序 CLIP 可跳过大部分 DiT 块，**显著提速**（参考 SageAttention 类加速思路，
+本方案不依赖额外模型下载，本机已装即可用）。
+- `block_cache_threshold`：命中阈值，越高越易命中、提速越多（默认 0.12）
+- `block_cache_device`：缓存设备，cpu 省显存 / gpu 减传输
+- 依赖未安装时自动静默回退，不影响原有生成
+
+### 2. 逐 CLIP 即时输出 image / audio 端口
+`BSAIH3FilmFactory` 新增 **`output_image_audio`**（默认开）与两个新输出端口
+**`images`(IMAGE) / `audios`(AUDIO)**（共 9 个输出）。
+每个 CLIP 采样完成后**立即**解码并推送到这两个端口（同时经 WebSocket
+`h3_extender_clip_av` 事件实时流式），无需等全片生成——可直接把 IMAGE 接超分放大节点、
+AUDIO 接音频后处理，实现流水线式并行消费。全片完成后端口输出全部帧/音频。
+
+### 3. BSAI H3 3D Latent 分块超清（新节点）
+新增 `BSAI_H3_3DLatentUpscale`：在**潜空间**内做 3D 分块高清放大，参考
+[MMH3 Ultimate Upscale](https://github.com/bbaudio-2025/Comfyui-MMH3-UltimateUpscale) /
+[MiniMax H3 Latent Split](https://github.com/bbaudio-2025/Comfyui-MiniMax-H3-LatentSplit) 方案。
+
+- **时间分块**：长片段按 H3 keyframe 网格切成重叠时间块（`chunk_length`/`temporal_overlap`，17 倍数），
+  每块独立处理，峰值显存与全片长度无关
+- **3D Latent 放大**：`minimax_h3_latent_upscaler_3d_*.safetensors`（放
+  `models/latent_upscale_models/`，可于 https://huggingface.co/LBH-123-AI/Minimax_h3_latent_Upscaler 下载，
+  国内用 hf-mirror.com 镜像），或 `interpolate` 无模型插值
+- **空间分块二采**：每时间块再切重叠 tile 逐块 re-sample（`tile_size`/`spatial_overlap`），
+  显存峰值 = 单 tile；**低配显卡也能跑高清**（8G 卡 tile 320-384 / chunk 34-68，12G 卡 384-512，16G 卡 512-576）
+- **锚定 + 交叉淡化缝合**：块间重叠区线性混合，时间/空间接缝平滑
+- **音频原样携带**：音频 latent 只裁剪拼接、从不重采样
+- 输出 `latent`（放大后 AV latent）+ `images` + `audios` + `status`
+
+> ⚠️ 二采（`resample_second_pass`）需要 `model` + `conditioning`（接你生成时所用的 H3 提示词/参考图编码）；
+> 不接则自动跳过二采、仅做 3D Latent 放大。
+
+
 
 ### Core Engine | 核心引擎
 - **Storyboard-Driven Generation** — Connect a Text Multiline node with `[整体风格]`, `[角色档案]`, `[分镜N]` markers; the system auto-splits global prompt vs. storyboard segments, auto-creates CLIPs, and syncs prompt + duration per clip
