@@ -2616,17 +2616,6 @@ class BSAIH3FilmFactory:
             active_prompt_pack_signature = ""
         data_path, manifest_path, manifest = _manifest_for_extender(owner, FPS)
 
-        # v1.14: 链完整性检查 —— 磁盘 latent 链缺失前置段时，扩展选择范围，
-        # 从最早缺失段起连续渲染到结束，避免部分选择时 'previous cached latent unavailable'。
-        if select_override is not None:
-            _pre_m = _load_manifest_from_paths(data_path, manifest_path)
-            _pre_n = len(_pre_m.get("segments", [])) if _pre_m else 0
-            _sel_min = min(select_override)
-            if _pre_n < _sel_min:
-                _from = max(0, _pre_n)
-                select_override = set(range(_from, len(clips)))
-                print(f"[H3 Extender] v1.14 前置 latent 链缺失({_pre_n}段 < 需求{_sel_min})：从段 {_from + 1} 起连续渲染到结束")
-
         # If cards were removed, trim the physical cache immediately.
         if len(manifest.get("segments", [])) > len(clips):
             manifest = _truncate_chain(
@@ -3044,6 +3033,24 @@ class BSAIH3FilmFactory:
                 else:
                     cfg["validated"] = False
 
+        # v1.15: 前置 latent 链完整性检查 —— 部分选择 / 重渲染时，若磁盘 latent 链
+        # 不足以支撑所选段的前置段，明确报错提示（不静默从 clip1 开始渲染，
+        # 避免用户预期外的大量生成浪费时间）。
+        _need_pre = None
+        if select_override is not None:
+            _need_pre = min(select_override)
+        elif any_replace and first_sel > 0:
+            _need_pre = first_sel
+        if _need_pre is not None:
+            _pre_m = _load_manifest_from_paths(data_path, manifest_path)
+            _pre_n = len(_pre_m.get("segments", [])) if _pre_m else 0
+            if _pre_n < _need_pre:
+                raise RuntimeError(
+                    f"MiniMax H3 Extender: 所选 CLIP{_need_pre + 1} 的前置 latent 链缺失"
+                    f"（磁盘仅缓存 {_pre_n} 段，不足 {_need_pre} 段）。"
+                    "请先「全量渲染」一次建立完整缓存，再单独选择该 CLIP 生成。"
+                )
+
         # Build the accelerated sampling model once for the whole pass.
         sampling_model = model
         if int(cache_dit):
@@ -3074,13 +3081,8 @@ class BSAIH3FilmFactory:
             # their cached latent (if any) and are not re-rendered.  This lets
             # the user turn off generation for specific clips without removing
             # them from the sequence. CLIP 选择生成时，未选中的同样跳过（保留缓存）。
-            # v1.14: 若前置段 latent 链断裂（previous_proxy 缺失），该段不能跳过 ——
-            # 必须补渲染，否则后续 CLIP 采样时 motion context 无前段 latent 会报
-            # 'previous cached latent is unavailable'。此场景通常发生在「单独选择
-            # 某个 CLIP 生成」但磁盘缓存不足时。
-            need_fill = (previous_proxy is None and i > 0) or (i == 0 and previous_handle is None)
-            if (not cfg.get("render_enabled", True) and not need_fill) or (
-                select_override is not None and i not in select_override and not need_fill
+            if not cfg.get("render_enabled", True) or (
+                select_override is not None and i not in select_override
             ):
                 current_manifest = _load_manifest_from_paths(data_path, manifest_path)
                 existing_count = len(current_manifest.get("segments", [])) if current_manifest else 0

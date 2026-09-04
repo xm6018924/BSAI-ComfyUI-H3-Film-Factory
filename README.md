@@ -6,6 +6,23 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 一个为 ComfyUI 中 [MiniMax H3](https://www.minimax.io/blog/minimax-h3) 工作流打造的全流程影视制作工具包。从剧本到成片——分镜驱动片段生成、资产库、内联缩略图、自动字幕提取、人脸修复、高清放大。
 
+## 2026-09-04 修复：单独选择 CLIP 生成严格从所选 CLIP 开始（不静默补前置）
+> **v1.15 新增**
+
+### 问题
+- 选中 CLIP3 单独生成，若磁盘 latent 链为空，v1.14 会**静默从 CLIP1 连续渲染**补全链 —— 用户预期从 CLIP3 开始，结果浪费大量时间从头渲染。
+
+### v1.15 修复
+- **撤销静默链扩展 / 强制补前置**逻辑。
+- **缓存完整时**：单独选择 CLIPn 严格**从 CLIPn 开始**连续渲染到结束（clipn、clipn+1…），符合预期。
+- **缓存缺失时**：明确报错提示 前置 latent 链缺失（磁盘仅 X 段，不足 N 段），请先「全量渲染」一次建立完整缓存，**不再静默从头渲染**。
+- 全量渲染不受影响（缓存空时从 CLIP1 正常建立）。
+- 保留 previous_proxy=None 防御性跳过 motion context（不崩）。
+
+### 为什么必须这样
+MiniMax H3 的链式生成依赖前置 CLIP 的 latent 做 motion context，磁盘缓存缺失时物理上无法单独从中间段开始。因此单独生成某 CLIP 前，请先全量渲染一次建立缓存；之后单独选择任意 CLIP 都能从该 CLIP 开始。
+
+---
 ## 2026-09-04 修复：单独选择生成遇到空缓存链不再报错（previous cached latent unavailable）
 > **v1.14 新增**
 
