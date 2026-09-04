@@ -6,6 +6,19 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 一个为 ComfyUI 中 [MiniMax H3](https://www.minimax.io/blog/minimax-h3) 工作流打造的全流程影视制作工具包。从剧本到成片——分镜驱动片段生成、资产库、内联缩略图、自动字幕提取、人脸修复、高清放大。
 
+## 2026-09-04 修复：单独选择生成遇到空缓存链不再报错（previous cached latent unavailable）
+> **v1.14 新增**
+
+### 问题
+- 磁盘 latent 链为空（或前置段缺失）时，单独选择生成某个 CLIP（如单选 clip3），主循环对未选中的前置段走缓存跳过，却因无缓存未建立前段 latent，采样时抛错 MiniMax H3 Extender: previous cached latent is unavailable。
+
+### v1.14 修复
+- **链完整性检查**：运行前读取磁盘 manifest，若部分选择但磁盘段数不足（前置段缺失），自动把选择范围扩展为**从最早缺失段起连续渲染到结束**，保证 latent 链完整、不报错。
+- **need_fill 兜底**：主循环中若前段 latent 缺失（previous_proxy / previous_handle 为空），强制渲染该段（即使未被选中），保持链完整。
+- **防御性容错**：previous_proxy 为 None 时不再 raise，跳过该段 motion context（从当前段独立渲染），链拼接由 disk_join 的 previous_cache 保证。
+- 链完整性扩展后仍**不自动合并**（保持用户部分选择意图，输出 per-clip，由用户手动「合并输出」）。
+
+---
 ## 2026-09-04 修复：暂停不再自动继续 + 单独生成/暂停后禁止自动合并
 > **v1.13 新增**
 

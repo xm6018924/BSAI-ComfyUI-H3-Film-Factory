@@ -2616,6 +2616,17 @@ class BSAIH3FilmFactory:
             active_prompt_pack_signature = ""
         data_path, manifest_path, manifest = _manifest_for_extender(owner, FPS)
 
+        # v1.14: 链完整性检查 —— 磁盘 latent 链缺失前置段时，扩展选择范围，
+        # 从最早缺失段起连续渲染到结束，避免部分选择时 'previous cached latent unavailable'。
+        if select_override is not None:
+            _pre_m = _load_manifest_from_paths(data_path, manifest_path)
+            _pre_n = len(_pre_m.get("segments", [])) if _pre_m else 0
+            _sel_min = min(select_override)
+            if _pre_n < _sel_min:
+                _from = max(0, _pre_n)
+                select_override = set(range(_from, len(clips)))
+                print(f"[H3 Extender] v1.14 前置 latent 链缺失({_pre_n}段 < 需求{_sel_min})：从段 {_from + 1} 起连续渲染到结束")
+
         # If cards were removed, trim the physical cache immediately.
         if len(manifest.get("segments", [])) > len(clips):
             manifest = _truncate_chain(
@@ -3063,8 +3074,13 @@ class BSAIH3FilmFactory:
             # their cached latent (if any) and are not re-rendered.  This lets
             # the user turn off generation for specific clips without removing
             # them from the sequence. CLIP 选择生成时，未选中的同样跳过（保留缓存）。
-            if not cfg.get("render_enabled", True) or (
-                select_override is not None and i not in select_override
+            # v1.14: 若前置段 latent 链断裂（previous_proxy 缺失），该段不能跳过 ——
+            # 必须补渲染，否则后续 CLIP 采样时 motion context 无前段 latent 会报
+            # 'previous cached latent is unavailable'。此场景通常发生在「单独选择
+            # 某个 CLIP 生成」但磁盘缓存不足时。
+            need_fill = (previous_proxy is None and i > 0) or (i == 0 and previous_handle is None)
+            if (not cfg.get("render_enabled", True) and not need_fill) or (
+                select_override is not None and i not in select_override and not need_fill
             ):
                 current_manifest = _load_manifest_from_paths(data_path, manifest_path)
                 existing_count = len(current_manifest.get("segments", [])) if current_manifest else 0
@@ -3153,11 +3169,9 @@ class BSAIH3FilmFactory:
             )
 
             trim_frames = None
-            if i > 0 and cfg.get("context_enabled", True):
-                if previous_proxy is None:
-                    raise RuntimeError(
-                        "MiniMax H3 Extender: previous cached latent is unavailable."
-                    )
+            # v1.14: previous_proxy 为 None（前段无缓存）时不再 raise，防御性跳过
+            # motion context（从当前段独立渲染，链拼接由 disk_join 的 previous_cache 保证）。
+            if i > 0 and cfg.get("context_enabled", True) and previous_proxy is not None:
                 positive, trim_frames, _, _, _ = motion.apply(
                     positive,
                     latent,
