@@ -41,6 +41,7 @@ import comfy.utils
 import latent_preview
 import node_helpers
 import folder_paths
+import threading
 from aiohttp import web
 from PIL import Image, ImageEnhance, ImageOps
 from server import PromptServer
@@ -1415,6 +1416,101 @@ def _send_extender_progress(
         pass
 
 
+# ---------------------------------------------------------------------------
+# 暂停渲染控制（CLIP 选择生成 + 每 CLIP 间暂停/继续/仅当前/中止）
+# ---------------------------------------------------------------------------
+_render_ctl_lock = threading.Lock()
+_render_ctl = {}
+
+
+@PromptServer.instance.routes.post("/h3_extender/render_control")
+async def render_control(request):
+    """前端暂停控制端点：pause / resume / stop_after / abort。"""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    node_id = str(data.get("node") or "")
+    action = str(data.get("action") or "")
+    with _render_ctl_lock:
+        ctl = _render_ctl.get(node_id)
+        if ctl is None:
+            return web.json_response({"ok": False, "error": "no active render"})
+        if action == "pause":
+            ctl["state"] = "pause_requested"
+        elif action == "resume":
+            ctl["state"] = "resume"
+            ctl["event"].set()
+        elif action == "stop_after":
+            ctl["state"] = "stop_after"
+            ctl["event"].set()
+        elif action == "abort":
+            ctl["state"] = "abort"
+            ctl["event"].set()
+        else:
+            return web.json_response({"ok": False, "error": f"unknown action {action}"})
+        return web.json_response({"ok": True, "state": ctl["state"]})
+
+
+def _register_render_ctl(node_id):
+    """开始渲染前注册控制条目（总是重置为运行态）。"""
+    with _render_ctl_lock:
+        _render_ctl[str(node_id)] = {"state": "running", "event": threading.Event()}
+
+
+def _release_render_ctl(node_id):
+    """渲染结束/中断后清理控制条目。"""
+    with _render_ctl_lock:
+        _render_ctl.pop(str(node_id), None)
+
+
+def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
+    """每个CLIP生成完后、下一个开始前调用。
+
+    仅当用户在前端点过「暂停」时才阻塞；否则立即返回 True。
+    返回 True=继续渲染下一个；False=停止后续渲染（保留已生成的CLIP）。
+    """
+    with _render_ctl_lock:
+        ctl = _render_ctl.get(str(node_id))
+        if ctl is None or ctl.get("state") != "pause_requested":
+            return True
+        ctl["state"] = "paused"
+        ctl["event"].clear()
+    _send_extender_progress(
+        node_id, clip_index, total, "paused",
+        f"Clip {clip_index + 1} 已生成完成，渲染已暂停 — 可点「继续 / 仅当前 / 中止」，无干预 {int(timeout)}s 后自动继续",
+    )
+    decided = ctl["event"].wait(timeout)
+    with _render_ctl_lock:
+        state = ctl.get("state", "running")
+        ctl["state"] = "running"
+    if not decided:
+        _send_extender_progress(
+            node_id, clip_index, total, "resumed",
+            f"暂停超时无干预，自动继续渲染 Clip {clip_index + 2}",
+        )
+        return True
+    if state == "resume":
+        _send_extender_progress(
+            node_id, clip_index, total, "resumed",
+            f"用户点击「继续」→ 渲染 Clip {clip_index + 2}",
+        )
+        return True
+    if state == "stop_after":
+        _send_extender_progress(
+            node_id, clip_index, total, "stopped",
+            "已停止后续渲染：仅保留已生成的 CLIP（可点「合并输出」合成视频）",
+        )
+        return False
+    if state == "abort":
+        _send_extender_progress(
+            node_id, clip_index, total, "aborted",
+            "渲染已中止",
+        )
+        return False
+    return True
+
+
 def _send_latent_preview_frame(node_id, clip_index, step, total_steps, jpeg_bytes):
     """Send a single latent preview frame (as base64 JPEG) to the frontend."""
     try:
@@ -2069,6 +2165,35 @@ class BSAIH3FilmFactory:
                     "tooltip": "Block Cache缓存设备。cpu省显存，gpu减少传输但占显存。",
                 },
             ),
+            "clip_select_enable": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "tooltip": "CLIP 选择生成开关：开启后仅渲染 clip_select 指定的 CLIP，未选中的保留缓存、不重新生成。",
+                },
+            ),
+            "clip_select": (
+                "STRING",
+                {
+                    "default": "all",
+                    "multiline": False,
+                    "tooltip": "要渲染的 CLIP（1 起）：all=全部；单个如 1；多选如 1,3；范围如 2-5；混合如 1,3-5。仅 clip_select_enable 开启时生效。",
+                },
+            ),
+            "pause_enable": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "tooltip": "暂停渲染开关：开启后每个 CLIP 生成完、开始下一个前可暂停。前端提供「暂停/继续/仅当前/中止」，用户无干预则超时自动继续。",
+                },
+            ),
+            "pause_timeout": (
+                "FLOAT",
+                {
+                    "default": 120.0, "min": 5.0, "max": 3600.0, "step": 5.0,
+                    "tooltip": "暂停后无干预自动继续渲染的等待秒数。",
+                },
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -2233,6 +2358,10 @@ class BSAIH3FilmFactory:
         block_cache=False,
         block_cache_threshold=0.12,
         block_cache_device="cpu",
+        clip_select_enable=False,
+        clip_select="all",
+        pause_enable=False,
+        pause_timeout=120.0,
         unique_id=None,
         **kwargs,
     ):
@@ -2276,6 +2405,13 @@ class BSAIH3FilmFactory:
             )
         )
         owner = str(unique_id if unique_id is not None else "h3_extender")
+        _register_render_ctl(owner)
+        # CLIP 自定义选择生成：None=全部；set=仅渲染选中的（未选中视为跳过、保留缓存）
+        select_override = None
+        if int(clip_select_enable):
+            select_override = _parse_clip_select(clip_select, len(clips))
+            if select_override:
+                print(f"[H3 Extender] CLIP 选择生成: 仅渲染 {sorted(n + 1 for n in select_override)}")
         if external_prompt_pack is None:
             active_prompt_pack_signature = ""
         data_path, manifest_path, manifest = _manifest_for_extender(owner, FPS)
@@ -2731,8 +2867,10 @@ class BSAIH3FilmFactory:
             # Clips with render_enabled=False are skipped entirely: they keep
             # their cached latent (if any) and are not re-rendered.  This lets
             # the user turn off generation for specific clips without removing
-            # them from the sequence.
-            if not cfg.get("render_enabled", True):
+            # them from the sequence. CLIP 选择生成时，未选中的同样跳过（保留缓存）。
+            if not cfg.get("render_enabled", True) or (
+                select_override is not None and i not in select_override
+            ):
                 current_manifest = _load_manifest_from_paths(data_path, manifest_path)
                 existing_count = len(current_manifest.get("segments", [])) if current_manifest else 0
                 if i < existing_count:
@@ -2917,6 +3055,15 @@ class BSAIH3FilmFactory:
             # Drop full sampled/conditioning references before the next clip.
             del sampled, positive, latent
 
+            # 暂停渲染：当前CLIP生成完、下一个开始前，若用户按过「暂停」则等待
+            # （继续/仅当前/中止；无干预则超时自动继续）
+            if i < loop_end - 1 and int(pause_enable):
+                if not _maybe_pause_between(
+                    owner, i, loop_end, len(clips), float(pause_timeout)
+                ):
+                    print(f"[H3 Extender] 渲染已暂停停止：保留已生成的 CLIP（共 {i + 1} 段）")
+                    break
+
         # All clips rendered; the last handle is the active cached prefix
         # expected by Final Decode.
         if previous_handle is None:
@@ -3089,6 +3236,9 @@ class BSAIH3FilmFactory:
         disabled = [i + 1 for i, c in enumerate(clips) if not c.get("render_enabled", True)]
         if disabled:
             clip_select_text += f" | skip {','.join(str(n) for n in disabled)}"
+        if select_override is not None:
+            sel_list = ",".join(str(n) for n in sorted(n + 1 for n in select_override))
+            clip_select_text += f" | clip_select {{{sel_list}}}"
         status = (
             f"{str(run_mode)} | {resolution_text} | refs {_reference_count(refs)} | cached {cached_count}/{len(clips)} | "
             f"validated {validated_count}{prompt_pack_text}{clip_select_text} | "
@@ -3107,6 +3257,7 @@ class BSAIH3FilmFactory:
             "idle",
             status,
         )
+        _release_render_ctl(owner)
 
         # ── Direct video output (per_clip / merged / both) ──────────────
         # Skip output only when single-clip replace is still pending (tail

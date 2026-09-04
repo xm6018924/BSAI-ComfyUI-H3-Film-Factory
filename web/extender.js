@@ -4011,7 +4011,39 @@ status.style.overflow = "hidden";
 status.style.textOverflow = "ellipsis";
 status.style.maxWidth = "45%";
 
-toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, status, projectFileInput);
+// ── 暂停渲染控制条（每CLIP间暂停 / 继续 / 仅当前 / 中止） ──
+const pauseBar = document.createElement("span");
+pauseBar.style.cssText = "display:none;align-items:center;gap:4px;margin-left:6px;";
+const pauseBtn = document.createElement("button");
+pauseBtn.textContent = "⏸ 暂停";
+pauseBtn.title = "当前CLIP生成完、下一个开始前暂停。暂停后可选择「继续/仅当前/中止」，无干预则超时自动继续。需节点 pause_enable 开启。";
+pauseBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#6a5a2a;border:1px solid #8a7a3a;border-radius:4px;color:#fcd;cursor:pointer;font-weight:bold;";
+const resumeBtn = document.createElement("button");
+resumeBtn.textContent = "▶ 继续";
+resumeBtn.title = "继续渲染剩余 CLIP";
+resumeBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a6a4a;border:1px solid #3a7a5a;border-radius:4px;color:#cde;cursor:pointer;font-weight:bold;display:none;";
+const stopAfterBtn = document.createElement("button");
+stopAfterBtn.textContent = "⏹ 仅当前/停止";
+stopAfterBtn.title = "停止后续渲染，仅保留已生成的 CLIP（可点「合并输出」合成）";
+stopAfterBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#7a3a3a;border:1px solid #9a5a5a;border-radius:4px;color:#fdd;cursor:pointer;font-weight:bold;display:none;";
+const abortBtn = document.createElement("button");
+abortBtn.textContent = "✖ 中止";
+abortBtn.title = "中止整个渲染";
+abortBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#5a2a2a;border:1px solid #7a4a4a;border-radius:4px;color:#fbb;cursor:pointer;font-weight:bold;display:none;";
+const sendRenderControl = (action) => {
+	fetch(api.apiURL("/h3_extender/render_control"), {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ node: String(node.id), action }),
+	}).catch((err) => console.warn("[H3 Extender] render_control failed", action, err));
+};
+pauseBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("pause"); });
+resumeBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("resume"); });
+stopAfterBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("stop_after"); });
+abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("abort"); });
+pauseBar.append(pauseBtn, resumeBtn, stopAfterBtn, abortBtn);
+
+toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, pauseBar, status, projectFileInput);
 
     // Store merge output button reference for later updates
 
@@ -4282,6 +4314,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     const restoredValidatedPrefix = validatedPrefixFromState(state);
     const runtime = {
+        _node: node,
         state,
         jsonWidget,
         refsState,
@@ -4300,6 +4333,11 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         projectFileInput,
         refFileInput,
         mergeOutputBtn,
+        pauseBar,
+        pauseBtn,
+        resumeBtn,
+        stopAfterBtn,
+        abortBtn,
         bottomBar,
         clipsTotalLabel,
         addClipBtn,
@@ -4738,6 +4776,34 @@ function scrollActiveCard(runtime, index) {
     });
 }
 
+function updatePauseBar(runtime) {
+	if (!runtime?.pauseBar) return;
+	const node = runtime?._node;
+	let pauseEnabled = true;
+	if (node?.widgets) {
+		const w = node.widgets.find((x) => x.name === "pause_enable");
+		if (w) pauseEnabled = Boolean(w.value);
+	}
+	const phase = String(runtime.activePhase || "idle");
+	const rendering = Number(runtime.activeClipIndex) >= 0 || ["preparing", "sampling", "decoding_preview", "complete", "paused", "resumed", "stopped", "aborted"].includes(phase);
+	if (!pauseEnabled || !rendering) {
+		runtime.pauseBar.style.display = "none";
+		return;
+	}
+	runtime.pauseBar.style.display = "flex";
+	if (phase === "paused") {
+		runtime.pauseBtn.style.display = "none";
+		runtime.resumeBtn.style.display = "";
+		runtime.stopAfterBtn.style.display = "";
+		runtime.abortBtn.style.display = "";
+	} else {
+		runtime.pauseBtn.style.display = "";
+		runtime.resumeBtn.style.display = "none";
+		runtime.stopAfterBtn.style.display = "none";
+		runtime.abortBtn.style.display = "none";
+	}
+}
+
 // A cancelled/failed ComfyUI execution does not call this node's onExecuted
 // callback. Without an explicit terminal-event reset, the last custom progress
 // event (usually "sampling") leaves the active card permanently blue until a
@@ -4763,6 +4829,7 @@ function clearTransientRenderingState(statusText = null) {
 
         runtime.activeClipIndex = -1;
         runtime.activePhase = "idle";
+        if (runtime.pauseBar) runtime.pauseBar.style.display = "none";
         if (statusText) runtime.statusText = statusText;
 
         // Clear per-clip transient rendering state for all clips.
@@ -4829,6 +4896,7 @@ app.registerExtension({
             runtime.activeClipIndex = Number.isFinite(index) ? index : -1;
             runtime.activePhase = String(detail?.phase || "idle");
             runtime.statusText = String(detail?.message || runtime.statusText || "Ready");
+            updatePauseBar(runtime);
 
             // When switching to a new active clip, clear latent preview state
             // on the previously active clip. This prevents a race condition

@@ -8,6 +8,28 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 ---
 
+## 2026-09-04 升级：CLIP 自定义选择生成 + 暂停渲染
+> **v1.7 新增（对应工作流：`example_workflows/BSAI_H3_ClipSelect_Pause_示例工作流.json`）**
+
+### 1. CLIP 自定义选择生成（单选 / 多选 / 全选）
+`BSAIH3FilmFactory` 新增 **`clip_select_enable`**（开关，默认关）与 **`clip_select`**（选择串，默认 `all`）。
+- `clip_select_enable` 开启后，仅渲染 `clip_select` 指定的 CLIP，**未选中的保留缓存、不重新生成**；
+- `clip_select` 支持格式：`all`=全部；`1`=单个；`1,3`=多选；`2-5`=区间；`1,3-5`=混合（数字从 1 起）；
+- 与卡片勾选（render_enabled）叠加：两者任一为「不渲染」即跳过该 CLIP；
+- 渲染状态栏会显示 `clip_select {…}` 标明本次实际渲染范围。
+
+### 2. 暂停渲染（CLIP 间暂停 / 继续 / 仅当前 / 中止，无干预自动继续）
+新增 **`pause_enable`**（开关，默认关）与 **`pause_timeout`**（暂停后无干预自动继续秒数，默认 120）。
+- 开启后，每个 CLIP 生成完成、**即将开始下一个之前**可暂停：前端工具栏出现「⏸ 暂停」按钮；
+- 点击暂停后进入暂停态，显示三个操作：
+  - **▶ 继续**：接着渲染剩余 CLIP；
+  - **⏹ 仅当前/停止**：停止后续渲染，仅保留已生成的 CLIP（可直接点「合并输出」合成视频）；
+  - **✖ 中止**：中止整个渲染；
+- 暂停期间**用户无干预则超时自动继续**（`pause_timeout` 秒），无需守候；
+- 后端新增路由 `POST /h3_extender/render_control`（action: pause / resume / stop_after / abort），前端 WebSocket
+  事件 `h3_extender_progress` 增加 `paused / resumed / stopped / aborted` 相位驱动按钮状态。
+
+---
 ## 2026-09 升级：Block-Cache 加速 + AV 即时输出 + 3D Latent 分块超清
 > **v1.6 新增（对应工作流：`example_workflows/BSAI_H3_3DLatentUpscale_示例工作流.json`）**
 
