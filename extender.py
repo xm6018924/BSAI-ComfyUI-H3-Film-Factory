@@ -1659,10 +1659,10 @@ def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
         ctl["state"] = "running"
     if not decided:
         _send_extender_progress(
-            node_id, clip_index, total, "resumed",
-            f"暂停超时无干预，自动继续渲染 Clip {clip_index + 2}",
+            node_id, clip_index, total, "stopped",
+            f"暂停超时无干预 → 已停止后续渲染（保留已生成的 CLIP，可点「合并输出」合成或重新运行）",
         )
-        return True
+        return False
     if state == "resume":
         _send_extender_progress(
             node_id, clip_index, total, "resumed",
@@ -2607,6 +2607,11 @@ class BSAIH3FilmFactory:
             if select_override:
                 _so_list = sorted(n + 1 for n in select_override)
                 print(f"[H3 Extender] CLIP 选择生成: 从 {_so_list[0]} 起连续渲染 {len(select_override)} 个 CLIP {_so_list}")
+        # v1.13: 仅「全量渲染且未干预」才自动合并；部分选择/重渲染/暂停均禁止自动合并
+        render_partial = (
+            select_override is not None
+            and set(select_override) != set(range(len(clips)))
+        )
         if external_prompt_pack is None:
             active_prompt_pack_signature = ""
         data_path, manifest_path, manifest = _manifest_for_extender(owner, FPS)
@@ -3014,6 +3019,7 @@ class BSAIH3FilmFactory:
             # 不再自动合并 —— 改为从最早选中段(first_sel)起连续渲染到结束
             # （自动依次生成后续 CLIP），除非用户手动暂停或手动「合并输出」。
             # 主循环依据 validated=False 从 first_sel 起逐个重新采样覆盖旧段。
+            render_partial = True  # 重渲染 = 部分渲染，禁止自动合并
             if _has_tail_latents_on_disk(owner):
                 _delete_tail_latents_from_disk(owner)
                 print("[H3 Extender] per-clip replace: deleted stale tail latents from disk")
@@ -3048,6 +3054,7 @@ class BSAIH3FilmFactory:
         out_images = []
         out_audios = []
         _av_decoded = set()
+        paused_break = False  # v1.13: 用户暂停/停止后禁止自动合并
 
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
@@ -3265,7 +3272,8 @@ class BSAIH3FilmFactory:
                 if not _maybe_pause_between(
                     owner, i, loop_end, len(clips), float(pause_timeout)
                 ):
-                    print(f"[H3 Extender] 渲染已暂停停止：保留已生成的 CLIP（共 {i + 1} 段）")
+                    print(f"[H3 Extender] 渲染已暂停停止：保留已生成的 CLIP（共 {i + 1} 段），不自动合并")
+                    paused_break = True
                     break
 
         # All clips rendered; the last handle is the active cached prefix
@@ -3428,6 +3436,12 @@ class BSAIH3FilmFactory:
         # latents not yet restored). After auto-restore, single_clip_replace
         # is set to False so output proceeds normally.
         output_ui_videos = []
+        # v1.13: 单独选择生成 / 重渲染 / 暂停停止后禁止自动合并输出（merged）。
+        # 仅「全量渲染且未干预」才自动合成 merged.mp4；否则只保留 per-clip 片段，
+        # 由用户手动点「合并输出」按钮合成。
+        suppress_auto_merge = bool(render_partial or paused_break)
+        if suppress_auto_merge:
+            print("[H3 Extender] 跳过自动合并输出（单独生成/暂停/重渲染），仅保留 per-clip 片段")
         if str(output_mode) != "none" and final_manifest is not None and not single_clip_replace:
             try:
                 out_dir = Path(folder_paths.get_output_directory()).resolve()
@@ -3443,7 +3457,7 @@ class BSAIH3FilmFactory:
                 ff = None
 
             want_per_clip = str(output_mode) in ("per_clip", "both")
-            want_merged = str(output_mode) in ("merged", "both")
+            want_merged = str(output_mode) in ("merged", "both") and not suppress_auto_merge
 
             if want_per_clip:
                 for si, seg in enumerate(segments_out):
