@@ -6,6 +6,20 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 一个为 ComfyUI 中 [MiniMax H3](https://www.minimax.io/blog/minimax-h3) 工作流打造的全流程影视制作工具包。从剧本到成片——分镜驱动片段生成、资产库、内联缩略图、自动字幕提取、人脸修复、高清放大。
 
+## 2026-09-04 新增：打开缓存目录按钮（Latent缓存 / Clip输出）
+> **v1.16 新增**
+
+### 功能
+工具栏新增两个按钮，点击自动在系统文件管理器中打开对应目录，随时查看缓存文件：
+- **📂 Latent缓存**：打开 latent 磁盘缓存目录 cache/（chain_extender_*.h3cache、manifest json、tail_*.pt 等）。
+- **📂 Clip输出**：打开 CLIP 视频输出目录（ComfyUI temp/，即 h3_clip_*.mp4 —— 正是 **BSAI Premiere Pro 节点 clip_videos 接收端口读取的文件目录**）。
+
+### 后端 API
+- GET /h3_extender/cache/open?kind=latent|clips
+- 返回 { ok, kind, path, opened, files[] }，files 为目录内文件列表（名称/大小/时间），状态栏实时显示路径与文件数。
+- 点击后前端调用该 API，后端 os.startfile 打开系统资源管理器（Windows）。
+
+---
 ## 2026-09-04 修复：单独选择 CLIP 生成严格从所选 CLIP 开始（不静默补前置）
 > **v1.15 新增**
 

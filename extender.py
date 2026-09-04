@@ -3811,6 +3811,52 @@ if getattr(PromptServer, "instance", None) is not None:
             },
         )
 
+    @PromptServer.instance.routes.get("/h3_extender/cache/open")
+    async def h3_extender_cache_open(request):
+        """v1.16: 打开 latent 缓存目录 / CLIP 视频输出目录，并返回路径+文件列表。
+        kind=latent -> cache/（chain_extender_*.h3cache 等）
+        kind=clips  -> ComfyUI temp/（h3_clip_*.mp4，即 BSAI Premiere Pro 接收端口读取的文件目录）"""
+        kind = str(request.query.get("kind", "latent")).strip().lower()
+        try:
+            if kind == "clips":
+                d = Path(folder_paths.get_temp_directory())
+            else:
+                d = _ensure_cache_root()
+            d = d.resolve()
+            files = []
+            if d.exists() and d.is_dir():
+                for p in sorted(d.iterdir()):
+                    if p.is_file():
+                        try:
+                            st = p.stat()
+                            files.append({
+                                "name": p.name,
+                                "size": st.st_size,
+                                "mtime": st.st_mtime,
+                            })
+                        except Exception:
+                            pass
+            opened = False
+            try:
+                if os.name == "nt":
+                    os.startfile(str(d))
+                    opened = True
+                else:
+                    import subprocess
+                    subprocess.Popen(["xdg-open", str(d)])
+                    opened = True
+            except Exception:
+                opened = False
+            return web.json_response({
+                "ok": True,
+                "kind": kind,
+                "path": str(d),
+                "opened": opened,
+                "files": files,
+            })
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
     @PromptServer.instance.routes.post("/h3_extender/project/prepare_save")
     async def h3_extender_project_prepare_save(request):
         """Build a portable .ext archive without buffering the cache in RAM."""

@@ -4002,6 +4002,31 @@ mergeOutputBtn.addEventListener("click", (e) => {
     }, 500);
 });
 
+// ── v1.16 打开缓存目录按钮（Latent缓存 / Clip输出） ──
+const openCacheBtn = document.createElement("button");
+openCacheBtn.textContent = "📂 Latent缓存";
+openCacheBtn.title = "打开 latent 缓存目录（chain_extender_*.h3cache 等文件），点击自动在系统文件管理器中打开该目录，随时查看缓存文件";
+openCacheBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#3a4a6a;border:1px solid #4a5a8a;border-radius:4px;color:#cde;cursor:pointer;margin-left:6px;font-weight:bold;";
+const openClipsBtn = document.createElement("button");
+openClipsBtn.textContent = "📂 Clip输出";
+openClipsBtn.title = "打开 CLIP 视频输出目录（h3_clip_*.mp4，即 BSAI Premiere Pro 接收端口读取的文件目录）";
+openClipsBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#3a4a6a;border:1px solid #4a5a8a;border-radius:4px;color:#cde;cursor:pointer;margin-left:6px;font-weight:bold;";
+const openCacheDir = (kind, label) => {
+    fetch(api.apiURL("/h3_extender/cache/open?kind=" + encodeURIComponent(kind)))
+        .then((r) => r.json())
+        .then((res) => {
+            if (res && res.ok) {
+                status.textContent = label + ": " + res.path + "（" + (res.files ? res.files.length : 0) + " 个文件）";
+                if (!res.opened) console.warn("[H3 Extender] 目录已返回但无法自动打开", res.path);
+            } else {
+                status.textContent = label + " 打开失败" + (res && res.error ? ": " + res.error : "");
+            }
+        })
+        .catch(() => { status.textContent = label + " 请求失败"; });
+};
+openCacheBtn.addEventListener("click", (e) => { e.preventDefault(); openCacheDir("latent", "Latent缓存"); });
+openClipsBtn.addEventListener("click", (e) => { e.preventDefault(); openCacheDir("clips", "Clip输出"); });
+
 const status = document.createElement("span");
 status.style.fontSize = "11px";
 status.style.opacity = ".72";
@@ -4050,7 +4075,7 @@ stopAfterBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderCo
 abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("abort"); });
 pauseBar.append(pauseBtn, resumeBtn, stopAfterBtn, abortBtn);
 
-toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, pauseBar, status, projectFileInput);
+toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, openCacheBtn, openClipsBtn, pauseBar, status, projectFileInput);
 
     // Store merge output button reference for later updates
 
