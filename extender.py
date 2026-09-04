@@ -2595,12 +2595,18 @@ class BSAIH3FilmFactory:
         )
         owner = str(unique_id if unique_id is not None else "h3_extender")
         _register_render_ctl(owner)
-        # CLIP 自定义选择生成：None=全部；set=仅渲染选中的（未选中视为跳过、保留缓存）
+        # CLIP 自定义选择生成：None=全部；set=指定渲染范围。
+        # 单选（如 2）语义：从该 CLIP 起连续渲染到结束（自动依次生成后续 CLIP），
+        # 除非用户手动暂停或手动选择「合并输出」，才执行合并。多选/范围保留原「仅渲染指定段」语义。
         select_override = None
         if int(clip_select_enable):
             select_override = _parse_clip_select(clip_select, len(clips))
+            if select_override is not None and len(select_override) == 1:
+                _sel_start = min(select_override)
+                select_override = set(range(_sel_start, len(clips)))
             if select_override:
-                print(f"[H3 Extender] CLIP 选择生成: 仅渲染 {sorted(n + 1 for n in select_override)}")
+                _so_list = sorted(n + 1 for n in select_override)
+                print(f"[H3 Extender] CLIP 选择生成: 从 {_so_list[0]} 起连续渲染 {len(select_override)} 个 CLIP {_so_list}")
         if external_prompt_pack is None:
             active_prompt_pack_signature = ""
         data_path, manifest_path, manifest = _manifest_for_extender(owner, FPS)
@@ -3450,7 +3456,11 @@ class BSAIH3FilmFactory:
         if disabled:
             clip_select_text += f" | skip {','.join(str(n) for n in disabled)}"
         if select_override is not None:
-            sel_list = ",".join(str(n) for n in sorted(n + 1 for n in select_override))
+            _sel_min = min(select_override)
+            if set(select_override) == set(range(_sel_min, len(clips))):
+                sel_list = f"{_sel_min + 1}-{len(clips)}"
+            else:
+                sel_list = ",".join(str(n) for n in sorted(n + 1 for n in select_override))
             clip_select_text += f" | clip_select {{{sel_list}}}"
         status = (
             f"{str(run_mode)} | {resolution_text} | refs {_reference_count(refs)} | cached {cached_count}/{len(clips)} | "
