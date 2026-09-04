@@ -3249,9 +3249,15 @@ class BSAIH3FilmFactory:
             # Drop full sampled/conditioning references before the next clip.
             del sampled, positive, latent
 
-            # 暂停渲染：当前CLIP生成完、下一个开始前，若用户按过「暂停」则等待
-            # （继续/仅当前/中止；无干预则超时自动继续）
-            if i < loop_end - 1 and int(pause_enable):
+            # 暂停渲染：当前CLIP生成完、下一个开始前——
+            #   pause_enable=False：手动暂停键始终可用（用户点过「暂停」才等待）
+            #   pause_enable=True ：每个CLIP生成完自动暂停等待（继续/仅当前/中止，无干预超时自动继续）
+            if i < loop_end - 1:
+                if int(pause_enable):
+                    with _render_ctl_lock:
+                        _ctl_now = _render_ctl.get(str(owner))
+                        if _ctl_now is not None:
+                            _ctl_now["state"] = "pause_requested"
                 if not _maybe_pause_between(
                     owner, i, loop_end, len(clips), float(pause_timeout)
                 ):

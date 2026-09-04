@@ -4016,7 +4016,7 @@ const pauseBar = document.createElement("span");
 pauseBar.style.cssText = "display:none;align-items:center;gap:4px;margin-left:6px;";
 const pauseBtn = document.createElement("button");
 pauseBtn.textContent = "⏸ 暂停";
-pauseBtn.title = "当前CLIP生成完、下一个开始前暂停。暂停后可选择「继续/仅当前/中止」，无干预则超时自动继续。需节点 pause_enable 开启。";
+pauseBtn.title = "暂停键始终可用：当前CLIP生成完、下一个开始前暂停。暂停后可选择「继续/仅当前/中止」，无干预则超时自动继续。节点 pause_enable 开启时则每个CLIP生成完自动暂停等待。";
 pauseBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#6a5a2a;border:1px solid #8a7a3a;border-radius:4px;color:#fcd;cursor:pointer;font-weight:bold;";
 const resumeBtn = document.createElement("button");
 resumeBtn.textContent = "▶ 继续";
@@ -4779,14 +4779,9 @@ function scrollActiveCard(runtime, index) {
 function updatePauseBar(runtime) {
 	if (!runtime?.pauseBar) return;
 	const node = runtime?._node;
-	let pauseEnabled = true;
-	if (node?.widgets) {
-		const w = node.widgets.find((x) => x.name === "pause_enable");
-		if (w) pauseEnabled = Boolean(w.value);
-	}
 	const phase = String(runtime.activePhase || "idle");
 	const rendering = Number(runtime.activeClipIndex) >= 0 || ["preparing", "sampling", "decoding_preview", "complete", "paused", "resumed", "stopped", "aborted"].includes(phase);
-	if (!pauseEnabled || !rendering) {
+	if (!rendering) {
 		runtime.pauseBar.style.display = "none";
 		return;
 	}

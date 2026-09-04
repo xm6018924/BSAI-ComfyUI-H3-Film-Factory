@@ -8,6 +8,25 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 ---
 
+## 2026-09-04 修复：暂停键始终可见可用
+> **v1.9 新增**
+
+### 暂停键在哪？现在渲染时始终显示在工具栏
+- 之前 `pause_enable` 默认关闭会把暂停条隐藏，导致看不到「⏸ 暂停」键。
+- v1.9 起：**只要开始渲染，工具栏即显示「⏸ 暂停」按钮**，无需先开任何开关。
+- 点击暂停 → 当前 CLIP 生成完、下一个开始前等待，弹出「▶ 继续 / ⏹ 仅当前/停止 / ✖ 中止」；无干预则超时自动继续。
+
+### `pause_enable` 语义更新（可选增强）
+- `pause_enable=False`（默认）：手动点「暂停」才暂停（随时可用）。
+- `pause_enable=True`：每个 CLIP 生成完**自动暂停等待**确认，更细粒度控制。
+- `pause_timeout`：无干预自动继续的等待秒数（默认 120）。
+
+### CLIP 选择生成说明
+- `clip_select_enable` + `clip_select`（如 `2`）= 仅渲染选中的 CLIP，其他保留缓存。单选即只生成该段；要连续多段请用 `1,3` / `2-5` / `all`。
+- 渲染过程中随时可用「⏸ 暂停」控制节奏。
+
+---
+
 ## 2026-09-04 加速升级：SageAttention + Ref2VA 磁盘缓存 + CacheDiT 引擎
 > **v1.8 新增（全球最新 H3 加速技术落地，三管齐下）**
 
