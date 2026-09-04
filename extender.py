@@ -3033,9 +3033,9 @@ class BSAIH3FilmFactory:
                 else:
                     cfg["validated"] = False
 
-        # v1.15: 前置 latent 链完整性检查 —— 部分选择 / 重渲染时，若磁盘 latent 链
-        # 不足以支撑所选段的前置段，明确报错提示（不静默从 clip1 开始渲染，
-        # 避免用户预期外的大量生成浪费时间）。
+        # v1.17: 前置 latent 链完整性检查 —— 部分选择 / 重渲染时，若磁盘 latent 链
+        # 不足以支撑所选段的前置段，自动补渲染缺失段建立完整链（H3 必须依赖前置
+        # latent 做 motion context），并明确打印提示，让用户知情而非报错/静默。
         _need_pre = None
         if select_override is not None:
             _need_pre = min(select_override)
@@ -3045,11 +3045,21 @@ class BSAIH3FilmFactory:
             _pre_m = _load_manifest_from_paths(data_path, manifest_path)
             _pre_n = len(_pre_m.get("segments", [])) if _pre_m else 0
             if _pre_n < _need_pre:
-                raise RuntimeError(
-                    f"MiniMax H3 Extender: 所选 CLIP{_need_pre + 1} 的前置 latent 链缺失"
-                    f"（磁盘仅缓存 {_pre_n} 段，不足 {_need_pre} 段）。"
-                    "请先「全量渲染」一次建立完整缓存，再单独选择该 CLIP 生成。"
-                )
+                _from = max(0, _pre_n)
+                if select_override is not None:
+                    select_override = set(range(_from, len(clips)))
+                    print(
+                        f"[H3 Extender] v1.17 前置 latent 链缺失（磁盘仅 {_pre_n} 段，"
+                        f"不足所选 CLIP{_need_pre + 1} 所需的 {_need_pre} 段）：自动从 "
+                        f"CLIP{_from + 1} 补渲染建立完整链，随后从所选 CLIP 连续生成到结束。"
+                    )
+                else:
+                    first_sel = _from
+                    print(
+                        f"[H3 Extender] v1.17 前置 latent 链缺失（磁盘仅 {_pre_n} 段，"
+                        f"不足重渲染 CLIP{_need_pre + 1} 所需的 {_need_pre} 段）：自动从 "
+                        f"CLIP{_from + 1} 补渲染建立完整链，随后连续生成到结束。"
+                    )
 
         # Build the accelerated sampling model once for the whole pass.
         sampling_model = model
