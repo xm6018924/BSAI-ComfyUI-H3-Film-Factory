@@ -4035,7 +4035,14 @@ const sendRenderControl = (action) => {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
 		body: JSON.stringify({ node: String(node.id), action }),
-	}).catch((err) => console.warn("[H3 Extender] render_control failed", action, err));
+	})
+		.then((r) => r.json().catch(() => ({})))
+		.then((res) => {
+			if (res && res.state === "idle") {
+				console.warn("[H3 Extender] 当前无渲染进行", action);
+			}
+		})
+		.catch((err) => console.warn("[H3 Extender] render_control failed", action, err));
 };
 pauseBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("pause"); });
 resumeBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("resume"); });
@@ -4780,11 +4787,7 @@ function updatePauseBar(runtime) {
 	if (!runtime?.pauseBar) return;
 	const node = runtime?._node;
 	const phase = String(runtime.activePhase || "idle");
-	const rendering = Number(runtime.activeClipIndex) >= 0 || ["preparing", "sampling", "decoding_preview", "complete", "paused", "resumed", "stopped", "aborted"].includes(phase);
-	if (!rendering) {
-		runtime.pauseBar.style.display = "none";
-		return;
-	}
+	// 暂停/继续/终止按钮任何时候都显示在工具栏；渲染空闲时点击由后端返回提示
 	runtime.pauseBar.style.display = "flex";
 	if (phase === "paused") {
 		runtime.pauseBtn.style.display = "none";

@@ -1603,7 +1603,7 @@ async def render_control(request):
     with _render_ctl_lock:
         ctl = _render_ctl.get(node_id)
         if ctl is None:
-            return web.json_response({"ok": False, "error": "no active render"})
+            return web.json_response({"ok": True, "state": "idle", "message": "当前无渲染进行"})
         if action == "pause":
             ctl["state"] = "pause_requested"
         elif action == "resume":
@@ -1615,6 +1615,11 @@ async def render_control(request):
         elif action == "abort":
             ctl["state"] = "abort"
             ctl["event"].set()
+            # 立即中断当前采样：终止即时生效，不等当前CLIP跑完
+            try:
+                comfy.model_management.interrupt_current_processing()
+            except Exception as _ie:
+                print(f"[H3 Extender] interrupt_current_processing failed: {_ie}")
         else:
             return web.json_response({"ok": False, "error": f"unknown action {action}"})
         return web.json_response({"ok": True, "state": ctl["state"]})
@@ -3171,18 +3176,26 @@ class BSAIH3FilmFactory:
                 f"Rendering clip {i + 1}/{len(clips)}",
             )
 
-            sampled = _sample_h3(
-                sampling_model,
-                positive,
-                latent,
-                cfg["seed"],
-                str(sampler_name),
-                str(scheduler),
-                int(steps),
-                float(denoise),
-                owner_id=owner,
-                clip_index=i,
-            )
+            try:
+                sampled = _sample_h3(
+                    sampling_model,
+                    positive,
+                    latent,
+                    cfg["seed"],
+                    str(sampler_name),
+                    str(scheduler),
+                    int(steps),
+                    float(denoise),
+                    owner_id=owner,
+                    clip_index=i,
+                )
+            except comfy.model_management.InterruptProcessingException:
+                _send_extender_progress(
+                    owner, i, len(clips), "aborted",
+                    "用户终止：渲染已中止（已保留已生成 CLIP）",
+                )
+                print("[H3 Extender] 用户终止渲染，停止后续 CLIP")
+                break
 
             result = disk_join.join(
                 samples=sampled,
