@@ -6,6 +6,19 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 一个为 ComfyUI 中 [MiniMax H3](https://www.minimax.io/blog/minimax-h3) 工作流打造的全流程影视制作工具包。从剧本到成片——分镜驱动片段生成、资产库、内联缩略图、自动字幕提取、人脸修复、高清放大。
 
+## 2026-09-04 修复：重渲染单CLIP不再自动合并，改为连续渲染到结束
+> **v1.12 新增**
+
+### 问题
+- 单独选择重渲染 clip2 生成后，代码自动恢复旧尾部 latent 并自动合并输出（saved tail → auto-restore → merge auto-triggered），而不是继续生成下一个 CLIP。
+
+### v1.12 修复
+- **重渲染单个/多个 CLIP 后，不再保存/截断尾部、不再自动合并**。
+- 改为：**从最早选中段(first_sel)起自动连续渲染到结束**（依次生成 clip2、3、4…），与 v1.11 单选语义一致。
+- 只有以下情况才执行合并：① 用户手动点击「⏸ 暂停 / ⏹ 停止」；② 用户手动点击「合并输出」按钮（merge_output 分支保留原样）。
+- 示例：重渲染 clip2 → clip1 走缓存，clip2~6 依次连续重新采样生成，最后正常输出完整视频（不自动合并）。
+
+---
 ## 2026-09-04 修复：clip_select 单选改为连续渲染（不自动合并）
 > **v1.11 新增**
 

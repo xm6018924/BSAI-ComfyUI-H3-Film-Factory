@@ -3010,36 +3010,21 @@ class BSAIH3FilmFactory:
             manifest = _load_manifest_from_paths(data_path, manifest_path) or manifest
             segments = manifest.get("segments", [])
 
-            # Delete any old tail latents from previous replace operations
+            # 2026-09-04 v1.12: 重渲染单个/多个 CLIP 后，不再保存/截断尾部 latent、
+            # 不再自动合并 —— 改为从最早选中段(first_sel)起连续渲染到结束
+            # （自动依次生成后续 CLIP），除非用户手动暂停或手动「合并输出」。
+            # 主循环依据 validated=False 从 first_sel 起逐个重新采样覆盖旧段。
             if _has_tail_latents_on_disk(owner):
                 _delete_tail_latents_from_disk(owner)
-                print("[H3 Extender] per-clip replace: deleted old tail latents from disk")
-
-            # Save tail latents to disk for later merge_output restore
-            if last_sel + 1 < len(segments):
-                _save_tail_latents_to_disk(data_path, manifest, last_sel + 1, owner)
-                print(f"[H3 Extender] per-clip replace: saved tail to disk for merge_output")
-            # Keep saved_tail = None so the old in-memory restore is skipped
+                print("[H3 Extender] per-clip replace: deleted stale tail latents from disk")
             saved_tail = None
 
-            if first_sel < len(segments):
-                manifest = _truncate_chain(data_path, manifest_path, manifest, first_sel)
-                segments = manifest.get("segments", [])
-                print(f"[H3 Extender] per-clip replace: truncated chain to {first_sel} clip(s)")
-
-            # Override validated flags: clips before first_sel stay validated;
-            # selected clips are forced unvalidated; clips after last_sel
-            # remain as-is (their tail latents are saved on disk for later
-            # merge_output restore, so they don't need to be marked validated).
+            # Override validated flags: first_sel 之前的保留缓存（join），
+            # first_sel 及之后全部置为未验证 → 主循环连续重新渲染到结束。
             for i, cfg in enumerate(clips):
-                if i in selected_set:
-                    cfg["validated"] = False
-                elif i < first_sel:
-                    if i < len(segments):
-                        cfg["validated"] = True
-                elif i > last_sel:
-                    # Do NOT mark as validated — tail latents are on disk,
-                    # not in the chain. They'll be restored on merge_output.
+                if i < first_sel and i < len(segments):
+                    cfg["validated"] = True
+                else:
                     cfg["validated"] = False
 
         # Build the accelerated sampling model once for the whole pass.
@@ -3337,59 +3322,15 @@ class BSAIH3FilmFactory:
                     m["updated_at"] = time.time()
                     _write_json_atomic(manifest_path, m)
 
-        # ── Auto-restore tail latents after per-clip replace ──────────
-        # After a single CLIP is regenerated, the tail latents (CLIP3, CLIP4,
-        # etc.) were saved to disk and the chain was truncated. Now that the
-        # re-rendered CLIP is validated, automatically restore the tail back
-        # into the chain so the Final Decode & Export node sees ALL clips.
+        # ── v1.12: 重渲染单个/多个 CLIP 后不再自动恢复尾部 + 自动合并 ──
+        # 链已由主循环从选中段连续渲染到结束，直接标记完成、正常输出。
         auto_merged = False
-        if single_clip_replace and _has_tail_latents_on_disk(owner):
-            print("[H3 Extender] auto-restoring tail latents after per-clip replace")
-            disk_tail = _load_tail_latents_from_disk(owner)
-            if disk_tail is not None:
-                tail_count = len(disk_tail)
-                restored_manifest = _restore_tail_latents(data_path, manifest_path, disk_tail)
-                if restored_manifest is not None:
-                    print(f"[H3 Extender] restored {tail_count} tail clip(s) → full chain restored")
-                    manifest = restored_manifest
-                _delete_tail_latents_from_disk(owner)
-
-                # Walk the restored tail segments to update previous_handle
-                current_m = _load_manifest_from_paths(data_path, manifest_path)
-                if current_m is not None:
-                    total_segs = len(current_m.get("segments", []))
-                    tail_start = total_segs - tail_count
-                    for _ in range(tail_start, total_segs):
-                        result = disk_join.join(
-                            samples=None,
-                            trim_frames=None,
-                            validated=True,
-                            run_mode=str(run_mode),
-                            fps=float(FPS),
-                            previous_cache=previous_handle,
-                            unique_id=f"extender_{owner}",
-                        )
-                        previous_handle = result[0]
-                        previous_proxy = result[1]
-                        statuses.append(result[4])
-
-                # Mark all clips as validated in the in-memory config
-                for cfg in clips:
-                    cfg["validated"] = True
-                    cfg["replace_mode"] = False
-
-                single_clip_replace = False
-                auto_merged = True
-                print("[H3 Extender] per-clip replace complete → tail restored, merge auto-triggered")
-        elif single_clip_replace:
-            # No tail latents on disk — the regenerated clip was the last one
-            # (or tail was already consumed). The chain is already complete.
+        if single_clip_replace:
             single_clip_replace = False
-            auto_merged = True
             for cfg in clips:
                 cfg["validated"] = True
                 cfg["replace_mode"] = False
-            print("[H3 Extender] per-clip replace complete → no tail to restore, chain already complete")
+            print("[H3 Extender] per-clip replace complete → chain rendered continuously to end (no auto-merge)")
 
         final_manifest = _load_manifest_from_paths(data_path, manifest_path)
         # Color grading is montage metadata only. Keep it attached to each cached
