@@ -305,6 +305,65 @@ def _apply_h3_block_cache(model, residual_diff_threshold=0.12, cache_device="cpu
         return model
 
 
+def _apply_cache_dit(model, model_type="Auto", warmup_steps=0, skip_interval=0, print_summary=True):
+    """Best-effort integration of ComfyUI-CacheDiT (DiT inter-step residual
+    caching; MiniMax-H3 supported, ~1.41-1.50x) into the Extender's own clip
+    sampling. If the plugin is not installed, sampling silently continues
+    without it."""
+    try:
+        import os as _os
+        import sys as _sys
+        import importlib.util as _ilu
+        import types as _types
+
+        cd_dir = None
+        try:
+            cnode_paths = folder_paths.get_folder_paths("custom_nodes")
+        except Exception:
+            cnode_paths = []
+        for base in list(cnode_paths) + [os.path.join(folder_paths.base_path, "custom_nodes")]:
+            cand = os.path.join(str(base), "ComfyUI-CacheDiT")
+            if os.path.isdir(cand):
+                cd_dir = cand
+                break
+        if cd_dir is None:
+            raise RuntimeError("ComfyUI-CacheDiT not installed")
+
+        if cd_dir not in _sys.path:
+            _sys.path.insert(0, cd_dir)
+
+        _pkg = _types.ModuleType("_cache_dit_pkg")
+        _pkg.__path__ = [cd_dir]
+        _sys.modules["_cache_dit_pkg"] = _pkg
+
+        utils_spec = _ilu.spec_from_file_location("_cache_dit_pkg.utils", os.path.join(cd_dir, "utils.py"))
+        utils_mod = _ilu.module_from_spec(utils_spec)
+        utils_spec.loader.exec_module(utils_mod)
+        _sys.modules["_cache_dit_pkg.utils"] = utils_mod
+
+        nodes_spec = _ilu.spec_from_file_location("_cache_dit_pkg.nodes", os.path.join(cd_dir, "nodes.py"))
+        nodes_mod = _ilu.module_from_spec(nodes_spec)
+        nodes_spec.loader.exec_module(nodes_mod)
+
+        optimizer_cls = nodes_mod.CacheDiT_Model_Optimizer
+        opt = optimizer_cls()
+        out = opt.optimize(
+            model,
+            enable=True,
+            model_type=str(model_type),
+            warmup_steps=int(warmup_steps),
+            skip_interval=int(skip_interval),
+            print_summary=bool(print_summary),
+        )
+        if isinstance(out, (tuple, list)):
+            out = out[0]
+        print(f"[H3 Extender] CacheDiT ACTIVE model_type={model_type}")
+        return out
+    except Exception as _e:
+        print(f"[H3 Extender] CacheDiT unavailable, running without it: {_e}")
+        return model
+
+
 CANVAS_MULTIPLE = 32
 REF_IMAGE_SHORT_EDGE = 2048
 MAX_CLIPS = 512
@@ -914,6 +973,115 @@ def _prepare_shared_refs(
         )
 
     return ref_items, ref_blocks, active_picture_slots
+
+
+# ---------------------------------------------------------------------------
+# v1.8 Ref2VA conditioning disk cache (CLIPCached-style, 2026-09).
+# Image-reference VAE latents are content-addressed by ref hash + output size
+# + ref_image_size. Re-running identical refs (new prompt / new seed) skips
+# the repeated multi-image 2K VAE encode. Audio refs are re-encoded fresh.
+# ---------------------------------------------------------------------------
+_REF2VA_CACHE_DIRNAME = "_ref2va_cache"
+
+
+def _ref2va_cache_key(vae, width, height, ref_image_size, refs):
+    sig = _refs_signature(refs)
+    vae_tag = vae.__class__.__name__ if vae is not None else "novae"
+    try:
+        vae_tag += ":" + str(getattr(vae, "model_name", "") or "")
+    except Exception:
+        pass
+    raw = f"r2v|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|{vae_tag}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:40]
+
+
+def _ref2va_cache_path(key):
+    root = _ensure_cache_root() / _REF2VA_CACHE_DIRNAME
+    root.mkdir(parents=True, exist_ok=True)
+    return root / (key + ".pt")
+
+
+def _ref2va_cache_load(key):
+    path = _ref2va_cache_path(key)
+    if not path.exists():
+        return None
+    try:
+        data = torch.load(path, map_location=comfy.model_management.intermediate_device())
+        if isinstance(data, dict) and "items" in data and "blocks" in data and "slots" in data:
+            return data
+    except Exception as _e:
+        print(f"[H3 Extender] ref2va cache load failed, will re-encode: {_e}")
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+    return None
+
+
+def _ref2va_cache_save(key, items, blocks, slots):
+    path = _ref2va_cache_path(key)
+    tmp = path.with_suffix(".tmp")
+    try:
+        torch.save({"items": items, "blocks": blocks, "slots": slots}, tmp)
+        os.replace(tmp, path)
+    except Exception as _e:
+        print(f"[H3 Extender] ref2va cache save failed (will re-encode next time): {_e}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _prepare_shared_refs_cached(
+    vae,
+    audio_vae,
+    width,
+    height,
+    ref_image_size,
+    refs,
+    ref_audio=None,
+    enable_cache=True,
+):
+    """_prepare_shared_refs + disk cache for image-reference VAE latents."""
+    if not enable_cache or not any(r is not None for r in refs or []):
+        items, blocks, slots = _prepare_shared_refs(
+            vae, audio_vae, width, height, ref_image_size, refs, ref_audio=ref_audio
+        )
+        return items, blocks, slots, False
+
+    key = _ref2va_cache_key(vae, width, height, ref_image_size, refs)
+    cached = _ref2va_cache_load(key)
+    if cached is not None:
+        items = list(cached["items"])
+        blocks = list(cached["blocks"])
+        slots = list(cached["slots"])
+        if ref_audio is not None:
+            if audio_vae is None:
+                raise ValueError(
+                    "MiniMax H3 Extender: ref_audio is connected but audio_vae is not. "
+                    "Connect the MiniMax H3 Audio VAE to audio_vae."
+                )
+            if not items:
+                raise ValueError(
+                    "MiniMax H3 Extender: MiniMax H3 Ref2VA requires an audio "
+                    "reference to be used together with at least one image reference."
+                )
+            audio_latent, ref_audio_t = _encode_ref_audio(audio_vae, ref_audio)
+            items = items + [{"type": "audio"}]
+            blocks = blocks + [
+                {"kind": "audio", "ref_audio_t": int(ref_audio_t), "audio_latent": audio_latent}
+            ]
+        print(f"[H3 Extender] ref2va image cache HIT ({len(items)} ref_items) - skipped VAE encode")
+        return items, blocks, slots, True
+
+    items, blocks, slots = _prepare_shared_refs(
+        vae, audio_vae, width, height, ref_image_size, refs, ref_audio=ref_audio
+    )
+    img_items = [it for it in items if it.get("type") == "image"]
+    img_blocks = [b for b in blocks if b.get("kind") == "image"]
+    _ref2va_cache_save(key, img_items, img_blocks, slots)
+    print(f"[H3 Extender] ref2va cache MISS - encoded & saved ({len(img_items)} image refs)")
+    return items, blocks, slots, False
 
 
 _PICTURE_TAG_RE = re.compile(r"<Picture\s+(\d+)>", re.IGNORECASE)
@@ -2165,6 +2333,20 @@ class BSAIH3FilmFactory:
                     "tooltip": "Block Cache缓存设备。cpu省显存，gpu减少传输但占显存。",
                 },
             ),
+            "ref_cache": (
+                "BOOLEAN",
+                {
+                    "default": True,
+                    "tooltip": "Ref2VA 参考图VAE编码磁盘缓存（CLIPCached同款，2026.09）：参考图内容未变时复用已编码的Image Latent，跳过每次重复编码——调提示词/换种子重跑显著提速；参考图变化自动失效。",
+                },
+            ),
+            "cache_dit": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "tooltip": "CacheDiT 步间缓存加速（ComfyUI-CacheDiT，H3 约1.4-1.5x，2026.08新增H3支持）：自动检测并应用，需已安装 ComfyUI-CacheDiT 插件（未装自动回退）。与 Block Cache 互斥，开启时优先使用 CacheDiT。",
+                },
+            ),
             "clip_select_enable": (
                 "BOOLEAN",
                 {
@@ -2358,6 +2540,8 @@ class BSAIH3FilmFactory:
         block_cache=False,
         block_cache_threshold=0.12,
         block_cache_device="cpu",
+        ref_cache=True,
+        cache_dit=False,
         clip_select_enable=False,
         clip_select="all",
         pause_enable=False,
@@ -2849,7 +3033,15 @@ class BSAIH3FilmFactory:
 
         # Build the accelerated sampling model once for the whole pass.
         sampling_model = model
-        if int(block_cache):
+        if int(cache_dit):
+            sampling_model = _apply_cache_dit(
+                model,
+                model_type="Auto",
+                warmup_steps=0,
+                skip_interval=0,
+                print_summary=True,
+            )
+        elif int(block_cache):
             sampling_model = _apply_h3_block_cache(
                 model,
                 residual_diff_threshold=float(block_cache_threshold),
@@ -2923,7 +3115,7 @@ class BSAIH3FilmFactory:
                 clips[j]["validated"] = False
 
             if ref_items is None or ref_blocks is None or active_picture_slots is None:
-                ref_items, ref_blocks, active_picture_slots = _prepare_shared_refs(
+                ref_items, ref_blocks, active_picture_slots, _ref_cache_hit = _prepare_shared_refs_cached(
                     vae,
                     audio_vae,
                     resolved_width,
@@ -2931,9 +3123,11 @@ class BSAIH3FilmFactory:
                     str(ref_image_size),
                     refs,
                     ref_audio=ref_audio,
+                    enable_cache=bool(ref_cache),
                 )
-                print(f"[H3 Extender] _prepare_shared_refs: {len(ref_items)} ref_items, "
-                      f"{len(ref_blocks)} ref_blocks, active_picture_slots={active_picture_slots}")
+                if not _ref_cache_hit:
+                    print(f"[H3 Extender] _prepare_shared_refs: {len(ref_items)} ref_items, "
+                          f"{len(ref_blocks)} ref_blocks, active_picture_slots={active_picture_slots}")
 
             frame_count = _duration_to_frames(cfg["duration"])
             # Prepend global prompt if connected from an external node

@@ -8,6 +8,33 @@ A complete AI filmmaking toolkit for [MiniMax H3](https://www.minimax.io/blog/mi
 
 ---
 
+## 2026-09-04 加速升级：SageAttention + Ref2VA 磁盘缓存 + CacheDiT 引擎
+> **v1.8 新增（全球最新 H3 加速技术落地，三管齐下）**
+
+### 1. 启动级：SageAttention（RTX 5090 Blackwell 原生加速）
+- 启动参数从 `--use-pytorch-cross-attention` 切换为 **`--use-sage-attention`**（`BSAI-...-8185.bat` 已改，备份 `.bak` 可回退）。
+- 本机已装 `sageattention` 库，ComfyUI 0.34 原生接入；H3 这类大 DiT 的 attention 是主要计算量，SageAttention 实测显著提速（参考 MiniMax H3 官方加速实验）。
+- **需重启 ComfyUI 生效**。若个别模型兼容异常，日志会提示并回退 pytorch attention，不影响出片。
+
+### 2. 节点级：Ref2VA 参考图编码磁盘缓存（CLIPCached 同款，2026.09 最新技术）
+- 新增 **`ref_cache`** 开关（默认开）。参考图（6 张 1088×1920 级别）的 VAE 编码结果按"参考图内容哈希 + 输出尺寸 + ref_image_size"磁盘缓存。
+- **调提示词 / 换种子 / 重跑同一分镜序列时，跳过每次重复的参考图 VAE 编码**，只重编音频引用；参考图变化自动失效重建。
+- 缓存目录：`ComfyUI/user/.../_ref2va_cache/`，单键 `<hash>.pt`，无需手动清理。
+
+### 3. 节点级：CacheDiT 步间缓存引擎（ComfyUI-CacheDiT，H3 约 1.41–1.50x）
+- 新增 **`cache_dit`** 开关（默认关，需已安装 `ComfyUI-CacheDiT` 插件——本机已装并装好 `cache-dit` 库）。
+- 开启后自动对采样模型应用 DiT 步间残差缓存（MiniMax-H3 预设 Auto 检测），与 Block Cache 互斥（优先 CacheDiT）。
+- 未安装插件时自动静默回退，不影响出片。
+
+### 4. 推荐加速组合（按需选择）
+| 场景 | 配置 |
+|---|---|
+| 最快 | `cache_dit=开` + `steps=4` + euler/simple + `ref_cache=开` |
+| 兼容稳妥 | `block_cache=开` + `cache_dit=关` + `ref_cache=开` |
+| 质量优先 | 关 cache，`steps=8~20` + PDD-Acc 官方 8 步 LoRA |
+
+---
+
 ## 2026-09-04 升级：CLIP 自定义选择生成 + 暂停渲染
 > **v1.7 新增（对应工作流：`example_workflows/BSAI_H3_ClipSelect_Pause_示例工作流.json`）**
 
