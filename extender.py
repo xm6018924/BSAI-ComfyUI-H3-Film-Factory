@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.63-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.64-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -1659,10 +1659,10 @@ def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
         ctl["state"] = "running"
     if not decided:
         _send_extender_progress(
-            node_id, clip_index, total, "stopped",
-            f"暂停超时无干预 → 已停止后续渲染（保留已生成的 CLIP，可点「合并输出」合成或重新运行）",
+            node_id, clip_index, total, "resumed",
+            f"暂停超时无干预 → 自动继续渲染 Clip {clip_index + 2}",
         )
-        return False
+        return True
     if state == "resume":
         _send_extender_progress(
             node_id, clip_index, total, "resumed",
