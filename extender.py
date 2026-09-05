@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.71-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.72-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -1177,8 +1177,13 @@ def _make_ref2va_conditioning(
         _te_bf16_patched = False
     # v1.25: 编码前最后清一次 CUDA 缓存——clip[0] 渲染+解码后 cudaMallocAsync 池有碎片，
     # TE 编码需要大块连续内存（causal_mask N×N），碎片会导致 allocated 很低但 free=0 的伪 OOM。
+    # v1.28: 加强为 reset_peak_memory_stats + 双轮 synchronize/empty_cache，配合启动脚本
+    # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 根治 cudaMallocAsync 碎片。
     try:
         import torch as _torch
+        _torch.cuda.synchronize()
+        _torch.cuda.empty_cache()
+        _torch.cuda.reset_peak_memory_stats()
         _torch.cuda.synchronize()
         _torch.cuda.empty_cache()
     except Exception:
