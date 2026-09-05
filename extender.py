@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.69-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.70-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -994,7 +994,10 @@ def _ref2va_cache_key(vae, width, height, ref_image_size, refs):
         vae_tag += ":" + str(getattr(vae, "model_name", "") or "")
     except Exception:
         pass
-    raw = f"r2v|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|{vae_tag}".encode("utf-8")
+    # v1.26: 缓存key必须包含REF_IMAGE_SHORT_EDGE——此前key不含该常量，
+    # 改短边从2048降到1024后key不变，仍命中旧缓存(2048短边)跳过resize，
+    # 导致1024短边修复完全不生效，clip[1] TE编码继续OOM。
+    raw = f"r2v|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:40]
 
 
