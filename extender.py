@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.68-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.69-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -365,7 +365,10 @@ def _apply_cache_dit(model, model_type="Auto", warmup_steps=0, skip_interval=0, 
 
 
 CANVAS_MULTIPLE = 32
-REF_IMAGE_SHORT_EDGE = 2048
+# v1.25: 短边从 2048 降到 1024——2048 短边的大图单图产生 ~18000 visual tokens，
+# 7 张 ref 总 token ~78000，TE 自注意力 causal_mask N×N 在 24GB 卡上直接 OOM。
+# 1024 短边 token 数减半以上，角色参考图细节仍足够识别。
+REF_IMAGE_SHORT_EDGE = 1024
 MAX_CLIPS = 512
 DEFAULT_DURATION = 10.0
 DEFAULT_MEGAPIXELS = 0.40
@@ -1166,6 +1169,14 @@ def _make_ref2va_conditioning(
             _te_bf16_patched = True
     except Exception:
         _te_bf16_patched = False
+    # v1.25: 编码前最后清一次 CUDA 缓存——clip[0] 渲染+解码后 cudaMallocAsync 池有碎片，
+    # TE 编码需要大块连续内存（causal_mask N×N），碎片会导致 allocated 很低但 free=0 的伪 OOM。
+    try:
+        import torch as _torch
+        _torch.cuda.synchronize()
+        _torch.cuda.empty_cache()
+    except Exception:
+        pass
     try:
         cond = clip.encode_from_tokens_scheduled(tokens)
     finally:
