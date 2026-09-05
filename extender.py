@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.61-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.62-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -2881,6 +2881,19 @@ class BSAIH3FilmFactory:
 
             _send_extender_progress(owner, -1, len(clips), "idle", status)
 
+            # v1.18: 单独选择生成（render_partial）时跳过了 preview 解码，
+            # decoded_mp4_blob 缺失——合并输出前对缺失段自动补解码，保证 merged 可产出。
+            if final_manifest is not None:
+                try:
+                    _segs = [dict(x) for x in final_manifest.get("segments", [])]
+                    for _si, _seg in enumerate(_segs):
+                        if _seg.get("decoded_mp4_blob") is None and int(_seg.get("frames", 0)) > 0:
+                            print(f"[H3 Extender] merge_output: 补解码 segment {_si}（单独生成未产 blob）")
+                            _decode_single_clip_preview(owner, _si, vae, audio_vae, float(FPS), _find_ffmpeg())
+                    final_manifest = _load_manifest_from_paths(data_path, manifest_path) or final_manifest
+                except Exception as _me:
+                    print(f"[H3 Extender] merge_output: blob 补解码失败 {_me}")
+
             # Produce merged output directly — merge_output always produces
             # a merged video regardless of the output_mode widget setting.
             output_ui_videos = []
@@ -3237,28 +3250,31 @@ class BSAIH3FilmFactory:
 
             # Decode this clip to MP4 so the frontend preview panel can play it
             # immediately without waiting for the Final Decode node.
+            # v1.18: 单独选择生成（render_partial）时静默——跳过 preview 解码，
+            # 只保留 latent 缓存，等待用户下一步（合并输出 / 全量渲染）。
             _preview_error = None
-            try:
-                _send_extender_progress(
-                    owner, i, len(clips), "decoding_preview",
-                    f"Decoding preview for clip {i + 1}/{len(clips)}",
-                )
-                _ff = _find_ffmpeg()
-                print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'}")
-                _decode_single_clip_preview(
-                    owner=owner,
-                    clip_index=i,
-                    vae=vae,
-                    audio_vae=audio_vae,
-                    fps=float(FPS),
-                    ffmpeg=_ff,
-                )
-            except Exception as _pv_err:
-                # Preview decode failure should never abort the main render loop.
-                _preview_error = str(_pv_err)
-                print(f"[H3 Extender] clip preview decode failed: {_pv_err}")
-                import traceback
-                traceback.print_exc()
+            if not render_partial:
+                try:
+                    _send_extender_progress(
+                        owner, i, len(clips), "decoding_preview",
+                        f"Decoding preview for clip {i + 1}/{len(clips)}",
+                    )
+                    _ff = _find_ffmpeg()
+                    print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'}")
+                    _decode_single_clip_preview(
+                        owner=owner,
+                        clip_index=i,
+                        vae=vae,
+                        audio_vae=audio_vae,
+                        fps=float(FPS),
+                        ffmpeg=_ff,
+                    )
+                except Exception as _pv_err:
+                    # Preview decode failure should never abort the main render loop.
+                    _preview_error = str(_pv_err)
+                    print(f"[H3 Extender] clip preview decode failed: {_pv_err}")
+                    import traceback
+                    traceback.print_exc()
 
             _send_extender_progress(
                 owner,
@@ -3271,7 +3287,8 @@ class BSAIH3FilmFactory:
 
             # Each CLIP is decoded to IMAGE+AUDIO as soon as it finishes and
             # emitted before the next clip starts (streaming output).
-            if int(output_image_audio):
+            # v1.18: render_partial（单独生成）静默，跳过 per-clip AV 解码。
+            if int(output_image_audio) and not render_partial:
                 try:
                     cimg, caud = _decode_clip_to_av(owner, i, vae, audio_vae, float(FPS))
                     if cimg is not None and int(cimg.shape[0]) > 0:
@@ -3467,7 +3484,7 @@ class BSAIH3FilmFactory:
         # 由用户手动点「合并输出」按钮合成。
         suppress_auto_merge = bool(render_partial or paused_break)
         if suppress_auto_merge:
-            print("[H3 Extender] 跳过自动合并输出（单独生成/暂停/重渲染），仅保留 per-clip 片段")
+            print("[H3 Extender] 单独生成/暂停：跳过合并与一切视频输出，仅保留 latent 缓存，静默等待新指令（v1.18）")
         if str(output_mode) != "none" and final_manifest is not None and not single_clip_replace:
             try:
                 out_dir = Path(folder_paths.get_output_directory()).resolve()
@@ -3482,7 +3499,7 @@ class BSAIH3FilmFactory:
             except Exception:
                 ff = None
 
-            want_per_clip = str(output_mode) in ("per_clip", "both")
+            want_per_clip = str(output_mode) in ("per_clip", "both") and not suppress_auto_merge
             want_merged = str(output_mode) in ("merged", "both") and not suppress_auto_merge
 
             if want_per_clip:
@@ -3626,54 +3643,57 @@ class BSAIH3FilmFactory:
         # paths + metadata are returned as a JSON string so the Premiere
         # Pro node can add them to its timeline.
         clip_videos_json = "[]"
-        try:
-            final_manifest = _load_manifest_from_paths(data_path, manifest_path)
-            if final_manifest and final_manifest.get("segments"):
-                segments = [dict(x) for x in final_manifest["segments"]]
-                root = _ensure_cache_root()
-                import folder_paths as _fp
-                temp_dir = Path(_fp.get_temp_directory())
-                clips_info = []
-                for si, seg in enumerate(segments):
-                    blob = seg.get("decoded_mp4_blob")
-                    if blob is None:
-                        print(f"[H3 Extender] clip_videos: segment {si} has no decoded blob, skipping")
-                        continue
-                    clip_name = clips[si].get("name", f"CLIP{si+1}") if si < len(clips) else f"CLIP{si+1}"
-                    out_name = f"h3_clip_{owner}_{si+1}_{int(time.time())}.mp4"
-                    out_path = temp_dir / out_name
-                    _copy_blob_to_file(data_path, blob, out_path)
-                    trim = int(seg.get("trim_frames", 0)) if si > 0 else 0
-                    total_frames = int(seg.get("frames", 0))
-                    out_frames = total_frames - trim
-                    clip_fps = float(final_manifest.get("fps", FPS))
-                    duration = float(out_frames) / clip_fps if clip_fps > 0 else 0.0
-                    has_audio = bool(seg.get("decoded_mp4_has_audio", False))
-                    w = int(seg.get("width", resolved_width))
-                    h = int(seg.get("height", resolved_height))
-                    clips_info.append({
-                        "clip_index": si,
-                        "clip_name": clip_name,
-                        "file_path": str(out_path),
-                        "file_name": out_name,
-                        "duration": round(duration, 3),
-                        "width": w,
-                        "height": h,
-                        "fps": clip_fps,
-                        "has_audio": has_audio,
-                        "frames": out_frames,
-                    })
-                    print(f"[H3 Extender] clip_videos: extracted clip {si+1} -> {out_path} ({out_frames} frames, {duration:.1f}s)")
-                clip_videos_json = json.dumps(clips_info, ensure_ascii=False)
-                print(f"[H3 Extender] clip_videos: {len(clips_info)} clip(s) ready for Premiere Pro")
-        except Exception as _cv_err:
-            print(f"[H3 Extender] clip_videos extraction failed: {_cv_err}")
-            import traceback
-            traceback.print_exc()
+        # v1.18: 单独生成/暂停后静默，不提取 clip_videos（等用户后续合并输出/全量渲染）。
+        if not suppress_auto_merge:
+            try:
+                final_manifest = _load_manifest_from_paths(data_path, manifest_path)
+                if final_manifest and final_manifest.get("segments"):
+                    segments = [dict(x) for x in final_manifest["segments"]]
+                    root = _ensure_cache_root()
+                    import folder_paths as _fp
+                    temp_dir = Path(_fp.get_temp_directory())
+                    clips_info = []
+                    for si, seg in enumerate(segments):
+                        blob = seg.get("decoded_mp4_blob")
+                        if blob is None:
+                            print(f"[H3 Extender] clip_videos: segment {si} has no decoded blob, skipping")
+                            continue
+                        clip_name = clips[si].get("name", f"CLIP{si+1}") if si < len(clips) else f"CLIP{si+1}"
+                        out_name = f"h3_clip_{owner}_{si+1}_{int(time.time())}.mp4"
+                        out_path = temp_dir / out_name
+                        _copy_blob_to_file(data_path, blob, out_path)
+                        trim = int(seg.get("trim_frames", 0)) if si > 0 else 0
+                        total_frames = int(seg.get("frames", 0))
+                        out_frames = total_frames - trim
+                        clip_fps = float(final_manifest.get("fps", FPS))
+                        duration = float(out_frames) / clip_fps if clip_fps > 0 else 0.0
+                        has_audio = bool(seg.get("decoded_mp4_has_audio", False))
+                        w = int(seg.get("width", resolved_width))
+                        h = int(seg.get("height", resolved_height))
+                        clips_info.append({
+                            "clip_index": si,
+                            "clip_name": clip_name,
+                            "file_path": str(out_path),
+                            "file_name": out_name,
+                            "duration": round(duration, 3),
+                            "width": w,
+                            "height": h,
+                            "fps": clip_fps,
+                            "has_audio": has_audio,
+                            "frames": out_frames,
+                        })
+                        print(f"[H3 Extender] clip_videos: extracted clip {si+1} -> {out_path} ({out_frames} frames, {duration:.1f}s)")
+                    clip_videos_json = json.dumps(clips_info, ensure_ascii=False)
+                    print(f"[H3 Extender] clip_videos: {len(clips_info)} clip(s) ready for Premiere Pro")
+            except Exception as _cv_err:
+                print(f"[H3 Extender] clip_videos extraction failed: {_cv_err}")
+                import traceback
+                traceback.print_exc()
 
         # Decode any validated (cached, not re-generated) clips so the
         # IMAGE/AUDIO outputs always carry the complete film.
-        if int(output_image_audio):
+        # v1.18: render_partial 静默，跳过 AV 汇总解码。
+        if int(output_image_audio) and not suppress_auto_merge:
             try:
                 final_m = _load_manifest_from_paths(data_path, manifest_path)
                 if final_m is not None:
