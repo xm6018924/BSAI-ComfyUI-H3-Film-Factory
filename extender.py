@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.65-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.66-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -1133,7 +1133,26 @@ def _make_ref2va_conditioning(
                 shape = tuple(data.shape) if data is not None and hasattr(data, 'shape') else None
                 print(f"[H3 Extender]   ref_item[{ri}]: type={item.get('type')}, data_shape={shape}")
     tokens = clip.tokenize(resolved_prompt, minimax_ref_items=ref_items)
-    cond = clip.encode_from_tokens_scheduled(tokens)
+    # v1.22: TE 文本编码放 CPU——TE(~15GB) 与 H3 主模型(~20GB) 同为大体量模型，
+    # 在 24GB 显存上连续渲染时无法共存（dynamic 共存互不卸载 → OOM）。
+    # CPU 编码彻底避开 GPU 显存竞争，渲染主循环全程独占 GPU。
+    _te_cpu = False
+    try:
+        _clip_patcher = getattr(clip, "patcher", None)
+        if _clip_patcher is not None and not _clip_patcher.is_dynamic():
+            _clip_patcher.load_device = torch.device("cpu")
+            _te_cpu = True
+    except Exception:
+        _te_cpu = False
+    try:
+        cond = clip.encode_from_tokens_scheduled(tokens)
+    finally:
+        if _te_cpu:
+            try:
+                import comfy.model_management as _cmm
+                _clip_patcher.load_device = _cmm.text_encoder_device()
+            except Exception:
+                pass
     if ref_blocks:
         cond = node_helpers.conditioning_set_values(
             cond, {"minimax_refs": ref_blocks}
@@ -3183,12 +3202,23 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:100]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
+            # v1.22: 增强——先标记当前 prompt 不再使用（解除 dynamic 保活），再卸载+清 CUDA 缓存。
             if i > 0:
                 try:
                     import comfy.model_management as _mm
-                    _mm.soft_empty_cache()
+                    import torch as _torch
+                    for _lm in list(_mm.current_loaded_models):
+                        try:
+                            _lm.set_in_use_by_current_prompt(False)
+                        except Exception:
+                            pass
                     _mm.unload_all_models()
-                    print(f"[H3 Extender] clip[{i}] 前已释放显存（卸载上一 CLIP 遗留模型）")
+                    _torch.cuda.synchronize()
+                    _mm.soft_empty_cache(force=True)
+                    _torch.cuda.empty_cache()
+                    _a = _torch.cuda.memory_allocated() / 1024 ** 3
+                    _r = _torch.cuda.memory_reserved() / 1024 ** 3
+                    print(f"[H3 Extender] clip[{i}] 显存已释放：allocated={_a:.2f}GB reserved={_r:.2f}GB")
                 except Exception as _me:
                     print(f"[H3 Extender] 显存清理失败(可忽略): {_me}")
             positive, latent = _make_ref2va_conditioning(
