@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.62-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.63-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -3248,12 +3248,30 @@ class BSAIH3FilmFactory:
             statuses.append(result[4])
             generated.append(i)
 
+            # Drop full sampled/conditioning references before the next clip.
+            del sampled, positive, latent
+
+            # 暂停渲染：当前CLIP生成完、下一个开始前——
+            #   pause_enable=False：手动暂停键始终可用（用户点过「暂停」才等待）
+            #   pause_enable=True ：每个CLIP生成完自动暂停等待（继续/仅当前/中止，无干预超时自动继续）
+            if i < loop_end - 1:
+                if int(pause_enable):
+                    with _render_ctl_lock:
+                        _ctl_now = _render_ctl.get(str(owner))
+                        if _ctl_now is not None:
+                            _ctl_now["state"] = "pause_requested"
+                if not _maybe_pause_between(
+                    owner, i, loop_end, len(clips), float(pause_timeout)
+                ):
+                    print(f"[H3 Extender] 渲染已暂停停止：保留已生成的 CLIP（共 {i + 1} 段），不自动合并")
+                    paused_break = True
+                    break
             # Decode this clip to MP4 so the frontend preview panel can play it
             # immediately without waiting for the Final Decode node.
-            # v1.18: 单独选择生成（render_partial）时静默——跳过 preview 解码，
+            # v1.19: 暂停停止（paused_break）或单独生成（render_partial）时静默——跳过 preview 解码，
             # 只保留 latent 缓存，等待用户下一步（合并输出 / 全量渲染）。
             _preview_error = None
-            if not render_partial:
+            if not paused_break and not render_partial:
                 try:
                     _send_extender_progress(
                         owner, i, len(clips), "decoding_preview",
@@ -3287,8 +3305,8 @@ class BSAIH3FilmFactory:
 
             # Each CLIP is decoded to IMAGE+AUDIO as soon as it finishes and
             # emitted before the next clip starts (streaming output).
-            # v1.18: render_partial（单独生成）静默，跳过 per-clip AV 解码。
-            if int(output_image_audio) and not render_partial:
+            # v1.19: 暂停停止/单独生成静默，跳过 per-clip AV 解码。
+            if not paused_break and int(output_image_audio) and not render_partial:
                 try:
                     cimg, caud = _decode_clip_to_av(owner, i, vae, audio_vae, float(FPS))
                     if cimg is not None and int(cimg.shape[0]) > 0:
@@ -3300,24 +3318,6 @@ class BSAIH3FilmFactory:
                 except Exception as _av_err:
                     print(f"[H3 Extender] per-clip AV output failed clip={i}: {_av_err}")
 
-            # Drop full sampled/conditioning references before the next clip.
-            del sampled, positive, latent
-
-            # 暂停渲染：当前CLIP生成完、下一个开始前——
-            #   pause_enable=False：手动暂停键始终可用（用户点过「暂停」才等待）
-            #   pause_enable=True ：每个CLIP生成完自动暂停等待（继续/仅当前/中止，无干预超时自动继续）
-            if i < loop_end - 1:
-                if int(pause_enable):
-                    with _render_ctl_lock:
-                        _ctl_now = _render_ctl.get(str(owner))
-                        if _ctl_now is not None:
-                            _ctl_now["state"] = "pause_requested"
-                if not _maybe_pause_between(
-                    owner, i, loop_end, len(clips), float(pause_timeout)
-                ):
-                    print(f"[H3 Extender] 渲染已暂停停止：保留已生成的 CLIP（共 {i + 1} 段），不自动合并")
-                    paused_break = True
-                    break
 
         # All clips rendered; the last handle is the active cached prefix
         # expected by Final Decode.
