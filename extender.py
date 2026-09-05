@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.70-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.71-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -1143,7 +1143,10 @@ def _make_ref2va_conditioning(
     # 的权重强制移回 CPU（partially_unload(offload, 1e32) 才是真正释放显存的路径；
     # unload_all_models 走 detach 分支不释放 dynamic 显存，此前 OOM 根因）。编码完 TE 自动让位，采样时 H3 按需重载。
     try:
+        import gc as _gc
+        _gc.collect()
         import comfy.model_management as _cmm
+        _cmm.cleanup_models_gc()
         for _lm in list(_cmm.current_loaded_models):
             try:
                 if _lm.model is not getattr(clip, "patcher", None):
@@ -1188,6 +1191,19 @@ def _make_ref2va_conditioning(
                 _tf_target.forward = _orig_tf_forward
             except Exception:
                 pass
+        # v1.27: TE编码完成后立即释放TE模型——参考MiniMaxH3 Director的vram_cleanup方案，
+        # TE是普通ModelPatcher（非dynamic），unload_all_models+cleanup_models可真正释放TE权重显存，
+        # 让H3主模型采样时独占GPU，避免TE驻留与H3加载竞争导致OOM。
+        try:
+            import gc as _gc2
+            _gc2.collect()
+            import comfy.model_management as _cmm2
+            _cmm2.cleanup_models_gc()
+            _cmm2.unload_all_models()
+            _cmm2.cleanup_models()
+            _cmm2.soft_empty_cache(force=True)
+        except Exception:
+            pass
         try:
             import torch as _torch
             _torch.cuda.synchronize()
