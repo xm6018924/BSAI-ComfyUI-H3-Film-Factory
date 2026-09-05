@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.67-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.68-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -1147,9 +1147,33 @@ def _make_ref2va_conditioning(
         _cmm.soft_empty_cache(force=True)
     except Exception:
         pass
+    # v1.24: TE 计算临时切 bf16——ComfyUI sd1_clip forward 把 dtype hardcode 为 float32，
+    # 导致 TE 编码峰值 ~22GB，在 24GB 卡（扣 reserve 后 ~22.3GB 可用）上贴边 OOM。
+    # H3 主模型本身就是 bf16，TE 嵌入用 bf16 精度匹配且显存减半，编码后恢复原 forward。
+    _te_bf16_patched = False
+    _orig_tf_forward = None
+    _tf_target = None
+    try:
+        _csm = getattr(clip, "cond_stage_model", None)
+        _tf = getattr(_csm, "transformer", None) if _csm is not None else None
+        if _tf is not None and hasattr(_tf, "forward"):
+            _orig_tf_forward = _tf.forward
+            _tf_target = _tf
+            def _bf16_tf_forward(*args, **kwargs):
+                kwargs["dtype"] = torch.bfloat16
+                return _orig_tf_forward(*args, **kwargs)
+            _tf.forward = _bf16_tf_forward
+            _te_bf16_patched = True
+    except Exception:
+        _te_bf16_patched = False
     try:
         cond = clip.encode_from_tokens_scheduled(tokens)
     finally:
+        if _te_bf16_patched and _tf_target is not None and _orig_tf_forward is not None:
+            try:
+                _tf_target.forward = _orig_tf_forward
+            except Exception:
+                pass
         try:
             import torch as _torch
             _torch.cuda.synchronize()
