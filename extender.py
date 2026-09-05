@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.73-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.74-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -1252,8 +1252,33 @@ def _sigmas(model, scheduler: str, steps: int, denoise: float):
     return sigmas[-(steps + 1):]
 
 
+def _upscale_latent_spatial(samples, factor):
+    """v1.30: H3 AV latent 空间维度放大。
+    H3 latent 为 5D (B, C, T, H, W)，空间下采样率 16（输出 768×1344 → latent 48×84）。
+    仅放大 H/W，保持 B/C/T 不变；放大后对齐到 2 的倍数（对应像素 32 网格）。
+    4D latent 走 common_upscale 兜底。
+    """
+    factor = max(1.0, float(factor))
+    if factor <= 1.0:
+        return samples
+    if samples.ndim == 4:
+        _, _, H, W = samples.shape
+        nH = max(2, (int(H * factor) // 2) * 2)
+        nW = max(2, (int(W * factor) // 2) * 2)
+        return comfy.utils.common_upscale(samples, nW, nH, "bicubic", "center")
+    # 5D (B, C, T, H, W)
+    B, C, T, H, W = samples.shape
+    nH = max(2, (int(H * factor) // 2) * 2)
+    nW = max(2, (int(W * factor) // 2) * 2)
+    bt = B * T
+    reshaped = samples.reshape(bt, C, H, W)
+    up = torch.nn.functional.interpolate(reshaped, size=(nH, nW), mode="bicubic", align_corners=False)
+    return up.reshape(B, C, T, nH, nW)
+
+
 def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, scheduler: str, steps: int, denoise: float,
-               owner_id=None, clip_index=-1):
+               owner_id=None, clip_index=-1,
+               refine_enable=False, refine_denoise=0.35, refine_steps=4, refine_upscale_factor=1.0):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -1354,6 +1379,51 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         seed=int(seed),
     )
     samples = samples.to(comfy.model_management.intermediate_device())
+
+    # v1.30: 二次采样（Refine / Second Sampling）画质修复
+    # 社区主流方案（Director 二次采样、latent upscaler、双采工作流均采用）：
+    # 主采样后用低 denoise（0.3-0.45）重新采样，提升细节、去模糊、去高速运动毛刺；
+    # 可选潜空间放大（1.0-2.0x），放大后二次采样输出更高分辨率。
+    # conditioning 保持不变（角色/场景一致性），seed+1 避免完全相同噪声。
+    if refine_enable:
+        try:
+            _r_factor = float(refine_upscale_factor)
+            if _r_factor > 1.0:
+                _old_hw = (samples.shape[-2], samples.shape[-1])
+                samples = _upscale_latent_spatial(samples, _r_factor)
+                print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
+                      f"{_old_hw[1]}x{_old_hw[0]} -> {samples.shape[-1]}x{samples.shape[-2]} (x{_r_factor})")
+
+            _r_denoise = max(0.05, min(0.70, float(refine_denoise)))
+            _r_steps = max(1, int(refine_steps))
+            print(f"[H3 Extender] Refine 二次采样: clip={clip_index} denoise={_r_denoise} steps={_r_steps}")
+
+            _r_sampler = comfy.samplers.sampler_object(str(sampler_name))
+            _r_sigmas = _sigmas(model, scheduler, _r_steps, _r_denoise)
+            _r_latent_image = comfy.sample.fix_empty_latent_channels(
+                model, samples,
+                latent.get("downscale_ratio_spacial", None),
+                latent.get("downscale_ratio_temporal", None),
+            )
+            _r_noise = comfy.sample.prepare_noise(_r_latent_image, int(seed) + 1, None)
+            _r_guider = _BasicGuider(model)
+            _r_guider.set_conds(conditioning)
+            _r_samples = _r_guider.sample(
+                _r_noise,
+                _r_latent_image,
+                _r_sampler,
+                _r_sigmas,
+                denoise_mask=None,
+                callback=None,
+                disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+                seed=int(seed) + 1,
+            )
+            samples = _r_samples.to(comfy.model_management.intermediate_device())
+            print(f"[H3 Extender] Refine 二次采样完成: clip={clip_index}")
+        except Exception as _re:
+            print(f"[H3 Extender] Refine 二次采样失败（回退主采样结果）: {_re}")
+            import traceback
+            traceback.print_exc()
 
     out = latent_out.copy()
     out.pop("downscale_ratio_spacial", None)
@@ -2468,6 +2538,35 @@ class BSAIH3FilmFactory:
                     "tooltip": "暂停后无干预自动继续渲染的等待秒数。",
                 },
             ),
+            # v1.30: 二次采样画质修复（Refine / Second Sampling）
+            "refine_enable": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "tooltip": "二次采样画质修复：主采样后用低 denoise 重新采样，提升细节、去模糊、去高速运动毛刺。社区主流方案（Director二次采样/latent upscaler/双采工作流）。开启后每CLIP渲染时间约增加50%-100%。",
+                },
+            ),
+            "refine_denoise": (
+                "FLOAT",
+                {
+                    "default": 0.35, "min": 0.05, "max": 0.70, "step": 0.01,
+                    "tooltip": "二次采样降噪强度。0.3-0.45 为画质提升黄金区间：过高(>0.5)会变脸/跑偏，过低(<0.2)画质提升微弱。仅 refine_enable 开启时生效。",
+                },
+            ),
+            "refine_steps": (
+                "INT",
+                {
+                    "default": 4, "min": 1, "max": 20, "step": 1,
+                    "tooltip": "二次采样步数。turbo 模型 4 步足够；步数越多细节越丰富但时间越长。仅 refine_enable 开启时生效。",
+                },
+            ),
+            "refine_upscale_factor": (
+                "FLOAT",
+                {
+                    "default": 1.0, "min": 1.0, "max": 2.0, "step": 0.1,
+                    "tooltip": "潜空间放大倍数（1.0=不放大）。1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加且可能出现线条/碎玻璃瑕疵。放大后自动二次采样。仅 refine_enable 开启时生效。",
+                },
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -2638,6 +2737,10 @@ class BSAIH3FilmFactory:
         clip_select="all",
         pause_enable=False,
         pause_timeout=120.0,
+        refine_enable=False,
+        refine_denoise=0.35,
+        refine_steps=4,
+        refine_upscale_factor=1.0,
         unique_id=None,
         **kwargs,
     ):
@@ -3333,6 +3436,10 @@ class BSAIH3FilmFactory:
                     float(denoise),
                     owner_id=owner,
                     clip_index=i,
+                    refine_enable=bool(refine_enable),
+                    refine_denoise=float(refine_denoise),
+                    refine_steps=int(refine_steps),
+                    refine_upscale_factor=float(refine_upscale_factor),
                 )
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
