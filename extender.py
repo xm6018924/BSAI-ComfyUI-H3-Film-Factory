@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.72-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.73-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -367,8 +367,12 @@ def _apply_cache_dit(model, model_type="Auto", warmup_steps=0, skip_interval=0, 
 CANVAS_MULTIPLE = 32
 # v1.25: 短边从 2048 降到 1024——2048 短边的大图单图产生 ~18000 visual tokens，
 # 7 张 ref 总 token ~78000，TE 自注意力 causal_mask N×N 在 24GB 卡上直接 OOM。
-# 1024 短边 token 数减半以上，角色参考图细节仍足够识别。
-REF_IMAGE_SHORT_EDGE = 1024
+# v1.29: 短边从 1024 降到 768——expandable_segments 生效后 TE 编码峰值从 23GB 降到 5.5GB，
+# 但 TE 是 ModelPatcherDynamic（VBAR 虚拟地址空间），绕过 cudaMallocAsync 池，MLP down_proj
+# 需要 1.19GB 连续块时 VBAR 无法提供导致 OOM（allocated 仅 5GB 但 free=0）。
+# 768 短边 visual token 再减 ~45%（1024: ~46000 → 768: ~25000），MLP 激活内存同比下降，
+# 角色参考图细节仍足够识别（ref 图仅用于特征提取，不影响输出分辨率 768×1344）。
+REF_IMAGE_SHORT_EDGE = 768
 MAX_CLIPS = 512
 DEFAULT_DURATION = 10.0
 DEFAULT_MEGAPIXELS = 0.40
@@ -1179,10 +1183,13 @@ def _make_ref2va_conditioning(
     # TE 编码需要大块连续内存（causal_mask N×N），碎片会导致 allocated 很低但 free=0 的伪 OOM。
     # v1.28: 加强为 reset_peak_memory_stats + 双轮 synchronize/empty_cache，配合启动脚本
     # PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 根治 cudaMallocAsync 碎片。
+    # v1.29: 加 ipc_collect() 清理 IPC 共享内存段；TE 是 ModelPatcherDynamic（VBAR），
+    # 绕过 cudaMallocAsync 池，需尽可能清理所有可能占用虚拟地址空间的残留。
     try:
         import torch as _torch
         _torch.cuda.synchronize()
         _torch.cuda.empty_cache()
+        _torch.cuda.ipc_collect()
         _torch.cuda.reset_peak_memory_stats()
         _torch.cuda.synchronize()
         _torch.cuda.empty_cache()
