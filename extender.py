@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.66-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.67-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -1133,26 +1133,28 @@ def _make_ref2va_conditioning(
                 shape = tuple(data.shape) if data is not None and hasattr(data, 'shape') else None
                 print(f"[H3 Extender]   ref_item[{ri}]: type={item.get('type')}, data_shape={shape}")
     tokens = clip.tokenize(resolved_prompt, minimax_ref_items=ref_items)
-    # v1.22: TE 文本编码放 CPU——TE(~15GB) 与 H3 主模型(~20GB) 同为大体量模型，
-    # 在 24GB 显存上连续渲染时无法共存（dynamic 共存互不卸载 → OOM）。
-    # CPU 编码彻底避开 GPU 显存竞争，渲染主循环全程独占 GPU。
-    _te_cpu = False
+    # v1.23: TE 文本编码回到 GPU 且独占显存——编码前把其他已加载模型（尤其 H3 主模型）
+    # 的权重强制移回 CPU（partially_unload(offload, 1e32) 才是真正释放显存的路径；
+    # unload_all_models 走 detach 分支不释放 dynamic 显存，此前 OOM 根因）。编码完 TE 自动让位，采样时 H3 按需重载。
     try:
-        _clip_patcher = getattr(clip, "patcher", None)
-        if _clip_patcher is not None and not _clip_patcher.is_dynamic():
-            _clip_patcher.load_device = torch.device("cpu")
-            _te_cpu = True
+        import comfy.model_management as _cmm
+        for _lm in list(_cmm.current_loaded_models):
+            try:
+                if _lm.model is not getattr(clip, "patcher", None):
+                    _lm.model.partially_unload(_lm.model.offload_device, 1e32)
+            except Exception:
+                pass
+        _cmm.soft_empty_cache(force=True)
     except Exception:
-        _te_cpu = False
+        pass
     try:
         cond = clip.encode_from_tokens_scheduled(tokens)
     finally:
-        if _te_cpu:
-            try:
-                import comfy.model_management as _cmm
-                _clip_patcher.load_device = _cmm.text_encoder_device()
-            except Exception:
-                pass
+        try:
+            import torch as _torch
+            _torch.cuda.synchronize()
+        except Exception:
+            pass
     if ref_blocks:
         cond = node_helpers.conditioning_set_values(
             cond, {"minimax_refs": ref_blocks}
@@ -3202,19 +3204,19 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:100]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
-            # v1.22: 增强——先标记当前 prompt 不再使用（解除 dynamic 保活），再卸载+清 CUDA 缓存。
+            # v1.23: unload_all_models 走 detach 分支不释放 dynamic 显存（OOM 根因），
+            # 改为 partially_unload(offload, 1e32) 强制 weights 回 CPU 真释放。
             if i > 0:
                 try:
                     import comfy.model_management as _mm
                     import torch as _torch
                     for _lm in list(_mm.current_loaded_models):
                         try:
-                            _lm.set_in_use_by_current_prompt(False)
+                            _lm.model.partially_unload(_lm.model.offload_device, 1e32)
                         except Exception:
                             pass
-                    _mm.unload_all_models()
-                    _torch.cuda.synchronize()
                     _mm.soft_empty_cache(force=True)
+                    _torch.cuda.synchronize()
                     _torch.cuda.empty_cache()
                     _a = _torch.cuda.memory_allocated() / 1024 ** 3
                     _r = _torch.cuda.memory_reserved() / 1024 ** 3
