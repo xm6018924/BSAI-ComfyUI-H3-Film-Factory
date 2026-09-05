@@ -81,7 +81,7 @@ from .motion_context_disk import (
     _has_tail_latents_on_disk,
 )
 
-BUILD = "minimax-h3-extender-v14.64-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.65-compact-prompt-bridge"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -3181,6 +3181,16 @@ class BSAIH3FilmFactory:
                 if gp:
                     effective_prompt = gp + "\n" + effective_prompt
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:100]}'")
+            # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
+            # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
+            if i > 0:
+                try:
+                    import comfy.model_management as _mm
+                    _mm.soft_empty_cache()
+                    _mm.unload_all_models()
+                    print(f"[H3 Extender] clip[{i}] 前已释放显存（卸载上一 CLIP 遗留模型）")
+                except Exception as _me:
+                    print(f"[H3 Extender] 显存清理失败(可忽略): {_me}")
             positive, latent = _make_ref2va_conditioning(
                 clip,
                 vae,
