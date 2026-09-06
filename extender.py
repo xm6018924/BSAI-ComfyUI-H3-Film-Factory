@@ -2599,6 +2599,21 @@ class BSAIH3FilmFactory:
             "asset_library": ("ASSET_LIBRARY", {"forceInput": True, "tooltip": "Connect BSAI_AssetLibraryInput to resolve @图N/@视频N/@音频N references in clip prompts."}),
         }
 
+        # v1.22: per-clip external prompt input ports (clip_prompt_1..clip_prompt_12).
+        # Real, connectable input sockets. The frontend repositions each socket to
+        # the matching CLIP card's prompt-window top-left corner via input.pos, so
+        # you can drag from an external text node straight onto that CLIP.
+        for _ci in range(1, 13):
+            optional[f"clip_prompt_{_ci}"] = (
+                "STRING",
+                {
+                    "forceInput": True,
+                    "multiline": True,
+                    "tooltip": f"External prompt override for CLIP {_ci}. If connected and non-empty, replaces CLIP {_ci}'s prompt (duration/refs/timings still come from the clip card). Leave unconnected to use the built-in clip prompt.",
+                },
+            )
+
+
         # v1.21: INPUT_TYPES keys kept as pure English for workflow compatibility.
         # Bilingual labels are applied on the frontend via extender.js widget label override.
         return {
@@ -2758,6 +2773,15 @@ class BSAIH3FilmFactory:
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
         clips = _parse_clips_json(clips_json)
         merge_output = _merge_output_from_state(clips_json)
+
+        # v1.22: per-clip external prompt overrides (clip_prompt_1..clip_prompt_12).
+        # Applied before @图N resolution so asset tags in the override are resolved too.
+        for _ci in range(1, 13):
+            _pk = f"clip_prompt_{_ci}"
+            _pv = kwargs.get(_pk)
+            if _pv and _ci - 1 < len(clips) and str(_pv).strip():
+                clips[_ci - 1]["prompt"] = str(_pv).strip()
+                print(f"[H3 Extender] CLIP {_ci} prompt overridden by external port {_pk}")
 
         # Split unified prompt_source at first [分镜N] marker:
         # text before → global_prompt, text from [分镜N] onwards → storyboard

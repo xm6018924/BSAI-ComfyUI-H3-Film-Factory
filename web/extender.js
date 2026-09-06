@@ -2901,7 +2901,125 @@ function render(node, runtime) {
         const rightPanel = document.createElement("div");
         rightPanel.style.cssText = "flex:1 1 auto;min-width:0;padding:9px;display:flex;flex-direction:column;position:relative;";
 
-        rightPanel.appendChild(makeFieldLabel("Prompt"));
+        // ── External prompt port (prompt window top-left socket) ──
+        // v1.22: per-CLIP external prompt input, stored in clip.external_prompt.
+        // When set, it overrides clip.prompt on render; builtin_prompt keeps the
+        // original text so the user can clear the override and restore it.
+        const promptHeader = document.createElement("div");
+        promptHeader.style.cssText = "display:flex;align-items:center;gap:6px;";
+        const promptLabel = makeFieldLabel("Prompt");
+        promptLabel.style.margin = "5px 0 3px";
+        const extPort = document.createElement("div");
+        extPort.className = "bsai-ext-port bsai-ext-port-anchor";
+        extPort.dataset.ci = String(index);
+        extPort.style.cssText = "width:12px;height:12px;border-radius:50%;flex-shrink:0;cursor:crosshair;box-sizing:border-box;border:2px solid #666;background:transparent;margin:5px 0 3px;transition:all .15s;";
+        if (clip.external_prompt) {
+            extPort.style.borderColor = "#3f789e";
+            extPort.style.background = "#3f789e";
+            extPort.title = "已使用外部提示词（点击管理/清除；拖拽可从反推节点拉线连接）";
+        } else {
+            extPort.title = "外部提示词端口：从反推/文本节点拖线连接到此处，或点击手动输入（渲染时覆盖内置 Prompt）";
+        }
+        extPort.addEventListener("mouseenter", () => {
+            extPort.style.boxShadow = "0 0 6px rgba(63,120,158,.8)";
+        });
+        extPort.addEventListener("mouseleave", () => {
+            extPort.style.boxShadow = "";
+        });
+        // v1.22: forward mousedown to the graph canvas so a REAL link drag
+        // starts from this socket position (the canvas socket lives at the
+        // same logical spot via input.pos set by positionClipPorts).
+        let _extDragDist = 0;
+        extPort.addEventListener("mousedown", (e) => {
+            _extDragDist = 0;
+            const sx = e.clientX, sy = e.clientY;
+            const _onMove = (ev) => {
+                _extDragDist = Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy);
+            };
+            document.addEventListener("mousemove", _onMove);
+            document.addEventListener("mouseup", () => {
+                document.removeEventListener("mousemove", _onMove);
+            }, { once: true });
+            const nodeEl2 = document.getElementById(`node-${node.id}`);
+            const canvasEl = nodeEl2?.querySelector("canvas")
+                || document.querySelector(".graph-canvas-container canvas")
+                || nodeEl2?.closest(".graph-canvas-container")?.querySelector("canvas");
+            if (canvasEl) {
+                e.preventDefault();
+                e.stopPropagation();
+                const opts = { bubbles: true, cancelable: true, composed: true, clientX: e.clientX, clientY: e.clientY, button: 0, buttons: 1 };
+                try { canvasEl.dispatchEvent(new PointerEvent("pointerdown", opts)); } catch (err) {}
+                canvasEl.dispatchEvent(new MouseEvent("mousedown", opts));
+            }
+        });
+        extPort._getDragDist = () => _extDragDist;
+        promptHeader.appendChild(promptLabel);
+        promptHeader.appendChild(extPort);
+        if (clip.external_prompt) {
+            const badge = document.createElement("span");
+            badge.textContent = "外部";
+            badge.style.cssText = "font-size:10px;color:#8cf;background:rgba(63,120,158,.18);border:1px solid #3f789e;border-radius:8px;padding:0 6px;margin:5px 0 3px;line-height:14px;";
+            promptHeader.appendChild(badge);
+        }
+        rightPanel.appendChild(promptHeader);
+
+        // External prompt editor (collapsible under the header)
+        const extRow = document.createElement("div");
+        extRow.className = "bsai-ext-row";
+        extRow.style.cssText = "display:none;margin-bottom:4px;";
+        const extTa = document.createElement("textarea");
+        extTa.placeholder = "外部提示词：渲染该 CLIP 时覆盖内置 Prompt（支持 @图N/@视频N/@音频N）";
+        extTa.value = clip.external_prompt || "";
+        extTa.style.cssText = "width:100%;height:64px;min-height:48px;box-sizing:border-box;background:rgba(10,30,50,.35);border:1px solid #3f789e;border-radius:5px;color:inherit;font-size:11px;padding:5px;resize:vertical;";
+        const extBtns = document.createElement("div");
+        extBtns.style.cssText = "display:flex;gap:6px;margin-top:4px;";
+        const applyBtn = document.createElement("button");
+        applyBtn.textContent = "应用外部提示词";
+        applyBtn.style.cssText = "flex:1;padding:3px 8px;font-size:11px;background:#2a4a6a;color:#fff;border:1px solid #3f789e;border-radius:4px;cursor:pointer;";
+        const clearBtn = document.createElement("button");
+        clearBtn.textContent = "清除外部";
+        clearBtn.style.cssText = "padding:3px 10px;font-size:11px;background:#4a2222;color:#f88;border:1px solid #633;border-radius:4px;cursor:pointer;";
+        extBtns.appendChild(applyBtn);
+        extBtns.appendChild(clearBtn);
+        extRow.appendChild(extTa);
+        extRow.appendChild(extBtns);
+        rightPanel.appendChild(extRow);
+
+        extPort.addEventListener("click", (e) => {
+            if (extPort._getDragDist && extPort._getDragDist() > 6) return; // was a link drag
+            e.preventDefault();
+            e.stopPropagation();
+            extRow.style.display = extRow.style.display === "none" ? "block" : "none";
+            if (extRow.style.display !== "none") extTa.focus();
+        });
+        applyBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            const v = extTa.value.trim();
+            if (v) {
+                if (!clip.builtin_prompt && clip.prompt) clip.builtin_prompt = clip.prompt;
+                clip.external_prompt = v;
+                clip.prompt = v;
+            } else {
+                if (clip.builtin_prompt) clip.prompt = clip.builtin_prompt;
+                delete clip.external_prompt;
+                delete clip.builtin_prompt;
+            }
+            updateHidden(node, runtime);
+            syncDomHeight(runtime);
+            render(node, runtime);
+        });
+        clearBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (clip.builtin_prompt) clip.prompt = clip.builtin_prompt;
+            delete clip.external_prompt;
+            delete clip.builtin_prompt;
+            updateHidden(node, runtime);
+            syncDomHeight(runtime);
+            render(node, runtime);
+        });
+
         const promptRow = document.createElement("div");
         promptRow.style.cssText = "display:flex;flex-direction:row;gap:3px;width:100%;";
         const prompt = document.createElement("textarea");
@@ -3672,6 +3790,34 @@ function render(node, runtime) {
     });
 
     requestAnimationFrame(() => syncDomHeight(node, runtime, false));
+    requestAnimationFrame(() => positionClipPorts(node, runtime));
+}
+
+function positionClipPorts(node, runtime) {
+    if (!node || !runtime || !runtime.cards) return;
+    const anchors = runtime.cards.querySelectorAll(".bsai-ext-port-anchor");
+    if (!anchors.length || !node.inputs) return;
+    const nodeEl = document.getElementById(`node-${node.id}`);
+    if (!nodeEl) return;
+    const nrect = nodeEl.getBoundingClientRect();
+    const logicalW = Array.isArray(node.size) ? node.size[0] : 420;
+    const zoom = nrect.width > 0 && logicalW > 0 ? nrect.width / logicalW : 1;
+    if (zoom <= 0) return;
+    anchors.forEach((a) => {
+        const ci = Number(a.dataset.ci || 0);
+        const inputIdx = node.inputs.findIndex((inp) => inp.name === `clip_prompt_${ci + 1}`);
+        if (inputIdx < 0) return;
+        const r = a.getBoundingClientRect();
+        const dx = (r.left - nrect.left) / zoom;
+        const dy = (r.top - nrect.top) / zoom;
+        const inp = node.inputs[inputIdx];
+        if (inp) {
+            inp.pos = [dx, dy];
+            if (!inp.label) inp.label = "";
+            if (!inp.localized_name) inp.localized_name = "";
+        }
+    });
+    try { node.graph?.setDirtyCanvas?.(true, true); } catch (err) {}
 }
 
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
@@ -4677,6 +4823,13 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     });
     runtime.domWidget = domWidget;
     node.__h3Extender = runtime;
+
+    // v1.22: keep per-CLIP sockets glued to their prompt-window anchors.
+    if (!runtime._portTimer) {
+        runtime._portTimer = setInterval(() => {
+            try { positionClipPorts(node, runtime); } catch (err) {}
+        }, 500);
+    }
 
     installInvalidationHooks(node, runtime);
     wrapResolutionWidgetCallbacks(node, runtime);
