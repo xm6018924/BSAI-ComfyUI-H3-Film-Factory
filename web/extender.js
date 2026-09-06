@@ -3784,73 +3784,45 @@ function positionClipPorts(node, runtime) {
     if (!node || !runtime || !runtime.cards) return;
     const anchors = runtime.cards.querySelectorAll(".bsai-ext-port-anchor");
     if (!anchors.length || !node.inputs) return;
-    const nodeEl = document.querySelector(`[data-node-id="${node.id}"]`);
-    if (!nodeEl) return;
-    const nrect = nodeEl.getBoundingClientRect();
-    if (nrect.width <= 0) return;
-    const slotEls = Array.from(nodeEl.querySelectorAll(".lg-slot--input"));
-    if (!slotEls.length) return;
-    // Match socket DOM by its data-slot-key (`<nodeId>-in-<index>`) so the
-    // mapping survives any input reordering.
-    const slotFor = (inputIdx) => {
-        const suf = `-in-${inputIdx}`;
-        for (const el of slotEls) {
-            const k = el.querySelector("[data-slot-key]")?.dataset.slotKey;
-            if (k && k.endsWith(suf)) return el;
-        }
-        return slotEls[inputIdx] || null;
-    };
-    ensureH3SlotCss(node.id);
+    // Canvas-rendered graph (classic LGraphCanvas): socket position is purely
+    // logical — input.pos is relative to node.pos, canvas maps via
+    // convertCanvasToOffset = canvasPx / scale - offset.
+    const app = window.comfyAPI?.app?.app;
+    const canvas = app?.canvas;
+    if (!canvas || !canvas.ds || !canvas.canvas) return;
+    const scale = canvas.ds.scale || 1;
+    const crect = canvas.canvas.getBoundingClientRect();
+    if (crect.width <= 0 || scale <= 0) return;
+    const ox = canvas.ds.offset[0], oy = canvas.ds.offset[1];
+    const np = node.pos;
     const placed = new Set();
     anchors.forEach((a) => {
         if (a.offsetParent === null && a.getClientRects().length === 0) return; // hidden (collapsed card)
         const ci = Number(a.dataset.ci || 0);
         const inputIdx = node.inputs.findIndex((inp) => inp.name === `clip_prompt_${ci + 1}`);
         if (inputIdx < 0) return;
-        const slot = slotFor(inputIdx);
-        if (!slot) return;
         const r = a.getBoundingClientRect();
-        const left = r.left - nrect.left + 6; // 12px dot -> socket center on dot center
-        const top = r.top - nrect.top + r.height / 2 - 10; // socket is 20px tall
-        slot.style.position = "absolute";
-        slot.style.left = left + "px";
-        slot.style.top = top + "px";
-        slot.style.zIndex = "1000";
-        slot.style.width = "16px";
-        slot.style.overflow = "visible";
-        slot.style.background = "transparent";
-        slot.style.pointerEvents = "auto";
-        placed.add(ci + 1);
-    });
-    // Unused fixed ports (clip_prompt_N with no matching CLIP card) must NOT
-    // pile up at the top of the widget area: park them far away.
-    node.inputs.forEach((inp, idx) => {
-        const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
-        if (m && !placed.has(Number(m[1]))) {
-            const slot = slotFor(idx);
-            if (slot) {
-                slot.style.position = "absolute";
-                slot.style.left = "-9999px";
-                slot.style.top = "-9999px";
-            }
+        const lx = (r.left + r.width / 2 - crect.left) / scale - ox;
+        const ly = (r.top + r.height / 2 - crect.top) / scale - oy;
+        const inp = node.inputs[inputIdx];
+        if (inp) {
+            inp.pos = [lx - np[0], ly - np[1]];
+            // blank label so only the socket dot renders, no text
+            if (!inp.label) inp.label = " ";
+            if (!inp.localized_name) inp.localized_name = " ";
+            placed.add(ci + 1);
         }
     });
-}
-
-function ensureH3SlotCss(nodeId) {
-    let st = document.getElementById("bsai-h3-slot-css");
-    if (!st) {
-        st = document.createElement("style");
-        st.id = "bsai-h3-slot-css";
-        document.head.appendChild(st);
-    }
-    const sel = `[data-node-id="${nodeId}"] .lg-slot--input`;
-    if (!st.textContent.includes(sel)) {
-        st.textContent += sel + ` { min-width:0; padding-right:0; border-radius:50%; }
-` +
-            sel + ` .text-node-component-slot-text { display:none; }
-`;
-    }
+    // Unused fixed ports (clip_prompt_N with no matching CLIP card) must NOT
+    // pile up in the widget list: park them far away.
+    node.inputs.forEach((inp) => {
+        const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
+        if (m && !placed.has(Number(m[1]))) {
+            inp.pos = [0, -9999];
+            if (!inp.label) inp.label = " ";
+            if (!inp.localized_name) inp.localized_name = " ";
+        }
+    });
 }
 
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
@@ -5109,6 +5081,7 @@ app.registerExtension({
     name: "BSAIMiniMaxH3.Extender",
 
     setup() {
+        console.log("[H3 Extender] v1.22.1-slotglue loaded");
         // Official ComfyUI terminal execution events. In particular, pressing
         // Kill/Interrupt raises execution_interrupted and bypasses onExecuted.
         api.addEventListener("execution_interrupted", () => {
