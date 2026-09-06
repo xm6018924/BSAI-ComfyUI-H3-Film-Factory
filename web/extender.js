@@ -2909,52 +2909,39 @@ function render(node, runtime) {
         promptHeader.style.cssText = "display:flex;align-items:center;gap:6px;";
         const promptLabel = makeFieldLabel("Prompt");
         promptLabel.style.margin = "5px 0 3px";
+        // v1.22 (final): the real connectable socket is the ComfyUI input slot
+        // (.lg-slot--input) which positionClipPorts() glues to this dot. The dot
+        // itself is pure visual (pointer-events:none) so the socket underneath
+        // receives the drag. The "外部" button keeps the manual-input editor.
         const extPort = document.createElement("div");
         extPort.className = "bsai-ext-port bsai-ext-port-anchor";
         extPort.dataset.ci = String(index);
-        extPort.style.cssText = "width:12px;height:12px;border-radius:50%;flex-shrink:0;cursor:crosshair;box-sizing:border-box;border:2px solid #666;background:transparent;margin:5px 0 3px;transition:all .15s;";
+        extPort.style.cssText = "width:12px;height:12px;border-radius:50%;flex-shrink:0;pointer-events:none;box-sizing:border-box;border:2px solid #666;background:transparent;margin:5px 0 3px;transition:all .15s;";
         if (clip.external_prompt) {
             extPort.style.borderColor = "#3f789e";
             extPort.style.background = "#3f789e";
-            extPort.title = "已使用外部提示词（点击管理/清除；拖拽可从反推节点拉线连接）";
+            extPort.title = "已使用外部提示词";
         } else {
-            extPort.title = "外部提示词端口：从反推/文本节点拖线连接到此处，或点击手动输入（渲染时覆盖内置 Prompt）";
+            extPort.title = "外部提示词端口：从反推/文本节点拖线连接到此处（渲染时覆盖内置 Prompt）";
         }
-        extPort.addEventListener("mouseenter", () => {
-            extPort.style.boxShadow = "0 0 6px rgba(63,120,158,.8)";
+        const extBtn = document.createElement("button");
+        extBtn.type = "button";
+        extBtn.textContent = clip.external_prompt ? "外部*" : "外部";
+        extBtn.style.cssText = "font-size:10px;line-height:14px;padding:0 6px;border-radius:8px;border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.06);color:inherit;cursor:pointer;margin:5px 0 3px;flex-shrink:0;";
+        extBtn.title = "手动设置该 CLIP 的外部提示词（渲染时覆盖内置 Prompt）；或从反推节点拖线连接卡片左上角的端口";
+        if (clip.external_prompt) {
+            extBtn.style.borderColor = "#3f789e";
+            extBtn.style.color = "#8cf";
+        }
+        extBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            extRow.style.display = extRow.style.display === "none" ? "block" : "none";
+            if (extRow.style.display !== "none") extTa.focus();
         });
-        extPort.addEventListener("mouseleave", () => {
-            extPort.style.boxShadow = "";
-        });
-        // v1.22: forward mousedown to the graph canvas so a REAL link drag
-        // starts from this socket position (the canvas socket lives at the
-        // same logical spot via input.pos set by positionClipPorts).
-        let _extDragDist = 0;
-        extPort.addEventListener("mousedown", (e) => {
-            _extDragDist = 0;
-            const sx = e.clientX, sy = e.clientY;
-            const _onMove = (ev) => {
-                _extDragDist = Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy);
-            };
-            document.addEventListener("mousemove", _onMove);
-            document.addEventListener("mouseup", () => {
-                document.removeEventListener("mousemove", _onMove);
-            }, { once: true });
-            const nodeEl2 = document.getElementById(`node-${node.id}`);
-            const canvasEl = nodeEl2?.querySelector("canvas")
-                || document.querySelector(".graph-canvas-container canvas")
-                || nodeEl2?.closest(".graph-canvas-container")?.querySelector("canvas");
-            if (canvasEl) {
-                e.preventDefault();
-                e.stopPropagation();
-                const opts = { bubbles: true, cancelable: true, composed: true, clientX: e.clientX, clientY: e.clientY, button: 0, buttons: 1 };
-                try { canvasEl.dispatchEvent(new PointerEvent("pointerdown", opts)); } catch (err) {}
-                canvasEl.dispatchEvent(new MouseEvent("mousedown", opts));
-            }
-        });
-        extPort._getDragDist = () => _extDragDist;
-        promptHeader.appendChild(promptLabel);
         promptHeader.appendChild(extPort);
+        promptHeader.appendChild(promptLabel);
+        promptHeader.appendChild(extBtn);
         if (clip.external_prompt) {
             const badge = document.createElement("span");
             badge.textContent = "外部";
@@ -3797,40 +3784,73 @@ function positionClipPorts(node, runtime) {
     if (!node || !runtime || !runtime.cards) return;
     const anchors = runtime.cards.querySelectorAll(".bsai-ext-port-anchor");
     if (!anchors.length || !node.inputs) return;
-    const nodeEl = document.getElementById(`node-${node.id}`);
+    const nodeEl = document.querySelector(`[data-node-id="${node.id}"]`);
     if (!nodeEl) return;
     const nrect = nodeEl.getBoundingClientRect();
-    const logicalW = Array.isArray(node.size) ? node.size[0] : 420;
-    const zoom = nrect.width > 0 && logicalW > 0 ? nrect.width / logicalW : 1;
-    if (zoom <= 0) return;
+    if (nrect.width <= 0) return;
+    const slotEls = Array.from(nodeEl.querySelectorAll(".lg-slot--input"));
+    if (!slotEls.length) return;
+    // Match socket DOM by its data-slot-key (`<nodeId>-in-<index>`) so the
+    // mapping survives any input reordering.
+    const slotFor = (inputIdx) => {
+        const suf = `-in-${inputIdx}`;
+        for (const el of slotEls) {
+            const k = el.querySelector("[data-slot-key]")?.dataset.slotKey;
+            if (k && k.endsWith(suf)) return el;
+        }
+        return slotEls[inputIdx] || null;
+    };
+    ensureH3SlotCss(node.id);
     const placed = new Set();
     anchors.forEach((a) => {
         if (a.offsetParent === null && a.getClientRects().length === 0) return; // hidden (collapsed card)
         const ci = Number(a.dataset.ci || 0);
         const inputIdx = node.inputs.findIndex((inp) => inp.name === `clip_prompt_${ci + 1}`);
         if (inputIdx < 0) return;
+        const slot = slotFor(inputIdx);
+        if (!slot) return;
         const r = a.getBoundingClientRect();
-        const dx = (r.left - nrect.left) / zoom;
-        const dy = (r.top - nrect.top) / zoom;
-        const inp = node.inputs[inputIdx];
-        if (inp) {
-            inp.pos = [dx, dy];
-            if (!inp.label) inp.label = "";
-            if (!inp.localized_name) inp.localized_name = "";
-            placed.add(ci + 1);
-        }
+        const left = r.left - nrect.left + 6; // 12px dot -> socket center on dot center
+        const top = r.top - nrect.top + r.height / 2 - 10; // socket is 20px tall
+        slot.style.position = "absolute";
+        slot.style.left = left + "px";
+        slot.style.top = top + "px";
+        slot.style.zIndex = "1000";
+        slot.style.width = "16px";
+        slot.style.overflow = "visible";
+        slot.style.background = "transparent";
+        slot.style.pointerEvents = "auto";
+        placed.add(ci + 1);
     });
     // Unused fixed ports (clip_prompt_N with no matching CLIP card) must NOT
-    // pile up on the node's left edge: park them far off-canvas.
-    node.inputs.forEach((inp) => {
+    // pile up at the top of the widget area: park them far away.
+    node.inputs.forEach((inp, idx) => {
         const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
         if (m && !placed.has(Number(m[1]))) {
-            inp.pos = [0, -9999];
-            if (!inp.label) inp.label = "";
-            if (!inp.localized_name) inp.localized_name = "";
+            const slot = slotFor(idx);
+            if (slot) {
+                slot.style.position = "absolute";
+                slot.style.left = "-9999px";
+                slot.style.top = "-9999px";
+            }
         }
     });
-    try { node.graph?.setDirtyCanvas?.(true, true); } catch (err) {}
+}
+
+function ensureH3SlotCss(nodeId) {
+    let st = document.getElementById("bsai-h3-slot-css");
+    if (!st) {
+        st = document.createElement("style");
+        st.id = "bsai-h3-slot-css";
+        document.head.appendChild(st);
+    }
+    const sel = `[data-node-id="${nodeId}"] .lg-slot--input`;
+    if (!st.textContent.includes(sel)) {
+        st.textContent += sel + ` { min-width:0; padding-right:0; border-radius:50%; }
+` +
+            sel + ` .text-node-component-slot-text { display:none; }
+`;
+    }
 }
 
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
