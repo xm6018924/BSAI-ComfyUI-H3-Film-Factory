@@ -3803,7 +3803,9 @@ function positionClipPorts(node, runtime) {
     const logicalW = Array.isArray(node.size) ? node.size[0] : 420;
     const zoom = nrect.width > 0 && logicalW > 0 ? nrect.width / logicalW : 1;
     if (zoom <= 0) return;
+    const placed = new Set();
     anchors.forEach((a) => {
+        if (a.offsetParent === null && a.getClientRects().length === 0) return; // hidden (collapsed card)
         const ci = Number(a.dataset.ci || 0);
         const inputIdx = node.inputs.findIndex((inp) => inp.name === `clip_prompt_${ci + 1}`);
         if (inputIdx < 0) return;
@@ -3813,6 +3815,17 @@ function positionClipPorts(node, runtime) {
         const inp = node.inputs[inputIdx];
         if (inp) {
             inp.pos = [dx, dy];
+            if (!inp.label) inp.label = "";
+            if (!inp.localized_name) inp.localized_name = "";
+            placed.add(ci + 1);
+        }
+    });
+    // Unused fixed ports (clip_prompt_N with no matching CLIP card) must NOT
+    // pile up on the node's left edge: park them far off-canvas.
+    node.inputs.forEach((inp) => {
+        const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
+        if (m && !placed.has(Number(m[1]))) {
+            inp.pos = [0, -9999];
             if (!inp.label) inp.label = "";
             if (!inp.localized_name) inp.localized_name = "";
         }
