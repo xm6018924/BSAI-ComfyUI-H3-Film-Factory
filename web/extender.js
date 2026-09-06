@@ -560,6 +560,52 @@ function getWidget(node, name) {
     return node?.widgets?.find((w) => w?.name === name);
 }
 
+// Bilingual widget labels: English name + Chinese usage description (global scope)
+const BSAI_BILINGUAL_LABELS = {
+    "run_mode": "运行模式（clip_by_clip逐帧 / full_batch全批）",
+    "width": "宽度（手动分辨率宽，自动模式下回退）",
+    "height": "高度（手动分辨率高，自动模式下回退）",
+    "ref_image_size": "参考图尺寸（match匹配 / max取最大）",
+    "steps": "采样步数",
+    "sampler_name": "采样器",
+    "scheduler": "调度器",
+    "denoise": "降噪强度（1.0=全量重绘）",
+    "context_length": "上下文长度（H3时间上下文帧数）",
+    "audio_context_length": "音频上下文长度（0=自动）",
+    "resolution_mode": "分辨率模式（auto_from_ref自动 / manual手动）",
+    "megapixels": "百万像素（自动分辨率目标总像素）",
+    "output_mode": "输出模式（none缓存/per_clip分段/merged合并/both两者）",
+    "filename_prefix": "文件名前缀",
+    "output_image_audio": "输出图像音频（每CLIP即时解码）",
+    "block_cache": "块缓存加速（F1B0残差，需T8插件）",
+    "block_cache_threshold": "块缓存阈值（越高越易命中）",
+    "block_cache_device": "块缓存设备（cpu省显存/gpu占显存）",
+    "ref_cache": "参考图缓存（Ref2VA编码，调参重跑提速）",
+    "cache_dit": "DiT步间缓存（CacheDiT加速，需插件）",
+    "clip_select_enable": "CLIP选择开关（仅渲染指定CLIP）",
+    "clip_select": "CLIP选择（all全部 / 1,3 / 2-5）",
+    "pause_enable": "暂停开关（每CLIP生成完可暂停）",
+    "pause_timeout": "暂停超时（秒，无干预自动继续）",
+    "refine_enable": "二次采样开关（画质修复去模糊）",
+    "refine_denoise": "二次采样降噪（0.3-0.45黄金区间）",
+    "refine_steps": "二次采样步数",
+    "refine_upscale_factor": "潜空间放大倍数（1.0=不放大）",
+};
+function bsaiApplyBilingualLabels(node) {
+    if (!node || !node.widgets) return;
+    let applied = 0;
+    for (const w of node.widgets) {
+        if (!w) continue;
+        const label = BSAI_BILINGUAL_LABELS[w.name];
+        if (label) {
+            w.label = w.name + "  " + label;
+            w._bsaiBilingual = true;
+            applied++;
+        }
+    }
+    if (applied > 0) console.log("[BSAI双语] 节点", node.id, "已应用", applied, "个双语标签(label模式)");
+}
+
 function effectiveManualResolution(width, height) {
     const step = 32;
     const w = Math.max(step, Math.min(MAX_RESOLUTION, Math.floor(Number(width || 0) / step) * step));
@@ -4643,6 +4689,9 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         // Force-update the node title to the new display name
         this.title = "BSAI ComfyUI H3 Film Factory";
 
+        // Apply bilingual (EN/中文) labels to all widgets
+        bsaiApplyBilingualLabels(this);
+
         // Workflow widget arrays are positional. The two v14.25 resolution
         // widgets were intentionally appended after clips_json so old values do
         // not shift. If this is an older workflow, force Manual to preserve its
@@ -5121,6 +5170,8 @@ app.registerExtension({
 
             const runtime = buildUi(this);
             removeLegacyImageRefInputs(this);
+            // Apply bilingual (EN/中文) labels to all widgets
+            bsaiApplyBilingualLabels(this);
             if (runtime) {
                 requestAnimationFrame(() => {
                     requestAnimationFrame(() => syncDomHeight(this, runtime, true));
@@ -5130,11 +5181,20 @@ app.registerExtension({
             return r;
         };
 
+        // Ultimate fallback: apply bilingual labels on every draw (idempotent)
+        const oldDrawFG = nodeType.prototype.onDrawForeground;
+        nodeType.prototype.onDrawForeground = function (ctx) {
+            if (oldDrawFG) oldDrawFG.apply(this, arguments);
+            bsaiApplyBilingualLabels(this);
+        };
+
         const oldExecuted = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (message) {
             if (oldExecuted) oldExecuted.apply(this, arguments);
             const runtime = buildUi(this);
             if (!runtime) return;
+            // Ensure bilingual labels are applied (fallback)
+            bsaiApplyBilingualLabels(this);
 
             const info = message?.h3_extender_state?.[0];
             if (!info) return;

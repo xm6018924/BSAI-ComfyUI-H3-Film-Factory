@@ -1100,6 +1100,9 @@ def _replace_output_from_preview(
     destination = output_dir / f"{_safe_name(filename_prefix)}.mp4"
     tmp = output_dir / f".{destination.stem}.{uuid.uuid4().hex[:10]}.tmp.mp4"
     try:
+        if not Path(preview_path).exists():
+            print(f"[H3 Final Decode] preview file not found, skipping autosave: {preview_path}")
+            return None
         if ffmpeg is not None and _timeline_has_color(color_timeline):
             _apply_color_timeline_to_file(
                 ffmpeg, preview_path, tmp, color_timeline,

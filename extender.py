@@ -159,11 +159,10 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
     return images, audio
 
 
-def _send_clip_av_output(node_id, clip_index, clip_count, images, audio):
-    """Lightweight per-clip readiness signal for the frontend.  The heavy
-    IMAGE/AUDIO payloads travel through the node output ports; this event only
-    tells the UI which clip just became available (each CLIP finishes -> its
-    IMAGE+AUDIO are emitted before the next clip starts)."""
+def _send_clip_av_output(node_id, clip_index, clip_count, images, audio, video_path=None, clip_name=None):
+    """Lightweight per-clip readiness signal for the frontend. Includes
+    video_path (temp MP4) so downstream nodes like BSAI Premiere Pro can
+    auto-import the clip to their timeline without waiting for the full run."""
     try:
         server = PromptServer.instance
         if server is None:
@@ -177,6 +176,8 @@ def _send_clip_av_output(node_id, clip_index, clip_count, images, audio):
             "height": int(images.shape[1]) if images is not None else 0,
             "sample_rate": int(audio["sample_rate"]) if audio is not None else 0,
             "ready": True,
+            "video_path": str(video_path) if video_path else None,
+            "clip_name": str(clip_name) if clip_name else None,
         }
         server.send_sync(
             "h3_extender_clip_av",
@@ -1257,10 +1258,23 @@ def _upscale_latent_spatial(samples, factor):
     H3 latent 为 5D (B, C, T, H, W)，空间下采样率 16（输出 768×1344 → latent 48×84）。
     仅放大 H/W，保持 B/C/T 不变；放大后对齐到 2 的倍数（对应像素 32 网格）。
     4D latent 走 common_upscale 兜底。
+    v1.21: 兼容 NestedTensor（H3 采样器可能返回 NestedTensor，无 .reshape 方法）。
     """
     factor = max(1.0, float(factor))
     if factor <= 1.0:
         return samples
+    # NestedTensor 兼容：无 .reshape 方法时尝试转为 padded tensor
+    if not hasattr(samples, "reshape"):
+        try:
+            if hasattr(samples, "to_padded_tensor"):
+                samples = samples.to_padded_tensor(0.0)
+                print(f"[H3 Extender] _upscale_latent_spatial: converted NestedTensor -> padded tensor shape={tuple(samples.shape)}")
+            else:
+                print(f"[H3 Extender] _upscale_latent_spatial: unsupported type {type(samples).__name__}, skip upscale")
+                return samples
+        except Exception as _conv_err:
+            print(f"[H3 Extender] _upscale_latent_spatial: NestedTensor convert failed ({_conv_err}), skip upscale")
+            return samples
     if samples.ndim == 4:
         _, _, H, W = samples.shape
         nH = max(2, (int(H * factor) // 2) * 2)
@@ -2585,6 +2599,8 @@ class BSAIH3FilmFactory:
             "asset_library": ("ASSET_LIBRARY", {"forceInput": True, "tooltip": "Connect BSAI_AssetLibraryInput to resolve @图N/@视频N/@音频N references in clip prompts."}),
         }
 
+        # v1.21: INPUT_TYPES keys kept as pure English for workflow compatibility.
+        # Bilingual labels are applied on the frontend via extender.js widget label override.
         return {
             "required": required,
             "optional": optional,
@@ -2703,47 +2719,42 @@ class BSAIH3FilmFactory:
 
         return clips, resolved_image_paths, resolved_audio_paths
 
-    def extend(
-        self,
-        model,
-        clip,
-        vae,
-        run_mode,
-        width,
-        height,
-        ref_image_size,
-        steps,
-        sampler_name,
-        scheduler,
-        denoise,
-        context_length,
-        audio_context_length,
-        clips_json,
-        resolution_mode="auto_from_ref",
-        megapixels=DEFAULT_MEGAPIXELS,
-        refs_json=None,
-        output_mode="none",
-        filename_prefix="H3_Extender",
-        prompt_pack=None,
-        asset_library=None,
-        prompt_source=None,
-        output_image_audio=True,
-        block_cache=False,
-        block_cache_threshold=0.12,
-        block_cache_device="cpu",
-        ref_cache=True,
-        cache_dit=False,
-        clip_select_enable=False,
-        clip_select="all",
-        pause_enable=False,
-        pause_timeout=120.0,
-        refine_enable=False,
-        refine_denoise=0.35,
-        refine_steps=4,
-        refine_upscale_factor=1.0,
-        unique_id=None,
-        **kwargs,
-    ):
+    def extend(self, model, clip, vae, **kwargs):
+        # v1.21: keys are pure English now, direct kwargs.get()
+        run_mode = kwargs.get("run_mode")
+        width = kwargs.get("width")
+        height = kwargs.get("height")
+        ref_image_size = kwargs.get("ref_image_size")
+        steps = kwargs.get("steps")
+        sampler_name = kwargs.get("sampler_name")
+        scheduler = kwargs.get("scheduler")
+        denoise = kwargs.get("denoise")
+        context_length = kwargs.get("context_length")
+        audio_context_length = kwargs.get("audio_context_length")
+        clips_json = kwargs.get("clips_json")
+        resolution_mode = kwargs.get("resolution_mode", "auto_from_ref")
+        megapixels = kwargs.get("megapixels", DEFAULT_MEGAPIXELS)
+        refs_json = kwargs.get("refs_json", None)
+        output_mode = kwargs.get("output_mode", "none")
+        filename_prefix = kwargs.get("filename_prefix", "H3_Extender")
+        prompt_pack = kwargs.get("prompt_pack", None)
+        asset_library = kwargs.get("asset_library", None)
+        prompt_source = kwargs.get("prompt_source", None)
+        output_image_audio = kwargs.get("output_image_audio", True)
+        block_cache = kwargs.get("block_cache", False)
+        block_cache_threshold = kwargs.get("block_cache_threshold", 0.12)
+        block_cache_device = kwargs.get("block_cache_device", "cpu")
+        ref_cache = kwargs.get("ref_cache", True)
+        cache_dit = kwargs.get("cache_dit", False)
+        clip_select_enable = kwargs.get("clip_select_enable", False)
+        clip_select = kwargs.get("clip_select", "all")
+        pause_enable = kwargs.get("pause_enable", False)
+        pause_timeout = kwargs.get("pause_timeout", 120.0)
+        refine_enable = kwargs.get("refine_enable", False)
+        refine_denoise = kwargs.get("refine_denoise", 0.35)
+        refine_steps = kwargs.get("refine_steps", 4)
+        refine_upscale_factor = kwargs.get("refine_upscale_factor", 1.0)
+        unique_id = kwargs.get("unique_id", None)
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
         clips = _parse_clips_json(clips_json)
         merge_output = _merge_output_from_state(clips_json)
@@ -3218,10 +3229,10 @@ class BSAIH3FilmFactory:
             manifest = _load_manifest_from_paths(data_path, manifest_path) or manifest
             segments = manifest.get("segments", [])
 
-            # 2026-09-04 v1.12: 重渲染单个/多个 CLIP 后，不再保存/截断尾部 latent、
-            # 不再自动合并 —— 改为从最早选中段(first_sel)起连续渲染到结束
-            # （自动依次生成后续 CLIP），除非用户手动暂停或手动「合并输出」。
-            # 主循环依据 validated=False 从 first_sel 起逐个重新采样覆盖旧段。
+            # 2026-09-05 v1.21: 重渲染单个/多个 CLIP 后，不再保存/截断尾部 latent、
+            # 不再自动合并 —— 仅渲染选中的 CLIP，渲染完即暂停静默等待。
+            # 用户可手动选择合并输出、继续生成余下全部 CLIP、或选择其他单个 CLIP 重渲染。
+            # 主循环依据 validated=False 仅重新采样选中段，其余段保留缓存。
             render_partial = True  # 重渲染 = 部分渲染，禁止自动合并
             if _has_tail_latents_on_disk(owner):
                 _delete_tail_latents_from_disk(owner)
@@ -3229,12 +3240,17 @@ class BSAIH3FilmFactory:
             saved_tail = None
 
             # Override validated flags: first_sel 之前的保留缓存（join），
-            # first_sel 及之后全部置为未验证 → 主循环连续重新渲染到结束。
+            # 仅选中的 clip 置为未验证 → 重新渲染，其余保留缓存不重渲染。
+            # v1.21: 单 clip 重渲染后立即停止，不连续渲染后续 clip，静默等待用户下一步操作。
             for i, cfg in enumerate(clips):
-                if i < first_sel and i < len(segments):
-                    cfg["validated"] = True
-                else:
+                if i in selected_set:
                     cfg["validated"] = False
+                else:
+                    cfg["validated"] = True
+            # 限制循环只到最后一个选中 clip，选中 clip 渲染完即停止
+            loop_end = max(selected_set) + 1
+            _sel_list = ",".join(str(s + 1) for s in sorted(selected_set))
+            print(f"[H3 Extender] single clip replace: selected_set={sorted(selected_set)} loop_end={loop_end} will re-render clip(s) {_sel_list}, then pause for user action")
 
         # v1.17: 前置 latent 链完整性检查 —— 部分选择 / 重渲染时，若磁盘 latent 链
         # 不足以支撑所选段的前置段，自动补渲染缺失段建立完整链（H3 必须依赖前置
@@ -3263,6 +3279,18 @@ class BSAIH3FilmFactory:
                         f"不足重渲染 CLIP{_need_pre + 1} 所需的 {_need_pre} 段）：自动从 "
                         f"CLIP{_from + 1} 补渲染建立完整链，随后连续生成到结束。"
                     )
+
+        # v1.21: 单 clip 重渲染时，如果前置 latent 链缺失（first_sel < 第一个选中 clip），
+        # 强制渲染前置 clip（忽略前端 render_enabled=False），建立完整 latent 链。
+        # 否则 disk_join 会把选中 clip 错放到索引0，导致预览解码和 Final Decode 失败。
+        if any_replace and selected_set:
+            _first_selected = min(selected_set)
+            if first_sel < _first_selected:
+                for _pre_i in range(first_sel, _first_selected):
+                    if _pre_i < len(clips):
+                        clips[_pre_i]["render_enabled"] = True
+                        clips[_pre_i]["validated"] = False
+                        print(f"[H3 Extender] v1.21: force render前置 clip {_pre_i + 1} (latent chain missing, first_sel={first_sel})")
 
         # Build the accelerated sampling model once for the whole pass.
         sampling_model = model
@@ -3486,7 +3514,8 @@ class BSAIH3FilmFactory:
             # v1.19: 暂停停止（paused_break）或单独生成（render_partial）时静默——跳过 preview 解码，
             # 只保留 latent 缓存，等待用户下一步（合并输出 / 全量渲染）。
             _preview_error = None
-            if not paused_break and not render_partial:
+            print(f"[H3 Extender] DEBUG clip={i} paused_break={paused_break} render_partial={render_partial} output_image_audio={output_image_audio} loop_end={loop_end}")
+            if not paused_break:
                 try:
                     _send_extender_progress(
                         owner, i, len(clips), "decoding_preview",
@@ -3520,8 +3549,9 @@ class BSAIH3FilmFactory:
 
             # Each CLIP is decoded to IMAGE+AUDIO as soon as it finishes and
             # emitted before the next clip starts (streaming output).
-            # v1.19: 暂停停止/单独生成静默，跳过 per-clip AV 解码。
-            if not paused_break and int(output_image_audio) and not render_partial:
+            # v1.21: 单 clip 重渲染也执行 per-clip AV 解码，推送 WebSocket 给 BSAI Premiere Pro。
+            print(f"[H3 Extender] DEBUG AV decode clip={i} cond={not paused_break and int(output_image_audio)}")
+            if not paused_break and int(output_image_audio):
                 try:
                     cimg, caud = _decode_clip_to_av(owner, i, vae, audio_vae, float(FPS))
                     if cimg is not None and int(cimg.shape[0]) > 0:
@@ -3529,7 +3559,31 @@ class BSAIH3FilmFactory:
                         _av_decoded.add(i)
                     if caud is not None:
                         out_audios.append(caud)
-                    _send_clip_av_output(owner, i, len(clips), cimg, caud)
+
+                    # Extract this clip's MP4 blob to a temp file and push
+                    # the path over WebSocket so BSAI Premiere Pro can
+                    # auto-import the clip immediately (per-clip streaming).
+                    _clip_video_path = None
+                    _clip_name = clips[i].get("name", f"CLIP{i+1}") if i < len(clips) else f"CLIP{i+1}"
+                    try:
+                        _m = _load_manifest_from_paths(data_path, manifest_path)
+                        if _m and _m.get("segments"):
+                            _segs = [dict(x) for x in _m["segments"]]
+                            if i < len(_segs):
+                                _blob = _segs[i].get("decoded_mp4_blob")
+                                if _blob is not None:
+                                    import folder_paths as _fp
+                                    _temp_dir = Path(_fp.get_temp_directory())
+                                    _out_name = f"h3_clip_{owner}_{i+1}_{int(time.time())}.mp4"
+                                    _out_path = _temp_dir / _out_name
+                                    _copy_blob_to_file(data_path, _blob, _out_path)
+                                    _clip_video_path = str(_out_path)
+                                    print(f"[H3 Extender] per-clip video ready: clip {i+1} -> {_out_path}")
+                    except Exception as _ve:
+                        print(f"[H3 Extender] per-clip video extract failed clip={i}: {_ve}")
+
+                    _send_clip_av_output(owner, i, len(clips), cimg, caud,
+                                          video_path=_clip_video_path, clip_name=_clip_name)
                 except Exception as _av_err:
                     print(f"[H3 Extender] per-clip AV output failed clip={i}: {_av_err}")
 
@@ -3957,7 +4011,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
-    "BSAIMiniMaxH3Extender": "BSAI ComfyUI H3 Film Factory",
+    "BSAIMiniMaxH3Extender": "BSAI H3 Extender (旧版兼容别名)",
     "BSAIH3FilmFactoryFinalDecode": "BSAI H3 Final Decode & Export",
 }
 
