@@ -3686,21 +3686,25 @@ function render(node, runtime) {
 }
 
 function positionClipPorts(node, runtime) {
-    // Reverted to the stable default 12-port layout (user request): the
-    // clip_prompt_1..12 sockets render as ordinary input slots in ComfyUI's
-    // default vertical list. No custom pos, no label blanking, no off-canvas
-    // parking, no card-anchor glue — that glue triggered a runaway node-height
-    // growth loop in non-Vue graph mode (input.pos feeds arrange()'s layout
-    // start, which fed node.size back into the DOM card position).
+    // Dynamic 12-port layout: only the ports matching the current number of
+    // CLIP cards are visible in the default input slot list; the rest are
+    // parked off-canvas so the node does not grow tall with 12 stacked rows
+    // (user: "乱套了" - node got too tall). Ports reappear as soon as more
+    // CLIP cards exist. Already-established links are untouched.
     if (!node || !node.inputs) return;
+    const need = Math.max(0, Math.min(12, (runtime.state?.clips || []).length || 0));
     node.inputs.forEach((inp) => {
         const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
         if (!m) return;
-        if (inp.pos) inp.pos = undefined;
-        if (inp.label === " ") inp.label = "clip_prompt_" + m[1];
-        if (inp.localized_name === " ") inp.localized_name = undefined;
+        const idx = Number(m[1]);
+        if (idx <= need) {
+            if (inp.pos) inp.pos = undefined;
+            if (inp.label === " ") inp.label = "clip_prompt_" + idx;
+            if (inp.localized_name === " ") inp.localized_name = undefined;
+        } else {
+            if (!inp.pos) inp.pos = [0, -9999];
+        }
     });
-}
 }
 
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
