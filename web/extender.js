@@ -3806,7 +3806,19 @@ function positionClipPorts(node, runtime) {
         const ly = (r.top + r.height / 2 - crect.top) / scale - oy;
         const inp = node.inputs[inputIdx];
         if (inp) {
-            inp.pos = [lx - np[0], ly - np[1]];
+            const nx = lx - np[0];
+            // HARD clamp: in non-Vue (legacy) graph mode ComfyUI re-runs
+            // arrange() every frame and derives the widget layout start from
+            // the lowest input-slot bound (getInputPos -> input.pos). A socket
+            // pushed below the top area grows the node by the whole UI height
+            // every frame (runaway: 4000 -> 100000+ px). Keep ports in the top
+            // safe band so layout stays stable.
+            const maxY = 220;
+            const ny = Math.min(ly - np[1], maxY);
+            const old = inp.pos;
+            if (!old || Math.abs(old[0] - nx) > 0.6 || Math.abs(old[1] - ny) > 0.6) {
+                inp.pos = [nx, ny];
+            }
             // blank label so only the socket dot renders, no text
             if (!inp.label) inp.label = " ";
             if (!inp.localized_name) inp.localized_name = " ";
@@ -3899,7 +3911,14 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         return;
     }
 
-    const y = Number(runtime.domWidget.last_y);
+    const curLegacyH = Number(node.size?.[1] || 0);
+    const yRaw = Number(runtime.domWidget.last_y);
+    // A last_y far beyond the current node height is a poisoned layout value
+    // (runaway feedback). Treat it as absent so minNodeH is computed from the
+    // real content minimum instead of amplifying the corruption.
+    const y = (Number.isFinite(yRaw) && yRaw > 0 && yRaw < Math.max(1, curLegacyH) * 1.5)
+        ? yRaw
+        : 0;
     if (!Number.isFinite(y) || y <= 0) {
         if (retry < 12) {
             requestAnimationFrame(() => syncDomHeight(node, runtime, forceMin, retry + 1));
@@ -3934,12 +3953,10 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
             )
                 ? Math.max(minNodeH, rememberedLegacyH)
                 : minNodeH;
-        } else if (
-            runtime.lastRenderMode == null &&
-            obviouslyPoisonedHeight(h, minNodeH)
-        ) {
-            // Also heal workflows that are opened directly in Legacy after an
-            // older version serialized an absurd height.
+        } else if (obviouslyPoisonedHeight(h, legacyMinH)) {
+            // Heal workflows that were opened directly in Legacy after an older
+            // version serialized an absurd height (baseline: real content
+            // minimum, not the possibly-poisoned y-derived minNodeH).
             h = minNodeH;
         } else if (forceMin && h < minNodeH) {
             h = minNodeH;
@@ -4829,6 +4846,21 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     runtime.domWidget = domWidget;
     node.__h3Extender = runtime;
 
+    // Runaway-height recovery: workflows saved while the node was mid-growth
+    // serialize an absurd size. Reset to the computed minimum so the DOM-widget
+    // container (CLIP cards) sits at the top of the node again. Without this,
+    // ComfyUI's widget layout reads the poisoned height and grows the node by
+    // ~content-height every frame until it reaches hundreds of thousands of px.
+    {
+        const poisonedMinH = calculateMinHeight(runtime);
+        const curH = Number(node.size?.[1] || 0);
+        if (obviouslyPoisonedHeight(curH, poisonedMinH)) {
+            const targetW = Math.max(NODE_MIN_WIDTH, Number(node.size?.[0] || NODE_MIN_WIDTH));
+            try { node.setSize([targetW, poisonedMinH]); } catch (e) {}
+            runtime.legacyNodeHeight = poisonedMinH;
+        }
+    }
+
     // v1.22: keep per-CLIP sockets glued to their prompt-window anchors.
     if (!runtime._portTimer) {
         runtime._portTimer = setInterval(() => {
@@ -4846,6 +4878,17 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
         // Force-update the node title to the new display name
         this.title = "BSAI ComfyUI H3 Film Factory";
+
+        // Poisoned-height recovery runs AFTER configure (workflow size has been
+        // applied). Reset an absurd serialized height to the computed minimum;
+        // widget layout then settles at the real content height.
+        const cfgMinH = calculateMinHeight(runtime);
+        const cfgCurH = Number(this.size?.[1] || 0);
+        if (obviouslyPoisonedHeight(cfgCurH, cfgMinH)) {
+            const cfgW = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
+            try { this.setSize([cfgW, cfgMinH]); } catch (e) {}
+            runtime.legacyNodeHeight = cfgMinH;
+        }
 
         // Apply bilingual (EN/中文) labels to all widgets
         bsaiApplyBilingualLabels(this);
