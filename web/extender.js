@@ -2976,15 +2976,15 @@ function render(node, runtime) {
 
 
         const promptRow = document.createElement("div");
-        promptRow.style.cssText = "display:flex;flex-direction:row;gap:3px;width:100%;";
+        promptRow.style.cssText = "display:flex;flex-direction:row;gap:3px;width:100%;flex:1 1 auto;min-height:120px;align-items:stretch;";
         const prompt = document.createElement("textarea");
         prompt.value = clip.prompt;
         clip._promptEl = prompt;
         prompt.spellcheck = false;
         prompt.style.width = "100%";
-        prompt.style.height = "120px";
+        prompt.style.height = "100%";
         prompt.style.minHeight = "80px";
-        prompt.style.maxHeight = "400px";
+        prompt.style.maxHeight = "none";
         prompt.style.flex = "1 1 auto";
         prompt.style.resize = "vertical";
         prompt.style.boxSizing = "border-box";
@@ -3053,7 +3053,7 @@ function render(node, runtime) {
         const clipOverlay = document.createElement("div");
         clipOverlay.style.cssText = [
             "position:absolute", "top:0", "left:0", "width:100%", "height:100%",
-            "min-height:120px", "max-height:400px",
+            "min-height:120px",
             "font-size:11px", "line-height:1.4",
             "font-family: inherit", "font-weight: inherit",
             "letter-spacing: normal", "word-spacing: normal",
@@ -3072,7 +3072,7 @@ function render(node, runtime) {
         // as the user types, especially in long CLIP prompts.
         prompt.style.cssText = [
             "position:absolute", "top:0", "left:0", "width:100%", "height:100%",
-            "min-height:120px", "max-height:400px",
+            "min-height:120px",
             "font-size:11px", "line-height:1.4",
             "font-family: inherit", "font-weight: inherit",
             "letter-spacing: normal", "word-spacing: normal",
