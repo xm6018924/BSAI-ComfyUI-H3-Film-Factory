@@ -3752,6 +3752,52 @@ function readUpstreamText(node, graph, input) {
     return null;
 }
 
+// Event-driven sync: wrap the upstream text widget's callback so every real
+// edit (typing, paste, clear) pushes the new value into every connected CLIP
+// card at once. ComfyUI calls widget.callback on each value change, so this
+// path is independent of polling and of any cached output values.
+function hookUpstreamWidgetCallback(node, runtime) {
+    const graph = node && node.graph;
+    if (!graph || !node.inputs || !runtime?.state) return;
+    node.inputs.forEach((inp) => {
+        const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
+        if (!m || !inp.link) return;
+        const link = graph.links && graph.links[inp.link];
+        if (!link) return;
+        const up = graph._nodes_by_id ? graph._nodes_by_id[link.origin_id] : null;
+        if (!up || !up.widgets) return;
+        for (const wd of up.widgets) {
+            if (!(typeof wd.value === "string" || wd.type === "customtext" || wd.type === "text" || /text|prompt|string|value|output/i.test(wd.name || ""))) continue;
+            if (wd.__h3Hooked) { wd.__h3HookedSync = wd.__h3HookedSync || []; if (!wd.__h3HookedSync.includes(node.id)) wd.__h3HookedSync.push(node.id); break; }
+            wd.__h3Hooked = true;
+            wd.__h3HookedSync = [node.id];
+            const orig = wd.callback;
+            wd.callback = function (value, canvas, nd, pos) {
+                if (typeof orig === "function") { try { orig.apply(this, arguments); } catch (e) {} }
+                try {
+                    const appObj = window.comfyAPI && window.comfyAPI.app && window.comfyAPI.app.app;
+                    const g = appObj && appObj.graph;
+                    if (!g) return;
+                    const newVal = value != null ? String(value) : (this && this.value != null ? String(this.value) : "");
+                    const srcId = nd ? nd.id : null;
+                    g._nodes.forEach((h3n) => {
+                        if (!h3n || h3n.type !== "BSAIH3FilmFactory" || !h3n.__h3Extender) return;
+                        (h3n.inputs || []).forEach((i2) => {
+                            const m2 = /^clip_prompt_(\d+)$/.exec(i2.name || "");
+                            if (!m2 || !i2.link) return;
+                            const l2 = g.links && g.links[i2.link];
+                            if (!l2 || l2.origin_id !== srcId) return;
+                            const cl = h3n.__h3Extender.state && h3n.__h3Extender.state.clips && h3n.__h3Extender.state.clips[Number(m2[1]) - 1];
+                            if (cl) applyExternalClipValue(cl, newVal);
+                        });
+                    });
+                } catch (e) {}
+            };
+            break;
+        }
+    });
+}
+
 // Keep each CLIP card's prompt textarea in sync with its connected external
 // clip_prompt_N input. Runs on a 500ms timer so edits on the upstream node
 // (e.g. prompt-reversal output) propagate into the card automatically. On
@@ -3761,6 +3807,7 @@ function syncExternalPrompts(node, runtime) {
     if (!node || !node.inputs || !runtime?.state) return;
     const graph = node.graph;
     if (!graph) return;
+    hookUpstreamWidgetCallback(node, runtime);
     node.inputs.forEach((inp) => {
         const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
         if (!m) return;
@@ -3795,9 +3842,17 @@ function syncExternalPrompts(node, runtime) {
 
 // Apply an external prompt value onto a CLIP card (shared by all sync paths).
 function applyExternalClipValue(clip, val) {
-    if (!clip || val == null || !String(val).trim()) return false;
+    if (!clip || val == null) return false;
     const text = String(val);
     if (clip.external_prompt === text) return false;
+    if (text === "") {
+        // upstream cleared -> clear the card to match
+        delete clip.external_prompt;
+        delete clip.builtin_prompt;
+        clip.prompt = "";
+        if (clip._promptEl && clip._promptEl.value !== "") clip._promptEl.value = "";
+        return true;
+    }
     if (!clip.builtin_prompt && clip.prompt && clip.prompt !== text) clip.builtin_prompt = clip.prompt;
     clip.external_prompt = text;
     clip.prompt = text;
