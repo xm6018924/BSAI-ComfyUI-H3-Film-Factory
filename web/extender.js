@@ -2325,11 +2325,11 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
     hdr.appendChild(refreshBtn);
     leftPanel.appendChild(hdr);
 
-    // Parse @图N/@视频N/@音频N and <Picture N> from the effective prompt
-    // (global prompt is prepended to every CLIP at runtime, so refs there
-    // are just as real as refs typed inside the CLIP itself).
-    const combined = (runtime.state?.global_prompt ? runtime.state.global_prompt + "\n" : "") + (clip.prompt || "");
-    const refs = parseAssetRefs(combined);
+    // Parse @图N/@视频N/@音频N and <Picture N> from THIS CLIP's own prompt
+    // only. Global-prompt refs are intentionally NOT shown here: each CLIP
+    // card's left panel must list just the assets its own prompt references,
+    // so cards without refs stay compact instead of mirroring every asset.
+    const refs = parseAssetRefs(clip.prompt || "");
 
     if (refs.length === 0) {
         const empty = document.createElement("div");
