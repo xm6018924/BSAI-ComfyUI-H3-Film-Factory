@@ -2916,6 +2916,7 @@ function render(node, runtime) {
         promptRow.style.cssText = "display:flex;flex-direction:row;gap:3px;width:100%;";
         const prompt = document.createElement("textarea");
         prompt.value = clip.prompt;
+        clip._promptEl = prompt;
         prompt.spellcheck = false;
         prompt.style.width = "100%";
         prompt.style.height = "120px";
@@ -3683,6 +3684,7 @@ function render(node, runtime) {
 
     requestAnimationFrame(() => syncDomHeight(node, runtime, false));
     requestAnimationFrame(() => positionClipPorts(node, runtime));
+    requestAnimationFrame(() => syncExternalPrompts(node, runtime));
 }
 
 function positionClipPorts(node, runtime) {
@@ -3703,6 +3705,64 @@ function positionClipPorts(node, runtime) {
             if (inp.localized_name === " ") inp.localized_name = undefined;
         } else {
             if (!inp.pos) inp.pos = [0, -9999];
+        }
+    });
+}
+
+// Read the text currently flowing into a connected clip_prompt_N input from
+// its upstream node (PrimitiveNode text widget, or a node output cached after
+// execution). Returns null when nothing usable is available yet.
+function readUpstreamText(node, graph, input) {
+    if (!input || !input.link) return null;
+    const link = graph && graph.links ? graph.links[input.link] : null;
+    if (!link) return null;
+    const up = graph._nodes_by_id ? graph._nodes_by_id[link.origin_id] : null;
+    if (!up) return null;
+    const out = up.outputs && up.outputs[link.origin_slot];
+    if (out) {
+        const v = out._data != null ? out._data : (out.value != null ? out.value : null);
+        if (v != null) {
+            const t = String(v);
+            if (t.trim()) return t;
+        }
+    }
+    const ws = up.widgets || [];
+    for (const wd of ws) {
+        if (typeof wd.value === "string" && wd.value.trim() && /text|prompt|string|value|output/i.test(wd.name || "")) {
+            return wd.value;
+        }
+    }
+    return null;
+}
+
+// Keep each CLIP card's prompt textarea in sync with its connected external
+// clip_prompt_N input. Runs on a 500ms timer so edits on the upstream node
+// (e.g. prompt-reversal output) propagate into the card automatically. On
+// disconnect the builtin prompt is restored.
+function syncExternalPrompts(node, runtime) {
+    if (!node || !node.inputs || !runtime?.state) return;
+    const graph = node.graph;
+    if (!graph) return;
+    node.inputs.forEach((inp) => {
+        const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
+        if (!m) return;
+        const idx = Number(m[1]) - 1;
+        const clip = runtime.state.clips && runtime.state.clips[idx];
+        if (!clip) return;
+        const val = readUpstreamText(node, graph, inp);
+        if (val != null) {
+            if (clip.external_prompt !== val) {
+                if (!clip.builtin_prompt && clip.prompt && clip.prompt !== val) clip.builtin_prompt = clip.prompt;
+                clip.external_prompt = val;
+                clip.prompt = val;
+                if (clip._promptEl && clip._promptEl.value !== val) clip._promptEl.value = val;
+            }
+        } else if (!inp.link && clip.external_prompt) {
+            // disconnected -> restore the builtin prompt
+            if (clip.builtin_prompt) clip.prompt = clip.builtin_prompt;
+            delete clip.external_prompt;
+            delete clip.builtin_prompt;
+            if (clip._promptEl && clip._promptEl.value !== clip.prompt) clip._promptEl.value = clip.prompt;
         }
     });
 }
@@ -4735,6 +4795,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     if (!runtime._portTimer) {
         runtime._portTimer = setInterval(() => {
             try { positionClipPorts(node, runtime); } catch (err) {}
+            try { syncExternalPrompts(node, runtime); } catch (err) {}
         }, 500);
     }
 
@@ -5207,6 +5268,14 @@ app.registerExtension({
             // When global_prompt input connection changes, fetch the value
             const runtime = buildUi(this);
             if (!runtime) return;
+            // NEW: per-CLIP external prompt — sync the card prompt immediately
+            // on connect/disconnect (plus the 500ms poll for upstream edits).
+            try {
+                const io = this.inputs && this.inputs[slot];
+                if (side === LiteGraph.INPUT && io && /^clip_prompt_\d+$/.test(io.name || "")) {
+                    syncExternalPrompts(this, runtime);
+                }
+            } catch (e) {}
             const gpInput = this.inputs?.find(inp => inp.name === "global_prompt");
             if (gpInput && gpInput.link != null) {
                 // A link is connected — fetch the source node's widget value
