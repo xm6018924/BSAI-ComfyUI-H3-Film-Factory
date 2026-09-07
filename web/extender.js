@@ -2673,7 +2673,10 @@ function syncGlobalPromptFromInput(node, runtime) {
                 runtime.state.global_prompt = globalText;
                 updateHidden(node, runtime);
             }
-            if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
+            // Mirror the state guard: never blank an auto-referenced /
+            // manually-entered global prompt when the storyboard has no
+            // archive section (empty globalText but non-empty source).
+            if (globalText && runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
                 runtime.globalPromptTextarea.value = globalText;
             }
             if (typeof runtime.renderGlobalAssetPanel === "function") {
