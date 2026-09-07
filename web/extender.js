@@ -3718,16 +3718,22 @@ function readUpstreamText(node, graph, input) {
     if (!link) return null;
     const up = graph._nodes_by_id ? graph._nodes_by_id[link.origin_id] : null;
     if (!up) return null;
-    const out = up.outputs && up.outputs[link.origin_slot];
-    if (out) {
-        const v = out._data != null ? out._data : (out.value != null ? out.value : null);
-        if (v != null) return String(v); // may be "" -> upstream explicitly cleared
-    }
+    // 1) Live widget values first: text-ish widgets (PrimitiveString,
+    // PrimitiveStringMultiline, etc.) update as the user types, so reading
+    // them keeps the CLIP card in lock-step with edits. Output caches would
+    // hold the stale value from graph load.
     const ws = up.widgets || [];
     for (const wd of ws) {
         if (typeof wd.value === "string" && /text|prompt|string|value|output/i.test(wd.name || "")) {
             return wd.value; // may be "" -> upstream explicitly cleared
         }
+    }
+    // 2) Execution outputs (prompt-reversal / text-generator nodes) only when
+    // the upstream has no text-ish widget to read live.
+    const out = up.outputs && up.outputs[link.origin_slot];
+    if (out) {
+        const v = out._data != null ? out._data : (out.value != null ? out.value : null);
+        if (v != null) return String(v); // may be "" -> upstream explicitly cleared
     }
     return null;
 }
