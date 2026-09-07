@@ -2646,21 +2646,15 @@ function showAssetPickerForTextarea(parentEl, clipOrState, node, runtime, textar
     parentEl.appendChild(popup);
 }
 
+function _readPromptSourceText(node) {
+    const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
+    if (!psInput || psInput.link == null) return null;
+    return readUpstreamText(node, node.graph, psInput);
+}
+
 function syncGlobalPromptFromInput(node, runtime) {
     try {
-        const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
-        if (!psInput || psInput.link == null) return;
-        const link = app.graph.links[psInput.link];
-        if (!link || link.origin_id == null) return;
-        const srcNode = app.graph.getNodeById(link.origin_id);
-        if (!srcNode) return;
-        let text = null;
-        const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
-        if (srcWidget && srcWidget.value != null) {
-            text = srcWidget.value;
-        } else {
-            text = srcNode.widgets_values?.[0];
-        }
+        const text = _readPromptSourceText(node);
         if (text != null && String(text).trim()) {
             const fullText = String(text);
             // Split at first [分镜N] marker: before → global prompt
@@ -3768,7 +3762,9 @@ function positionClipPorts(node, runtime) {
         const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
         if (!m) return;
         const idx = Number(m[1]);
-        if (idx <= need) {
+        // Show port if it's within card range OR already connected
+        const isConnected = inp.link != null;
+        if (idx <= need || isConnected) {
             if (inp.pos) inp.pos = undefined;
             if (inp.label === " ") inp.label = "clip_prompt_" + idx;
             if (inp.localized_name === " ") inp.localized_name = undefined;
@@ -3909,6 +3905,13 @@ function syncExternalPrompts(node, runtime) {
         const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
         if (!m) return;
         const idx = Number(m[1]) - 1;
+        // Auto-create CLIP cards to match connected clip_prompt_N ports
+        if (inp.link != null) {
+            while (runtime.state.clips.length <= idx) {
+                runtime.state.clips.push(newClip(runtime.state.clips.length));
+                changed = true;
+            }
+        }
         const clip = runtime.state.clips && runtime.state.clips[idx];
         if (!clip) return;
         const val = readUpstreamText(node, graph, inp);
@@ -3949,7 +3952,7 @@ function syncExternalPrompts(node, runtime) {
     // writes are not reliably visible on every render path; rebuilding the
     // card list is what makes the new text appear (same as the Sync All
     // button). Only happens when a value actually changed.
-    if (changed) { try { render(node, runtime); } catch (e) {} }
+    if (changed) { try { updateHidden(node, runtime); } catch (e) {} try { render(node, runtime); } catch (e) {} }
 }
 
 // Apply an external prompt value onto a CLIP card (shared by all sync paths).
@@ -4082,6 +4085,7 @@ function ensureGlobalSyncPoll() {
                 if (!n || n.type !== "BSAIH3FilmFactory" || !n.__h3Extender) continue;
                 try { positionClipPorts(n, n.__h3Extender); } catch (e) {}
                 try { syncExternalPrompts(n, n.__h3Extender); } catch (e) {}
+                try { syncGlobalPromptFromInput(n, n.__h3Extender); } catch (e) {}
             }
         } catch (e) {}
     }, 500);
@@ -4391,21 +4395,12 @@ const mergeOutputBtn = document.createElement("button");
         try {
             syncExternalPrompts(node, runtime);
             setTimeout(() => { try { syncFromHistory(); } catch (e) {} }, 0);
-            const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
-            if (!psInput || psInput.link == null) {
+            const text = _readPromptSourceText(node);
+            if (text == null) {
                 runtime.statusText = "未连接外部输入源 / No external source";
                 status.textContent = runtime.statusText;
                 return;
             }
-            const link = app.graph.links[psInput.link];
-            if (!link || link.origin_id == null) return;
-            const srcNode = app.graph.getNodeById(link.origin_id);
-            if (!srcNode) return;
-            let text = null;
-            const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
-            if (srcWidget && srcWidget.value != null) text = srcWidget.value;
-            else text = srcNode.widgets_values?.[0];
-            if (text == null) return;
             const newText = String(text);
             runtime._lastPromptSourceText = newText;
             const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
@@ -4923,19 +4918,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     runtime._lastPromptSourceText = null;
     runtime._psPollTimer = setInterval(() => {
         try {
-            const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
-            if (!psInput || psInput.link == null) return;
-            const link = app.graph.links[psInput.link];
-            if (!link || link.origin_id == null) return;
-            const srcNode = app.graph.getNodeById(link.origin_id);
-            if (!srcNode) return;
-            let text = null;
-            const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
-            if (srcWidget && srcWidget.value != null) {
-                text = srcWidget.value;
-            } else {
-                text = srcNode.widgets_values?.[0];
-            }
+            const text = _readPromptSourceText(node);
             if (text == null) return;
             const newText = String(text);
             if (newText === runtime._lastPromptSourceText) return;
@@ -5240,19 +5223,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
             [100, 500, 1200, 2500, 4000].forEach(delay => {
                 setTimeout(() => {
                     try {
-                        const psInput = this.inputs?.find(inp => inp.name === "prompt_source");
-                        if (!psInput || psInput.link == null) return;
-                        const link = app.graph.links[psInput.link];
-                        if (!link || link.origin_id == null) return;
-                        const srcNode = app.graph.getNodeById(link.origin_id);
-                        if (!srcNode) return;
-                        let text = null;
-                        const srcWidget = srcNode.widgets?.find(w => w.name === "text" || w.type === "text_multiline" || w.type === "customtext");
-                        if (srcWidget && srcWidget.value != null) {
-                            text = srcWidget.value;
-                        } else {
-                            text = srcNode.widgets_values?.[0];
-                        }
+                        const text = _readPromptSourceText(this);
                         if (text == null) return;
                         const newText = String(text);
                         if (newText === runtime._lastPromptSourceText) return;
@@ -5620,7 +5591,7 @@ app.registerExtension({
         const oldConnChange = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function (side, slot, connected, link_info, ioSlot) {
             if (oldConnChange) oldConnChange.apply(this, arguments);
-            // When global_prompt input connection changes, fetch the value
+            // When prompt_source input connection changes, fetch the value
             const runtime = buildUi(this);
             if (!runtime) return;
             // NEW: per-CLIP external prompt — sync the card prompt immediately
@@ -5628,27 +5599,19 @@ app.registerExtension({
             try {
                 const io = this.inputs && this.inputs[slot];
                 if (side === LiteGraph.INPUT && io && /^clip_prompt_\d+$/.test(io.name || "")) {
+                    // Auto-create CLIP cards to match the connected port index
+                    const idx = Number(/^clip_prompt_(\d+)$/.exec(io.name)[1]) - 1;
+                    while (runtime.state.clips.length <= idx) {
+                        runtime.state.clips.push(newClip(runtime.state.clips.length));
+                    }
                     syncExternalPrompts(this, runtime);
                 }
             } catch (e) {}
-            const gpInput = this.inputs?.find(inp => inp.name === "global_prompt");
-            if (gpInput && gpInput.link != null) {
-                // A link is connected — fetch the source node's widget value
-                try {
-                    const link = app.graph.links[gpInput.link];
-                    if (link && link.origin_id != null) {
-                        const srcNode = app.graph.getNodeById(link.origin_id);
-                        if (srcNode && srcNode.widgets_values) {
-                            // Text multiline nodes store text in widgets_values[0]
-                            const text = srcNode.widgets_values[0];
-                            if (text != null && String(text).trim()) {
-                                runtime.state.global_prompt = String(text);
-                                updateHidden(this, runtime);
-                                render(this, runtime);
-                            }
-                        }
-                    }
-                } catch (e) { /* ignore */ }
+            // Sync from prompt_source (was incorrectly looking for "global_prompt")
+            const psInput = this.inputs?.find(inp => inp.name === "prompt_source");
+            if (psInput) {
+                runtime._lastPromptSourceText = null; // Force re-sync on next poll
+                syncGlobalPromptFromInput(this, runtime);
             }
         };
 
