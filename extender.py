@@ -580,6 +580,30 @@ def _refs_signature(refs):
     return hashlib.sha256(raw).hexdigest()
 
 
+def _asset_paths_signature(paths):
+    """Content-ish signature of the @图N-resolved asset image paths.
+
+    When asset-library images replace the internal refs, the refs are plain
+    tensors: _normalize_ref_descriptor() drops them to None, so _refs_signature()
+    is constant and the ref2va cache key never changes even after the user swaps
+    the asset library for entirely different images. That made the cached VAE
+    latents of the *old* assets keep being re-used. Path + mtime + size changes
+    whenever the library is edited or same-named files are replaced, so the key
+    invalidates and the new assets are encoded.
+    """
+    if not paths:
+        return ""
+    parts = []
+    for p in paths[:MAX_IMAGE_REFS]:
+        try:
+            st = Path(p).stat()
+            parts.append(f"{p}|{int(st.st_mtime)}|{int(st.st_size)}")
+        except Exception:
+            parts.append(str(p))
+    raw = "|".join(parts).encode("utf-8", errors="replace")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
 def _reference_count(refs):
     return sum(1 for ref in refs or [] if ref is not None)
 
@@ -992,7 +1016,7 @@ def _prepare_shared_refs(
 _REF2VA_CACHE_DIRNAME = "_ref2va_cache"
 
 
-def _ref2va_cache_key(vae, width, height, ref_image_size, refs):
+def _ref2va_cache_key(vae, width, height, ref_image_size, refs, cache_bias=""):
     sig = _refs_signature(refs)
     vae_tag = vae.__class__.__name__ if vae is not None else "novae"
     try:
@@ -1002,7 +1026,9 @@ def _ref2va_cache_key(vae, width, height, ref_image_size, refs):
     # v1.26: 缓存key必须包含REF_IMAGE_SHORT_EDGE——此前key不含该常量，
     # 改短边从2048降到1024后key不变，仍命中旧缓存(2048短边)跳过resize，
     # 导致1024短边修复完全不生效，clip[1] TE编码继续OOM。
-    raw = f"r2v|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}".encode("utf-8")
+    # v1.27: cache_bias 携带 @图N 资产图片路径签名——资产库更换后 key 变化，
+    # 否则张量 refs 的 _refs_signature 恒定，ref2va 命中旧资产 VAE 编码。
+    raw = f"r2v|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}|b{cache_bias}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:40]
 
 
@@ -1052,6 +1078,7 @@ def _prepare_shared_refs_cached(
     refs,
     ref_audio=None,
     enable_cache=True,
+    cache_bias="",
 ):
     """_prepare_shared_refs + disk cache for image-reference VAE latents."""
     if not enable_cache or not any(r is not None for r in refs or []):
@@ -1060,7 +1087,7 @@ def _prepare_shared_refs_cached(
         )
         return items, blocks, slots, False
 
-    key = _ref2va_cache_key(vae, width, height, ref_image_size, refs)
+    key = _ref2va_cache_key(vae, width, height, ref_image_size, refs, cache_bias=cache_bias)
     cached = _ref2va_cache_load(key)
     if cached is not None:
         items = list(cached["items"])
@@ -3410,6 +3437,7 @@ class BSAIH3FilmFactory:
                     refs,
                     ref_audio=ref_audio,
                     enable_cache=bool(ref_cache),
+                    cache_bias=_asset_paths_signature(resolved_img_paths),
                 )
                 if not _ref_cache_hit:
                     print(f"[H3 Extender] _prepare_shared_refs: {len(ref_items)} ref_items, "
