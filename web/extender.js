@@ -1,4 +1,4 @@
-import { app } from "../../scripts/app.js";
+﻿import { app } from "../../scripts/app.js";
 // extender.js v2.4.0 — cache-bust marker (2026-08-22-clean-break-from-original)
 import { api } from "../../scripts/api.js";
 
@@ -3712,7 +3712,7 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
-window.__h3ExtenderVersion = "3f31cac-widget-first";
+window.__h3ExtenderVersion = "3c792b9-render-rebuild";
 
 // --- diagnostic counters (removable) ---
 function h3diag(sync) {
