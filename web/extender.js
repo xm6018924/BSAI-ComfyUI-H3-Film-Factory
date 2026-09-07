@@ -2225,6 +2225,36 @@ async function h3FetchAssets() {
     }
 }
 
+// Remove a previously auto-appended "[资产库自动引用]" block whose tag
+// line is malformed (e.g. old "0 1 2..." residue from a buggy version).
+// Valid blocks carrying real @图N tags are kept untouched.
+function sanitizeGlobalPrompt(gp) {
+    if (!gp) return gp;
+    const lines = String(gp).split("\n");
+    const out = [];
+    for (let i = 0; i < lines.length; i++) {
+        const lt = lines[i].trim();
+        if (/^\[资产库自动引用\]/.test(lt)) {
+            let tags = lt.replace(/^\[资产库自动引用\]/, "").trim();
+            let j = i;
+            if (!tags) {
+                j = i + 1;
+                while (j < lines.length && !lines[j].trim()) j++;
+                tags = j < lines.length ? lines[j].trim() : "";
+            }
+            if (/^@(图|视频|音频)\d/.test(tags)) {
+                out.push(lines[i]);
+            } else {
+                if (tags && j > i) i = j;
+            }
+        } else {
+            out.push(lines[i]);
+        }
+    }
+    const cleaned = out.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    return cleaned === gp ? gp : cleaned;
+}
+
 // Auto-append asset-library references to the global prompt when it
 // carries no reference tags at all, so connected assets are actually
 // used by every CLIP. Returns true when the global prompt changed.
@@ -2233,12 +2263,12 @@ function autoRefAssetsToGlobal(runtime) {
     const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
     const images = assetList.images || [];
     if (!images.length) return false;
-    const gp = runtime.state.global_prompt || "";
+    let gp = sanitizeGlobalPrompt(runtime.state.global_prompt || "");
     if (/@图|@视频|@音频|<Picture|@Picture/i.test(gp)) return false;
     const tags = images.map((item, i) => "@图" + (item && item.index ? item.index : (i + 1))).join(" ");
     const suffix = "\n\n[资产库自动引用]\n" + tags;
     const newGp = (gp + suffix).trim();
-    if (newGp === gp) return false;
+    if (newGp === runtime.state.global_prompt) return false;
     runtime.state.global_prompt = newGp;
     if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== newGp) {
         runtime.globalPromptTextarea.value = newGp;
@@ -4736,10 +4766,15 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                 const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
                 const sbMatch = fullText.match(sbMarkerRe);
                 const globalText = sbMatch ? fullText.slice(0, sbMatch.index).trim() : fullText.trim();
-                gpTextarea.value = globalText;
-                state.global_prompt = globalText;
-                updateHidden(node, runtime);
-                renderGlobalAssetPanel();
+                // Preserve a manually-entered / auto-referenced global prompt when
+                // the source carries no archive section but is not empty.
+                const keepGlobal = !globalText && fullText.trim().length > 0;
+                if (!keepGlobal) {
+                    gpTextarea.value = globalText;
+                    state.global_prompt = globalText;
+                    updateHidden(node, runtime);
+                    renderGlobalAssetPanel();
+                }
             }
             if (typeof origGpWidgetChanged === "function") origGpWidgetChanged.call(this, v);
         };
@@ -5179,6 +5214,12 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                 );
             }
             render(this, runtime);
+            // Remove malformed auto-ref residue saved by an older version.
+            const sanGp = sanitizeGlobalPrompt(runtime.state.global_prompt || "");
+            if (sanGp !== runtime.state.global_prompt) {
+                runtime.state.global_prompt = sanGp;
+                try { updateHidden(this, runtime); } catch (e) {}
+            }
             // Restore global prompt textarea value (render doesn't update it)
             // 恢复全局提示词textarea值（render不更新它）
             if (runtime.globalPromptTextarea) {
