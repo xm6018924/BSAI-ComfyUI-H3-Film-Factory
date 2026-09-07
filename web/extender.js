@@ -3767,6 +3767,103 @@ function syncExternalPrompts(node, runtime) {
     });
 }
 
+// Apply an external prompt value onto a CLIP card (shared by all sync paths).
+function applyExternalClipValue(clip, val) {
+    if (!clip || val == null || !String(val).trim()) return false;
+    const text = String(val);
+    if (clip.external_prompt === text) return false;
+    if (!clip.builtin_prompt && clip.prompt && clip.prompt !== text) clip.builtin_prompt = clip.prompt;
+    clip.external_prompt = text;
+    clip.prompt = text;
+    if (clip._promptEl && clip._promptEl.value !== text) clip._promptEl.value = text;
+    return true;
+}
+
+// After a node executes, ComfyUI fires "executed" on the frontend API with the
+// node's output. Prompt-reversal / text nodes (e.g. Muye 提示词反推及扩写) only
+// produce their text at execution time, so this is the reliable path to sync
+// their result into the connected CLIP card prompt.
+function hookExecutedSync() {
+    const apiObj = window.comfyAPI?.api?.api;
+    if (!apiObj || window.__h3ExecSyncHooked) return;
+    window.__h3ExecSyncHooked = true;
+    apiObj.addEventListener("executed", (ev) => {
+        try {
+            const d = ev.detail;
+            if (!d || d.node == null || d.output == null) return;
+            const appObj = window.comfyAPI?.app?.app;
+            const graph = appObj && appObj.graph;
+            if (!graph) return;
+            const nodeId = Number(d.node);
+            const nodes = graph._nodes || [];
+            for (const n of nodes) {
+                if (!n || n.type !== "BSAIH3FilmFactory" || !n.__h3Extender) continue;
+                const rt = n.__h3Extender;
+                (n.inputs || []).forEach((inp) => {
+                    const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
+                    if (!m || !inp.link) return;
+                    const link = graph.links && graph.links[inp.link];
+                    if (!link || link.origin_id !== nodeId) return;
+                    const clip = rt.state && rt.state.clips && rt.state.clips[Number(m[1]) - 1];
+                    if (!clip) return;
+                    const raw = d.output && d.output[0];
+                    let val = null;
+                    if (Array.isArray(raw)) { if (raw.length) val = raw[0]; }
+                    else if (raw != null) val = raw;
+                    if (val != null) applyExternalClipValue(clip, val);
+                });
+            }
+        } catch (e) {}
+    });
+}
+
+// Execution-type sources (prompt reversal, text generators, custom nodes)
+// produce their text only server-side. After a run completes, pull the latest
+// history (standard /history API) and write the upstream outputs into the
+// connected CLIP cards. This is what makes "点刷新 / Sync All" and "每次反推
+// 执行完自动同步" work.
+async function syncFromHistory() {
+    try {
+        const res = await fetch("/history?max_items=2");
+        if (!res.ok) return;
+        const hist = await res.json();
+        const appObj = window.comfyAPI?.app?.app;
+        const graph = appObj && appObj.graph;
+        if (!graph || !hist) return;
+        const h3Nodes = (graph._nodes || []).filter((n) => n && n.type === "BSAIH3FilmFactory" && n.__h3Extender);
+        if (!h3Nodes.length) return;
+        // map origin node id+slot -> clip (node idx)
+        const targets = [];
+        for (const n of h3Nodes) {
+            (n.inputs || []).forEach((inp) => {
+                const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
+                if (!m || !inp.link) return;
+                const link = graph.links && graph.links[inp.link];
+                if (!link) return;
+                targets.push({ originId: Number(link.origin_id), slot: Number(link.origin_slot), node: n, clipIdx: Number(m[1]) - 1 });
+            });
+        }
+        if (!targets.length) return;
+        for (const entry of Object.values(hist)) {
+            const outputs = entry && entry.outputs;
+            if (!outputs) continue;
+            let any = false;
+            for (const t of targets) {
+                const out = outputs[t.originId];
+                if (!out || !out.outputs) continue;
+                const raw = out.outputs[t.slot];
+                let val = null;
+                if (Array.isArray(raw)) { if (raw.length) val = raw[0]; }
+                else if (raw != null) val = raw;
+                if (val == null) continue;
+                const clip = t.node.__h3Extender.state && t.node.__h3Extender.state.clips && t.node.__h3Extender.state.clips[t.clipIdx];
+                if (clip && applyExternalClipValue(clip, val)) any = true;
+            }
+            if (any) break;
+        }
+    } catch (e) {}
+}
+
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
     if (!node || !runtime?.domWidget || runtime.syncingDomHeight) return;
 
@@ -4069,6 +4166,8 @@ const mergeOutputBtn = document.createElement("button");
     syncAllClipsBtn.addEventListener("click", (e) => {
         e.preventDefault();
         try {
+            syncExternalPrompts(node, runtime);
+            setTimeout(() => { try { syncFromHistory(); } catch (e) {} }, 0);
             const psInput = node.inputs?.find(inp => inp.name === "prompt_source");
             if (!psInput || psInput.link == null) {
                 runtime.statusText = "未连接外部输入源 / No external source";
@@ -5064,11 +5163,13 @@ app.registerExtension({
         api.addEventListener("execution_error", () => {
             clearTransientRenderingState("Execution stopped by error");
         });
+        hookExecutedSync();
         // Defensive cleanup: a successful prompt should never leave a stale
         // rendering highlight even if another frontend/backend change prevents
         // the expected node UI callback from arriving.
         api.addEventListener("execution_success", () => {
             clearTransientRenderingState();
+            setTimeout(() => { try { syncFromHistory(); } catch (e) {} }, 400);
         });
 
         api.addEventListener(PROMPT_PACK_EVENT, ({ detail }) => {
