@@ -5438,6 +5438,7 @@ app.registerExtension({
             setWidgetValue(this, "resolution_mode", "auto_from_ref");
 
             const runtime = buildUi(this);
+            ensureGlobalSyncPoll();
             removeLegacyImageRefInputs(this);
             // Apply bilingual (EN/中文) labels to all widgets
             bsaiApplyBilingualLabels(this);
