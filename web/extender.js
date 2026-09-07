@@ -2235,28 +2235,11 @@ function sanitizeGlobalPrompt(gp) {
     for (let i = 0; i < lines.length; i++) {
         const lt = lines[i].trim();
         if (/^\[资产库自动引用\]/.test(lt)) {
-            let tags = lt.replace(/^\[资产库自动引用\]/, "").trim();
-            let j = i;
-            if (!tags) {
-                j = i + 1;
-                while (j < lines.length && !lines[j].trim()) j++;
-                tags = j < lines.length ? lines[j].trim() : "";
-            }
-            // Keep only well-formed @图N/@视频N/@音频N tokens; drop junk digits.
-            const validTags = tags.split(/\s+/).filter(t => /^@(图|视频|音频)\d+/.test(t)).join(" ");
-            if (validTags) {
-                if (j > i) {
-                    // cross-line valid block: keep header + cleaned tag line
-                    out.push(lines[i]);
-                    out.push(validTags);
-                    i = j;
-                } else {
-                    // same-line block: rebuild the single line
-                    out.push("[资产库自动引用] " + validTags);
-                }
-            } else {
-                // malformed block (no valid tags): drop header and tag line
-                if (j > i) i = j;
+            // drop header; also drop an immediately-following tag/junk line
+            let j = i + 1;
+            while (j < lines.length && !lines[j].trim()) j++;
+            if (j < lines.length && (/^@(图|视频|音频)\d/.test(lines[j].trim()) || /^[\d\s]+$/.test(lines[j].trim()))) {
+                i = j;
             }
         } else {
             out.push(lines[i]);
@@ -2266,53 +2249,24 @@ function sanitizeGlobalPrompt(gp) {
     return cleaned === gp ? gp : cleaned;
 }
 
-// Auto-append asset-library references to the global prompt when it
-// carries no reference tags at all, so connected assets are actually
-// used by every CLIP. An existing auto-appended block is refreshed to
-// the current asset list. Returns true when the global prompt changed.
+// Reference rendering is driven by user-written @图N/@视频N/@音频N/<Picture N>
+// tags only. Never inject an auto-reference block into the global prompt:
+// per user request, an empty prompt must stay empty. This helper only strips
+// legacy "[资产库自动引用]" blocks saved by older versions.
 function autoRefAssetsToGlobal(runtime) {
     if (!runtime || !runtime.state) return false;
-    const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
-    const images = assetList.images || [];
-    if (!images.length) return false;
-    let gp = sanitizeGlobalPrompt(runtime.state.global_prompt || "");
-    const tags = images.map((item, i) => "@图" + (item && item.index ? item.index : (i + 1))).join(" ");
-    // Plugin-managed auto-ref block already present -> refresh its tags so a
-    // stale/residual block (e.g. sanitized "@图1" leftover) picks up new assets.
-    const autoBlockRe = /\[资产库自动引用\][^\n]*(\n@(?:图|视频|音频)\d[^\n]*)?/;
-    if (autoBlockRe.test(gp)) {
-        const refreshed = gp.replace(autoBlockRe, "[资产库自动引用]\n" + tags).replace(/\n{3,}/g, "\n\n").trim();
-        if (refreshed === runtime.state.global_prompt) return false;
-        runtime.state.global_prompt = refreshed;
-        if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== refreshed) {
-            runtime.globalPromptTextarea.value = refreshed;
-        }
-        // Persist into clips_json widget so saving the workflow keeps the refs.
-        try {
-            if (runtime.jsonWidget && typeof runtime.jsonWidget.value === "string") {
-                const st = JSON.parse(runtime.jsonWidget.value);
-                if (st && st.global_prompt !== refreshed) {
-                    st.global_prompt = refreshed;
-                    runtime.jsonWidget.value = JSON.stringify(st);
-                }
-            }
-        } catch (e) { /* ignore */ }
-        return true;
+    const gp = sanitizeGlobalPrompt(runtime.state.global_prompt || "");
+    if (gp === runtime.state.global_prompt) return false;
+    runtime.state.global_prompt = gp;
+    if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== gp) {
+        runtime.globalPromptTextarea.value = gp;
     }
-    if (/@图|@视频|@音频|<Picture|@Picture/i.test(gp)) return false;
-    const suffix = "\n\n[资产库自动引用]\n" + tags;
-    const newGp = (gp + suffix).trim();
-    if (newGp === runtime.state.global_prompt) return false;
-    runtime.state.global_prompt = newGp;
-    if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== newGp) {
-        runtime.globalPromptTextarea.value = newGp;
-    }
-    // Persist into clips_json widget so saving the workflow keeps the refs.
+    // Persist into clips_json widget so the cleaned prompt is saved too.
     try {
         if (runtime.jsonWidget && typeof runtime.jsonWidget.value === "string") {
             const st = JSON.parse(runtime.jsonWidget.value);
-            if (st && st.global_prompt !== newGp) {
-                st.global_prompt = newGp;
+            if (st && st.global_prompt !== gp) {
+                st.global_prompt = gp;
                 runtime.jsonWidget.value = JSON.stringify(st);
             }
         }
