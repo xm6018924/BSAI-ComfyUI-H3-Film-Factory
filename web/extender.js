@@ -3721,15 +3721,12 @@ function readUpstreamText(node, graph, input) {
     const out = up.outputs && up.outputs[link.origin_slot];
     if (out) {
         const v = out._data != null ? out._data : (out.value != null ? out.value : null);
-        if (v != null) {
-            const t = String(v);
-            if (t.trim()) return t;
-        }
+        if (v != null) return String(v); // may be "" -> upstream explicitly cleared
     }
     const ws = up.widgets || [];
     for (const wd of ws) {
-        if (typeof wd.value === "string" && wd.value.trim() && /text|prompt|string|value|output/i.test(wd.name || "")) {
-            return wd.value;
+        if (typeof wd.value === "string" && /text|prompt|string|value|output/i.test(wd.name || "")) {
+            return wd.value; // may be "" -> upstream explicitly cleared
         }
     }
     return null;
@@ -3750,8 +3747,16 @@ function syncExternalPrompts(node, runtime) {
         const clip = runtime.state.clips && runtime.state.clips[idx];
         if (!clip) return;
         const val = readUpstreamText(node, graph, inp);
-        if (val != null) {
-            if (clip.external_prompt !== val) {
+        if (val !== null) {
+            if (val === "") {
+                // upstream text deleted -> clear the card to match
+                if (clip.external_prompt != null || clip.prompt) {
+                    delete clip.external_prompt;
+                    delete clip.builtin_prompt;
+                    clip.prompt = "";
+                    if (clip._promptEl && clip._promptEl.value !== "") clip._promptEl.value = "";
+                }
+            } else if (clip.external_prompt !== val) {
                 if (!clip.builtin_prompt && clip.prompt && clip.prompt !== val) clip.builtin_prompt = clip.prompt;
                 clip.external_prompt = val;
                 clip.prompt = val;
