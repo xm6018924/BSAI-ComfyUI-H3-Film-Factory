@@ -2228,6 +2228,19 @@ async function h3FetchAssets() {
 // Remove a previously auto-appended "[资产库自动引用]" block whose tag
 // line is malformed (e.g. old "0 1 2..." residue from a buggy version).
 // Valid blocks carrying real @图N tags are kept untouched.
+// Auto-grow any textarea so its height always fits the full content
+// (removes the need for internal scrollbars; the card/node can then be
+// stretched tall enough to show every line). If the textarea lives inside
+// a .bsai-gp-editor-wrap (global prompt overlay container), the wrapper
+// height is kept in sync so the node reports the full content height.
+function autoResizeTextarea(ta) {
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = ta.scrollHeight + "px";
+    const wrap = ta.closest(".bsai-gp-editor-wrap");
+    if (wrap) wrap.style.height = ta.scrollHeight + "px";
+}
+
 function sanitizeGlobalPrompt(gp) {
     if (!gp) return gp;
     const lines = String(gp).split("\n");
@@ -2260,6 +2273,7 @@ function autoRefAssetsToGlobal(runtime) {
     runtime.state.global_prompt = gp;
     if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== gp) {
         runtime.globalPromptTextarea.value = gp;
+        autoResizeTextarea(runtime.globalPromptTextarea);
     }
     // Persist into clips_json widget so the cleaned prompt is saved too.
     try {
@@ -2670,6 +2684,7 @@ function syncGlobalPromptFromInput(node, runtime) {
             // archive section (empty globalText but non-empty source).
             if (globalText && runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
                 runtime.globalPromptTextarea.value = globalText;
+                autoResizeTextarea(runtime.globalPromptTextarea);
             }
             if (typeof runtime.renderGlobalAssetPanel === "function") {
                 runtime.renderGlobalAssetPanel();
@@ -3777,7 +3792,7 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
-window.__h3ExtenderVersion = "globalfix-autoref";
+window.__h3ExtenderVersion = "gp-autoresize";
 
 // --- diagnostic counters (removable) ---
 function h3diag(sync) {
@@ -4410,7 +4425,10 @@ const mergeOutputBtn = document.createElement("button");
             const keepGlobal = !globalText && newText.trim().length > 0;
             if (globalText !== undefined && !keepGlobal) {
                 runtime.state.global_prompt = globalText;
-                if (runtime.globalPromptTextarea) runtime.globalPromptTextarea.value = globalText;
+                if (runtime.globalPromptTextarea) {
+                    runtime.globalPromptTextarea.value = globalText;
+                    autoResizeTextarea(runtime.globalPromptTextarea);
+                }
             }
             if (storyboardText) {
                 const segments = parseStoryboard(storyboardText);
@@ -4587,7 +4605,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
 
     // Left panel: global-prompt asset references (same as per-clip left panel)
     const gpLeftPanel = document.createElement("div");
-    gpLeftPanel.style.cssText = "width:140px;min-width:140px;flex-shrink:0;border-right:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.15);padding:6px;display:flex;flex-direction:column;overflow-y:auto;max-height:400px;align-self:stretch;";
+    gpLeftPanel.style.cssText = "width:140px;min-width:140px;flex-shrink:0;border-right:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.15);padding:6px;display:flex;flex-direction:column;overflow-y:auto;max-height:none;align-self:stretch;";
 
     const gpLabel = document.createElement("div");
     gpLabel.textContent = "全局提示词";
@@ -4596,9 +4614,11 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     gpTextarea.value = state.global_prompt || "";
     gpTextarea.spellcheck = false;
     gpTextarea.placeholder = "全局提示词 (Global Prompt) — 将添加到每个CLIP提示词前\n连接外部输入源后自动同步内容";
-    gpTextarea.style.cssText = "flex:1 1 auto;min-height:180px;max-height:400px;resize:vertical;font-size:11px;background:rgba(0,0,0,.27);border:1px solid rgba(255,255,255,.15);color:inherit;border-radius:5px;padding:4px 6px;box-sizing:border-box;align-self:stretch;";
+    gpTextarea.style.cssText = "flex:1 1 auto;min-height:180px;max-height:none;height:auto;resize:vertical;overflow-y:hidden;font-size:11px;background:rgba(0,0,0,.27);border:1px solid rgba(255,255,255,.15);color:inherit;border-radius:5px;padding:4px 6px;box-sizing:border-box;align-self:stretch;";
+    autoResizeTextarea(gpTextarea);
     gpTextarea.addEventListener("input", () => {
         state.global_prompt = gpTextarea.value;
+        autoResizeTextarea(gpTextarea);
         updateHidden(node, runtime);
         renderGlobalOverlay();
         renderAssetPanel(gpLeftPanel, gpPseudoClip, node, runtime, gpTextarea);
@@ -4661,8 +4681,9 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
             gpTextarea.style.zIndex = "";
             gpTextarea.style.width = "";
             gpTextarea.style.height = "";
-            gpTextarea.style.maxHeight = "400px";
+            gpTextarea.style.maxHeight = "none";
             gpTextarea.style.resize = "vertical";
+            autoResizeTextarea(gpTextarea);
             gpExpandBtn.textContent = "⤢";
             gpExpandBtn.style.zIndex = "";
             gpExpandBtn.style.position = "";
@@ -4706,13 +4727,15 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     gpTextarea.style.top = "0";
     gpTextarea.style.left = "0";
     gpTextarea.style.width = "100%";
-    gpTextarea.style.height = "100%";
+    gpTextarea.style.height = "auto";
     gpTextarea.style.zIndex = "2";
     gpTextarea.style.resize = "none";
     gpTextarea.style.outline = "none";
     const gpEditorWrap = document.createElement("div");
-    gpEditorWrap.style.cssText = "position:relative;flex:1 1 auto;min-height:180px;max-height:400px;align-self:stretch;";
+    gpEditorWrap.className = "bsai-gp-editor-wrap";
+    gpEditorWrap.style.cssText = "position:relative;flex:1 1 auto;min-height:180px;max-height:none;height:auto;align-self:stretch;";
     gpEditorWrap.append(gpOverlay, gpTextarea);
+    autoResizeTextarea(gpTextarea);
     gpTextarea.addEventListener("scroll", () => {
         gpOverlay.scrollTop = gpTextarea.scrollTop;
         gpOverlay.scrollLeft = gpTextarea.scrollLeft;
@@ -4941,6 +4964,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                 runtime.state.global_prompt = globalText;
                 if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
                     runtime.globalPromptTextarea.value = globalText;
+                    autoResizeTextarea(runtime.globalPromptTextarea);
                 }
                 changed = true;
             }
@@ -5211,6 +5235,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
             // 恢复全局提示词textarea值（render不更新它）
             if (runtime.globalPromptTextarea) {
                 runtime.globalPromptTextarea.value = runtime.state.global_prompt || "";
+                autoResizeTextarea(runtime.globalPromptTextarea);
             }
             if (typeof runtime.renderGlobalAssetPanel === "function") {
                 runtime.renderGlobalAssetPanel();
@@ -5234,7 +5259,10 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                         const storyboardText = sbMatch ? newText.slice(sbMatch.index).trim() : "";
                         if (globalText) {
                             runtime.state.global_prompt = globalText;
-                            if (runtime.globalPromptTextarea) runtime.globalPromptTextarea.value = globalText;
+                            if (runtime.globalPromptTextarea) {
+                                runtime.globalPromptTextarea.value = globalText;
+                                autoResizeTextarea(runtime.globalPromptTextarea);
+                            }
                             if (typeof runtime.renderGlobalAssetPanel === "function") runtime.renderGlobalAssetPanel();
                         }
                         if (storyboardText) {
@@ -5535,7 +5563,10 @@ app.registerExtension({
                         const cleaned = cleanStaleAssetRefs(runtime.state.global_prompt, assetList);
                         if (cleaned !== runtime.state.global_prompt) {
                             runtime.state.global_prompt = cleaned;
-                            if (runtime.globalPromptTextarea) runtime.globalPromptTextarea.value = cleaned;
+                            if (runtime.globalPromptTextarea) {
+                                runtime.globalPromptTextarea.value = cleaned;
+                                autoResizeTextarea(runtime.globalPromptTextarea);
+                            }
                             changed = true;
                         }
                     }
