@@ -1,4 +1,4 @@
-/**
+﻿/**
  * BSAI Asset Library - Upload-Based Frontend Extension
  *
  * Three panels: Images (图片), Videos (视频), Audio (音频)
@@ -22,6 +22,23 @@ if (!document.getElementById(STYLE_ID)) {
 }
 .bsai-sec {
     border:1px solid #333; border-radius:5px; overflow:hidden;
+    display:flex; flex-direction:column; min-height:80px;
+}
+.bsai-splitter {
+    height:12px; cursor:row-resize; background:#1e1e1e;
+    border-top:1px solid #333; border-bottom:1px solid #333;
+    position:relative; flex-shrink:0; display:flex;
+    align-items:center; justify-content:center;
+}
+.bsai-splitter::after {
+    content:""; width:80px; height:5px; background:#555;
+    border-radius:3px; transition:background 0.15s;
+}
+.bsai-splitter:hover, .bsai-splitter.active {
+    background:#252525; border-top-color:#3f789e; border-bottom-color:#3f789e;
+}
+.bsai-splitter:hover::after, .bsai-splitter.active::after {
+    background:#3f789e;
 }
 .bsai-sec-hdr {
     padding:5px 10px; background:#262626; color:#8cf; font-size:12px;
@@ -52,7 +69,7 @@ if (!document.getElementById(STYLE_ID)) {
 .bsai-btn-rm:hover { background:#633; }
 .bsai-grid {
     display:flex; flex-wrap:wrap; gap:6px; padding:6px;
-    max-height:280px; overflow-y:auto; background:#111;
+    flex:1 1 0; min-height:0; max-height:none; overflow-y:auto; background:#111;
 }
 .bsai-grid:empty::after {
     content:"No assets / 无资产"; color:#555; font-size:11px;
@@ -126,7 +143,7 @@ var SECTIONS = [
 ];
 
 app.registerExtension({
-    name: "BSAI.AssetLibrary",
+    name: "BSAI.AssetLibrary.H3",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name !== "BSAI_AssetLibraryInput") return;
         var orig = nodeType.prototype.onNodeCreated;
@@ -139,7 +156,20 @@ app.registerExtension({
 });
 
 function setupGallery(node) {
-    if (node._bsaiGal) return;
+    if (node._bsaiGal && node.__bsaiUiHasSplitter) return;
+    // Drop a stale old-version gallery widget (built without splitters)
+    // so the current splitter UI is always the one that renders.
+    var oldDw = null;
+    if (node.widgets) {
+        for (var wi = 0; wi < node.widgets.length; wi++) {
+            if (node.widgets[wi].type === "bsai_gallery") { oldDw = node.widgets[wi]; break; }
+        }
+    }
+    if (oldDw) {
+        try { if (oldDw.element) oldDw.element.remove(); } catch (_) {}
+        var idx = node.widgets.indexOf(oldDw);
+        if (idx >= 0) node.widgets.splice(idx, 1);
+    }
     node._bsaiGal = true;
 
     // Hide the three string widgets
@@ -157,8 +187,18 @@ function setupGallery(node) {
     var container = document.createElement("div");
     container.className = "bsai-gal";
 
-    SECTIONS.forEach(function (sec) {
-        container.appendChild(createSection(sec, node));
+    var secEls = [];
+    SECTIONS.forEach(function (sec, idx) {
+        var secEl = createSection(sec, node);
+        secEl.style.height = "180px";
+        secEls.push(secEl);
+        container.appendChild(secEl);
+        if (idx < SECTIONS.length - 1) {
+            var sp = document.createElement("div");
+            sp.className = "bsai-splitter";
+            container.appendChild(sp);
+            setupSplitter(sp, secEl, secEls);
+        }
     });
 
     if (typeof node.addDOMWidget === "function") {
@@ -173,6 +213,8 @@ function setupGallery(node) {
     } else {
         console.warn("[BSAI] addDOMWidget not available, gallery UI will not be visible");
     }
+
+    node.__bsaiUiHasSplitter = true;
 
     // Load existing files from widget values (for workflow reload)
     setTimeout(function () { loadExistingFiles(node, container); }, 100);
@@ -226,6 +268,39 @@ function createSection(sec, node) {
     el.appendChild(tb);
     el.appendChild(grid);
     return el;
+}
+
+function setupSplitter(splitter, topSec, allSecs) {
+    splitter.addEventListener("mousedown", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var next = splitter.nextElementSibling;
+        while (next && !next.classList.contains("bsai-sec")) next = next.nextElementSibling;
+        var startY = e.clientY;
+        var startTopH = topSec.offsetHeight;
+        var startBotH = next ? next.offsetHeight : 0;
+        splitter.classList.add("active");
+        document.body.style.cursor = "row-resize";
+        document.body.style.userSelect = "none";
+        function onMove(ev) {
+            var dy = ev.clientY - startY;
+            var newTop = Math.max(80, startTopH + dy);
+            topSec.style.height = newTop + "px";
+            if (next) {
+                var newBot = Math.max(80, startBotH - dy);
+                next.style.height = newBot + "px";
+            }
+        }
+        function onUp() {
+            document.removeEventListener("mousemove", onMove);
+            document.removeEventListener("mouseup", onUp);
+            splitter.classList.remove("active");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+        }
+        document.addEventListener("mousemove", onMove);
+        document.addEventListener("mouseup", onUp);
+    });
 }
 
 function openFilePicker(sec, node, sectionEl) {
