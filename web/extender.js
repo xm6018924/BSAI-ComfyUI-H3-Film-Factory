@@ -3780,17 +3780,22 @@ function hookUpstreamWidgetCallback(node, runtime) {
                     if (!g) return;
                     const newVal = value != null ? String(value) : (this && this.value != null ? String(this.value) : "");
                     const srcId = nd ? nd.id : null;
+                    const touched = [];
                     g._nodes.forEach((h3n) => {
                         if (!h3n || h3n.type !== "BSAIH3FilmFactory" || !h3n.__h3Extender) return;
+                        let changed = false;
                         (h3n.inputs || []).forEach((i2) => {
                             const m2 = /^clip_prompt_(\d+)$/.exec(i2.name || "");
                             if (!m2 || !i2.link) return;
                             const l2 = g.links && g.links[i2.link];
                             if (!l2 || l2.origin_id !== srcId) return;
                             const cl = h3n.__h3Extender.state && h3n.__h3Extender.state.clips && h3n.__h3Extender.state.clips[Number(m2[1]) - 1];
-                            if (cl) applyExternalClipValue(cl, newVal);
+                            if (cl && applyExternalClipValue(cl, newVal)) changed = true;
                         });
+                        if (changed) touched.push(h3n);
                     });
+                    // Rebuild card DOM so the change is visible immediately.
+                    touched.forEach((h3n) => { try { render(h3n, h3n.__h3Extender); } catch (e2) {} });
                 } catch (e) {}
             };
             break;
@@ -3808,6 +3813,7 @@ function syncExternalPrompts(node, runtime) {
     const graph = node.graph;
     if (!graph) return;
     hookUpstreamWidgetCallback(node, runtime);
+    let changed = false;
     node.inputs.forEach((inp) => {
         const m = /^clip_prompt_(\d+)$/.exec(inp.name || "");
         if (!m) return;
@@ -3823,12 +3829,14 @@ function syncExternalPrompts(node, runtime) {
                     delete clip.builtin_prompt;
                     clip.prompt = "";
                     if (clip._promptEl && clip._promptEl.value !== "") clip._promptEl.value = "";
+                    changed = true;
                 }
             } else if (clip.external_prompt !== val) {
                 if (!clip.builtin_prompt && clip.prompt && clip.prompt !== val) clip.builtin_prompt = clip.prompt;
                 clip.external_prompt = val;
                 clip.prompt = val;
                 if (clip._promptEl && clip._promptEl.value !== val) clip._promptEl.value = val;
+                changed = true;
             }
         } else if (!inp.link && clip.external_prompt) {
             // disconnected -> restore the builtin prompt
@@ -3836,8 +3844,14 @@ function syncExternalPrompts(node, runtime) {
             delete clip.external_prompt;
             delete clip.builtin_prompt;
             if (clip._promptEl && clip._promptEl.value !== clip.prompt) clip._promptEl.value = clip.prompt;
+            changed = true;
         }
     });
+    // A real value change must be reflected in the card DOM. Direct .value
+    // writes are not reliably visible on every render path; rebuilding the
+    // card list is what makes the new text appear (same as the Sync All
+    // button). Only happens when a value actually changed.
+    if (changed) { try { render(node, runtime); } catch (e) {} }
 }
 
 // Apply an external prompt value onto a CLIP card (shared by all sync paths).
