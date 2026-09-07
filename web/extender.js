@@ -3712,7 +3712,7 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
-window.__h3ExtenderVersion = "3c792b9-render-rebuild";
+window.__h3ExtenderVersion = "emptyfix-clip2";
 
 // --- diagnostic counters (removable) ---
 function h3diag(sync) {
@@ -3752,6 +3752,23 @@ function readUpstreamText(node, graph, input) {
     return null;
 }
 
+// Whether the upstream node feeding `input` ever held non-empty text (user
+// typed/pasted something at least once). Distinguishes "user cleared the
+// external prompt" from "an empty node was connected and never used".
+function upstreamEverHadContent(node, graph, input) {
+    if (!input || !input.link || !graph || !graph.links) return false;
+    const link = graph.links[input.link];
+    if (!link) return false;
+    const up = graph._nodes_by_id ? graph._nodes_by_id[link.origin_id] : null;
+    if (!up || !up.widgets) return false;
+    for (const wd of up.widgets) {
+        if (typeof wd.value === "string" || wd.type === "customtext" || wd.type === "text" || /text|prompt|string|value|output/i.test(wd.name || "")) {
+            if (wd.__h3HadNonEmpty === true) return true;
+        }
+    }
+    return false;
+}
+
 // Event-driven sync: wrap the upstream text widget's callback so every real
 // edit (typing, paste, clear) pushes the new value into every connected CLIP
 // card at once. ComfyUI calls widget.callback on each value change, so this
@@ -3779,6 +3796,11 @@ function hookUpstreamWidgetCallback(node, runtime) {
                     const g = appObj && appObj.graph;
                     if (!g) return;
                     const newVal = value != null ? String(value) : (this && this.value != null ? String(this.value) : "");
+                    // Remember whether the upstream ever held non-empty content.
+                    // An always-empty upstream (user never typed anything) must
+                    // NOT clear a CLIP card filled by global storyboard parsing;
+                    // only a real "was non-empty -> now cleared" should clear it.
+                    if (newVal && newVal.trim()) wd.__h3HadNonEmpty = true;
                     const srcId = nd ? nd.id : null;
                     const touched = [];
                     g._nodes.forEach((h3n) => {
@@ -3790,7 +3812,7 @@ function hookUpstreamWidgetCallback(node, runtime) {
                             const l2 = g.links && g.links[i2.link];
                             if (!l2 || l2.origin_id !== srcId) return;
                             const cl = h3n.__h3Extender.state && h3n.__h3Extender.state.clips && h3n.__h3Extender.state.clips[Number(m2[1]) - 1];
-                            if (cl && applyExternalClipValue(cl, newVal)) changed = true;
+                            if (cl && applyExternalClipValue(cl, newVal, wd.__h3HadNonEmpty === true)) changed = true;
                         });
                         if (changed) touched.push(h3n);
                     });
@@ -3823,8 +3845,13 @@ function syncExternalPrompts(node, runtime) {
         const val = readUpstreamText(node, graph, inp);
         if (val !== null) {
             if (val === "") {
-                // upstream text deleted -> clear the card to match
-                if (clip.external_prompt != null || clip.prompt) {
+                // Upstream text was cleared. Only clear the card when the
+                // upstream really held non-empty content before (user cleared
+                // it) OR this card already received external content. An
+                // always-empty upstream must not wipe a card filled by global
+                // storyboard parsing.
+                const everHad = !clip._storyboardFilled && (upstreamEverHadContent(node, graph, inp) || clip.external_prompt != null);
+                if (everHad && (clip.external_prompt != null || clip.prompt)) {
                     delete clip.external_prompt;
                     delete clip.builtin_prompt;
                     clip.prompt = "";
@@ -3832,6 +3859,8 @@ function syncExternalPrompts(node, runtime) {
                     changed = true;
                 }
             } else if (clip.external_prompt !== val) {
+                // External non-empty value takes over; lift the storyboard lock.
+                clip._storyboardFilled = false;
                 if (!clip.builtin_prompt && clip.prompt && clip.prompt !== val) clip.builtin_prompt = clip.prompt;
                 clip.external_prompt = val;
                 clip.prompt = val;
@@ -3855,11 +3884,18 @@ function syncExternalPrompts(node, runtime) {
 }
 
 // Apply an external prompt value onto a CLIP card (shared by all sync paths).
-function applyExternalClipValue(clip, val) {
+// allowClear guards the empty branch: a card filled by global storyboard
+// parsing is only cleared when the upstream genuinely held content before
+// (user cleared it), never by an always-empty upstream node.
+function applyExternalClipValue(clip, val, allowClear) {
     if (!clip || val == null) return false;
     const text = String(val);
     if (clip.external_prompt === text) return false;
     if (text === "") {
+        // A card filled by global storyboard parsing stays until an external
+        // non-empty value takes over; an empty upstream must not wipe it.
+        if (clip._storyboardFilled) return false;
+        if (!(allowClear === true || clip.external_prompt != null)) return false;
         // upstream cleared -> clear the card to match
         delete clip.external_prompt;
         delete clip.builtin_prompt;
@@ -3867,6 +3903,8 @@ function applyExternalClipValue(clip, val) {
         if (clip._promptEl && clip._promptEl.value !== "") clip._promptEl.value = "";
         return true;
     }
+    // External non-empty value takes over the card.
+    clip._storyboardFilled = false;
     if (!clip.builtin_prompt && clip.prompt && clip.prompt !== text) clip.builtin_prompt = clip.prompt;
     clip.external_prompt = text;
     clip.prompt = text;
@@ -4316,6 +4354,8 @@ const mergeOutputBtn = document.createElement("button");
                         runtime.state.clips.push(newClip(runtime.state.clips.length));
                     }
                     runtime.state.clips[i].prompt = segments[i].prompt;
+                    runtime.state.clips[i]._storyboardFilled = true;
+                    delete runtime.state.clips[i].external_prompt;
                     runtime.state.clips[i].duration = String(segments[i].duration);
                 }
                 // Remove excess CLIPs when storyboard has fewer segments
@@ -4908,6 +4948,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                         if (seg) {
                             fresh.prompt = seg.prompt || "";
                             fresh.duration = String(seg.duration || fresh.duration);
+                            fresh._storyboardFilled = true;
+                            delete fresh.external_prompt;
                         }
                         runtime.state.clips.push(fresh);
                         changed = true;
@@ -4922,6 +4964,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                         // it from the segment. Otherwise keep user edits.
                         if ((!clip.prompt || !clip.prompt.trim()) && seg.prompt) {
                             clip.prompt = seg.prompt;
+                            clip._storyboardFilled = true;
+                            delete clip.external_prompt;
                             changed = true;
                         }
                         const newDur = String(seg.duration);
@@ -5141,6 +5185,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                                     runtime.state.clips.push(newClip(runtime.state.clips.length));
                                 }
                                 runtime.state.clips[i].prompt = segments[i].prompt;
+                                runtime.state.clips[i]._storyboardFilled = true;
+                                delete runtime.state.clips[i].external_prompt;
                                 runtime.state.clips[i].duration = String(segments[i].duration);
                             }
                             // Remove excess CLIPs when storyboard has fewer segments
