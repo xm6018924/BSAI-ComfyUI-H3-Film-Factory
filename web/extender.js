@@ -2213,11 +2213,37 @@ async function h3FetchAssets() {
         app.graph._nodes.forEach(function(n) {
             if (ALL_TARGETS.has(n.type) && n.__h3Extender) {
                 n.__h3Extender._h3_assetCache = data;
+                // Auto-append asset-library references to the global prompt
+                // when it carries none, so connected assets are actually used.
+                if (autoRefAssetsToGlobal(n.__h3Extender)) {
+                    try { render(n, n.__h3Extender); } catch (e) {}
+                }
             }
         });
     } catch (e) {
         console.error("[H3] Failed to fetch assets:", e);
     }
+}
+
+// Auto-append asset-library references to the global prompt when it
+// carries no reference tags at all, so connected assets are actually
+// used by every CLIP. Returns true when the global prompt changed.
+function autoRefAssetsToGlobal(runtime) {
+    if (!runtime || !runtime.state) return false;
+    const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
+    const images = assetList.images || [];
+    if (!images.length) return false;
+    const gp = runtime.state.global_prompt || "";
+    if (/@图|@视频|@音频|<Picture|@Picture/i.test(gp)) return false;
+    const tags = images.map((item, i) => "@图" + (item && item.index ? item.index : (i + 1))).join(" ");
+    const suffix = "\n\n[资产库自动引用]\n" + tags;
+    const newGp = (gp + suffix).trim();
+    if (newGp === gp) return false;
+    runtime.state.global_prompt = newGp;
+    if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== newGp) {
+        runtime.globalPromptTextarea.value = newGp;
+    }
+    return true;
 }
 
 function parseAssetRefs(prompt) {
@@ -2227,6 +2253,15 @@ function parseAssetRefs(prompt) {
     while ((match = re.exec(prompt)) !== null) {
         const type = match[1] === "图" ? "images" : match[1] === "视频" ? "videos" : "audios";
         refs.push({ type: type, index: parseInt(match[2]), tag: match[0] });
+    }
+    // Also parse <Picture N> tags (SKILL storyboard archive format) as image refs
+    const reP = /<Picture\s+(\d+)>/gi;
+    let m2;
+    while ((m2 = reP.exec(prompt)) !== null) {
+        const idx = parseInt(m2[1]);
+        if (!refs.some(function(r) { return r.type === "images" && r.index === idx; })) {
+            refs.push({ type: "images", index: idx, tag: m2[0] });
+        }
     }
     return refs;
 }
@@ -2262,8 +2297,11 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
     hdr.appendChild(refreshBtn);
     leftPanel.appendChild(hdr);
 
-    // Parse @图N/@视频N/@音频N from prompt
-    const refs = parseAssetRefs(clip.prompt);
+    // Parse @图N/@视频N/@音频N and <Picture N> from the effective prompt
+    // (global prompt is prepended to every CLIP at runtime, so refs there
+    // are just as real as refs typed inside the CLIP itself).
+    const combined = (runtime.state?.global_prompt ? runtime.state.global_prompt + "\n" : "") + (clip.prompt || "");
+    const refs = parseAssetRefs(combined);
 
     if (refs.length === 0) {
         const empty = document.createElement("div");
@@ -3712,7 +3750,7 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
-window.__h3ExtenderVersion = "emptyfix-clip2";
+window.__h3ExtenderVersion = "globalfix-autoref";
 
 // --- diagnostic counters (removable) ---
 function h3diag(sync) {
@@ -4343,7 +4381,8 @@ const mergeOutputBtn = document.createElement("button");
             const sbMatch = newText.match(sbMarkerRe);
             const globalText = sbMatch ? newText.slice(0, sbMatch.index).trim() : newText.trim();
             const storyboardText = sbMatch ? newText.slice(sbMatch.index).trim() : "";
-            if (globalText !== undefined) {
+            const keepGlobal = !globalText && newText.trim().length > 0;
+            if (globalText !== undefined && !keepGlobal) {
                 runtime.state.global_prompt = globalText;
                 if (runtime.globalPromptTextarea) runtime.globalPromptTextarea.value = globalText;
             }
@@ -4875,7 +4914,11 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
             let changed = false;
 
             // 1. Update global prompt (always sync, even if empty)
-            if (runtime.state.global_prompt !== globalText) {
+            // Preserve a manually-entered / auto-referenced global prompt when
+            // the storyboard text has no archive section (empty globalText but
+            // non-empty source). Only a fully deleted source resets it.
+            const keepGlobal = !globalText && newText.trim().length > 0;
+            if (!keepGlobal && runtime.state.global_prompt !== globalText) {
                 runtime.state.global_prompt = globalText;
                 if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
                     runtime.globalPromptTextarea.value = globalText;
