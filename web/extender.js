@@ -3712,6 +3712,15 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
+window.__h3ExtenderVersion = "3f31cac-widget-first";
+
+// --- diagnostic counters (removable) ---
+function h3diag(sync) {
+    if (sync) {
+        window.__h3SyncCalls = (window.__h3SyncCalls || 0) + 1;
+        window.__h3LastSyncAt = Date.now();
+    }
+}
 function readUpstreamText(node, graph, input) {
     if (!input || !input.link) return null;
     const link = graph && graph.links ? graph.links[input.link] : null;
@@ -3725,6 +3734,7 @@ function readUpstreamText(node, graph, input) {
     const ws = up.widgets || [];
     for (const wd of ws) {
         if (typeof wd.value === "string" && /text|prompt|string|value|output/i.test(wd.name || "")) {
+            window.__h3LastRead = "w:" + String(wd.value).slice(0, 30);
             return wd.value; // may be "" -> upstream explicitly cleared
         }
     }
@@ -3733,8 +3743,12 @@ function readUpstreamText(node, graph, input) {
     const out = up.outputs && up.outputs[link.origin_slot];
     if (out) {
         const v = out._data != null ? out._data : (out.value != null ? out.value : null);
-        if (v != null) return String(v); // may be "" -> upstream explicitly cleared
+        if (v != null) {
+            window.__h3LastRead = "o:" + String(v).slice(0, 30);
+            return String(v); // may be "" -> upstream explicitly cleared
+        }
     }
+    window.__h3LastRead = "NULL";
     return null;
 }
 
@@ -3743,6 +3757,7 @@ function readUpstreamText(node, graph, input) {
 // (e.g. prompt-reversal output) propagate into the card automatically. On
 // disconnect the builtin prompt is restored.
 function syncExternalPrompts(node, runtime) {
+    h3diag(true);
     if (!node || !node.inputs || !runtime?.state) return;
     const graph = node.graph;
     if (!graph) return;
