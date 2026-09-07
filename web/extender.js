@@ -3869,6 +3869,27 @@ async function syncFromHistory() {
     } catch (e) {}
 }
 
+// Module-level fallback poller: runs independent of any per-node closure
+// timer. Every 500ms it walks the current graph and syncs every H3 node's
+// per-CLIP external prompt ports, so upstream text edits / deletions reach
+// the card prompt even if a node-local timer was never created or its closure
+// captured a stale reference.
+function ensureGlobalSyncPoll() {
+    if (window.__h3GlobalSyncPoll) return;
+    window.__h3GlobalSyncPoll = setInterval(() => {
+        try {
+            const appObj = window.comfyAPI?.app?.app;
+            const g = appObj && appObj.graph;
+            if (!g || !g._nodes) return;
+            for (const n of g._nodes) {
+                if (!n || n.type !== "BSAIH3FilmFactory" || !n.__h3Extender) continue;
+                try { positionClipPorts(n, n.__h3Extender); } catch (e) {}
+                try { syncExternalPrompts(n, n.__h3Extender); } catch (e) {}
+            }
+        } catch (e) {}
+    }, 500);
+}
+
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
     if (!node || !runtime?.domWidget || runtime.syncingDomHeight) return;
 
@@ -5169,6 +5190,7 @@ app.registerExtension({
             clearTransientRenderingState("Execution stopped by error");
         });
         hookExecutedSync();
+        ensureGlobalSyncPoll();
         // Defensive cleanup: a successful prompt should never leave a stale
         // rendering highlight even if another frontend/backend change prevents
         // the expected node UI callback from arriving.
