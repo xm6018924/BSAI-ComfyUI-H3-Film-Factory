@@ -2235,9 +2235,12 @@ async function h3FetchAssets() {
 // height is kept in sync so the node reports the full content height.
 function autoResizeTextarea(ta) {
     if (!ta) return;
+    const wrap = ta.closest(".bsai-gp-editor-wrap");
+    // When the user drag-fixed the global prompt section height, keep
+    // wrapper/textarea at 100% (internal scrolling) instead of growing.
+    if (wrap && wrap.dataset.gpDragFixed === "1") return;
     ta.style.height = "auto";
     ta.style.height = ta.scrollHeight + "px";
-    const wrap = ta.closest(".bsai-gp-editor-wrap");
     if (wrap) wrap.style.height = ta.scrollHeight + "px";
 }
 
@@ -3792,7 +3795,7 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
-window.__h3ExtenderVersion = "gp-autoresize";
+window.__h3ExtenderVersion = "gp-resize-font";
 
 // --- diagnostic counters (removable) ---
 function h3diag(sync) {
@@ -4773,7 +4776,38 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         gpOverlay.innerHTML = html;
     }
 
-    globalPromptSection.append(gpLeftPanel, gpLabel, gpEditorWrap, gpRefreshBtn, gpExpandBtn);
+    // ── Global prompt font-size controls (A− / A+) ──
+    let gpFontSize = Number(state.gpFontSize) || 11;
+    function applyGpFontSize() {
+        gpFontSize = Math.max(8, Math.min(26, Math.round(gpFontSize)));
+        gpTextarea.style.fontSize = gpFontSize + "px";
+        gpOverlay.style.fontSize = gpFontSize + "px";
+        state.gpFontSize = gpFontSize;
+        autoResizeTextarea(gpTextarea);
+    }
+    const gpFontMinusBtn = document.createElement("button");
+    gpFontMinusBtn.textContent = "A−";
+    gpFontMinusBtn.title = "减小全局提示词字号";
+    gpFontMinusBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;font-size:11px;background:rgba(40,40,40,.8);border:1px solid rgba(255,255,255,.15);border-radius:4px;color:#aaa;cursor:pointer;align-self:flex-start;";
+    gpFontMinusBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        gpFontSize -= 1;
+        applyGpFontSize();
+        updateHidden(node, runtime);
+    });
+    const gpFontPlusBtn = document.createElement("button");
+    gpFontPlusBtn.textContent = "A+";
+    gpFontPlusBtn.title = "增大全局提示词字号";
+    gpFontPlusBtn.style.cssText = gpFontMinusBtn.style.cssText;
+    gpFontPlusBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        gpFontSize += 1;
+        applyGpFontSize();
+        updateHidden(node, runtime);
+    });
+    applyGpFontSize();
+
+    globalPromptSection.append(gpLeftPanel, gpLabel, gpEditorWrap, gpRefreshBtn, gpExpandBtn, gpFontMinusBtn, gpFontPlusBtn);
 
     // Sync external prompt_source input to the textarea (legacy widget callback)
     const gpWidget = node.widgets?.find(w => w.name === "global_prompt" || w.name === "prompt_source");
@@ -4834,7 +4868,62 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     bottomBtnGroup.append(addClipBtn, delAllClipsBtn);
     bottomBar.append(clipsTotalLabel, bottomBtnGroup);
 
-    root.append(toolbar, refsSection, globalPromptSection, cards, bottomBar, refFileInput);
+    // ── Draggable divider between global prompt and CLIP cards ──
+    // Drag to fix the global prompt section height (px); double-click to
+    // restore auto (content-height) mode.
+    let gpDragHeight = null; // null = auto; number = fixed px
+    const gpResizer = document.createElement("div");
+    gpResizer.title = "拖动调整全局提示词区高度；双击恢复自动高度";
+    gpResizer.style.cssText = "height:7px;flex:0 0 7px;cursor:row-resize;background:transparent;margin:1px 0;position:relative;z-index:5;";
+    const gpResizerInner = document.createElement("div");
+    gpResizerInner.style.cssText = "position:absolute;left:10px;right:10px;top:2px;height:3px;border-radius:2px;background:rgba(255,255,255,.12);transition:background .15s;";
+    gpResizer.append(gpResizerInner);
+    gpResizer.addEventListener("mouseenter", () => { gpResizerInner.style.background = "rgba(120,190,255,.6)"; });
+    gpResizer.addEventListener("mouseleave", () => { gpResizerInner.style.background = "rgba(255,255,255,.12)"; });
+    gpResizer.addEventListener("dblclick", (e) => {
+        e.preventDefault();
+        gpDragHeight = null;
+        delete gpEditorWrap.dataset.gpDragFixed;
+        globalPromptSection.style.height = "";
+        globalPromptSection.style.flex = "";
+        gpEditorWrap.style.height = "";
+        gpTextarea.style.height = "";
+        gpTextarea.style.overflowY = "hidden";
+        autoResizeTextarea(gpTextarea);
+        syncDomHeight(runtime);
+    });
+    gpResizer.addEventListener("mousedown", (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const startY = e.clientY;
+        const startH = gpDragHeight != null
+            ? gpDragHeight
+            : (globalPromptSection.getBoundingClientRect().height || 200);
+        const cardsMin = Number(cards.style.minHeight) || 200;
+        const maxH = Math.max(80, (runtime.root ? runtime.root.getBoundingClientRect().height : 800) - cardsMin - 60);
+        function onMove(ev) {
+            const h = Math.max(60, Math.min(maxH, startH + (ev.clientY - startY)));
+            gpDragHeight = h;
+            gpEditorWrap.dataset.gpDragFixed = "1";
+            globalPromptSection.style.height = h + "px";
+            globalPromptSection.style.flex = "0 0 auto";
+            gpEditorWrap.style.height = "100%";
+            gpEditorWrap.style.minHeight = "0";
+            gpTextarea.style.height = "100%";
+            gpTextarea.style.overflowY = "auto";
+        }
+        function onUp() {
+            window.removeEventListener("mousemove", onMove);
+            window.removeEventListener("mouseup", onUp);
+            document.body.style.cursor = "";
+            syncDomHeight(runtime);
+        }
+        window.addEventListener("mousemove", onMove);
+        window.addEventListener("mouseup", onUp);
+        document.body.style.cursor = "row-resize";
+    });
+
+    root.append(toolbar, refsSection, globalPromptSection, gpResizer, cards, bottomBar, refFileInput);
 
     const restoredValidatedPrefix = validatedPrefixFromState(state);
     const runtime = {
