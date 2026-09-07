@@ -5407,6 +5407,9 @@ app.registerExtension({
         });
 
         window.addEventListener("bsai-assets-changed", () => {
+            // Delete the old assets' ref2va VAE encodings immediately so a
+            // swapped asset library can never reuse stale image latents.
+            try { fetch(api.apiURL("/h3_extender/ref2va_cache/clear"), { method: "POST" }).catch(() => {}); } catch (e) {}
             app.graph._nodes.forEach(node => {
                 if (ALL_TARGETS.has(node.type) && node.__h3Extender) {
                     delete node.__h3Extender._assetCache;

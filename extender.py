@@ -4208,6 +4208,29 @@ if getattr(PromptServer, "instance", None) is not None:
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
+    @PromptServer.instance.routes.post("/h3_extender/ref2va_cache/clear")
+    async def h3_extender_ref2va_cache_clear(request):
+        """v1.27: 资产库删除/更换后清空 ref2va 参考图VAE编码磁盘缓存。
+
+        旧资产图片被删除后，其 VAE 编码（Image Latent）若仍留在磁盘缓存，
+        可能被同名/同key的新资产命中而错误复用。前端在 bsai-assets-changed
+        事件中调用本接口，删除所有 _ref2va_cache/*.pt，下次生成重新编码。
+        """
+        try:
+            root = _ensure_cache_root() / _REF2VA_CACHE_DIRNAME
+            removed = 0
+            if root.exists() and root.is_dir():
+                for p in root.glob("*.pt"):
+                    try:
+                        p.unlink(missing_ok=True)
+                        removed += 1
+                    except Exception:
+                        pass
+            print(f"[H3 Extender] ref2va cache cleared on asset change: removed={removed}")
+            return web.json_response({"ok": True, "removed": removed, "path": str(root)})
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
     @PromptServer.instance.routes.post("/h3_extender/project/prepare_save")
     async def h3_extender_project_prepare_save(request):
         """Build a portable .ext archive without buffering the cache in RAM."""
