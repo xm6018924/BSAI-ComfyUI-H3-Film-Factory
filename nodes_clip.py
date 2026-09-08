@@ -217,7 +217,12 @@ class BSAI_ClipSequencer:
         except Exception:
             internal_clips = []
 
+        selected_count = 0
         for clip_def in internal_clips:
+            # Multi-select filter: skip unselected clips (default selected=True for backward compat)
+            if not clip_def.get("selected", True):
+                continue
+            selected_count += 1
             prompt = clip_def.get("prompt", "")
             asset_refs = clip_def.get("asset_refs", "")
             narration = clip_def.get("narration", "")
@@ -262,7 +267,9 @@ class BSAI_ClipSequencer:
             clips.append(clip_info)
 
         total_dur = sum(c.get("duration", 0) for c in clips)
-        print(f"[BSAI ClipSequencer] Sequenced {len(clips)} clips ({ext_count} external + {len(internal_clips)} internal), total {total_dur:.1f}s")
+        internal_total = len(internal_clips)
+        skipped = internal_total - selected_count
+        print(f"[BSAI ClipSequencer] Sequenced {len(clips)} clips ({ext_count} external + {selected_count}/{internal_total} internal selected, {skipped} skipped), total {total_dur:.1f}s")
         return (clips,)
 
     @classmethod

@@ -2238,10 +2238,106 @@ function autoResizeTextarea(ta) {
     const wrap = ta.closest(".bsai-gp-editor-wrap");
     // When the user drag-fixed the global prompt section height, keep
     // wrapper/textarea at 100% (internal scrolling) instead of growing.
-    if (wrap && wrap.dataset.gpDragFixed === "1") return;
+    if (wrap && wrap.dataset.gpDragFixed === "1") {
+        // Even in drag-fixed mode, keep the gp left asset panel height
+        // locked to the wrapper so a long asset list can never push the
+        // node taller than the user-set global prompt height.
+        if (typeof syncGpLeftPanelToWrap === "function") {
+            syncGpLeftPanelToWrap(wrap);
+        }
+        return;
+    }
+    // Detect if the node is currently being clipped by canvas zoom-out:
+    // if the wrap's own rendered height is already SMALLER than the
+    // textarea's intrinsic content height, growing the wrap to fit would
+    // break visual equality with the left panel. In that case, leave the
+    // wrap at its current rendered height and let the textarea scroll
+    // internally so its visible footprint matches the left panel exactly.
+    let wrapClipped = false;
+    if (wrap) {
+        const currentWrapH = wrap.clientHeight;
+        // Temporarily reset the textarea height so scrollHeight reports
+        // its true intrinsic content height (not a stale clipped value).
+        const savedH = ta.style.height;
+        ta.style.height = "auto";
+        const intrinsicH = ta.scrollHeight;
+        ta.style.height = savedH || "";
+        if (currentWrapH > 0 && intrinsicH > currentWrapH + 1) {
+            wrapClipped = true;
+        }
+    }
+    if (wrapClipped) {
+        // Wrap is being squeezed by an outer constraint (canvas zoom).
+        // Lock the textarea to the wrap and let it scroll internally.
+        ta.style.height = "100%";
+        ta.style.maxHeight = "100%";
+        ta.style.overflowY = "auto";
+        if (wrap) {
+            wrap.style.overflow = "hidden";
+        }
+        if (typeof syncGpLeftPanelToWrap === "function") {
+            syncGpLeftPanelToWrap(wrap);
+        }
+        return;
+    }
     ta.style.height = "auto";
     ta.style.height = ta.scrollHeight + "px";
     if (wrap) wrap.style.height = ta.scrollHeight + "px";
+    if (wrap) wrap.style.overflow = "";
+    if (wrap && typeof syncGpLeftPanelToWrap === "function") {
+        syncGpLeftPanelToWrap(wrap);
+    }
+}
+
+// Lock the global-prompt left asset panel height to the editor wrapper so
+// a long asset list (with overflow-y:auto + many rows) can never push the
+// node taller than the prompt textarea itself. Implemented as a single
+// function (no ResizeObserver per render) and called from every place
+// that mutates the wrapper height: autoResizeTextarea, drag-resize, and
+// the per-frame render() pass.
+//
+// IMPORTANT: read the wrap's *rendered* height (clientHeight) instead of
+// getBoundingClientRect(). When the user zooms the canvas out, the whole
+// node gets visually clipped and the bounding rect can be smaller than
+// the wrap's actual layout height. clientHeight reflects the wrap's
+// real internal height, so leftPanel never gets stuck at a stale value.
+function syncGpLeftPanelToWrap(wrap) {
+    if (!wrap) return;
+    const section = wrap.parentElement;
+    if (!section) return;
+    const left = section.querySelector(".bsai-gp-left-panel");
+    if (!left) return;
+    // Prefer the wrap's own clientHeight — survives canvas zoom-out where
+    // the node is visually clipped but its layout box is still large.
+    let h = wrap.clientHeight;
+    if (!(h > 0)) h = wrap.getBoundingClientRect().height;
+    if (h > 0) {
+        left.style.height = h + "px";
+        left.style.maxHeight = h + "px";
+    }
+    // When the canvas zooms out so far that the node is shorter than the
+    // textarea content, the absolute-positioned textarea would otherwise
+    // overflow the wrap and visually grow taller than the left panel.
+    // Force the textarea to fill 100% of the wrap (with internal scroll)
+    // so its *visible* footprint matches the left panel exactly.
+    const ta = wrap.querySelector("textarea");
+    if (ta && h > 0) {
+        ta.style.height = "100%";
+        ta.style.maxHeight = "100%";
+        ta.style.overflowY = "auto";
+    }
+}
+
+// Run sync once after the next paint. Used to cover the very first render
+// of the node, when the left panel was just created/inserted but the wrap
+// has not yet been measured (clientHeight = 0) and ResizeObserver has not
+// fired yet. Without this, a saved global prompt with many lines would
+// briefly render the left panel at its full content height, then snap.
+function syncGpLeftPanelToWrapNextFrame(wrap) {
+    if (!wrap) return;
+    requestAnimationFrame(() => {
+        requestAnimationFrame(() => syncGpLeftPanelToWrap(wrap));
+    });
 }
 
 function sanitizeGlobalPrompt(gp) {
@@ -4655,9 +4751,17 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     const globalPromptSection = document.createElement("div");
     globalPromptSection.style.cssText = "display:flex;flex-direction:row;gap:4px;margin-bottom:6px;align-items:stretch;position:relative;";
 
-    // Left panel: global-prompt asset references (same as per-clip left panel)
+    // Left panel: global-prompt asset references (same as per-clip left panel).
+    // Height is locked to the editor wrapper (right side) via
+    // syncGpLeftPanelToWrap — a long asset list scrolls inside this panel
+    // instead of pushing the whole node taller than the prompt textarea.
+    // Note: NO align-self: stretch — that would re-introduce the
+    // section-height feedback loop where leftPanel content stretches the
+    // section, which stretches the editor wrap, which is what we are
+    // trying to clamp in the first place.
     const gpLeftPanel = document.createElement("div");
-    gpLeftPanel.style.cssText = "width:140px;min-width:140px;flex-shrink:0;border-right:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.15);padding:6px;display:flex;flex-direction:column;overflow-y:auto;max-height:none;align-self:stretch;";
+    gpLeftPanel.className = "bsai-gp-left-panel";
+    gpLeftPanel.style.cssText = "width:140px;min-width:140px;flex-shrink:0;border-right:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.15);padding:6px;display:flex;flex-direction:column;overflow-y:auto;min-height:0;flex:0 0 auto;box-sizing:border-box;";
 
     const gpLabel = document.createElement("div");
     gpLabel.textContent = "全局提示词";
@@ -4763,8 +4867,18 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     };
 
     function renderGlobalAssetPanel() {
+        // Lock the left asset panel height to the editor wrap BEFORE the
+        // asset list is re-rendered. Without this, a long asset list would
+        // briefly push the section taller than the prompt textarea on the
+        // next paint, then snap back when the ResizeObserver callback fires.
+        // Use the next-frame variant so we read the wrap's real clientHeight
+        // after the browser has finished its current layout pass.
+        syncGpLeftPanelToWrapNextFrame(gpEditorWrap);
         renderAssetPanel(gpLeftPanel, gpPseudoClip, node, runtime, gpTextarea);
         renderGlobalOverlay();
+        // Re-lock in case the asset list appended children whose intrinsic
+        // height somehow exceeds the wrap (it shouldn't, but be safe).
+        syncGpLeftPanelToWrapNextFrame(gpEditorWrap);
     }
 
     // Overlay technique: textarea (transparent text, visible caret) on top,
@@ -4788,6 +4902,19 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
     gpEditorWrap.style.cssText = "position:relative;flex:1 1 auto;min-height:180px;max-height:none;height:auto;align-self:stretch;";
     gpEditorWrap.append(gpOverlay, gpTextarea);
     autoResizeTextarea(gpTextarea);
+
+    // Keep the global-prompt left asset panel in lock-step with the editor
+    // wrap height — covers font-size changes, drag-resize, and any other
+    // path that mutates wrap height without going through autoResizeTextarea.
+    // Also re-runs autoResizeTextarea so canvas zoom-out (which compresses
+    // the wrap from outside) is detected and the textarea is switched to
+    // internal scroll mode to stay in lock-step with the left panel.
+    if (typeof ResizeObserver !== "undefined") {
+        const gpRO = new ResizeObserver(() => {
+            autoResizeTextarea(gpTextarea);
+        });
+        gpRO.observe(gpEditorWrap);
+    }
     gpTextarea.addEventListener("scroll", () => {
         gpOverlay.scrollTop = gpTextarea.scrollTop;
         gpOverlay.scrollLeft = gpTextarea.scrollLeft;
@@ -4962,6 +5089,9 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
             gpEditorWrap.style.minHeight = "0";
             gpTextarea.style.height = "100%";
             gpTextarea.style.overflowY = "auto";
+            // Drag-fixed height changes the wrap height after the next layout
+            // tick; keep the left asset panel locked to it in real time.
+            syncGpLeftPanelToWrap(gpEditorWrap);
         }
         function onUp() {
             window.removeEventListener("mousemove", onMove);
@@ -4973,6 +5103,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                 state.gpDragHeight = gpDragHeight;
                 updateHidden(node, runtime);
             }
+            syncGpLeftPanelToWrap(gpEditorWrap);
             syncDomHeight(runtime);
         }
         window.addEventListener("mousemove", onMove);
@@ -4991,6 +5122,11 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
             gpEditorWrap.style.minHeight = "0";
             gpTextarea.style.height = "100%";
             gpTextarea.style.overflowY = "auto";
+            // Sync left asset panel to the restored fixed height on first paint
+            // (ResizeObserver fires on the next tick, but the asset list is
+            // already rendered by then and would briefly push the section
+            // taller than the user-set height).
+            syncGpLeftPanelToWrap(gpEditorWrap);
         }
     }
 

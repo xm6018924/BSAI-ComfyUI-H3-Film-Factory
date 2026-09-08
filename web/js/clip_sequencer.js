@@ -194,6 +194,54 @@ if (!document.getElementById(STYLE_ID)) {
     display: flex; justify-content: space-around;
 }
 .bsai-seq-summary span { color: #8cf; font-weight: bold; }
+
+/* === Multi-select toolbar === */
+.bsai-seq-toolbar {
+    display: flex; gap: 5px; padding: 4px 6px;
+    background: #161616; border: 1px solid #2a2a2a; border-radius: 4px;
+    align-items: center; flex-wrap: wrap;
+}
+.bsai-seq-toolbar-label {
+    font-size: 10px; color: #888; margin-right: 4px; font-weight: bold;
+}
+.bsai-seq-toolbar button {
+    background: #222; color: #aaa; border: 1px solid #333; border-radius: 3px;
+    padding: 3px 8px; font-size: 10px; cursor: pointer; transition: all 0.12s;
+}
+.bsai-seq-toolbar button:hover { background: #2a3a4a; color: #8cf; border-color: #3f789e; }
+.bsai-seq-toolbar-info {
+    margin-left: auto; font-size: 10px; color: #666;
+}
+.bsai-seq-toolbar-info span { color: #8f8; font-weight: bold; }
+
+/* === Card checkbox === */
+.bsai-clip-check {
+    width: 16px; height: 16px; flex-shrink: 0; cursor: pointer;
+    border: 2px solid #555; border-radius: 3px; background: #1a1a1a;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: #fff; transition: all 0.12s; user-select: none;
+}
+.bsai-clip-check:hover { border-color: #3f789e; }
+.bsai-clip.selected .bsai-clip-check {
+    background: #3f789e; border-color: #3f789e;
+}
+.bsai-clip-check::after { content: ""; }
+.bsai-clip.selected .bsai-clip-check::after { content: "\2713"; }
+
+/* === Selected card highlight === */
+.bsai-clip.selected {
+    border-color: #3f789e;
+    box-shadow: 0 0 6px rgba(63,120,158,0.25);
+}
+.bsai-clip.selected .bsai-clip-hdr {
+    background: linear-gradient(135deg, #2a4a5a, #1e3e4e);
+}
+.bsai-clip:not(.selected) {
+    opacity: 0.55;
+}
+.bsai-clip:not(.selected):hover {
+    opacity: 0.8;
+}
 `;
     document.head.appendChild(st);
 }
@@ -209,6 +257,7 @@ var DEFAULT_CLIP = {
     width: 1344,
     height: 768,
     seed: 0,
+    selected: true,
 };
 
 var _assetCache = null;
@@ -322,9 +371,36 @@ function setupSequencer(node) {
     var container = document.createElement("div");
     container.className = "bsai-seq";
 
+    // === Multi-select toolbar ===
+    var toolbar = document.createElement("div");
+    toolbar.className = "bsai-seq-toolbar";
+    toolbar.innerHTML = '<span class="bsai-seq-toolbar-label">批量选择:</span>';
+    var btnAll = document.createElement("button");
+    btnAll.textContent = "全选";
+    btnAll.title = "Select all clips";
+    btnAll.addEventListener("click", function () { setAllSelected(cardsWrapper, true); });
+    toolbar.appendChild(btnAll);
+    var btnNone = document.createElement("button");
+    btnNone.textContent = "全不选";
+    btnNone.title = "Deselect all clips";
+    btnNone.addEventListener("click", function () { setAllSelected(cardsWrapper, false); });
+    toolbar.appendChild(btnNone);
+    var btnInvert = document.createElement("button");
+    btnInvert.textContent = "反选";
+    btnInvert.title = "Invert selection";
+    btnInvert.addEventListener("click", function () { invertSelection(cardsWrapper); });
+    toolbar.appendChild(btnInvert);
+    var toolbarInfo = document.createElement("span");
+    toolbarInfo.className = "bsai-seq-toolbar-info";
+    toolbarInfo.innerHTML = '已选 <span data-sel-count>0</span>/<span data-total-count>0</span>';
+    toolbar.appendChild(toolbarInfo);
+    container.appendChild(toolbar);
+
     var cardsWrapper = document.createElement("div");
     cardsWrapper.className = "bsai-seq-cards";
     container.appendChild(cardsWrapper);
+
+    node._bsaiToolbarInfo = toolbarInfo;
 
     var summary = document.createElement("div");
     summary.className = "bsai-seq-summary";
@@ -337,12 +413,18 @@ function setupSequencer(node) {
     addBtn.addEventListener("click", function () {
         addClipCard(node, cardsWrapper, null);
         serializeClips(node, cardsWrapper);
-        updateSummary(cardsWrapper, summary);
+        updateSummary(cardsWrapper, summary, toolbarInfo);
     });
     container.appendChild(addBtn);
 
     node._bsaiCardsWrapper = cardsWrapper;
     node._bsaiSummary = summary;
+
+    // Listen for toolbar selection changes
+    container.addEventListener("bsai-selection-changed", function () {
+        serializeClips(node, cardsWrapper);
+        updateSummary(cardsWrapper, summary, toolbarInfo);
+    });
 
     if (typeof node.addDOMWidget === "function") {
         var dw = node.addDOMWidget("bsai_clips_ui", "html", container, {
@@ -381,7 +463,7 @@ function reloadFromWidget(node) {
     }
 
     var summary = node._bsaiSummary;
-    updateSummary(cardsWrapper, summary);
+    updateSummary(cardsWrapper, summary, toolbarInfo);
 }
 
 function addClipCard(node, cardsWrapper, clipData) {
@@ -397,7 +479,26 @@ function addClipCard(node, cardsWrapper, clipData) {
 
     var numWrap = document.createElement("div");
     numWrap.className = "bsai-clip-num";
-    numWrap.innerHTML = '<span class="bsai-clip-num-badge">' + index + '</span> CLIP';
+    var checkBox = document.createElement("div");
+    checkBox.className = "bsai-clip-check";
+    checkBox.title = "勾选后参与渲染 / Check to include in render";
+    if (data.selected !== false) {
+        card.classList.add("selected");
+    }
+    checkBox.addEventListener("click", function (e) {
+        e.stopPropagation();
+        toggleCardSelected(card);
+        serializeClips(node, cardsWrapper);
+        updateSummary(cardsWrapper, node._bsaiSummary, node._bsaiToolbarInfo);
+    });
+    numWrap.appendChild(checkBox);
+    var badge = document.createElement("span");
+    badge.className = "bsai-clip-num-badge";
+    badge.textContent = index;
+    numWrap.appendChild(badge);
+    var clipLabel = document.createElement("span");
+    clipLabel.textContent = " CLIP";
+    numWrap.appendChild(clipLabel);
     hdr.appendChild(numWrap);
 
     var delBtn = document.createElement("div");
@@ -408,7 +509,7 @@ function addClipCard(node, cardsWrapper, clipData) {
         card.remove();
         renumberCards(cardsWrapper);
         serializeClips(node, cardsWrapper);
-        updateSummary(cardsWrapper, node._bsaiSummary);
+        updateSummary(cardsWrapper, node._bsaiSummary, node._bsaiToolbarInfo);
     });
     hdr.appendChild(delBtn);
     card.appendChild(hdr);
@@ -479,7 +580,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     durInput.min = 0.25; durInput.max = 150; durInput.step = 0.25;
     durInput.addEventListener("input", function () {
         serializeClips(node, cardsWrapper);
-        updateSummary(cardsWrapper, node._bsaiSummary);
+        updateSummary(cardsWrapper, node._bsaiSummary, node._bsaiToolbarInfo);
     });
     durWrap.appendChild(durInput);
     row.appendChild(durWrap);
@@ -737,6 +838,7 @@ function serializeClips(node, cardsWrapper) {
             width: 1344,
             height: 768,
             seed: 0,
+            selected: card.classList.contains("selected"),
         };
 
         var promptEl = card.querySelector(".bsai-clip-prompt");
@@ -780,18 +882,63 @@ function serializeClips(node, cardsWrapper) {
     }
 }
 
-function updateSummary(cardsWrapper, summary) {
+function updateSummary(cardsWrapper, summary, toolbarInfo) {
     if (!summary) return;
     var cards = cardsWrapper.querySelectorAll(".bsai-clip");
+    var selectedCards = cardsWrapper.querySelectorAll(".bsai-clip.selected");
     var totalDur = 0;
+    var selectedDur = 0;
     cards.forEach(function (card) {
         var durField = card.querySelector('[data-field="duration"] input');
-        if (durField) totalDur += parseFloat(durField.value) || 0;
+        var dur = parseFloat(durField.value) || 0;
+        totalDur += dur;
+        if (card.classList.contains("selected")) selectedDur += dur;
     });
     var clipsSpan = summary.querySelector("[data-sum-clips]");
     var durSpan = summary.querySelector("[data-sum-dur]");
-    if (clipsSpan) clipsSpan.textContent = cards.length;
-    if (durSpan) durSpan.textContent = totalDur.toFixed(1);
+    if (clipsSpan) clipsSpan.textContent = selectedCards.length + "/" + cards.length;
+    if (durSpan) durSpan.textContent = selectedDur.toFixed(1) + "/" + totalDur.toFixed(1);
+    if (toolbarInfo) {
+        var selSpan = toolbarInfo.querySelector("[data-sel-count]");
+        var totalSpan = toolbarInfo.querySelector("[data-total-count]");
+        if (selSpan) selSpan.textContent = selectedCards.length;
+        if (totalSpan) totalSpan.textContent = cards.length;
+    }
+}
+
+function toggleCardSelected(card) {
+    card.classList.toggle("selected");
+}
+
+function setAllSelected(cardsWrapper, selected) {
+    var cards = cardsWrapper.querySelectorAll(".bsai-clip");
+    cards.forEach(function (card) {
+        if (selected) card.classList.add("selected");
+        else card.classList.remove("selected");
+    });
+    // Find the node from the first card's context
+    var node = null;
+    if (cards.length > 0) {
+        var el = cards[0];
+        while (el && !el._bsaiNode) el = el.parentElement;
+        if (el) node = el._bsaiNode;
+    }
+    // Trigger serialize via the add button's closure — use a custom event
+    var seq = cardsWrapper.closest(".bsai-seq");
+    if (seq) {
+        seq.dispatchEvent(new CustomEvent("bsai-selection-changed"));
+    }
+}
+
+function invertSelection(cardsWrapper) {
+    var cards = cardsWrapper.querySelectorAll(".bsai-clip");
+    cards.forEach(function (card) {
+        card.classList.toggle("selected");
+    });
+    var seq = cardsWrapper.closest(".bsai-seq");
+    if (seq) {
+        seq.dispatchEvent(new CustomEvent("bsai-selection-changed"));
+    }
 }
 
 function findWidget(node, name) {
