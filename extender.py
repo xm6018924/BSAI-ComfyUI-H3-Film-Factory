@@ -2912,6 +2912,7 @@ class BSAIH3FilmFactory:
         # Load asset library images as reference tensors. When @图N tags are
         # used, the asset images replace the internal refs list entirely so
         # that <Picture N> tags in prompts match the ref slot numbers.
+        clip_ref_plans = None
         if resolved_img_paths:
             print(f"[H3 Extender] Loading {len(resolved_img_paths)} asset images as ref tensors")
             asset_tensors = []
@@ -2930,9 +2931,64 @@ class BSAIH3FilmFactory:
                 refs = asset_tensors[:MAX_IMAGE_REFS]
                 refs += [None] * (MAX_IMAGE_REFS - len(refs))
                 print(f"[H3 Extender] refs replaced with {len(asset_tensors)} asset tensors (padded to {len(refs)} slots)")
-                for i, r in enumerate(refs):
-                    if r is not None:
-                        print(f"[H3 Extender]   refs[{i}]: tensor shape {tuple(r.shape)}")
+
+                # Per-CLIP reference planning: each CLIP renders with ONLY the
+                # assets its own prompt (plus the global prompt) references.
+                # Other CLIPs' scene assets never leak into this shot, fixing
+                # scene mixing when a CLIP references just one scene image.
+                # <Picture N> tags are renumbered compactly 1..k
+                # (k <= MAX_IMAGE_REFS) and both the CLIP prompt and the global
+                # prompt are rewritten accordingly, so a <Picture 38> scene
+                # reference still occupies a slot even when many global role
+                # refs were resolved before it. Own-CLIP refs take priority
+                # over global refs when the total exceeds the model's slot cap.
+                _pic_re = re.compile(r'<Picture\s+(\d+)>', re.IGNORECASE)
+                _gp_text = str(global_prompt or "")
+
+                def _collect_pic_nums(text):
+                    seen = []
+                    for _m in _pic_re.finditer(str(text)):
+                        _n = int(_m.group(1))
+                        if _n not in seen and 1 <= _n <= len(asset_tensors):
+                            seen.append(_n)
+                    return seen
+
+                def _remap_prompt_text(text, old_to_new):
+                    def _sub(_m):
+                        _n = int(_m.group(1))
+                        if _n in old_to_new:
+                            return f"<Picture {old_to_new[_n]}>"
+                        # Refs beyond the slot cap are dropped entirely (tag
+                        # removed, surrounding text kept). Leaving the original
+                        # number would collide with a remapped tag and make the
+                        # model reference the wrong asset.
+                        return ""
+                    return _pic_re.sub(_sub, str(text))
+
+                _gp_nums = _collect_pic_nums(_gp_text)
+                clip_ref_plans = []
+                for _ci, _clip in enumerate(clips):
+                    _clip_nums = _collect_pic_nums(_clip.get("prompt", ""))
+                    _ordered = list(_clip_nums)
+                    for _n in _gp_nums:
+                        if _n not in _ordered:
+                            _ordered.append(_n)
+                    _ordered = _ordered[:MAX_IMAGE_REFS]
+                    _o2n = {_old: _idx + 1 for _idx, _old in enumerate(_ordered)}
+                    _slot_refs = [None] * MAX_IMAGE_REFS
+                    for _idx, _old in enumerate(_ordered):
+                        _slot_refs[_idx] = asset_tensors[_old - 1]
+                    clip_ref_plans.append(
+                        {
+                            "refs": _slot_refs,
+                            "clip_prompt": _remap_prompt_text(_clip.get("prompt", ""), _o2n),
+                            "global_prompt": _remap_prompt_text(_gp_text, _o2n),
+                        }
+                    )
+                    print(
+                        f"[H3 Extender] clip[{_ci}] ref plan: {len(_ordered)} assets, "
+                        f"slots={[i + 1 for i, r in enumerate(_slot_refs) if r is not None]}"
+                    )
             else:
                 print("[H3 Extender] WARNING: resolved_img_paths was non-empty but no tensors were loaded!")
         else:
@@ -3427,27 +3483,37 @@ class BSAIH3FilmFactory:
             for j in range(i + 1, loop_end):
                 clips[j]["validated"] = False
 
-            if ref_items is None or ref_blocks is None or active_picture_slots is None:
-                ref_items, ref_blocks, active_picture_slots, _ref_cache_hit = _prepare_shared_refs_cached(
-                    vae,
-                    audio_vae,
-                    resolved_width,
-                    resolved_height,
-                    str(ref_image_size),
-                    refs,
-                    ref_audio=ref_audio,
-                    enable_cache=bool(ref_cache),
-                    cache_bias=_asset_paths_signature(resolved_img_paths),
-                )
-                if not _ref_cache_hit:
-                    print(f"[H3 Extender] _prepare_shared_refs: {len(ref_items)} ref_items, "
-                          f"{len(ref_blocks)} ref_blocks, active_picture_slots={active_picture_slots}")
+            # Per-CLIP reference selection: this shot only conditions on the
+            # assets its own prompt (plus the global prompt's) references.
+            # Assets referenced by other CLIPs never leak into this scene.
+            _refs_for_clip = refs
+            _clip_prompt_for_cond = str(cfg["prompt"] or "")
+            _gp_for_cond = global_prompt
+            if clip_ref_plans is not None:
+                _plan = clip_ref_plans[i]
+                _refs_for_clip = _plan["refs"]
+                _clip_prompt_for_cond = _plan["clip_prompt"]
+                _gp_for_cond = _plan["global_prompt"]
+            ref_items, ref_blocks, active_picture_slots, _ref_cache_hit = _prepare_shared_refs_cached(
+                vae,
+                audio_vae,
+                resolved_width,
+                resolved_height,
+                str(ref_image_size),
+                _refs_for_clip,
+                ref_audio=ref_audio,
+                enable_cache=bool(ref_cache),
+                cache_bias=_asset_paths_signature(resolved_img_paths) + f"|clip{i}",
+            )
+            if not _ref_cache_hit:
+                print(f"[H3 Extender] _prepare_shared_refs: {len(ref_items)} ref_items, "
+                      f"{len(ref_blocks)} ref_blocks, active_picture_slots={active_picture_slots}")
 
             frame_count = _duration_to_frames(cfg["duration"])
             # Prepend global prompt if connected from an external node
-            effective_prompt = str(cfg["prompt"] or "")
-            if global_prompt:
-                gp = str(global_prompt).strip()
+            effective_prompt = _clip_prompt_for_cond
+            if _gp_for_cond:
+                gp = str(_gp_for_cond).strip()
                 if gp:
                     effective_prompt = gp + "\n" + effective_prompt
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:100]}'")
