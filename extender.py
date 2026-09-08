@@ -1124,6 +1124,34 @@ def _prepare_shared_refs_cached(
 
 _PICTURE_TAG_RE = re.compile(r"<Picture\s+(\d+)>", re.IGNORECASE)
 
+_ARCHIVE_SECTION_RE = re.compile(r"^\s*\[[^\[\]\n]*档案[^\[\]\n]*\]", re.MULTILINE)
+
+
+def _strip_archive_sections(text):
+    """Remove [角色档案]/[道具档案]/[场景档案] sections (heading plus their
+    item lines) from a global prompt. Those character/prop/scene inventories
+    must never leak into a CLIP's render prompt — otherwise the model draws
+    every listed character and scene in every card. Other sections (e.g.
+    [整体风格]) are kept as pure text style, without any picture refs."""
+    if not text:
+        return ""
+    lines = str(text).splitlines()
+    out = []
+    skipping = False
+    for ln in lines:
+        if _ARCHIVE_SECTION_RE.match(ln):
+            skipping = True
+            continue
+        if skipping:
+            # A new bracket section ends the skipped archive block. Plain item
+            # lines (e.g. "凌薇@图1，...") stay inside the skipped block.
+            if re.match(r"^\s*\[", ln):
+                skipping = False
+            else:
+                continue
+        out.append(ln)
+    return "\n".join(out).strip()
+
 
 def _remap_picture_tags(prompt: str, active_picture_slots):
     """Map stable UI Ref slots to H3's contiguous active Picture ordinals."""
@@ -3512,10 +3540,12 @@ class BSAIH3FilmFactory:
                       f"{len(ref_blocks)} ref_blocks, active_picture_slots={active_picture_slots}")
 
             frame_count = _duration_to_frames(cfg["duration"])
-            # Prepend global prompt if connected from an external node
+            # Prepend global prompt if connected from an external node.
+            # The [角色档案]/[道具档案]/[场景档案] inventories are stripped so
+            # the render prompt only ever describes THIS CLIP's own content.
             effective_prompt = _clip_prompt_for_cond
             if _gp_for_cond:
-                gp = str(_gp_for_cond).strip()
+                gp = _strip_archive_sections(str(_gp_for_cond)).strip()
                 if gp:
                     effective_prompt = gp + "\n" + effective_prompt
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:100]}'")
