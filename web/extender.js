@@ -2355,12 +2355,24 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
         leftPanel.appendChild(empty);
     } else {
         const assetList = runtime._h3_assetCache;
-        refs.forEach(function(ref) {
+        // Group identical assets: show ONE thumbnail per asset with a usage
+        // count badge in its bottom-right corner. Duplicates no longer stack
+        // rows, so the card height stays compact.
+        const groups = new Map();
+        for (const ref of refs) {
+            const key = ref.type + ":" + ref.index;
+            const g = groups.get(key) || { ref: ref, count: 0 };
+            g.count += 1;
+            groups.set(key, g);
+        }
+        Array.from(groups.values()).forEach(function(g) {
+            const ref = g.ref;
+            const count = g.count;
             const assetItem = document.createElement("div");
             assetItem.style.cssText = "display:flex;align-items:center;gap:4px;margin-bottom:3px;font-size:11px;";
 
             const thumb = document.createElement("div");
-            thumb.style.cssText = "width:40px;height:40px;border:1px solid #333;border-radius:3px;overflow:hidden;flex-shrink:0;background:#1a1a1a;";
+            thumb.style.cssText = "position:relative;width:40px;height:40px;border:1px solid #333;border-radius:3px;overflow:hidden;flex-shrink:0;background:#1a1a1a;";
             if (ref.type !== "audios") {
                 const img = document.createElement("img");
                 img.style.cssText = "width:100%;height:100%;object-fit:cover;";
@@ -2384,6 +2396,14 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
                 thumb.appendChild(img);
             } else {
                 thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;">♪</div>';
+            }
+            // Usage count badge (only when the same asset is referenced more
+            // than once in this CLIP's prompt)
+            if (count > 1) {
+                const badge = document.createElement("div");
+                badge.textContent = "×" + count;
+                badge.style.cssText = "position:absolute;right:1px;bottom:1px;background:rgba(190,30,30,.92);color:#fff;font-size:9px;line-height:1.2;padding:1px 3px;border-radius:3px;pointer-events:none;";
+                thumb.appendChild(badge);
             }
             assetItem.appendChild(thumb);
 
@@ -3795,7 +3815,7 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
-window.__h3ExtenderVersion = "gp-size-persist";
+window.__h3ExtenderVersion = "ref-dedupe-badge";
 
 // --- diagnostic counters (removable) ---
 function h3diag(sync) {
