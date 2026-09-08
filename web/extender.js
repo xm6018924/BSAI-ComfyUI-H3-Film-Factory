@@ -3795,7 +3795,7 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
-window.__h3ExtenderVersion = "gp-resize-font";
+window.__h3ExtenderVersion = "gp-size-persist";
 
 // --- diagnostic counters (removable) ---
 function h3diag(sync) {
@@ -4884,6 +4884,8 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         e.preventDefault();
         gpDragHeight = null;
         delete gpEditorWrap.dataset.gpDragFixed;
+        delete state.gpDragHeight;
+        updateHidden(node, runtime);
         globalPromptSection.style.height = "";
         globalPromptSection.style.flex = "";
         gpEditorWrap.style.height = "";
@@ -4916,12 +4918,32 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
             window.removeEventListener("mousemove", onMove);
             window.removeEventListener("mouseup", onUp);
             document.body.style.cursor = "";
+            // Persist the user-dragged global prompt section height so it
+            // survives page refresh / workflow save until adjusted again.
+            if (gpDragHeight != null) {
+                state.gpDragHeight = gpDragHeight;
+                updateHidden(node, runtime);
+            }
             syncDomHeight(runtime);
         }
         window.addEventListener("mousemove", onMove);
         window.addEventListener("mouseup", onUp);
         document.body.style.cursor = "row-resize";
     });
+
+    // Restore a previously drag-fixed global prompt height on node creation.
+    if (state.gpDragHeight) {
+        gpDragHeight = Number(state.gpDragHeight) || null;
+        if (gpDragHeight != null) {
+            gpEditorWrap.dataset.gpDragFixed = "1";
+            globalPromptSection.style.height = gpDragHeight + "px";
+            globalPromptSection.style.flex = "0 0 auto";
+            gpEditorWrap.style.height = "100%";
+            gpEditorWrap.style.minHeight = "0";
+            gpTextarea.style.height = "100%";
+            gpTextarea.style.overflowY = "auto";
+        }
+    }
 
     root.append(toolbar, refsSection, globalPromptSection, gpResizer, cards, bottomBar, refFileInput);
 
