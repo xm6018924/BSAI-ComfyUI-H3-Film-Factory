@@ -4137,6 +4137,9 @@ function ensureGlobalSyncPoll() {
                             if (Number(rt.state.nodeHeight || 0) !== h) {
                                 rt.state.nodeHeight = h;
                                 updateHidden(n, rt);
+                                // Re-apply the saved body height immediately so a
+                                // later refresh / restart has a real value to restore.
+                                try { syncDomHeight(n, rt); } catch (e) {}
                             }
                         }
                     }
@@ -5367,6 +5370,32 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                 }
             }
             runtime.validatedCount = restoredValidatedPrefix;
+            // Restore the exact node size the user last adjusted. This must run
+            // AFTER widgets are applied: onNodeCreated sees pre-config defaults,
+            // so the saved height is only available here in onConfigure. If the
+            // widget value is missing (workflow saved by an older build) but the
+            // serialized node size is taller than the content minimum, treat
+            // that as the user's last height and persist it going forward.
+            try {
+                const savedH = Number(runtime.state?.nodeHeight || 0);
+                const nodeH = Number(this.size?.[1] || 0);
+                const minNodeH = calculateMinHeight(runtime) + NON_CARD_FIXED;
+                let targetH = 0;
+                if (Number.isFinite(savedH) && savedH > 0) {
+                    targetH = Math.max(savedH, minNodeH);
+                } else if (Number.isFinite(nodeH) && nodeH > minNodeH + 4) {
+                    targetH = nodeH;
+                    runtime.state.nodeHeight = nodeH;
+                    try { updateHidden(this, runtime); } catch (e) {}
+                }
+                if (targetH > 0) {
+                    const w = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
+                    if (Math.abs(Number(this.size?.[1] || 0) - targetH) > 4) {
+                        this.setSize([w, targetH]);
+                    }
+                    syncDomHeight(this, runtime, true);
+                }
+            } catch (e) {}
             if (removedLegacyRefs && refCount(runtime) === 0) {
                 runtime.statusText = "Legacy image-ref sockets removed — load references in the Extender";
             }
