@@ -3815,7 +3815,7 @@ function positionClipPorts(node, runtime) {
 // Read the text currently flowing into a connected clip_prompt_N input from
 // its upstream node (PrimitiveNode text widget, or a node output cached after
 // execution). Returns null when nothing usable is available yet.
-window.__h3ExtenderVersion = "ref-dedupe-badge";
+window.__h3ExtenderVersion = "node-size-persist";
 
 // --- diagnostic counters (removable) ---
 function h3diag(sync) {
@@ -4124,6 +4124,23 @@ function ensureGlobalSyncPoll() {
                 try { positionClipPorts(n, n.__h3Extender); } catch (e) {}
                 try { syncExternalPrompts(n, n.__h3Extender); } catch (e) {}
                 try { syncGlobalPromptFromInput(n, n.__h3Extender); } catch (e) {}
+                // Persist the user-adjusted node height so a page refresh or
+                // ComfyUI restart restores the exact last layout, including
+                // every CLIP card's share of the node body. Sampling is cheap
+                // (500ms) and only writes the widget when the value changed.
+                try {
+                    const rt = n.__h3Extender;
+                    if (rt && rt.state) {
+                        const h = Number(n.size?.[1] || 0);
+                        if (Number.isFinite(h) && h > 100 && h < 100000 && h !== rt._lastNodeHeight) {
+                            rt._lastNodeHeight = h;
+                            if (Number(rt.state.nodeHeight || 0) !== h) {
+                                rt.state.nodeHeight = h;
+                                updateHidden(n, rt);
+                            }
+                        }
+                    }
+                } catch (e) {}
             }
         } catch (e) {}
     }, 500);
@@ -4145,6 +4162,15 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
     // feedback loop that created the infinite-height nodes.
     if (mode === "nodes2") {
         const dynMinH = calculateMinHeight(runtime);
+        // If the user last resized the node, keep that exact body height as
+        // the intrinsic minimum so refresh / restart restores the same card
+        // layout instead of collapsing back to the content minimum.
+        const savedNodeH = Number(runtime.state?.nodeHeight || 0);
+        const bodyMinH = (
+            Number.isFinite(savedNodeH) && savedNodeH > 0
+        )
+            ? Math.max(dynMinH, savedNodeH)
+            : dynMinH;
         const currentH = Number(node.size?.[1] || 0);
         const y = Number(runtime.domWidget.last_y);
         const fallbackH = Number.isFinite(y) && y > 0
@@ -4187,8 +4213,8 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         // remount the element until a page refresh. Keep a real intrinsic
         // minimum instead and let Vue stretch the row/child naturally.
         runtime.root.style.height = "auto";
-        runtime.root.style.minHeight = `${dynMinH}px`;
-        runtime.root.style.setProperty("--comfy-widget-min-height", `${dynMinH}px`);
+        runtime.root.style.minHeight = `${bodyMinH}px`;
+        runtime.root.style.setProperty("--comfy-widget-min-height", `${bodyMinH}px`);
         runtime.root.style.maxHeight = "none";
         runtime.root.style.flex = "1 1 auto";
         runtime.root.style.paddingTop = `${5 + NODES2_TOP_GAP}px`;
@@ -4198,7 +4224,7 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
 
         runtime.cards.style.height = "auto";
         runtime.cards.style.flex = "1 1 auto";
-        runtime.cards.style.minHeight = `${Math.max(COLLAPSED_MIN_HEIGHT, dynMinH - NON_CARD_FIXED)}px`;
+        runtime.cards.style.minHeight = `${Math.max(COLLAPSED_MIN_HEIGHT, bodyMinH - NON_CARD_FIXED)}px`;
         runtime.cards.style.maxHeight = "none";
         return;
     }
@@ -5796,7 +5822,22 @@ app.registerExtension({
             bsaiApplyBilingualLabels(this);
             if (runtime) {
                 requestAnimationFrame(() => {
-                    requestAnimationFrame(() => syncDomHeight(this, runtime, true));
+                    requestAnimationFrame(() => {
+                        syncDomHeight(this, runtime, true);
+                        // Restore the exact node size the user last adjusted,
+                        // so refresh / restart keeps the same CLIP card layout.
+                        // Never shrink below the content minimum.
+                        const savedH = Number(runtime.state?.nodeHeight || 0);
+                        if (Number.isFinite(savedH) && savedH > 0) {
+                            const minNodeH = calculateMinHeight(runtime) + NON_CARD_FIXED;
+                            const targetH = Math.max(savedH, minNodeH);
+                            const w = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
+                            if (Math.abs(Number(this.size?.[1] || 0) - targetH) > 4) {
+                                this.setSize([w, targetH]);
+                                syncDomHeight(this, runtime, true);
+                            }
+                        }
+                    });
                 });
                 h3FetchAssets();
             }
