@@ -2969,11 +2969,7 @@ class BSAIH3FilmFactory:
                 clip_ref_plans = []
                 for _ci, _clip in enumerate(clips):
                     _clip_nums = _collect_pic_nums(_clip.get("prompt", ""))
-                    _ordered = list(_clip_nums)
-                    for _n in _gp_nums:
-                        if _n not in _ordered:
-                            _ordered.append(_n)
-                    _ordered = _ordered[:MAX_IMAGE_REFS]
+                    _ordered = _clip_nums[:MAX_IMAGE_REFS]
                     _o2n = {_old: _idx + 1 for _idx, _old in enumerate(_ordered)}
                     _slot_refs = [None] * MAX_IMAGE_REFS
                     for _idx, _old in enumerate(_ordered):
@@ -2982,11 +2978,17 @@ class BSAIH3FilmFactory:
                         {
                             "refs": _slot_refs,
                             "clip_prompt": _remap_prompt_text(_clip.get("prompt", ""), _o2n),
-                            "global_prompt": _remap_prompt_text(_gp_text, _o2n),
+                            # Strict per-CLIP isolation: the global prompt NEVER
+                            # injects picture refs into a CLIP. Only the CLIP's
+                            # own @图N tags drive its reference images, so assets
+                            # mentioned only in the global prompt (other scenes,
+                            # other characters) never appear in this shot.
+                            "global_prompt": _remap_prompt_text(_gp_text, {}),
                         }
                     )
                     print(
-                        f"[H3 Extender] clip[{_ci}] ref plan: {len(_ordered)} assets, "
+                        f"[H3 Extender] clip[{_ci}] ref plan: {len(_ordered)} assets "
+                        f"(strict per-clip, global refs excluded), "
                         f"slots={[i + 1 for i, r in enumerate(_slot_refs) if r is not None]}"
                     )
             else:
