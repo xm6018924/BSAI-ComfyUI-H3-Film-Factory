@@ -4082,6 +4082,19 @@ function syncExternalPrompts(node, runtime) {
             changed = true;
         }
     });
+
+    // v2.2: 空CLIP自动清理 — 从后往前删，只删空的、非CLIP1的卡片
+    // CLIP1（idx=0）永远保留，永不删除
+    for (let idx = runtime.state.clips.length - 1; idx > 0; idx--) {
+        const clip = runtime.state.clips[idx];
+        const promptEmpty = !clip.prompt || !clip.prompt.trim();
+        const externalEmpty = !clip.external_prompt || !clip.external_prompt.trim();
+        if (promptEmpty && externalEmpty) {
+            runtime.state.clips.splice(idx, 1);
+            changed = true;
+        }
+    }
+
     // A real value change must be reflected in the card DOM. Direct .value
     // writes are not reliably visible on every render path; rebuilding the
     // card list is what makes the new text appear (same as the Sync All
