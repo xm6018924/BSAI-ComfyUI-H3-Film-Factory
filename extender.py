@@ -1334,20 +1334,21 @@ def _upscale_latent_spatial(samples, factor):
         _, _, H, W = samples.shape
         nH = max(2, (int(H * factor) // 2) * 2)
         nW = max(2, (int(W * factor) // 2) * 2)
-        return comfy.utils.common_upscale(samples, nW, nH, "bicubic", "center")
+        return comfy.utils.common_upscale(samples, nW, nH, "bilinear", "center")
     # 5D (B, C, T, H, W)
     B, C, T, H, W = samples.shape
     nH = max(2, (int(H * factor) // 2) * 2)
     nW = max(2, (int(W * factor) // 2) * 2)
     bt = B * T
     reshaped = samples.reshape(bt, C, H, W)
-    up = torch.nn.functional.interpolate(reshaped, size=(nH, nW), mode="bicubic", align_corners=False)
+    # v2.0: bilinear 替代 bicubic，减少 latent 放大后的鬼影/重影
+    up = torch.nn.functional.interpolate(reshaped, size=(nH, nW), mode="bilinear", align_corners=False)
     return up.reshape(B, C, T, nH, nW)
 
 
 def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, scheduler: str, steps: int, denoise: float,
                owner_id=None, clip_index=-1,
-               refine_enable=False, refine_denoise=0.35, refine_steps=4, refine_upscale_factor=1.0):
+               refine_enable=False, refine_denoise=0.55, refine_steps=4, refine_upscale_factor=1.0):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -2618,8 +2619,8 @@ class BSAIH3FilmFactory:
             "refine_denoise": (
                 "FLOAT",
                 {
-                    "default": 0.35, "min": 0.05, "max": 0.70, "step": 0.01,
-                    "tooltip": "二次采样降噪强度。0.3-0.45 为画质提升黄金区间：过高(>0.5)会变脸/跑偏，过低(<0.2)画质提升微弱。仅 refine_enable 开启时生效。",
+                    "default": 0.55, "min": 0.05, "max": 0.70, "step": 0.01,
+                    "tooltip": "二次采样降噪强度。0.5-0.6 为细节提升黄金区间（双采实测）：过低(<0.3)画质提升微弱，过高(>0.65)会变脸/跑偏。仅 refine_enable 开启时生效。",
                 },
             ),
             "refine_steps": (
@@ -2821,7 +2822,7 @@ class BSAIH3FilmFactory:
         pause_enable = kwargs.get("pause_enable", False)
         pause_timeout = kwargs.get("pause_timeout", 120.0)
         refine_enable = kwargs.get("refine_enable", False)
-        refine_denoise = kwargs.get("refine_denoise", 0.35)
+        refine_denoise = kwargs.get("refine_denoise", 0.55)
         refine_steps = kwargs.get("refine_steps", 4)
         refine_upscale_factor = kwargs.get("refine_upscale_factor", 1.0)
         unique_id = kwargs.get("unique_id", None)
