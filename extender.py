@@ -2472,19 +2472,19 @@ class BSAIH3FilmFactory:
             "width": (
                 "INT",
                 {
-                    "default": 896, "min": 32, "max": 4096, "step": 32,
+                    "default": 1344, "min": 32, "max": 4096, "step": 32,
                     "tooltip": "Manual resolution width, also used as Auto fallback when no internal image reference is loaded.",
                 },
             ),
             "height": (
                 "INT",
                 {
-                    "default": 576, "min": 32, "max": 4096, "step": 32,
+                    "default": 768, "min": 32, "max": 4096, "step": 32,
                     "tooltip": "Manual resolution height, also used as Auto fallback when no internal image reference is loaded.",
                 },
             ),
             "ref_image_size": (["match", "max"], {"default": "match"}),
-            "steps": ("INT", {"default": 4, "min": 1, "max": 10000, "step": 1}),
+            "steps": ("INT", {"default": 8, "min": 1, "max": 10000, "step": 1}),
             "sampler_name": (sampler_names, {"default": default_sampler}),
             "scheduler": (scheduler_names, {"default": default_scheduler}),
             "denoise": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1.0, "step": 0.01}),
@@ -2633,8 +2633,8 @@ class BSAIH3FilmFactory:
             "refine_upscale_factor": (
                 "FLOAT",
                 {
-                    "default": 1.0, "min": 1.0, "max": 2.0, "step": 0.1,
-                    "tooltip": "潜空间放大倍数（1.0=不放大）。1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加且可能出现线条/碎玻璃瑕疵。放大后自动二次采样。仅 refine_enable 开启时生效。",
+                    "default": 2.0, "min": 1.0, "max": 2.0, "step": 0.1,
+                    "tooltip": "潜空间放大倍数（1.0=不放大）。官方双采极速版推荐2.0x；1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加且可能出现线条/碎玻璃瑕疵。放大后自动二次采样。仅 refine_enable 开启时生效。",
                 },
             ),
         }
