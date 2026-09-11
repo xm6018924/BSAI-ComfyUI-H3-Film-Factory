@@ -1,0 +1,2985 @@
+{
+  "id": "56c3ebd1-49ee-4a95-8d74-98ff8532b213",
+  "revision": 0,
+  "last_node_id": 75,
+  "last_link_id": 104,
+  "nodes": [
+    {
+      "id": 17,
+      "type": "BasicScheduler",
+      "pos": [
+        -562.5847174579291,
+        4098.158486685025
+      ],
+      "size": [
+        300,
+        110
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "slot_index": 0,
+          "links": [
+            26
+          ]
+        }
+      ],
+      "title": "Basic Scheduler (人脸修复调度)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "simple",
+        4,
+        0.35
+      ],
+      "widgets_values_named": {
+        "scheduler": "simple",
+        "steps": 4,
+        "denoise": 0.35
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 18,
+      "type": "RandomNoise",
+      "pos": [
+        -562.5847174579291,
+        4248.158486685024
+      ],
+      "size": [
+        300,
+        82
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "NOISE",
+          "type": "NOISE",
+          "slot_index": 0,
+          "links": [
+            27
+          ]
+        }
+      ],
+      "title": "Random Noise (随机噪声)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "RandomNoise"
+      },
+      "widgets_values": [
+        614310126002342,
+        "randomize"
+      ],
+      "widgets_values_named": {
+        "noise_seed": 614310126002342,
+        "control_after_generate": "randomize"
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 19,
+      "type": "KSamplerSelect",
+      "pos": [
+        -562.5847174579291,
+        4368.158486685024
+      ],
+      "size": [
+        300,
+        80
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "slot_index": 0,
+          "links": [
+            28
+          ]
+        }
+      ],
+      "title": "KSampler Select (采样器选择)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "KSamplerSelect"
+      },
+      "widgets_values": [
+        "euler"
+      ],
+      "widgets_values_named": {
+        "sampler_name": "euler"
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 30,
+      "type": "KSamplerSelect",
+      "pos": [
+        2861.382108602151,
+        3987.619189804877
+      ],
+      "size": [
+        300,
+        80
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "SAMPLER",
+          "type": "SAMPLER",
+          "slot_index": 0,
+          "links": [
+            47
+          ]
+        }
+      ],
+      "title": "KSampler Select (高清采样器)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "KSamplerSelect"
+      },
+      "widgets_values": [
+        "euler"
+      ],
+      "widgets_values_named": {
+        "sampler_name": "euler"
+      },
+      "color": "#533"
+    },
+    {
+      "id": 31,
+      "type": "BasicScheduler",
+      "pos": [
+        2861.382108602151,
+        4107.619189804875
+      ],
+      "size": [
+        300,
+        110
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "slot_index": 0,
+          "links": [
+            48
+          ]
+        }
+      ],
+      "title": "Basic Scheduler (高清修复调度)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "simple",
+        4,
+        1
+      ],
+      "widgets_values_named": {
+        "scheduler": "simple",
+        "steps": 4,
+        "denoise": 1
+      },
+      "color": "#533"
+    },
+    {
+      "id": 32,
+      "type": "DisableNoise",
+      "pos": [
+        2861.382108602151,
+        4257.619189804875
+      ],
+      "size": [
+        300,
+        80
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "NOISE",
+          "type": "NOISE",
+          "slot_index": 0,
+          "links": [
+            45
+          ]
+        }
+      ],
+      "title": "Disable Noise (禁用噪声)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "DisableNoise"
+      },
+      "color": "#533"
+    },
+    {
+      "id": 33,
+      "type": "SamplerCustomAdvanced",
+      "pos": [
+        3184.120134281804,
+        3832.954505505814
+      ],
+      "size": [
+        320,
+        110
+      ],
+      "flags": {},
+      "order": 41,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": 45
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 46
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 47
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 48
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 49
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            50
+          ]
+        },
+        {
+          "name": "denoised_output",
+          "type": "LATENT",
+          "slot_index": 1,
+          "links": null
+        }
+      ],
+      "title": "Sampler Custom Advanced (高清采样)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "SamplerCustomAdvanced"
+      },
+      "color": "#533"
+    },
+    {
+      "id": 34,
+      "type": "VAEDecode",
+      "pos": [
+        3536.3665567417215,
+        3831.3658404989883
+      ],
+      "size": [
+        300,
+        80
+      ],
+      "flags": {},
+      "order": 42,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 50
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            52
+          ]
+        }
+      ],
+      "title": "VAE Decode (高清解码)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "VAEDecode"
+      },
+      "color": "#533"
+    },
+    {
+      "id": 35,
+      "type": "VHS_VideoCombine",
+      "pos": [
+        3868.3883364608046,
+        3825.9155799088335
+      ],
+      "size": [
+        400,
+        238
+      ],
+      "flags": {},
+      "order": 43,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 52
+        },
+        {
+          "name": "audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Filenames",
+          "type": "VHS_FILENAMES",
+          "links": null
+        }
+      ],
+      "title": "Video Combine (高清输出)",
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "4ee72c065db22c9d96c2427954dc69e7b908444b",
+        "Node name for S&R": "VHS_VideoCombine"
+      },
+      "widgets_values": {
+        "frame_rate": 24,
+        "loop_count": 0,
+        "filename_prefix": "BSAI_H3_HD_Upscaled",
+        "format": "H.264",
+        "pingpong": "fast",
+        "save_output": 17,
+        "videopreview": "192k"
+      },
+      "widgets_values_named": {
+        "frame_rate": 24,
+        "loop_count": 0,
+        "filename_prefix": "BSAI_H3_HD_Upscaled",
+        "format": "H.264",
+        "pingpong": "fast",
+        "save_output": 17,
+        "videopreview": "192k"
+      },
+      "color": "#533"
+    },
+    {
+      "id": 26,
+      "type": "RandomNoise",
+      "pos": [
+        2050.4153071427886,
+        3832.621048659041
+      ],
+      "size": [
+        300,
+        82
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "NOISE",
+          "type": "NOISE",
+          "slot_index": 0,
+          "links": [
+            35
+          ]
+        }
+      ],
+      "title": "Random Noise (放大噪声)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "RandomNoise"
+      },
+      "widgets_values": [
+        471013504373061,
+        "randomize"
+      ],
+      "widgets_values_named": {
+        "noise_seed": 471013504373061,
+        "control_after_generate": "randomize"
+      },
+      "color": "#533"
+    },
+    {
+      "id": 24,
+      "type": "MiniMaxH3LatentUpscaleCombined",
+      "pos": [
+        2372.5904790740974,
+        3835.1051551769765
+      ],
+      "size": [
+        467.3307328783221,
+        274
+      ],
+      "flags": {},
+      "order": 37,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 33
+        },
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": 35
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 36
+        },
+        {
+          "name": "learned_upscaler",
+          "shape": 7,
+          "type": "H3_LATENT_UPSCALER",
+          "link": null
+        },
+        {
+          "name": "positive",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 37
+        },
+        {
+          "name": "negative",
+          "shape": 7,
+          "type": "CONDITIONING",
+          "link": 38
+        }
+      ],
+      "outputs": [
+        {
+          "name": "latent",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            49
+          ]
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "slot_index": 1,
+          "links": [
+            42
+          ]
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "slot_index": 2,
+          "links": [
+            43
+          ]
+        }
+      ],
+      "title": "H3 Latent Upscale 2x (高清放大)",
+      "properties": {
+        "aux_id": "Tr1dae/ComfyUI-MiniMaxH3_LatentUpscaler",
+        "ver": "895e3c471164423f0ea0e8eaf45eb701efe641ae",
+        "Node name for S&R": "MiniMaxH3LatentUpscaleCombined"
+      },
+      "widgets_values": [
+        "learned",
+        "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+        0,
+        "independent",
+        0
+      ],
+      "widgets_values_named": {
+        "method": "learned",
+        "learned_model": "minimax_h3_latent_upscaler_3d_fp16.safetensors",
+        "audio_denoise": 0,
+        "noise_resample": "independent",
+        "match_stats": 0
+      },
+      "color": "#533"
+    },
+    {
+      "id": 27,
+      "type": "BasicScheduler",
+      "pos": [
+        2050.4153071427886,
+        3960.9997703869617
+      ],
+      "size": [
+        300,
+        110
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "SIGMAS",
+          "type": "SIGMAS",
+          "slot_index": 0,
+          "links": [
+            36
+          ]
+        }
+      ],
+      "title": "Basic Scheduler (放大调度)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "BasicScheduler"
+      },
+      "widgets_values": [
+        "simple",
+        4,
+        1
+      ],
+      "widgets_values_named": {
+        "scheduler": "simple",
+        "steps": 4,
+        "denoise": 1
+      },
+      "color": "#533"
+    },
+    {
+      "id": 29,
+      "type": "CFGGuider",
+      "pos": [
+        2861.382108602151,
+        3837.619189804877
+      ],
+      "size": [
+        300,
+        110
+      ],
+      "flags": {},
+      "order": 39,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "name": "positive",
+          "type": "CONDITIONING",
+          "link": 42
+        },
+        {
+          "name": "negative",
+          "type": "CONDITIONING",
+          "link": 43
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "slot_index": 0,
+          "links": [
+            46
+          ]
+        }
+      ],
+      "title": "CFG Guider (高清修复引导)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "CFGGuider"
+      },
+      "widgets_values": [
+        1
+      ],
+      "widgets_values_named": {
+        "cfg": 1
+      },
+      "color": "#533"
+    },
+    {
+      "id": 28,
+      "type": "CLIPTextEncode",
+      "pos": [
+        2050.5628004777204,
+        4118.612182750367
+      ],
+      "size": [
+        300,
+        120
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            38
+          ]
+        }
+      ],
+      "title": "CLIP Text Encode (负面提示词)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "blurry, low quality, distorted, artifacts, deformed"
+      ],
+      "widgets_values_named": {
+        "text": "blurry, low quality, distorted, artifacts, deformed"
+      },
+      "color": "#533"
+    },
+    {
+      "id": 23,
+      "type": "VHS_VideoCombine",
+      "pos": [
+        1522.1967771021814,
+        3829.191073726323
+      ],
+      "size": [
+        400,
+        238
+      ],
+      "flags": {},
+      "order": 40,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 31
+        },
+        {
+          "name": "audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Filenames",
+          "type": "VHS_FILENAMES",
+          "links": null
+        }
+      ],
+      "title": "Video Combine (人脸修复输出)",
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "4ee72c065db22c9d96c2427954dc69e7b908444b",
+        "Node name for S&R": "VHS_VideoCombine"
+      },
+      "widgets_values": {
+        "frame_rate": 24,
+        "loop_count": 0,
+        "filename_prefix": "BSAI_H3_FaceRefined",
+        "format": "H.264",
+        "pingpong": "fast",
+        "save_output": 17,
+        "videopreview": "192k"
+      },
+      "widgets_values_named": {
+        "frame_rate": 24,
+        "loop_count": 0,
+        "filename_prefix": "BSAI_H3_FaceRefined",
+        "format": "H.264",
+        "pingpong": "fast",
+        "save_output": 17,
+        "videopreview": "192k"
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 22,
+      "type": "H3FaceStitch",
+      "pos": [
+        1100.8310477085722,
+        3830.1546076438913
+      ],
+      "size": [
+        400,
+        262
+      ],
+      "flags": {},
+      "order": 38,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "base_images",
+          "type": "IMAGE",
+          "link": 13
+        },
+        {
+          "name": "refined_crops",
+          "type": "IMAGE",
+          "link": 30
+        },
+        {
+          "name": "transform",
+          "type": "H3FACEXFORM",
+          "link": 16
+        },
+        {
+          "name": "masks",
+          "shape": 7,
+          "type": "MASK",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            31
+          ]
+        }
+      ],
+      "title": "H3 Face Stitch Back (人脸缝合)",
+      "properties": {
+        "cnr_id": "comfyui-h3-facerefine",
+        "ver": "79a97ce5ee4b393ce26313bd1280b706fe8b4f2c",
+        "Node name for S&R": "H3FaceStitch"
+      },
+      "widgets_values": [
+        "face_only",
+        16,
+        6,
+        1,
+        1,
+        "fade_out",
+        false
+      ],
+      "widgets_values_named": {
+        "paste_region": "face_only",
+        "mask_dilation": 16,
+        "feather": 6,
+        "colour_match": 1,
+        "blend": 1,
+        "undetected_frames": "fade_out",
+        "feather_scales_with_crop": false
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 21,
+      "type": "VAEDecode",
+      "pos": [
+        781.3041580841417,
+        3835.1334784785927
+      ],
+      "size": [
+        300,
+        80
+      ],
+      "flags": {},
+      "order": 36,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "samples",
+          "type": "LATENT",
+          "link": 29
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            30
+          ]
+        }
+      ],
+      "title": "VAE Decode (解码人脸)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "VAEDecode"
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 10,
+      "type": "VHS_LoadVideoPath",
+      "pos": [
+        -1369.5147536845207,
+        3817.606248726305
+      ],
+      "size": [
+        340,
+        286
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "meta_batch",
+          "shape": 7,
+          "type": "VHS_BatchManager",
+          "link": null
+        },
+        {
+          "name": "vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            12,
+            13
+          ]
+        },
+        {
+          "name": "frame_count",
+          "type": "INT",
+          "slot_index": 1,
+          "links": null
+        },
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "slot_index": 2,
+          "links": null
+        },
+        {
+          "name": "video_info",
+          "type": "VHS_VIDEOINFO",
+          "slot_index": 3,
+          "links": null
+        }
+      ],
+      "title": "Load Video (加载生成的视频) — 0=全部帧",
+      "properties": {
+        "cnr_id": "comfyui-videohelpersuite",
+        "ver": "4ee72c065db22c9d96c2427954dc69e7b908444b",
+        "Node name for S&R": "VHS_LoadVideoPath"
+      },
+      "widgets_values": {
+        "video": "output/BSAI_H3_Storyboard_00001.mp4",
+        "force_rate": 0,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 0,
+        "skip_first_frames": false,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "output/BSAI_H3_Storyboard_00001.mp4",
+            "type": "path",
+            "format": "video/mp4",
+            "force_rate": 0,
+            "custom_width": 0,
+            "custom_height": 0,
+            "frame_load_cap": 1,
+            "skip_first_frames": false,
+            "select_every_nth": null
+          }
+        }
+      },
+      "widgets_values_named": {
+        "video": "output/BSAI_H3_Storyboard_00001.mp4",
+        "force_rate": 0,
+        "custom_width": 0,
+        "custom_height": 0,
+        "frame_load_cap": 0,
+        "skip_first_frames": false,
+        "select_every_nth": 1,
+        "format": "AnimateDiff",
+        "videopreview": {
+          "hidden": false,
+          "paused": false,
+          "params": {
+            "filename": "output/BSAI_H3_Storyboard_00001.mp4",
+            "type": "path",
+            "format": "video/mp4",
+            "force_rate": 0,
+            "custom_width": 0,
+            "custom_height": 0,
+            "frame_load_cap": 1,
+            "skip_first_frames": false,
+            "select_every_nth": null
+          }
+        }
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 11,
+      "type": "H3FaceTrackCrop",
+      "pos": [
+        -1004.045583427083,
+        3819.800633400159
+      ],
+      "size": [
+        400,
+        494
+      ],
+      "flags": {},
+      "order": 25,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 12
+        },
+        {
+          "name": "identity_reference",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "crops",
+          "type": "IMAGE",
+          "slot_index": 0,
+          "links": [
+            14
+          ]
+        },
+        {
+          "name": "transform",
+          "type": "H3FACEXFORM",
+          "slot_index": 1,
+          "links": [
+            15,
+            16
+          ]
+        },
+        {
+          "name": "preview",
+          "type": "IMAGE",
+          "slot_index": 2,
+          "links": null
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "slot_index": 3,
+          "links": null
+        },
+        {
+          "name": "canvas_w",
+          "type": "INT",
+          "slot_index": 4,
+          "links": [
+            18
+          ]
+        },
+        {
+          "name": "canvas_h",
+          "type": "INT",
+          "slot_index": 5,
+          "links": [
+            19
+          ]
+        }
+      ],
+      "title": "H3 Face Track + Crop (人脸追踪裁剪)",
+      "properties": {
+        "cnr_id": "comfyui-h3-facerefine",
+        "ver": "79a97ce5ee4b393ce26313bd1280b706fe8b4f2c",
+        "Node name for S&R": "H3FaceTrackCrop"
+      },
+      "widgets_values": [
+        "face_yolov8m.pt",
+        0.35,
+        2.5,
+        512,
+        512,
+        "auto_capped_768",
+        21,
+        51,
+        "gaussian",
+        "per_frame",
+        true,
+        0.28,
+        "largest",
+        "none",
+        0.5
+      ],
+      "widgets_values_named": {
+        "detector": "face_yolov8m.pt",
+        "confidence": 0.35,
+        "crop_factor": 2.5,
+        "canvas_width": 512,
+        "canvas_height": 512,
+        "canvas_mode": "auto_capped_768",
+        "smooth_window": 21,
+        "size_smooth_window": 51,
+        "smooth_method": "gaussian",
+        "size_mode": "per_frame",
+        "identity_track": true,
+        "identity_threshold": 0.28,
+        "select": "largest",
+        "fallback_detector": "none",
+        "fallback_head_frac": 0.5
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 15,
+      "type": "CLIPTextEncode",
+      "pos": [
+        -1372.3744297826756,
+        4155.573509238421
+      ],
+      "size": [
+        340,
+        120
+      ],
+      "flags": {},
+      "order": 10,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "CONDITIONING",
+          "type": "CONDITIONING",
+          "slot_index": 0,
+          "links": [
+            23,
+            37
+          ]
+        }
+      ],
+      "title": "CLIP Text Encode (人脸提示词)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "CLIPTextEncode"
+      },
+      "widgets_values": [
+        "A cinematic close-up of a woman's face, detailed skin texture, realistic lighting, 8k quality"
+      ],
+      "widgets_values_named": {
+        "text": "A cinematic close-up of a woman's face, detailed skin texture, realistic lighting, 8k quality"
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 12,
+      "type": "EmptyMiniMaxH3LatentAV",
+      "pos": [
+        -570.9645415863562,
+        3816.267851313141
+      ],
+      "size": [
+        300,
+        110
+      ],
+      "flags": {},
+      "order": 29,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": 18
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": 19
+        }
+      ],
+      "outputs": [
+        {
+          "name": "LATENT",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            20
+          ]
+        }
+      ],
+      "title": "Empty H3 AV Latent (空H3潜空间)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "EmptyMiniMaxH3LatentAV"
+      },
+      "widgets_values": [
+        124,
+        768,
+        124
+      ],
+      "widgets_values_named": {
+        "width": 124,
+        "height": 768,
+        "length": 124
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 16,
+      "type": "BasicGuider",
+      "pos": [
+        -562.5847174579295,
+        3977.144661355946
+      ],
+      "size": [
+        300,
+        80
+      ],
+      "flags": {},
+      "order": 26,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": null
+        },
+        {
+          "name": "conditioning",
+          "type": "CONDITIONING",
+          "link": 23
+        }
+      ],
+      "outputs": [
+        {
+          "name": "GUIDER",
+          "type": "GUIDER",
+          "slot_index": 0,
+          "links": [
+            25
+          ]
+        }
+      ],
+      "title": "Basic Guider (基础引导器)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "BasicGuider"
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 13,
+      "type": "H3InjectVideoLatent",
+      "pos": [
+        -248.25794549150868,
+        3822.8997663650084
+      ],
+      "size": [
+        300,
+        80
+      ],
+      "flags": {},
+      "order": 31,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "av_latent",
+          "type": "LATENT",
+          "link": 20
+        },
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 14
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "av_latent",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            21
+          ]
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "slot_index": 1,
+          "links": null
+        }
+      ],
+      "title": "H3 Inject Video Latent (注入人脸潜空间)",
+      "properties": {
+        "cnr_id": "comfyui-h3-facerefine",
+        "ver": "79a97ce5ee4b393ce26313bd1280b706fe8b4f2c",
+        "Node name for S&R": "H3InjectVideoLatent"
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 14,
+      "type": "H3PerFrameDenoise",
+      "pos": [
+        84.7621244347067,
+        3822.938419462634
+      ],
+      "size": [
+        320,
+        222
+      ],
+      "flags": {},
+      "order": 33,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "av_latent",
+          "type": "LATENT",
+          "link": 21
+        },
+        {
+          "name": "transform",
+          "type": "H3FACEXFORM",
+          "link": 15
+        }
+      ],
+      "outputs": [
+        {
+          "name": "av_latent",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            22
+          ]
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "slot_index": 1,
+          "links": null
+        }
+      ],
+      "title": "H3 Per-Frame Denoise (逐帧降噪)",
+      "properties": {
+        "cnr_id": "comfyui-h3-facerefine",
+        "ver": "79a97ce5ee4b393ce26313bd1280b706fe8b4f2c",
+        "Node name for S&R": "H3PerFrameDenoise"
+      },
+      "widgets_values": [
+        1,
+        0.35,
+        "absolute_px",
+        30,
+        120,
+        1,
+        9
+      ],
+      "widgets_values_named": {
+        "strength_small_face": 1,
+        "strength_large_face": 0.35,
+        "scale_mode": "absolute_px",
+        "face_px_small": 30,
+        "face_px_large": 120,
+        "gamma": 1,
+        "smooth_frames": 9
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 20,
+      "type": "SamplerCustomAdvanced",
+      "pos": [
+        433.5467911638392,
+        3827.055172100227
+      ],
+      "size": [
+        320,
+        110
+      ],
+      "flags": {},
+      "order": 35,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "noise",
+          "type": "NOISE",
+          "link": 27
+        },
+        {
+          "name": "guider",
+          "type": "GUIDER",
+          "link": 25
+        },
+        {
+          "name": "sampler",
+          "type": "SAMPLER",
+          "link": 28
+        },
+        {
+          "name": "sigmas",
+          "type": "SIGMAS",
+          "link": 26
+        },
+        {
+          "name": "latent_image",
+          "type": "LATENT",
+          "link": 22
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "LATENT",
+          "slot_index": 0,
+          "links": [
+            29
+          ]
+        },
+        {
+          "name": "denoised_output",
+          "type": "LATENT",
+          "slot_index": 1,
+          "links": [
+            33
+          ]
+        }
+      ],
+      "title": "Sampler Custom Advanced (高级采样)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "SamplerCustomAdvanced"
+      },
+      "color": "#886600"
+    },
+    {
+      "id": 25,
+      "type": "Note",
+      "pos": [
+        -2132.467873473576,
+        4114.181660999749
+      ],
+      "size": [
+        431.4678657759122,
+        732.3503059433274
+      ],
+      "flags": {},
+      "order": 11,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [],
+      "title": "Workflow Instructions (工作流说明)",
+      "properties": {
+        "Node name for S&R": "Note"
+      },
+      "widgets_values": [
+        "BSAI Contextual-Series H3 Extender — 修复版\n==========================================\n\n■ 单击运行路径 (mode=0, 直接可用)\n  1. UNETLoader (50)  →  LoraLoaderModelOnly (65)  →  ComfySwitchNode (61)\n  2. ComfySwitchNode (61)  →  MiniMaxH3Extender (6)  →  MiniMaxH3MotionContextDiskFinalDecode (7)\n  3. CLIPLoader (51) + VAELoader (42) + VAELoader (43)  →  MiniMaxH3Extender (6)\n  4. Text Multiline (37/36) 历史文本(只读, 实际在 H3Extender 节点内编辑)\n  5. Boolean (66) 切换 Lightning LoRA 步数: true=4步, false=20步\n\n■ 可选后处理 — 默认 mode=4 (禁用), 需要时右键节点 → mode = Always\n  人脸修复 (棕色组, 节点 10-23):\n    启用前先运行主管线生成 MP4, 修改节点 10 的 video 路径为该 MP4\n    节点 10 的 frame_load_cap 已修正为 0 (=全部帧)\n  HD 2x 放大 (紫色组, 节点 24-35):\n    需要先启用并运行人脸修复管线以提供 denoised latent\n\n■ 资产库 (节点 5)\n  工作流里的 6 个文件名已清空。请在 BSAI_AssetLibraryInput 节点的\n  UI 上传你自己的图片/视频/音频, 索引为 @图1/@视频1/@音频1 等。\n  H3Extender 节点内每个 clip 都有 rfe_* 系列参数, 独立于 AssetLibrary。\n\n■ 关键节点参数\n  [UNETLoader 50]: minimax_h3_fl2va_int8_convrot.safetensors (default 精度)\n  [LoraLoaderModelOnly 65]: minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors, strength=1\n  [CLIPLoader 51]: qwen3vl_32b_minimax_h3_*, type=minimax (必须)\n  [VAELoader 42]: minimax_h3_video_vae_int8_convrot.safetensors\n  [VAELoader 43]: minimax_h3_audio_vae_fp32.safetensors\n  [H3Extender 6]: width/height 由节点 widget 控制 (默认 1344x768, 24fps)\n                  4 步 (Lightning LoRA 开启) 或 20 步 (关闭)\n                  故事板 (clips_json) 在节点 widget 内编辑, 已预置 3 段分镜\n\n■ 运行顺序\n  1. 打开 MiniMaxH3Extender (节点 6) → 在 clips_json 里编辑 3 段分镜的 prompt\n  2. 必要时调整 UNET/CLIP/VAE 文件名匹配本地模型\n  3. (可选) 启用 Lightning LoRA (节点 66=true=4步加速)\n  4. Queue Prompt → 等待 → 视频输出在 ComfyUI/output/ 下\n  5. (可选) 启用 人脸修复/HD 放大 后处理\n"
+      ],
+      "widgets_values_named": {
+        "text": "BSAI Contextual-Series H3 Extender — 修复版\n==========================================\n\n■ 单击运行路径 (mode=0, 直接可用)\n  1. UNETLoader (50)  →  LoraLoaderModelOnly (65)  →  ComfySwitchNode (61)\n  2. ComfySwitchNode (61)  →  MiniMaxH3Extender (6)  →  MiniMaxH3MotionContextDiskFinalDecode (7)\n  3. CLIPLoader (51) + VAELoader (42) + VAELoader (43)  →  MiniMaxH3Extender (6)\n  4. Text Multiline (37/36) 历史文本(只读, 实际在 H3Extender 节点内编辑)\n  5. Boolean (66) 切换 Lightning LoRA 步数: true=4步, false=20步\n\n■ 可选后处理 — 默认 mode=4 (禁用), 需要时右键节点 → mode = Always\n  人脸修复 (棕色组, 节点 10-23):\n    启用前先运行主管线生成 MP4, 修改节点 10 的 video 路径为该 MP4\n    节点 10 的 frame_load_cap 已修正为 0 (=全部帧)\n  HD 2x 放大 (紫色组, 节点 24-35):\n    需要先启用并运行人脸修复管线以提供 denoised latent\n\n■ 资产库 (节点 5)\n  工作流里的 6 个文件名已清空。请在 BSAI_AssetLibraryInput 节点的\n  UI 上传你自己的图片/视频/音频, 索引为 @图1/@视频1/@音频1 等。\n  H3Extender 节点内每个 clip 都有 rfe_* 系列参数, 独立于 AssetLibrary。\n\n■ 关键节点参数\n  [UNETLoader 50]: minimax_h3_fl2va_int8_convrot.safetensors (default 精度)\n  [LoraLoaderModelOnly 65]: minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors, strength=1\n  [CLIPLoader 51]: qwen3vl_32b_minimax_h3_*, type=minimax (必须)\n  [VAELoader 42]: minimax_h3_video_vae_int8_convrot.safetensors\n  [VAELoader 43]: minimax_h3_audio_vae_fp32.safetensors\n  [H3Extender 6]: width/height 由节点 widget 控制 (默认 1344x768, 24fps)\n                  4 步 (Lightning LoRA 开启) 或 20 步 (关闭)\n                  故事板 (clips_json) 在节点 widget 内编辑, 已预置 3 段分镜\n\n■ 运行顺序\n  1. 打开 MiniMaxH3Extender (节点 6) → 在 clips_json 里编辑 3 段分镜的 prompt\n  2. 必要时调整 UNET/CLIP/VAE 文件名匹配本地模型\n  3. (可选) 启用 Lightning LoRA (节点 66=true=4步加速)\n  4. Queue Prompt → 等待 → 视频输出在 ComfyUI/output/ 下\n  5. (可选) 启用 人脸修复/HD 放大 后处理\n"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 63,
+      "type": "PrimitiveInt",
+      "pos": [
+        -808.5781141329542,
+        -1859.899115448401
+      ],
+      "size": [
+        270,
+        90
+      ],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            82
+          ]
+        }
+      ],
+      "title": "Int (Full)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "PrimitiveInt"
+      },
+      "widgets_values": [
+        20,
+        "fixed"
+      ],
+      "widgets_values_named": {
+        "value": 20,
+        "fixed": "fixed"
+      }
+    },
+    {
+      "id": 61,
+      "type": "ComfySwitchNode",
+      "pos": [
+        -456.0267382968966,
+        -1861.2450199435602
+      ],
+      "size": [
+        285.02629601803164,
+        78
+      ],
+      "flags": {},
+      "order": 30,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "on_false",
+          "type": "MODEL",
+          "link": 79
+        },
+        {
+          "name": "on_true",
+          "type": "MODEL",
+          "link": 80
+        },
+        {
+          "name": "switch",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch"
+          },
+          "link": 81
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "MODEL",
+          "links": [
+            86
+          ]
+        }
+      ],
+      "title": "If/Else Switch (model)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "ComfySwitchNode"
+      },
+      "widgets_values": [
+        false
+      ],
+      "widgets_values_named": {
+        "switch": false
+      }
+    },
+    {
+      "id": 62,
+      "type": "ComfySwitchNode",
+      "pos": [
+        -446.57285492934705,
+        -1712.6872217462385
+      ],
+      "size": [
+        272.25394440270475,
+        78
+      ],
+      "flags": {},
+      "order": 27,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "on_false",
+          "type": "INT",
+          "link": 82
+        },
+        {
+          "name": "on_true",
+          "type": "INT",
+          "link": 83
+        },
+        {
+          "name": "switch",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "switch"
+          },
+          "link": 84
+        }
+      ],
+      "outputs": [
+        {
+          "name": "output",
+          "type": "INT",
+          "links": [
+            87
+          ]
+        }
+      ],
+      "title": "If/Else Switch (Steps)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "ComfySwitchNode"
+      },
+      "widgets_values": [
+        false
+      ],
+      "widgets_values_named": {
+        "switch": false
+      }
+    },
+    {
+      "id": 65,
+      "type": "LoraLoaderModelOnly",
+      "pos": [
+        -1528.874732501138,
+        -1723.034548745461
+      ],
+      "size": [
+        640,
+        90
+      ],
+      "flags": {},
+      "order": 28,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 85
+        }
+      ],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            80
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "LoraLoaderModelOnly",
+        "models": [
+          {
+            "name": "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/loras/minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors",
+            "directory": "loras"
+          }
+        ]
+      },
+      "widgets_values": [
+        "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+        1
+      ],
+      "widgets_values_named": {
+        "lora_name": "minimax_h3_fl2v_turbo_4step_v1.0_768p_comfyui_bf16.safetensors",
+        "strength_model": 1
+      }
+    },
+    {
+      "id": 51,
+      "type": "CLIPLoader",
+      "pos": [
+        -1529.6929753544762,
+        -1568.2163613786283
+      ],
+      "size": [
+        640,
+        120
+      ],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            88
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "CLIPLoader",
+        "models": [
+          {
+            "name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            "directory": "text_encoders"
+          }
+        ]
+      },
+      "widgets_values": [
+        "qwen3vl_32b_minimax_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+        "minimax",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3vl_32b_minimax_h3_ultra_uncensored_heretic_int8_convrot.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    {
+      "id": 43,
+      "type": "VAELoader",
+      "pos": [
+        -1542.7769052897143,
+        -1242.5517648461182
+      ],
+      "size": [
+        650,
+        70
+      ],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            90,
+            92
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "minimax_h3_audio_vae_fp32.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "minimax_h3_audio_vae_fp32.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    {
+      "id": 42,
+      "type": "VAELoader",
+      "pos": [
+        -1536.2349403220949,
+        -1382.6616058281681
+      ],
+      "size": [
+        640,
+        70
+      ],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "links": [
+            89,
+            91
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "VAELoader",
+        "models": [
+          {
+            "name": "minimax_h3_video_vae_fp16.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/vae/minimax_h3_video_vae_fp16.safetensors",
+            "directory": "vae"
+          }
+        ]
+      },
+      "widgets_values": [
+        "minimax_h3_video_vae_int8_convrot.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+      }
+    },
+    {
+      "id": 64,
+      "type": "PrimitiveInt",
+      "pos": [
+        -804.080682699601,
+        -1686.9620350364398
+      ],
+      "size": [
+        270,
+        90
+      ],
+      "flags": {},
+      "order": 16,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [
+            83
+          ]
+        }
+      ],
+      "title": "Int (Lightning LoRA)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "PrimitiveInt"
+      },
+      "widgets_values": [
+        4,
+        "fixed"
+      ],
+      "widgets_values_named": {
+        "value": 4,
+        "fixed": "fixed"
+      }
+    },
+    {
+      "id": 67,
+      "type": "Text Multiline",
+      "pos": [
+        -813.2559984880455,
+        -1268.7954979200838
+      ],
+      "size": [
+        653.497567471591,
+        88
+      ],
+      "flags": {},
+      "order": 17,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "title": "说明: false=20步(无Lightning LoRA) / true=4步(开启Lightning LoRA)",
+      "properties": {
+        "cnr_id": "was-ns",
+        "ver": "3.0.1",
+        "Node name for S&R": "Text Multiline"
+      },
+      "widgets_values": [
+        "false=20step    ture=4step"
+      ],
+      "widgets_values_named": {
+        "text": "false=20step    ture=4step"
+      }
+    },
+    {
+      "id": 70,
+      "type": "BSAI_AssetLibraryInput",
+      "pos": [
+        -80.60465517643692,
+        -1872.214067937743
+      ],
+      "size": [
+        470.1167706434994,
+        774.7242308555401
+      ],
+      "flags": {},
+      "order": 18,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "asset_library",
+          "type": "ASSET_LIBRARY",
+          "links": [
+            95
+          ]
+        }
+      ],
+      "properties": {
+        "aux_id": "xm6018924/BSAI-ComfyUI-H3-Film-Factory",
+        "ver": "6708e1cabdd3fd30dccb78b03b313a2790cb3daf",
+        "Node name for S&R": "BSAI_AssetLibraryInput"
+      },
+      "widgets_values": [
+        "[\"01樊迪_1.png\",\"02沈曼_3.png\",\"06“泰坦”巨型机器人_1.png\",\"03巨型机器人研发基地.png\",\"ComfyUI_00013__1.png\"]",
+        "[]",
+        "[]",
+        ""
+      ],
+      "widgets_values_named": {
+        "image_files": "[\"01樊迪_1.png\",\"02沈曼_3.png\",\"06“泰坦”巨型机器人_1.png\",\"03巨型机器人研发基地.png\",\"ComfyUI_00013__1.png\"]",
+        "video_files": "[]",
+        "audio_files": "[]",
+        "bsai_gallery": ""
+      }
+    },
+    {
+      "id": 73,
+      "type": "Text Multiline",
+      "pos": [
+        -1264.4427894843907,
+        1437.3669731381076
+      ],
+      "size": [
+        660.7869212320904,
+        736.814707481142
+      ],
+      "flags": {},
+      "order": 19,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "was-ns",
+        "ver": "3.0.1",
+        "Node name for S&R": "Text Multiline"
+      },
+      "widgets_values": [
+        "[整体风格]：电影级写实风格，炽热且充满感官张力的午后氛围。\n\n[角色档案]：\n角色1@图1，淡蓝亚麻裙敏感少女，浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉，淡蓝色亚麻连衣裙，米白色细绳编织吊坠，珍珠项链，赤足，亚麻材质在强光下泛出柔和暖光。\n角色2@图2，灰白粗麻衬衫固执青年，黑色短发利落硬朗，深棕色皮革腰带，灰白色粗麻衬衫，深灰色工装裤，黄铜怀表，粗麻材质在烈日下呈现干燥哑光质感。\n\n[道具档案]：\n巨大的西瓜@图3，鲜艳翠绿硬壳，深绿条纹分布，蜡质光滑表面，直径40cm饱满球体，高光反射锐利。\n西瓜切片@图4，鲜亮樱桃红瓤，奶油白果肉，湿润多汁质地，15cm方块形态，表面反光强烈。\n\n[场景档案]：\n户外庭院（午后）@图5，炽热的日光穿透稀疏的树叶，在地面投下斑驳的几何阴影，地面由干燥的赤土构成，部分区域有微小的尘埃颗粒在光线下闪烁，四周可见高大、覆盖着攀爬藤蔓的石砌矮墙，墙体表面呈现出粗糙的苔藓状纹理，中央放置着一张带有明显木纹的旧式藤椅，远处可见一片被高温扭曲的青黛色天空，强烈的顶光在物体表面形成了锐利的亮斑。\n同一户外庭院（午后）@图6，炙烤的空气使景物边缘略微模糊，地面上散落着几片被晒干的枯黄落叶，四围石砌矮墙的阴影变得更加浓重，核心区域的藤椅被移开，取而代之的是一个低矮的、沾染着水渍的木制砧板，砧板表面反射着微弱的湿润反光，天空的蓝调被热浪扭曲成一层朦胧的白雾。\n\n[分镜1]：初始的觊觎\n0-2秒：极缓推、中景。炽热日光穿透稀疏树叶，在地面投下斑驳几何阴影。角色1位于画面左侧，浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉闪烁，淡蓝色亚麻连衣裙垂坠，米白色细绳编织吊坠随呼吸轻晃，视线专注锁定画面中央巨大的西瓜上的西瓜切片。角色2位于画面右侧，黑色短发利落硬朗，深棕色皮革腰带勒紧灰白色粗麻衬衫，身体微微倾向巨大的西瓜，黄铜怀表在腰间反射微光。角色1说：“是我先看到它的”(声线：略带娇嗔，语速：中等，情绪：不服气)。音效：远处蝉鸣声，轻微风吹过植物沙沙声。\n2-5秒：微移、特写。焦点转移至西瓜切片，鲜亮樱桃红瓤在强光下饱和度极高，奶油白果肉湿润多汁。角色1的指尖悬停在西瓜切片上方半寸，指甲修剪整齐，皮肤纹理清晰。角色2的侧脸出现在背景虚焦中，黑色短发边缘被阳光勾勒，灰白色粗麻衬衫肩部褶皱清晰。角色2说：“不是说好了你今天不想吃西瓜的吗”(声线：沉稳略带不悦，语速：中等，情绪：提醒与维护)。音效：蝉鸣声持续，空气因高温产生的细微滋滋声。\n\n[分镜2]：边界的试探\n0-3秒：过肩镜头、跟随。视角从角色2身后看向角色1，角色2黑色短发利落硬朗，灰白色粗麻衬衫背部纹理清晰，深棕色皮革腰带扣头反射微光。角色1位于前景，浅棕色长发微卷松散，淡蓝色亚麻连衣裙下摆随风微动，米白色细绳编织吊坠垂在胸前。角色1身体微微前倾，试图靠近巨大的西瓜，指尖即将触碰到翠绿色硬壳。角色2迅速侧身，右臂以防御姿态横在胸前，遮挡了巨大的西瓜的一角，黄铜怀表在手臂摆动中晃动。角色1说：“我就是想尝尝看”(声线：语气坚定，语速：中等，情绪：坚持)。音效：蝉鸣声瞬间减弱，两人之间急促的呼吸声。\n3-5秒：极近特写、固定。两人紧绷的侧脸在阳光下形成强烈阴影对比，角色1浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉在阴影中若隐若现，淡蓝色亚麻连衣裙肩部线条紧绷。角色2黑色短发利落硬朗，灰白色粗麻衬衫领口紧扣，深棕色皮革腰带勒出腹部线条。角色2的嘴角紧抿，下颌肌肉紧绷，眼神激烈交汇，视线穿过虚化前景落在角色1颈侧。角色2说：“你不能反悔？”(声线：低沉有力，语速：慢，情绪：宣告主权)。音效：衣物摩擦声，喉结滚动的细微声响。\n\n[分镜3]：冲突的升级\n0-3秒：快速推进、跟拍。角色2猛地抓起巨大的西瓜，灰白色粗麻衬衫袖口因用力而皱缩，深灰色工装裤腿部肌肉紧绷，深棕色皮革腰带随动作震动。角色1没有后退，双臂同时伸出，淡蓝色亚麻连衣裙袖口卷起，米白色细绳编织吊坠剧烈晃动，试图阻止巨大的西瓜的移动，指尖抓向翠绿色硬壳。角色1说：“我就突然想吃了，给我！”(声线：尖锐爆发，语速：快，情绪：愤怒)。音效：一声低沉的闷响声，随后是急促的喘息声。\n3-5秒：手持微晃、特写。两人交错的双手占据画面中心，角色1指尖悬停，皮肤上可见因用力而产生的微红，指甲嵌入西瓜中。角色2的手紧紧攥着巨大的西瓜，指节因用力而泛白，灰白色粗麻衬衫袖口紧绷，黄铜怀表在腰间剧烈晃动。角色2说：“别跟我抢瓜！”(声线：嘶哑低吼，语速：极快，情绪：强硬拒绝)。音效：皮肤摩擦声，肌肉紧绷的咯吱声。\n\n[分镜4]：失控的对峙\n0-3秒：环绕、仰拍。角色1猛地向前一步，淡蓝色亚麻连衣裙下摆扬起，浅棕色长发微卷松散在空中飞舞，翠绿宝石蝴蝶耳钉闪烁。身体撞击到角色2的胸膛，角色2灰白色粗麻衬衫被挤压变形，黑色短发利落硬朗，深棕色皮革腰带勒紧。两人短暂地贴合在一起，画面充满压迫感，炽热日光在两人头顶形成光晕。角色1说：“你到底在想什么？”(声线：情绪失控，语速：快，情绪：质问)。音效：强烈的风声呼啸而过，随后骤然安静。\n3-5秒：固定、中景。两人僵持不动，怒火从身体语言中传递。角色1浅棕色长发微卷松散，淡蓝色亚麻连衣裙褶皱清晰，米白色细绳编织吊坠静止。角色2黑色短发利落硬朗，灰白色粗麻衬衫肩部紧绷，深灰色工装裤裤腿笔直，黄铜怀表在腰间静止。角色2紧盯着角色1的眼睛，视线穿透高温扭曲的空气，深棕色皮革腰带扣头反射微光。角色2说：“我就想吃西瓜！”(声线：压抑到极致，语速：慢，情绪：辩护与疲惫)。音效：蝉鸣声重新响起，空气流动的细微声响。"
+      ],
+      "widgets_values_named": {
+        "text": "[整体风格]：电影级写实风格，炽热且充满感官张力的午后氛围。\n\n[角色档案]：\n角色1@图1，淡蓝亚麻裙敏感少女，浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉，淡蓝色亚麻连衣裙，米白色细绳编织吊坠，珍珠项链，赤足，亚麻材质在强光下泛出柔和暖光。\n角色2@图2，灰白粗麻衬衫固执青年，黑色短发利落硬朗，深棕色皮革腰带，灰白色粗麻衬衫，深灰色工装裤，黄铜怀表，粗麻材质在烈日下呈现干燥哑光质感。\n\n[道具档案]：\n巨大的西瓜@图3，鲜艳翠绿硬壳，深绿条纹分布，蜡质光滑表面，直径40cm饱满球体，高光反射锐利。\n西瓜切片@图4，鲜亮樱桃红瓤，奶油白果肉，湿润多汁质地，15cm方块形态，表面反光强烈。\n\n[场景档案]：\n户外庭院（午后）@图5，炽热的日光穿透稀疏的树叶，在地面投下斑驳的几何阴影，地面由干燥的赤土构成，部分区域有微小的尘埃颗粒在光线下闪烁，四周可见高大、覆盖着攀爬藤蔓的石砌矮墙，墙体表面呈现出粗糙的苔藓状纹理，中央放置着一张带有明显木纹的旧式藤椅，远处可见一片被高温扭曲的青黛色天空，强烈的顶光在物体表面形成了锐利的亮斑。\n同一户外庭院（午后）@图6，炙烤的空气使景物边缘略微模糊，地面上散落着几片被晒干的枯黄落叶，四围石砌矮墙的阴影变得更加浓重，核心区域的藤椅被移开，取而代之的是一个低矮的、沾染着水渍的木制砧板，砧板表面反射着微弱的湿润反光，天空的蓝调被热浪扭曲成一层朦胧的白雾。\n\n[分镜1]：初始的觊觎\n0-2秒：极缓推、中景。炽热日光穿透稀疏树叶，在地面投下斑驳几何阴影。角色1位于画面左侧，浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉闪烁，淡蓝色亚麻连衣裙垂坠，米白色细绳编织吊坠随呼吸轻晃，视线专注锁定画面中央巨大的西瓜上的西瓜切片。角色2位于画面右侧，黑色短发利落硬朗，深棕色皮革腰带勒紧灰白色粗麻衬衫，身体微微倾向巨大的西瓜，黄铜怀表在腰间反射微光。角色1说：“是我先看到它的”(声线：略带娇嗔，语速：中等，情绪：不服气)。音效：远处蝉鸣声，轻微风吹过植物沙沙声。\n2-5秒：微移、特写。焦点转移至西瓜切片，鲜亮樱桃红瓤在强光下饱和度极高，奶油白果肉湿润多汁。角色1的指尖悬停在西瓜切片上方半寸，指甲修剪整齐，皮肤纹理清晰。角色2的侧脸出现在背景虚焦中，黑色短发边缘被阳光勾勒，灰白色粗麻衬衫肩部褶皱清晰。角色2说：“不是说好了你今天不想吃西瓜的吗”(声线：沉稳略带不悦，语速：中等，情绪：提醒与维护)。音效：蝉鸣声持续，空气因高温产生的细微滋滋声。\n\n[分镜2]：边界的试探\n0-3秒：过肩镜头、跟随。视角从角色2身后看向角色1，角色2黑色短发利落硬朗，灰白色粗麻衬衫背部纹理清晰，深棕色皮革腰带扣头反射微光。角色1位于前景，浅棕色长发微卷松散，淡蓝色亚麻连衣裙下摆随风微动，米白色细绳编织吊坠垂在胸前。角色1身体微微前倾，试图靠近巨大的西瓜，指尖即将触碰到翠绿色硬壳。角色2迅速侧身，右臂以防御姿态横在胸前，遮挡了巨大的西瓜的一角，黄铜怀表在手臂摆动中晃动。角色1说：“我就是想尝尝看”(声线：语气坚定，语速：中等，情绪：坚持)。音效：蝉鸣声瞬间减弱，两人之间急促的呼吸声。\n3-5秒：极近特写、固定。两人紧绷的侧脸在阳光下形成强烈阴影对比，角色1浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉在阴影中若隐若现，淡蓝色亚麻连衣裙肩部线条紧绷。角色2黑色短发利落硬朗，灰白色粗麻衬衫领口紧扣，深棕色皮革腰带勒出腹部线条。角色2的嘴角紧抿，下颌肌肉紧绷，眼神激烈交汇，视线穿过虚化前景落在角色1颈侧。角色2说：“你不能反悔？”(声线：低沉有力，语速：慢，情绪：宣告主权)。音效：衣物摩擦声，喉结滚动的细微声响。\n\n[分镜3]：冲突的升级\n0-3秒：快速推进、跟拍。角色2猛地抓起巨大的西瓜，灰白色粗麻衬衫袖口因用力而皱缩，深灰色工装裤腿部肌肉紧绷，深棕色皮革腰带随动作震动。角色1没有后退，双臂同时伸出，淡蓝色亚麻连衣裙袖口卷起，米白色细绳编织吊坠剧烈晃动，试图阻止巨大的西瓜的移动，指尖抓向翠绿色硬壳。角色1说：“我就突然想吃了，给我！”(声线：尖锐爆发，语速：快，情绪：愤怒)。音效：一声低沉的闷响声，随后是急促的喘息声。\n3-5秒：手持微晃、特写。两人交错的双手占据画面中心，角色1指尖悬停，皮肤上可见因用力而产生的微红，指甲嵌入西瓜中。角色2的手紧紧攥着巨大的西瓜，指节因用力而泛白，灰白色粗麻衬衫袖口紧绷，黄铜怀表在腰间剧烈晃动。角色2说：“别跟我抢瓜！”(声线：嘶哑低吼，语速：极快，情绪：强硬拒绝)。音效：皮肤摩擦声，肌肉紧绷的咯吱声。\n\n[分镜4]：失控的对峙\n0-3秒：环绕、仰拍。角色1猛地向前一步，淡蓝色亚麻连衣裙下摆扬起，浅棕色长发微卷松散在空中飞舞，翠绿宝石蝴蝶耳钉闪烁。身体撞击到角色2的胸膛，角色2灰白色粗麻衬衫被挤压变形，黑色短发利落硬朗，深棕色皮革腰带勒紧。两人短暂地贴合在一起，画面充满压迫感，炽热日光在两人头顶形成光晕。角色1说：“你到底在想什么？”(声线：情绪失控，语速：快，情绪：质问)。音效：强烈的风声呼啸而过，随后骤然安静。\n3-5秒：固定、中景。两人僵持不动，怒火从身体语言中传递。角色1浅棕色长发微卷松散，淡蓝色亚麻连衣裙褶皱清晰，米白色细绳编织吊坠静止。角色2黑色短发利落硬朗，灰白色粗麻衬衫肩部紧绷，深灰色工装裤裤腿笔直，黄铜怀表在腰间静止。角色2紧盯着角色1的眼睛，视线穿透高温扭曲的空气，深棕色皮革腰带扣头反射微光。角色2说：“我就想吃西瓜！”(声线：压抑到极致，语速：慢，情绪：辩护与疲惫)。音效：蝉鸣声重新响起，空气流动的细微声响。"
+      }
+    },
+    {
+      "id": 66,
+      "type": "PrimitiveBoolean",
+      "pos": [
+        -806.1955008003964,
+        -1508.824093810057
+      ],
+      "size": [
+        270,
+        70
+      ],
+      "flags": {},
+      "order": 20,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "BOOLEAN",
+          "type": "BOOLEAN",
+          "links": [
+            81,
+            84
+          ]
+        }
+      ],
+      "title": "Boolean (Enable Lightning LoRA)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "PrimitiveBoolean"
+      },
+      "widgets_values": [
+        true
+      ],
+      "widgets_values_named": {
+        "value": true
+      },
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 69,
+      "type": "ResolutionSelector",
+      "pos": [
+        -451.34666584183844,
+        -1554.6819398099958
+      ],
+      "size": [
+        270,
+        170
+      ],
+      "flags": {},
+      "order": 21,
+      "mode": 0,
+      "showAdvanced": false,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "width",
+          "type": "INT",
+          "links": [
+            93
+          ]
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "links": [
+            94
+          ]
+        }
+      ],
+      "title": "Resolution Selector (Size)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "ResolutionSelector"
+      },
+      "widgets_values": [
+        "16:9 (Widescreen)",
+        0.5,
+        32
+      ],
+      "widgets_values_named": {
+        "aspect_ratio": "16:9 (Widescreen)",
+        "megapixels": 0.5,
+        "multiple": 32
+      },
+      "color": "#322",
+      "bgcolor": "#533"
+    },
+    {
+      "id": 6,
+      "type": "BSAIH3FilmFactory",
+      "pos": [
+        436.2542328505724,
+        -1916.1417668588663
+      ],
+      "size": [
+        1061.456500988491,
+        2988.6301652892557
+      ],
+      "flags": {},
+      "order": 32,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 86
+        },
+        {
+          "name": "clip",
+          "type": "CLIP",
+          "link": 88
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 89
+        },
+        {
+          "name": "audio_vae",
+          "shape": 7,
+          "type": "VAE",
+          "link": 90
+        },
+        {
+          "name": "ref_audio",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "prompt_source",
+          "shape": 7,
+          "type": "STRING",
+          "link": 104
+        },
+        {
+          "name": "prompt_pack",
+          "shape": 7,
+          "type": "H3_PROMPT_PACK",
+          "link": null
+        },
+        {
+          "name": "asset_library",
+          "shape": 7,
+          "type": "ASSET_LIBRARY",
+          "link": 95
+        },
+        {
+          "name": "width",
+          "type": "INT",
+          "widget": {
+            "name": "width"
+          },
+          "link": 93
+        },
+        {
+          "name": "height",
+          "type": "INT",
+          "widget": {
+            "name": "height"
+          },
+          "link": 94
+        },
+        {
+          "name": "steps",
+          "type": "INT",
+          "widget": {
+            "name": "steps"
+          },
+          "link": 87
+        },
+        {
+          "name": "ref_audio_1",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "ref_video_1",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "global_prompt",
+          "shape": 7,
+          "type": "STRING",
+          "link": null
+        },
+        {
+          "name": "ref_pack",
+          "shape": 7,
+          "type": "H3_REF_PACK",
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "cache",
+          "type": "H3_MOTION_DISK_CACHE",
+          "slot_index": 0,
+          "links": [
+            32
+          ]
+        },
+        {
+          "name": "clip_count",
+          "type": "INT",
+          "slot_index": 1,
+          "links": null
+        },
+        {
+          "name": "validated_count",
+          "type": "INT",
+          "slot_index": 2,
+          "links": null
+        },
+        {
+          "name": "status",
+          "type": "STRING",
+          "slot_index": 3,
+          "links": null
+        },
+        {
+          "name": "cache_size_mb",
+          "type": "FLOAT",
+          "slot_index": 4,
+          "links": null
+        },
+        {
+          "name": "build",
+          "type": "STRING",
+          "slot_index": 5,
+          "links": null
+        }
+      ],
+      "properties": {
+        "aux_id": "tritant/ComfyUI_MiniMax_H3_Extender",
+        "ver": "95216e620d947bb52ed518209ed5f94ab1371b36",
+        "Node name for S&R": "MiniMaxH3Extender",
+        "h3_manual_width": 1344,
+        "h3_manual_height": 768
+      },
+      "widgets_values": [
+        "clip_by_clip",
+        896,
+        576,
+        "max",
+        4,
+        "euler",
+        "beta",
+        1,
+        "22",
+        0,
+        "{\"version\":1,\"clips\":[{\"id\":\"clip_1\",\"name\":\"\",\"prompt\":\"：跨江大桥断裂处-钢铁降临\\n0-3秒：微移、中全景双人镜头。暴雨灰光从上方投射，樊迪和沈曼爬上操控平台，樊迪白色实验大褂被雨水浸透贴在深灰高领毛衣上，银色框架眼镜镜片上雨水横流，黑色短发湿发贴在额头，樊迪双手抓住操控平台护栏，目光盯向巨型人形机器人。沈曼白色修身衬衫被雨水浸透贴身，黑色长发湿成一绺贴在脸颊和肩背，银色腕表在灰光下泛冷光，沈曼脸色苍白但眼神坚定，双手攀上操控平台。雨幕中两人的身影渺小而坚定。音效：攀爬金属平台叮当声，狂风呼啸声，暴雨拍打声，两人急促呼吸声。\\n3-6秒：极缓推、近景单人镜头。暴雨灰光照在沈曼脸上，沈曼黑色长发湿成一绺贴在脸颊，白色修身衬衫被雨水浸透泛暗白，银色腕表反射灰光，沈曼双手放在操控台键盘上，目光盯向屏幕数据，嘴唇张开，声音穿透雨幕。沈曼说：\\\"巨型人形机器人启动程序就绪，\\\"（声线：女声清亮，语速：中，情绪：专业镇定）。音效：键盘敲击声，操控台电子设备启动嗡鸣，暴雨拍打声。\\n6-10秒：ref_t2v: 微移、近景单人镜头。暴雨灰光照在沈曼脸上，沈曼黑色长发湿发贴在脸颊，白色修身衬衫被雨水浸透贴身，银色腕表反射灰光，沈曼目光从屏幕移向巨型人形机器人，嘴唇张开，语速沉稳。沈曼说：\\\"身高二十三米，与桥面高度持平。\\\"（声线：女声中速，语速：中，情绪：专业镇定）。音效：沈曼声音在风雨中回响，操控台设备嗡鸣，暴雨拍打声。\",\"seed\":8289480518384107,\"seed_mode\":\"randomize\",\"duration\":\"10\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false},{\"id\":\"clip_2_mt3pavk8\",\"name\":\"\",\"prompt\":\"：跨江大桥断裂处-入江令下\\n0-4秒：极缓推、近景双人镜头。暴雨灰光从上方投射，沈曼站在操控台前，黑色长发湿发贴在脸颊，白色修身衬衫被雨水浸透泛暗白，银色腕表反射灰光，沈曼双手放在键盘上，目光从屏幕移向樊迪。樊迪站在操控台旁，白色实验大褂被雨水浸透贴在深灰高领毛衣上，银色框架眼镜镜片上雨水成流，黑色短发湿发贴在额头，樊迪目光盯向江中翻涌的水面，嘴唇张开，声音低沉有力。沈曼说：\\\"双臂承重上限八十吨。\\\"（声线：女声中速，语速：中，情绪：专业镇定）。音效：沈曼声音在风雨中回响，操控台设备嗡鸣，暴雨拍打声。\\n4-6秒：微移、近景单人镜头。暴雨灰光照在樊迪脸上，樊迪白色实验大褂被雨水浸透贴身，银色框架眼镜镜片上雨水横流，黑色短发湿发贴在额头，深灰高领毛衣领口被雨水浸湿泛暗灰，樊迪目光从江面收回，转向巨型人形机器人，嘴唇微张，声音被风雨撕扯但穿透雨幕。樊迪说：\\\"让它下江。\\\"（声线：男声低沉洪亮，语速：缓，情绪：果断坚定）。音效：樊迪声音在风雨中回响，狂风呼啸声，暴雨拍打声。\\n6-10秒：极缓推、中全景环境空镜。暴雨灰光照亮操控台，沈曼按下启动键，操控台上启动键泛起红光，巨型人形机器人的蓝色光学双眼骤然亮起蓝光，蓝光穿透雨幕照亮周围水汽，深灰色装甲外壳在蓝光映照下泛冷蓝光泽，液压关节发出低沉的嗡鸣，巨型人形机器人缓缓站起，金属关节摩擦发出沉重的嘎吱声，每一步都让操控平台微微震动。音效：启动键咔嗒声，液压系统启动低沉嗡鸣，金属关节摩擦嘎吱声，地面震动隆隆声，暴雨拍打金属装甲噼啪声。\",\"seed\":4393026310921566,\"seed_mode\":\"randomize\",\"duration\":\"10\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false},{\"id\":\"clip_3_mt3pavk8\",\"name\":\"\",\"prompt\":\"：跨江大桥江中-钢铁入水\\n0-3秒：极缓推、大全景环境空镜。暴雨灰光照亮断桥边缘，巨型人形机器人走到断桥边缘，深灰色装甲外壳在暴风雨中泛冷光，肩部红色\\\"BSAI救援\\\"标识在雨水中依然醒目，蓝色光学双眼在雨幕中闪烁，巨型人形机器人一只巨大的钢脚踏入江水，钢脚砸入水面溅起数米高的浪花，浪花在灰光下泛白沫，江水没过钢脚脚踝，泛起浑浊的漩涡。音效：钢脚踏入江水轰然巨响，水花飞溅哗啦声，液压关节低沉嗡鸣，狂风呼啸声，暴雨拍打声。\\n3-6秒：微移、中全景环境空镜。暴雨灰光照亮江面，巨型人形机器人稳稳地向江心走去，江水没过巨型人形机器人的脚踝，又漫上小腿，浑浊的江水在深灰色装甲外壳上留下黄灰色水痕，每一步都让江面泛起巨大的波纹向两侧扩散，蓝色光学双眼在雨幕中闪烁蓝光，液压关节发出低沉有节奏的嗡鸣。音效：钢脚涉水哗哗声，液压关节有节奏嗡鸣，江水翻涌声，狂风呼啸声，暴雨拍打金属装甲噼啪声。\\n6-10秒：极缓推、中全景环境空镜。暴雨灰光照亮江心，巨型人形机器人走到江心，浑浊的江水只到巨型人形机器人的腰部，深灰色装甲外壳上半部分在暴雨中泛冷光，肩部红色\\\"BSAI救援\\\"标识在雨水中醒目，蓝色光学双眼俯视江面，巨型人形机器人低下头，巨大的钢手缓缓探入水中。音效：江水拍打装甲哗哗声，液压关节嗡鸣，狂风呼啸声，暴雨拍打声。\",\"seed\":243749928085006,\"seed_mode\":\"randomize\",\"duration\":\"10\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false},{\"id\":\"clip_4_mt3vud7s\",\"name\":\"\",\"prompt\":\"：跨江大桥江中-钢铁捞车\\n0-3秒：极缓推、近景道具微观镜头。暴雨灰光照亮江面，巨型人形机器人的巨大钢手探入浑浊的江水中，五指张开如一把铲子，金属手指缓缓插入一辆半沉的小轿车底部，钢手指尖触碰到车身金属发出沉闷的撞击声，金属手指扣住车身底盘，浑浊的江水在钢手周围泛起漩涡。音效：钢手入水哗啦声，金属触碰车身沉闷撞击声，液压杆加压嘶嘶声，江水翻涌声。\\n3-6秒：微移、中全景环境空镜。暴雨灰光照亮江面，巨型人形机器人的巨大钢手稳稳地将整辆小轿车从水中托起，水从车身倾泻而下如瀑布，小轿车在钢手中微微晃动，车轮还在空转，浑浊的江水从车底盘流下溅起水花，巨型人形机器人将小轿车轻轻放在桥头安全地带。音效：水从车身倾泻哗哗声，液压杆加压嗡鸣，车身金属晃动嘎吱声，钢脚涉水声。\\n6-10秒：极缓推、近景道具微观镜头。暴雨灰光照亮车窗，车窗内一个满脸惊恐的女人抱着孩子，女人的棕色长发湿成一绺贴在脸颊，浅粉色T恤被江水浸透紧贴身体，女人的瞳孔放大，嘴唇颤抖，透过湿漉漉的车窗玻璃看到头顶那张巨大的钢铁面孔，巨型人形机器人的蓝色光学双眼在雨幕中俯视，深灰色装甲外壳上的水珠在蓝光映照下泛冷光。音效：车窗内女人与孩子的哭泣声，雨水拍打车窗噼啪声，巨型人形机器人液压嗡鸣，狂风呼啸声。\",\"seed\":2854698643951659,\"seed_mode\":\"randomize\",\"duration\":\"10\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false}],\"global_prompt\":\"[整体风格]：电影级写实风格，冷白科技实验室再到暴风雨钢铁救灾的史诗级视觉张力，充满光影雕刻与微动作叙事的美学氛围。\\n\\n[角色档案]：\\n樊迪(数年后CEO时期)@图1，沉稳锋利的青年男性，黑色短发向后梳理露出饱满额头，白色实验大褂，深灰高领毛衣，黑色修身长裤，黑色皮鞋，银色框架眼镜边缘反射冷白光，化纤材质在日光下泛锐利光泽。\\n沈曼(职场时期)@图2，干练坚定的青年女性，黑色长发低马尾束于脑后，白色修身衬衫，黑色西裤，黑色高跟鞋，银色腕表，棉质衬衫在日光灯下泛冷白光泽。\\n\\n[道具档案]：\\n人形机器人原型@图3，约两米高，银灰色金属外壳，球形关节，蓝色光学传感器双眼，四肢液压杆外露，金属表面泛幽蓝冷光。\\n\\n[场景档案]：\\n云城分公司研发实验室(日间)@图4，冷白LED灯管照射呈手术级冷白光。地面深灰防静电地板反射幽蓝光斑。四围为不锈钢实验台与透明玻璃隔断。中央测试台矗立人形机器人原型，金属外壳反射蓝光。固定陈设为操控台与多屏显示器跳动数据。远景实验室深处暗影中可见备用零件架。\\n跨江大桥上(日间·台风天)@图5，天色铁灰，暴雨形成雨幕将光线过滤成灰白混浊色。地面沥青桥面湿滑积水反射灰光。四围为大桥钢索护栏与路灯杆在风中摇晃。固定陈设为拥堵车辆排列与雨刮器摆动。核心地标为桥中央断裂处。远景江面浊浪翻涌呈黄灰色。\\n跨江大桥断裂处(日间·台风天)@图5，暴雨灰光照亮断裂桥面边缘，沥青桥面断裂处钢筋外露，混凝土碎块悬挂。四围为断裂桥面钢索与护栏残骸，运输卡车停在桥边。固定陈设为操控平台与巨型人形机器人。核心地标为断裂处边缘操控平台。远景江心浊浪翻涌，巨型机器人矗立。\\n跨江大桥江中(日间·台风天)@图5，暴雨灰光与江水浊黄交织呈混沌色调。江面浊浪翻涌，水面泛黄灰泡沫。四围为断裂桥面悬挂的钢筋与混凝土碎块。固定陈设为运输卡车停在桥边，帆布掀开露出巨型人形机器人。核心地标为江心中矗立的巨型人形机器人。远景对岸桥面断口与灰白天际线模糊交界。\"}",
+        "auto_from_ref",
+        1,
+        "{\"version\":2,\"refs\":[null,null,null,null,null,null,null,null,null]}",
+        "both",
+        "BSAI_H3_Extender",
+        ""
+      ],
+      "widgets_values_named": {
+        "run_mode": "clip_by_clip",
+        "width": 896,
+        "height": 576,
+        "ref_image_size": "max",
+        "steps": 4,
+        "sampler_name": "euler",
+        "scheduler": "beta",
+        "denoise": 1,
+        "context_length": "22",
+        "audio_context_length": 0,
+        "clips_json": "{\"version\":1,\"clips\":[{\"id\":\"clip_1\",\"name\":\"\",\"prompt\":\"：跨江大桥断裂处-钢铁降临\\n0-3秒：微移、中全景双人镜头。暴雨灰光从上方投射，樊迪和沈曼爬上操控平台，樊迪白色实验大褂被雨水浸透贴在深灰高领毛衣上，银色框架眼镜镜片上雨水横流，黑色短发湿发贴在额头，樊迪双手抓住操控平台护栏，目光盯向巨型人形机器人。沈曼白色修身衬衫被雨水浸透贴身，黑色长发湿成一绺贴在脸颊和肩背，银色腕表在灰光下泛冷光，沈曼脸色苍白但眼神坚定，双手攀上操控平台。雨幕中两人的身影渺小而坚定。音效：攀爬金属平台叮当声，狂风呼啸声，暴雨拍打声，两人急促呼吸声。\\n3-6秒：极缓推、近景单人镜头。暴雨灰光照在沈曼脸上，沈曼黑色长发湿成一绺贴在脸颊，白色修身衬衫被雨水浸透泛暗白，银色腕表反射灰光，沈曼双手放在操控台键盘上，目光盯向屏幕数据，嘴唇张开，声音穿透雨幕。沈曼说：\\\"巨型人形机器人启动程序就绪，\\\"（声线：女声清亮，语速：中，情绪：专业镇定）。音效：键盘敲击声，操控台电子设备启动嗡鸣，暴雨拍打声。\\n6-10秒：ref_t2v: 微移、近景单人镜头。暴雨灰光照在沈曼脸上，沈曼黑色长发湿发贴在脸颊，白色修身衬衫被雨水浸透贴身，银色腕表反射灰光，沈曼目光从屏幕移向巨型人形机器人，嘴唇张开，语速沉稳。沈曼说：\\\"身高二十三米，与桥面高度持平。\\\"（声线：女声中速，语速：中，情绪：专业镇定）。音效：沈曼声音在风雨中回响，操控台设备嗡鸣，暴雨拍打声。\",\"seed\":8289480518384107,\"seed_mode\":\"randomize\",\"duration\":\"10\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false},{\"id\":\"clip_2_mt3pavk8\",\"name\":\"\",\"prompt\":\"：跨江大桥断裂处-入江令下\\n0-4秒：极缓推、近景双人镜头。暴雨灰光从上方投射，沈曼站在操控台前，黑色长发湿发贴在脸颊，白色修身衬衫被雨水浸透泛暗白，银色腕表反射灰光，沈曼双手放在键盘上，目光从屏幕移向樊迪。樊迪站在操控台旁，白色实验大褂被雨水浸透贴在深灰高领毛衣上，银色框架眼镜镜片上雨水成流，黑色短发湿发贴在额头，樊迪目光盯向江中翻涌的水面，嘴唇张开，声音低沉有力。沈曼说：\\\"双臂承重上限八十吨。\\\"（声线：女声中速，语速：中，情绪：专业镇定）。音效：沈曼声音在风雨中回响，操控台设备嗡鸣，暴雨拍打声。\\n4-6秒：微移、近景单人镜头。暴雨灰光照在樊迪脸上，樊迪白色实验大褂被雨水浸透贴身，银色框架眼镜镜片上雨水横流，黑色短发湿发贴在额头，深灰高领毛衣领口被雨水浸湿泛暗灰，樊迪目光从江面收回，转向巨型人形机器人，嘴唇微张，声音被风雨撕扯但穿透雨幕。樊迪说：\\\"让它下江。\\\"（声线：男声低沉洪亮，语速：缓，情绪：果断坚定）。音效：樊迪声音在风雨中回响，狂风呼啸声，暴雨拍打声。\\n6-10秒：极缓推、中全景环境空镜。暴雨灰光照亮操控台，沈曼按下启动键，操控台上启动键泛起红光，巨型人形机器人的蓝色光学双眼骤然亮起蓝光，蓝光穿透雨幕照亮周围水汽，深灰色装甲外壳在蓝光映照下泛冷蓝光泽，液压关节发出低沉的嗡鸣，巨型人形机器人缓缓站起，金属关节摩擦发出沉重的嘎吱声，每一步都让操控平台微微震动。音效：启动键咔嗒声，液压系统启动低沉嗡鸣，金属关节摩擦嘎吱声，地面震动隆隆声，暴雨拍打金属装甲噼啪声。\",\"seed\":4393026310921566,\"seed_mode\":\"randomize\",\"duration\":\"10\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false},{\"id\":\"clip_3_mt3pavk8\",\"name\":\"\",\"prompt\":\"：跨江大桥江中-钢铁入水\\n0-3秒：极缓推、大全景环境空镜。暴雨灰光照亮断桥边缘，巨型人形机器人走到断桥边缘，深灰色装甲外壳在暴风雨中泛冷光，肩部红色\\\"BSAI救援\\\"标识在雨水中依然醒目，蓝色光学双眼在雨幕中闪烁，巨型人形机器人一只巨大的钢脚踏入江水，钢脚砸入水面溅起数米高的浪花，浪花在灰光下泛白沫，江水没过钢脚脚踝，泛起浑浊的漩涡。音效：钢脚踏入江水轰然巨响，水花飞溅哗啦声，液压关节低沉嗡鸣，狂风呼啸声，暴雨拍打声。\\n3-6秒：微移、中全景环境空镜。暴雨灰光照亮江面，巨型人形机器人稳稳地向江心走去，江水没过巨型人形机器人的脚踝，又漫上小腿，浑浊的江水在深灰色装甲外壳上留下黄灰色水痕，每一步都让江面泛起巨大的波纹向两侧扩散，蓝色光学双眼在雨幕中闪烁蓝光，液压关节发出低沉有节奏的嗡鸣。音效：钢脚涉水哗哗声，液压关节有节奏嗡鸣，江水翻涌声，狂风呼啸声，暴雨拍打金属装甲噼啪声。\\n6-10秒：极缓推、中全景环境空镜。暴雨灰光照亮江心，巨型人形机器人走到江心，浑浊的江水只到巨型人形机器人的腰部，深灰色装甲外壳上半部分在暴雨中泛冷光，肩部红色\\\"BSAI救援\\\"标识在雨水中醒目，蓝色光学双眼俯视江面，巨型人形机器人低下头，巨大的钢手缓缓探入水中。音效：江水拍打装甲哗哗声，液压关节嗡鸣，狂风呼啸声，暴雨拍打声。\",\"seed\":243749928085006,\"seed_mode\":\"randomize\",\"duration\":\"10\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false},{\"id\":\"clip_4_mt3vud7s\",\"name\":\"\",\"prompt\":\"：跨江大桥江中-钢铁捞车\\n0-3秒：极缓推、近景道具微观镜头。暴雨灰光照亮江面，巨型人形机器人的巨大钢手探入浑浊的江水中，五指张开如一把铲子，金属手指缓缓插入一辆半沉的小轿车底部，钢手指尖触碰到车身金属发出沉闷的撞击声，金属手指扣住车身底盘，浑浊的江水在钢手周围泛起漩涡。音效：钢手入水哗啦声，金属触碰车身沉闷撞击声，液压杆加压嘶嘶声，江水翻涌声。\\n3-6秒：微移、中全景环境空镜。暴雨灰光照亮江面，巨型人形机器人的巨大钢手稳稳地将整辆小轿车从水中托起，水从车身倾泻而下如瀑布，小轿车在钢手中微微晃动，车轮还在空转，浑浊的江水从车底盘流下溅起水花，巨型人形机器人将小轿车轻轻放在桥头安全地带。音效：水从车身倾泻哗哗声，液压杆加压嗡鸣，车身金属晃动嘎吱声，钢脚涉水声。\\n6-10秒：极缓推、近景道具微观镜头。暴雨灰光照亮车窗，车窗内一个满脸惊恐的女人抱着孩子，女人的棕色长发湿成一绺贴在脸颊，浅粉色T恤被江水浸透紧贴身体，女人的瞳孔放大，嘴唇颤抖，透过湿漉漉的车窗玻璃看到头顶那张巨大的钢铁面孔，巨型人形机器人的蓝色光学双眼在雨幕中俯视，深灰色装甲外壳上的水珠在蓝光映照下泛冷光。音效：车窗内女人与孩子的哭泣声，雨水拍打车窗噼啪声，巨型人形机器人液压嗡鸣，狂风呼啸声。\",\"seed\":2854698643951659,\"seed_mode\":\"randomize\",\"duration\":\"10\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false}],\"global_prompt\":\"[整体风格]：电影级写实风格，冷白科技实验室再到暴风雨钢铁救灾的史诗级视觉张力，充满光影雕刻与微动作叙事的美学氛围。\\n\\n[角色档案]：\\n樊迪(数年后CEO时期)@图1，沉稳锋利的青年男性，黑色短发向后梳理露出饱满额头，白色实验大褂，深灰高领毛衣，黑色修身长裤，黑色皮鞋，银色框架眼镜边缘反射冷白光，化纤材质在日光下泛锐利光泽。\\n沈曼(职场时期)@图2，干练坚定的青年女性，黑色长发低马尾束于脑后，白色修身衬衫，黑色西裤，黑色高跟鞋，银色腕表，棉质衬衫在日光灯下泛冷白光泽。\\n\\n[道具档案]：\\n人形机器人原型@图3，约两米高，银灰色金属外壳，球形关节，蓝色光学传感器双眼，四肢液压杆外露，金属表面泛幽蓝冷光。\\n\\n[场景档案]：\\n云城分公司研发实验室(日间)@图4，冷白LED灯管照射呈手术级冷白光。地面深灰防静电地板反射幽蓝光斑。四围为不锈钢实验台与透明玻璃隔断。中央测试台矗立人形机器人原型，金属外壳反射蓝光。固定陈设为操控台与多屏显示器跳动数据。远景实验室深处暗影中可见备用零件架。\\n跨江大桥上(日间·台风天)@图5，天色铁灰，暴雨形成雨幕将光线过滤成灰白混浊色。地面沥青桥面湿滑积水反射灰光。四围为大桥钢索护栏与路灯杆在风中摇晃。固定陈设为拥堵车辆排列与雨刮器摆动。核心地标为桥中央断裂处。远景江面浊浪翻涌呈黄灰色。\\n跨江大桥断裂处(日间·台风天)@图5，暴雨灰光照亮断裂桥面边缘，沥青桥面断裂处钢筋外露，混凝土碎块悬挂。四围为断裂桥面钢索与护栏残骸，运输卡车停在桥边。固定陈设为操控平台与巨型人形机器人。核心地标为断裂处边缘操控平台。远景江心浊浪翻涌，巨型机器人矗立。\\n跨江大桥江中(日间·台风天)@图5，暴雨灰光与江水浊黄交织呈混沌色调。江面浊浪翻涌，水面泛黄灰泡沫。四围为断裂桥面悬挂的钢筋与混凝土碎块。固定陈设为运输卡车停在桥边，帆布掀开露出巨型人形机器人。核心地标为江心中矗立的巨型人形机器人。远景对岸桥面断口与灰白天际线模糊交界。\"}",
+        "resolution_mode": "auto_from_ref",
+        "megapixels": 1,
+        "refs_json": "{\"version\":2,\"refs\":[null,null,null,null,null,null,null,null,null]}",
+        "output_mode": "both",
+        "filename_prefix": "BSAI_H3_Extender",
+        "h3_extender_timeline": ""
+      },
+      "color": "#223"
+    },
+    {
+      "id": 72,
+      "type": "Text Multiline",
+      "pos": [
+        -1022.294141186559,
+        -994.5460669105355
+      ],
+      "size": [
+        676.0999999999999,
+        689.5
+      ],
+      "flags": {},
+      "order": 22,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": []
+        }
+      ],
+      "properties": {
+        "cnr_id": "was-ns",
+        "ver": "3.0.1",
+        "Node name for S&R": "Text Multiline"
+      },
+      "widgets_values": [
+        "[整体风格]：电影级写实风格，炽热且充满感官张力的午后氛围。\n\n[角色档案]：\n角色1@图1，淡蓝亚麻裙敏感少女，浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉，淡蓝色亚麻连衣裙，米白色细绳编织吊坠，珍珠项链，赤足，亚麻材质在强光下泛出柔和暖光。\n角色2@图2，灰白粗麻衬衫固执青年，黑色短发利落硬朗，深棕色皮革腰带，灰白色粗麻衬衫，深灰色工装裤，黄铜怀表，粗麻材质在烈日下呈现干燥哑光质感。\n\n[道具档案]：\n巨大的西瓜@图3，鲜艳翠绿硬壳，深绿条纹分布，蜡质光滑表面，直径40cm饱满球体，高光反射锐利。\n西瓜切片@图4，鲜亮樱桃红瓤，奶油白果肉，湿润多汁质地，15cm方块形态，表面反光强烈。\n\n[场景档案]：\n户外庭院（午后）@图5，炽热的日光穿透稀疏的树叶，在地面投下斑驳的几何阴影，地面由干燥的赤土构成，部分区域有微小的尘埃颗粒在光线下闪烁，四周可见高大、覆盖着攀爬藤蔓的石砌矮墙，墙体表面呈现出粗糙的苔藓状纹理，中央放置着一张带有明显木纹的旧式藤椅，远处可见一片被高温扭曲的青黛色天空，强烈的顶光在物体表面形成了锐利的亮斑。\n同一户外庭院（午后）@图6，炙烤的空气使景物边缘略微模糊，地面上散落着几片被晒干的枯黄落叶，四围石砌矮墙的阴影变得更加浓重，核心区域的藤椅被移开，取而代之的是一个低矮的、沾染着水渍的木制砧板，砧板表面反射着微弱的湿润反光，天空的蓝调被热浪扭曲成一层朦胧的白雾。\n\n[分镜1]：初始的觊觎\n0-2秒：极缓推、中景。炽热日光穿透稀疏树叶，在地面投下斑驳几何阴影。角色1位于画面左侧，浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉闪烁，淡蓝色亚麻连衣裙垂坠，米白色细绳编织吊坠随呼吸轻晃，视线专注锁定画面中央巨大的西瓜上的西瓜切片。角色2位于画面右侧，黑色短发利落硬朗，深棕色皮革腰带勒紧灰白色粗麻衬衫，身体微微倾向巨大的西瓜，黄铜怀表在腰间反射微光。角色1说：“是我先看到它的”(声线：略带娇嗔，语速：中等，情绪：不服气)。音效：远处蝉鸣声，轻微风吹过植物沙沙声。\n2-5秒：微移、特写。焦点转移至西瓜切片，鲜亮樱桃红瓤在强光下饱和度极高，奶油白果肉湿润多汁。角色1的指尖悬停在西瓜切片上方半寸，指甲修剪整齐，皮肤纹理清晰。角色2的侧脸出现在背景虚焦中，黑色短发边缘被阳光勾勒，灰白色粗麻衬衫肩部褶皱清晰。角色2说：“不是说好了你今天不想吃西瓜的吗”(声线：沉稳略带不悦，语速：中等，情绪：提醒与维护)。音效：蝉鸣声持续，空气因高温产生的细微滋滋声。\n\n[分镜2]：边界的试探\n0-3秒：过肩镜头、跟随。视角从角色2身后看向角色1，角色2黑色短发利落硬朗，灰白色粗麻衬衫背部纹理清晰，深棕色皮革腰带扣头反射微光。角色1位于前景，浅棕色长发微卷松散，淡蓝色亚麻连衣裙下摆随风微动，米白色细绳编织吊坠垂在胸前。角色1身体微微前倾，试图靠近巨大的西瓜，指尖即将触碰到翠绿色硬壳。角色2迅速侧身，右臂以防御姿态横在胸前，遮挡了巨大的西瓜的一角，黄铜怀表在手臂摆动中晃动。角色1说：“我就是想尝尝看”(声线：语气坚定，语速：中等，情绪：坚持)。音效：蝉鸣声瞬间减弱，两人之间急促的呼吸声。\n3-5秒：极近特写、固定。两人紧绷的侧脸在阳光下形成强烈阴影对比，角色1浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉在阴影中若隐若现，淡蓝色亚麻连衣裙肩部线条紧绷。角色2黑色短发利落硬朗，灰白色粗麻衬衫领口紧扣，深棕色皮革腰带勒出腹部线条。角色2的嘴角紧抿，下颌肌肉紧绷，眼神激烈交汇，视线穿过虚化前景落在角色1颈侧。角色2说：“你不能反悔？”(声线：低沉有力，语速：慢，情绪：宣告主权)。音效：衣物摩擦声，喉结滚动的细微声响。"
+      ],
+      "widgets_values_named": {
+        "text": "[整体风格]：电影级写实风格，炽热且充满感官张力的午后氛围。\n\n[角色档案]：\n角色1@图1，淡蓝亚麻裙敏感少女，浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉，淡蓝色亚麻连衣裙，米白色细绳编织吊坠，珍珠项链，赤足，亚麻材质在强光下泛出柔和暖光。\n角色2@图2，灰白粗麻衬衫固执青年，黑色短发利落硬朗，深棕色皮革腰带，灰白色粗麻衬衫，深灰色工装裤，黄铜怀表，粗麻材质在烈日下呈现干燥哑光质感。\n\n[道具档案]：\n巨大的西瓜@图3，鲜艳翠绿硬壳，深绿条纹分布，蜡质光滑表面，直径40cm饱满球体，高光反射锐利。\n西瓜切片@图4，鲜亮樱桃红瓤，奶油白果肉，湿润多汁质地，15cm方块形态，表面反光强烈。\n\n[场景档案]：\n户外庭院（午后）@图5，炽热的日光穿透稀疏的树叶，在地面投下斑驳的几何阴影，地面由干燥的赤土构成，部分区域有微小的尘埃颗粒在光线下闪烁，四周可见高大、覆盖着攀爬藤蔓的石砌矮墙，墙体表面呈现出粗糙的苔藓状纹理，中央放置着一张带有明显木纹的旧式藤椅，远处可见一片被高温扭曲的青黛色天空，强烈的顶光在物体表面形成了锐利的亮斑。\n同一户外庭院（午后）@图6，炙烤的空气使景物边缘略微模糊，地面上散落着几片被晒干的枯黄落叶，四围石砌矮墙的阴影变得更加浓重，核心区域的藤椅被移开，取而代之的是一个低矮的、沾染着水渍的木制砧板，砧板表面反射着微弱的湿润反光，天空的蓝调被热浪扭曲成一层朦胧的白雾。\n\n[分镜1]：初始的觊觎\n0-2秒：极缓推、中景。炽热日光穿透稀疏树叶，在地面投下斑驳几何阴影。角色1位于画面左侧，浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉闪烁，淡蓝色亚麻连衣裙垂坠，米白色细绳编织吊坠随呼吸轻晃，视线专注锁定画面中央巨大的西瓜上的西瓜切片。角色2位于画面右侧，黑色短发利落硬朗，深棕色皮革腰带勒紧灰白色粗麻衬衫，身体微微倾向巨大的西瓜，黄铜怀表在腰间反射微光。角色1说：“是我先看到它的”(声线：略带娇嗔，语速：中等，情绪：不服气)。音效：远处蝉鸣声，轻微风吹过植物沙沙声。\n2-5秒：微移、特写。焦点转移至西瓜切片，鲜亮樱桃红瓤在强光下饱和度极高，奶油白果肉湿润多汁。角色1的指尖悬停在西瓜切片上方半寸，指甲修剪整齐，皮肤纹理清晰。角色2的侧脸出现在背景虚焦中，黑色短发边缘被阳光勾勒，灰白色粗麻衬衫肩部褶皱清晰。角色2说：“不是说好了你今天不想吃西瓜的吗”(声线：沉稳略带不悦，语速：中等，情绪：提醒与维护)。音效：蝉鸣声持续，空气因高温产生的细微滋滋声。\n\n[分镜2]：边界的试探\n0-3秒：过肩镜头、跟随。视角从角色2身后看向角色1，角色2黑色短发利落硬朗，灰白色粗麻衬衫背部纹理清晰，深棕色皮革腰带扣头反射微光。角色1位于前景，浅棕色长发微卷松散，淡蓝色亚麻连衣裙下摆随风微动，米白色细绳编织吊坠垂在胸前。角色1身体微微前倾，试图靠近巨大的西瓜，指尖即将触碰到翠绿色硬壳。角色2迅速侧身，右臂以防御姿态横在胸前，遮挡了巨大的西瓜的一角，黄铜怀表在手臂摆动中晃动。角色1说：“我就是想尝尝看”(声线：语气坚定，语速：中等，情绪：坚持)。音效：蝉鸣声瞬间减弱，两人之间急促的呼吸声。\n3-5秒：极近特写、固定。两人紧绷的侧脸在阳光下形成强烈阴影对比，角色1浅棕色长发微卷松散，翠绿宝石蝴蝶耳钉在阴影中若隐若现，淡蓝色亚麻连衣裙肩部线条紧绷。角色2黑色短发利落硬朗，灰白色粗麻衬衫领口紧扣，深棕色皮革腰带勒出腹部线条。角色2的嘴角紧抿，下颌肌肉紧绷，眼神激烈交汇，视线穿过虚化前景落在角色1颈侧。角色2说：“你不能反悔？”(声线：低沉有力，语速：慢，情绪：宣告主权)。音效：衣物摩擦声，喉结滚动的细微声响。"
+      }
+    },
+    {
+      "id": 50,
+      "type": "UNETLoader",
+      "pos": [
+        -1528.8747935362942,
+        -1869.0344877103046
+      ],
+      "size": [
+        640,
+        90
+      ],
+      "flags": {},
+      "order": 23,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            79,
+            85
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "UNETLoader",
+        "models": [
+          {
+            "name": "minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            "url": "https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            "directory": "diffusion_models"
+          }
+        ]
+      },
+      "widgets_values": [
+        "minimax_h3_ref2va_int8_convrot.safetensors",
+        "default"
+      ],
+      "widgets_values_named": {
+        "unet_name": "minimax_h3_ref2va_int8_convrot.safetensors",
+        "weight_dtype": "default"
+      }
+    },
+    {
+      "id": 7,
+      "type": "BSAIH3FilmFactoryFinalDecode",
+      "pos": [
+        1550.7063973966253,
+        -1912.4896099348111
+      ],
+      "size": [
+        1108.2717401791433,
+        932.7167260515614
+      ],
+      "flags": {},
+      "order": 34,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "cache",
+          "type": "H3_MOTION_DISK_CACHE",
+          "link": 32
+        },
+        {
+          "name": "vae",
+          "type": "VAE",
+          "link": 91
+        },
+        {
+          "name": "audio_vae",
+          "type": "VAE",
+          "link": 92
+        }
+      ],
+      "outputs": [],
+      "properties": {
+        "aux_id": "tritant/ComfyUI_MiniMax_H3_Extender",
+        "ver": "95216e620d947bb52ed518209ed5f94ab1371b36",
+        "Node name for S&R": "MiniMaxH3MotionContextDiskFinalDecode"
+      },
+      "widgets_values": [
+        24,
+        "BSAI_H3_Storyboard",
+        "",
+        "H.264",
+        17,
+        "medium",
+        "320k",
+        "all",
+        ""
+      ],
+      "widgets_values_named": {
+        "fps": 24,
+        "filename_prefix": "BSAI_H3_Storyboard",
+        "output_directory": "",
+        "codec": "H.264",
+        "crf": 17,
+        "preset": "medium",
+        "audio_bitrate": "320k",
+        "export_clips": "all",
+        "h3_live_preview": ""
+      },
+      "color": "#2a2"
+    },
+    {
+      "id": 75,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        -102.43302033668682,
+        -1019.9005808705338
+      ],
+      "size": [
+        502.7359852395806,
+        1118.344872755848
+      ],
+      "flags": {},
+      "order": 24,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            104
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.33.0",
+        "Node name for S&R": "PrimitiveStringMultiline"
+      },
+      "widgets_values": [
+        "[整体风格]：电影级写实风格，冷白科技实验室再到暴风雨钢铁救灾的史诗级视觉张力，充满光影雕刻与微动作叙事的美学氛围。\n\n[角色档案]：\n樊迪(数年后CEO时期)@图1，沉稳锋利的青年男性，黑色短发向后梳理露出饱满额头，白色实验大褂，深灰高领毛衣，黑色修身长裤，黑色皮鞋，银色框架眼镜边缘反射冷白光，化纤材质在日光下泛锐利光泽。\n沈曼(职场时期)@图2，干练坚定的青年女性，黑色长发低马尾束于脑后，白色修身衬衫，黑色西裤，黑色高跟鞋，银色腕表，棉质衬衫在日光灯下泛冷白光泽。\n\n[道具档案]：\n人形机器人原型@图3，约两米高，银灰色金属外壳，球形关节，蓝色光学传感器双眼，四肢液压杆外露，金属表面泛幽蓝冷光。\n\n[场景档案]：\n云城分公司研发实验室(日间)@图4，冷白LED灯管照射呈手术级冷白光。地面深灰防静电地板反射幽蓝光斑。四围为不锈钢实验台与透明玻璃隔断。中央测试台矗立人形机器人原型，金属外壳反射蓝光。固定陈设为操控台与多屏显示器跳动数据。远景实验室深处暗影中可见备用零件架。\n跨江大桥上(日间·台风天)@图5，天色铁灰，暴雨形成雨幕将光线过滤成灰白混浊色。地面沥青桥面湿滑积水反射灰光。四围为大桥钢索护栏与路灯杆在风中摇晃。固定陈设为拥堵车辆排列与雨刮器摆动。核心地标为桥中央断裂处。远景江面浊浪翻涌呈黄灰色。\n跨江大桥断裂处(日间·台风天)@图5，暴雨灰光照亮断裂桥面边缘，沥青桥面断裂处钢筋外露，混凝土碎块悬挂。四围为断裂桥面钢索与护栏残骸，运输卡车停在桥边。固定陈设为操控平台与巨型人形机器人。核心地标为断裂处边缘操控平台。远景江心浊浪翻涌，巨型机器人矗立。\n跨江大桥江中(日间·台风天)@图5，暴雨灰光与江水浊黄交织呈混沌色调。江面浊浪翻涌，水面泛黄灰泡沫。四围为断裂桥面悬挂的钢筋与混凝土碎块。固定陈设为运输卡车停在桥边，帆布掀开露出巨型人形机器人。核心地标为江心中矗立的巨型人形机器人。远景对岸桥面断口与灰白天际线模糊交界。\n\n[分镜21]：跨江大桥断裂处-钢铁降临\n0-3秒：微移、中全景双人镜头。暴雨灰光从上方投射，樊迪和沈曼爬上操控平台，樊迪白色实验大褂被雨水浸透贴在深灰高领毛衣上，银色框架眼镜镜片上雨水横流，黑色短发湿发贴在额头，樊迪双手抓住操控平台护栏，目光盯向巨型人形机器人。沈曼白色修身衬衫被雨水浸透贴身，黑色长发湿成一绺贴在脸颊和肩背，银色腕表在灰光下泛冷光，沈曼脸色苍白但眼神坚定，双手攀上操控平台。雨幕中两人的身影渺小而坚定。音效：攀爬金属平台叮当声，狂风呼啸声，暴雨拍打声，两人急促呼吸声。\n3-6秒：极缓推、近景单人镜头。暴雨灰光照在沈曼脸上，沈曼黑色长发湿成一绺贴在脸颊，白色修身衬衫被雨水浸透泛暗白，银色腕表反射灰光，沈曼双手放在操控台键盘上，目光盯向屏幕数据，嘴唇张开，声音穿透雨幕。沈曼说：\"巨型人形机器人启动程序就绪，\"（声线：女声清亮，语速：中，情绪：专业镇定）。音效：键盘敲击声，操控台电子设备启动嗡鸣，暴雨拍打声。\n6-10秒：ref_t2v: 微移、近景单人镜头。暴雨灰光照在沈曼脸上，沈曼黑色长发湿发贴在脸颊，白色修身衬衫被雨水浸透贴身，银色腕表反射灰光，沈曼目光从屏幕移向巨型人形机器人，嘴唇张开，语速沉稳。沈曼说：\"身高二十三米，与桥面高度持平。\"（声线：女声中速，语速：中，情绪：专业镇定）。音效：沈曼声音在风雨中回响，操控台设备嗡鸣，暴雨拍打声。\n\n[分镜22]：跨江大桥断裂处-入江令下\n0-4秒：极缓推、近景双人镜头。暴雨灰光从上方投射，沈曼站在操控台前，黑色长发湿发贴在脸颊，白色修身衬衫被雨水浸透泛暗白，银色腕表反射灰光，沈曼双手放在键盘上，目光从屏幕移向樊迪。樊迪站在操控台旁，白色实验大褂被雨水浸透贴在深灰高领毛衣上，银色框架眼镜镜片上雨水成流，黑色短发湿发贴在额头，樊迪目光盯向江中翻涌的水面，嘴唇张开，声音低沉有力。沈曼说：\"双臂承重上限八十吨。\"（声线：女声中速，语速：中，情绪：专业镇定）。音效：沈曼声音在风雨中回响，操控台设备嗡鸣，暴雨拍打声。\n4-6秒：微移、近景单人镜头。暴雨灰光照在樊迪脸上，樊迪白色实验大褂被雨水浸透贴身，银色框架眼镜镜片上雨水横流，黑色短发湿发贴在额头，深灰高领毛衣领口被雨水浸湿泛暗灰，樊迪目光从江面收回，转向巨型人形机器人，嘴唇微张，声音被风雨撕扯但穿透雨幕。樊迪说：\"让它下江。\"（声线：男声低沉洪亮，语速：缓，情绪：果断坚定）。音效：樊迪声音在风雨中回响，狂风呼啸声，暴雨拍打声。\n6-10秒：极缓推、中全景环境空镜。暴雨灰光照亮操控台，沈曼按下启动键，操控台上启动键泛起红光，巨型人形机器人的蓝色光学双眼骤然亮起蓝光，蓝光穿透雨幕照亮周围水汽，深灰色装甲外壳在蓝光映照下泛冷蓝光泽，液压关节发出低沉的嗡鸣，巨型人形机器人缓缓站起，金属关节摩擦发出沉重的嘎吱声，每一步都让操控平台微微震动。音效：启动键咔嗒声，液压系统启动低沉嗡鸣，金属关节摩擦嘎吱声，地面震动隆隆声，暴雨拍打金属装甲噼啪声。\n\n[分镜23]：跨江大桥江中-钢铁入水\n0-3秒：极缓推、大全景环境空镜。暴雨灰光照亮断桥边缘，巨型人形机器人走到断桥边缘，深灰色装甲外壳在暴风雨中泛冷光，肩部红色\"BSAI救援\"标识在雨水中依然醒目，蓝色光学双眼在雨幕中闪烁，巨型人形机器人一只巨大的钢脚踏入江水，钢脚砸入水面溅起数米高的浪花，浪花在灰光下泛白沫，江水没过钢脚脚踝，泛起浑浊的漩涡。音效：钢脚踏入江水轰然巨响，水花飞溅哗啦声，液压关节低沉嗡鸣，狂风呼啸声，暴雨拍打声。\n3-6秒：微移、中全景环境空镜。暴雨灰光照亮江面，巨型人形机器人稳稳地向江心走去，江水没过巨型人形机器人的脚踝，又漫上小腿，浑浊的江水在深灰色装甲外壳上留下黄灰色水痕，每一步都让江面泛起巨大的波纹向两侧扩散，蓝色光学双眼在雨幕中闪烁蓝光，液压关节发出低沉有节奏的嗡鸣。音效：钢脚涉水哗哗声，液压关节有节奏嗡鸣，江水翻涌声，狂风呼啸声，暴雨拍打金属装甲噼啪声。\n6-10秒：极缓推、中全景环境空镜。暴雨灰光照亮江心，巨型人形机器人走到江心，浑浊的江水只到巨型人形机器人的腰部，深灰色装甲外壳上半部分在暴雨中泛冷光，肩部红色\"BSAI救援\"标识在雨水中醒目，蓝色光学双眼俯视江面，巨型人形机器人低下头，巨大的钢手缓缓探入水中。音效：江水拍打装甲哗哗声，液压关节嗡鸣，狂风呼啸声，暴雨拍打声。\n\n[分镜24]：跨江大桥江中-钢铁捞车\n0-3秒：极缓推、近景道具微观镜头。暴雨灰光照亮江面，巨型人形机器人的巨大钢手探入浑浊的江水中，五指张开如一把铲子，金属手指缓缓插入一辆半沉的小轿车底部，钢手指尖触碰到车身金属发出沉闷的撞击声，金属手指扣住车身底盘，浑浊的江水在钢手周围泛起漩涡。音效：钢手入水哗啦声，金属触碰车身沉闷撞击声，液压杆加压嘶嘶声，江水翻涌声。\n3-6秒：微移、中全景环境空镜。暴雨灰光照亮江面，巨型人形机器人的巨大钢手稳稳地将整辆小轿车从水中托起，水从车身倾泻而下如瀑布，小轿车在钢手中微微晃动，车轮还在空转，浑浊的江水从车底盘流下溅起水花，巨型人形机器人将小轿车轻轻放在桥头安全地带。音效：水从车身倾泻哗哗声，液压杆加压嗡鸣，车身金属晃动嘎吱声，钢脚涉水声。\n6-10秒：极缓推、近景道具微观镜头。暴雨灰光照亮车窗，车窗内一个满脸惊恐的女人抱着孩子，女人的棕色长发湿成一绺贴在脸颊，浅粉色T恤被江水浸透紧贴身体，女人的瞳孔放大，嘴唇颤抖，透过湿漉漉的车窗玻璃看到头顶那张巨大的钢铁面孔，巨型人形机器人的蓝色光学双眼在雨幕中俯视，深灰色装甲外壳上的水珠在蓝光映照下泛冷光。音效：车窗内女人与孩子的哭泣声，雨水拍打车窗噼啪声，巨型人形机器人液压嗡鸣，狂风呼啸声。\n\n\n"
+      ],
+      "widgets_values_named": {
+        "value": "[整体风格]：电影级写实风格，冷白科技实验室再到暴风雨钢铁救灾的史诗级视觉张力，充满光影雕刻与微动作叙事的美学氛围。\n\n[角色档案]：\n樊迪(数年后CEO时期)@图1，沉稳锋利的青年男性，黑色短发向后梳理露出饱满额头，白色实验大褂，深灰高领毛衣，黑色修身长裤，黑色皮鞋，银色框架眼镜边缘反射冷白光，化纤材质在日光下泛锐利光泽。\n沈曼(职场时期)@图2，干练坚定的青年女性，黑色长发低马尾束于脑后，白色修身衬衫，黑色西裤，黑色高跟鞋，银色腕表，棉质衬衫在日光灯下泛冷白光泽。\n\n[道具档案]：\n人形机器人原型@图3，约两米高，银灰色金属外壳，球形关节，蓝色光学传感器双眼，四肢液压杆外露，金属表面泛幽蓝冷光。\n\n[场景档案]：\n云城分公司研发实验室(日间)@图4，冷白LED灯管照射呈手术级冷白光。地面深灰防静电地板反射幽蓝光斑。四围为不锈钢实验台与透明玻璃隔断。中央测试台矗立人形机器人原型，金属外壳反射蓝光。固定陈设为操控台与多屏显示器跳动数据。远景实验室深处暗影中可见备用零件架。\n跨江大桥上(日间·台风天)@图5，天色铁灰，暴雨形成雨幕将光线过滤成灰白混浊色。地面沥青桥面湿滑积水反射灰光。四围为大桥钢索护栏与路灯杆在风中摇晃。固定陈设为拥堵车辆排列与雨刮器摆动。核心地标为桥中央断裂处。远景江面浊浪翻涌呈黄灰色。\n跨江大桥断裂处(日间·台风天)@图5，暴雨灰光照亮断裂桥面边缘，沥青桥面断裂处钢筋外露，混凝土碎块悬挂。四围为断裂桥面钢索与护栏残骸，运输卡车停在桥边。固定陈设为操控平台与巨型人形机器人。核心地标为断裂处边缘操控平台。远景江心浊浪翻涌，巨型机器人矗立。\n跨江大桥江中(日间·台风天)@图5，暴雨灰光与江水浊黄交织呈混沌色调。江面浊浪翻涌，水面泛黄灰泡沫。四围为断裂桥面悬挂的钢筋与混凝土碎块。固定陈设为运输卡车停在桥边，帆布掀开露出巨型人形机器人。核心地标为江心中矗立的巨型人形机器人。远景对岸桥面断口与灰白天际线模糊交界。\n\n[分镜21]：跨江大桥断裂处-钢铁降临\n0-3秒：微移、中全景双人镜头。暴雨灰光从上方投射，樊迪和沈曼爬上操控平台，樊迪白色实验大褂被雨水浸透贴在深灰高领毛衣上，银色框架眼镜镜片上雨水横流，黑色短发湿发贴在额头，樊迪双手抓住操控平台护栏，目光盯向巨型人形机器人。沈曼白色修身衬衫被雨水浸透贴身，黑色长发湿成一绺贴在脸颊和肩背，银色腕表在灰光下泛冷光，沈曼脸色苍白但眼神坚定，双手攀上操控平台。雨幕中两人的身影渺小而坚定。音效：攀爬金属平台叮当声，狂风呼啸声，暴雨拍打声，两人急促呼吸声。\n3-6秒：极缓推、近景单人镜头。暴雨灰光照在沈曼脸上，沈曼黑色长发湿成一绺贴在脸颊，白色修身衬衫被雨水浸透泛暗白，银色腕表反射灰光，沈曼双手放在操控台键盘上，目光盯向屏幕数据，嘴唇张开，声音穿透雨幕。沈曼说：\"巨型人形机器人启动程序就绪，\"（声线：女声清亮，语速：中，情绪：专业镇定）。音效：键盘敲击声，操控台电子设备启动嗡鸣，暴雨拍打声。\n6-10秒：ref_t2v: 微移、近景单人镜头。暴雨灰光照在沈曼脸上，沈曼黑色长发湿发贴在脸颊，白色修身衬衫被雨水浸透贴身，银色腕表反射灰光，沈曼目光从屏幕移向巨型人形机器人，嘴唇张开，语速沉稳。沈曼说：\"身高二十三米，与桥面高度持平。\"（声线：女声中速，语速：中，情绪：专业镇定）。音效：沈曼声音在风雨中回响，操控台设备嗡鸣，暴雨拍打声。\n\n[分镜22]：跨江大桥断裂处-入江令下\n0-4秒：极缓推、近景双人镜头。暴雨灰光从上方投射，沈曼站在操控台前，黑色长发湿发贴在脸颊，白色修身衬衫被雨水浸透泛暗白，银色腕表反射灰光，沈曼双手放在键盘上，目光从屏幕移向樊迪。樊迪站在操控台旁，白色实验大褂被雨水浸透贴在深灰高领毛衣上，银色框架眼镜镜片上雨水成流，黑色短发湿发贴在额头，樊迪目光盯向江中翻涌的水面，嘴唇张开，声音低沉有力。沈曼说：\"双臂承重上限八十吨。\"（声线：女声中速，语速：中，情绪：专业镇定）。音效：沈曼声音在风雨中回响，操控台设备嗡鸣，暴雨拍打声。\n4-6秒：微移、近景单人镜头。暴雨灰光照在樊迪脸上，樊迪白色实验大褂被雨水浸透贴身，银色框架眼镜镜片上雨水横流，黑色短发湿发贴在额头，深灰高领毛衣领口被雨水浸湿泛暗灰，樊迪目光从江面收回，转向巨型人形机器人，嘴唇微张，声音被风雨撕扯但穿透雨幕。樊迪说：\"让它下江。\"（声线：男声低沉洪亮，语速：缓，情绪：果断坚定）。音效：樊迪声音在风雨中回响，狂风呼啸声，暴雨拍打声。\n6-10秒：极缓推、中全景环境空镜。暴雨灰光照亮操控台，沈曼按下启动键，操控台上启动键泛起红光，巨型人形机器人的蓝色光学双眼骤然亮起蓝光，蓝光穿透雨幕照亮周围水汽，深灰色装甲外壳在蓝光映照下泛冷蓝光泽，液压关节发出低沉的嗡鸣，巨型人形机器人缓缓站起，金属关节摩擦发出沉重的嘎吱声，每一步都让操控平台微微震动。音效：启动键咔嗒声，液压系统启动低沉嗡鸣，金属关节摩擦嘎吱声，地面震动隆隆声，暴雨拍打金属装甲噼啪声。\n\n[分镜23]：跨江大桥江中-钢铁入水\n0-3秒：极缓推、大全景环境空镜。暴雨灰光照亮断桥边缘，巨型人形机器人走到断桥边缘，深灰色装甲外壳在暴风雨中泛冷光，肩部红色\"BSAI救援\"标识在雨水中依然醒目，蓝色光学双眼在雨幕中闪烁，巨型人形机器人一只巨大的钢脚踏入江水，钢脚砸入水面溅起数米高的浪花，浪花在灰光下泛白沫，江水没过钢脚脚踝，泛起浑浊的漩涡。音效：钢脚踏入江水轰然巨响，水花飞溅哗啦声，液压关节低沉嗡鸣，狂风呼啸声，暴雨拍打声。\n3-6秒：微移、中全景环境空镜。暴雨灰光照亮江面，巨型人形机器人稳稳地向江心走去，江水没过巨型人形机器人的脚踝，又漫上小腿，浑浊的江水在深灰色装甲外壳上留下黄灰色水痕，每一步都让江面泛起巨大的波纹向两侧扩散，蓝色光学双眼在雨幕中闪烁蓝光，液压关节发出低沉有节奏的嗡鸣。音效：钢脚涉水哗哗声，液压关节有节奏嗡鸣，江水翻涌声，狂风呼啸声，暴雨拍打金属装甲噼啪声。\n6-10秒：极缓推、中全景环境空镜。暴雨灰光照亮江心，巨型人形机器人走到江心，浑浊的江水只到巨型人形机器人的腰部，深灰色装甲外壳上半部分在暴雨中泛冷光，肩部红色\"BSAI救援\"标识在雨水中醒目，蓝色光学双眼俯视江面，巨型人形机器人低下头，巨大的钢手缓缓探入水中。音效：江水拍打装甲哗哗声，液压关节嗡鸣，狂风呼啸声，暴雨拍打声。\n\n[分镜24]：跨江大桥江中-钢铁捞车\n0-3秒：极缓推、近景道具微观镜头。暴雨灰光照亮江面，巨型人形机器人的巨大钢手探入浑浊的江水中，五指张开如一把铲子，金属手指缓缓插入一辆半沉的小轿车底部，钢手指尖触碰到车身金属发出沉闷的撞击声，金属手指扣住车身底盘，浑浊的江水在钢手周围泛起漩涡。音效：钢手入水哗啦声，金属触碰车身沉闷撞击声，液压杆加压嘶嘶声，江水翻涌声。\n3-6秒：微移、中全景环境空镜。暴雨灰光照亮江面，巨型人形机器人的巨大钢手稳稳地将整辆小轿车从水中托起，水从车身倾泻而下如瀑布，小轿车在钢手中微微晃动，车轮还在空转，浑浊的江水从车底盘流下溅起水花，巨型人形机器人将小轿车轻轻放在桥头安全地带。音效：水从车身倾泻哗哗声，液压杆加压嗡鸣，车身金属晃动嘎吱声，钢脚涉水声。\n6-10秒：极缓推、近景道具微观镜头。暴雨灰光照亮车窗，车窗内一个满脸惊恐的女人抱着孩子，女人的棕色长发湿成一绺贴在脸颊，浅粉色T恤被江水浸透紧贴身体，女人的瞳孔放大，嘴唇颤抖，透过湿漉漉的车窗玻璃看到头顶那张巨大的钢铁面孔，巨型人形机器人的蓝色光学双眼在雨幕中俯视，深灰色装甲外壳上的水珠在蓝光映照下泛冷光。音效：车窗内女人与孩子的哭泣声，雨水拍打车窗噼啪声，巨型人形机器人液压嗡鸣，狂风呼啸声。\n\n\n"
+      }
+    }
+  ],
+  "links": [
+    [
+      12,
+      10,
+      0,
+      11,
+      0,
+      "IMAGE"
+    ],
+    [
+      13,
+      10,
+      0,
+      22,
+      0,
+      "IMAGE"
+    ],
+    [
+      14,
+      11,
+      0,
+      13,
+      1,
+      "IMAGE"
+    ],
+    [
+      15,
+      11,
+      1,
+      14,
+      1,
+      "H3FACEXFORM"
+    ],
+    [
+      16,
+      11,
+      1,
+      22,
+      2,
+      "H3FACEXFORM"
+    ],
+    [
+      18,
+      11,
+      4,
+      12,
+      0,
+      "INT"
+    ],
+    [
+      19,
+      11,
+      5,
+      12,
+      1,
+      "INT"
+    ],
+    [
+      20,
+      12,
+      0,
+      13,
+      0,
+      "LATENT"
+    ],
+    [
+      21,
+      13,
+      0,
+      14,
+      0,
+      "LATENT"
+    ],
+    [
+      22,
+      14,
+      0,
+      20,
+      4,
+      "LATENT"
+    ],
+    [
+      23,
+      15,
+      0,
+      16,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      25,
+      16,
+      0,
+      20,
+      1,
+      "GUIDER"
+    ],
+    [
+      26,
+      17,
+      0,
+      20,
+      3,
+      "SIGMAS"
+    ],
+    [
+      27,
+      18,
+      0,
+      20,
+      0,
+      "NOISE"
+    ],
+    [
+      28,
+      19,
+      0,
+      20,
+      2,
+      "SAMPLER"
+    ],
+    [
+      29,
+      20,
+      0,
+      21,
+      0,
+      "LATENT"
+    ],
+    [
+      30,
+      21,
+      0,
+      22,
+      1,
+      "IMAGE"
+    ],
+    [
+      31,
+      22,
+      0,
+      23,
+      0,
+      "IMAGE"
+    ],
+    [
+      32,
+      6,
+      0,
+      7,
+      0,
+      "H3_MOTION_DISK_CACHE"
+    ],
+    [
+      33,
+      20,
+      1,
+      24,
+      0,
+      "LATENT"
+    ],
+    [
+      35,
+      26,
+      0,
+      24,
+      2,
+      "NOISE"
+    ],
+    [
+      36,
+      27,
+      0,
+      24,
+      3,
+      "SIGMAS"
+    ],
+    [
+      37,
+      15,
+      0,
+      24,
+      5,
+      "CONDITIONING"
+    ],
+    [
+      38,
+      28,
+      0,
+      24,
+      6,
+      "CONDITIONING"
+    ],
+    [
+      42,
+      24,
+      1,
+      29,
+      1,
+      "CONDITIONING"
+    ],
+    [
+      43,
+      24,
+      2,
+      29,
+      2,
+      "CONDITIONING"
+    ],
+    [
+      45,
+      32,
+      0,
+      33,
+      0,
+      "NOISE"
+    ],
+    [
+      46,
+      29,
+      0,
+      33,
+      1,
+      "GUIDER"
+    ],
+    [
+      47,
+      30,
+      0,
+      33,
+      2,
+      "SAMPLER"
+    ],
+    [
+      48,
+      31,
+      0,
+      33,
+      3,
+      "SIGMAS"
+    ],
+    [
+      49,
+      24,
+      0,
+      33,
+      4,
+      "LATENT"
+    ],
+    [
+      50,
+      33,
+      0,
+      34,
+      0,
+      "LATENT"
+    ],
+    [
+      52,
+      34,
+      0,
+      35,
+      0,
+      "IMAGE"
+    ],
+    [
+      79,
+      50,
+      0,
+      61,
+      0,
+      "MODEL"
+    ],
+    [
+      80,
+      65,
+      0,
+      61,
+      1,
+      "MODEL"
+    ],
+    [
+      81,
+      66,
+      0,
+      61,
+      2,
+      "BOOLEAN"
+    ],
+    [
+      82,
+      63,
+      0,
+      62,
+      0,
+      "INT"
+    ],
+    [
+      83,
+      64,
+      0,
+      62,
+      1,
+      "INT"
+    ],
+    [
+      84,
+      66,
+      0,
+      62,
+      2,
+      "BOOLEAN"
+    ],
+    [
+      85,
+      50,
+      0,
+      65,
+      0,
+      "MODEL"
+    ],
+    [
+      86,
+      61,
+      0,
+      6,
+      0,
+      "MODEL"
+    ],
+    [
+      87,
+      62,
+      0,
+      6,
+      10,
+      "INT"
+    ],
+    [
+      88,
+      51,
+      0,
+      6,
+      1,
+      "CLIP"
+    ],
+    [
+      89,
+      42,
+      0,
+      6,
+      2,
+      "VAE"
+    ],
+    [
+      90,
+      43,
+      0,
+      6,
+      3,
+      "VAE"
+    ],
+    [
+      91,
+      42,
+      0,
+      7,
+      1,
+      "VAE"
+    ],
+    [
+      92,
+      43,
+      0,
+      7,
+      2,
+      "VAE"
+    ],
+    [
+      93,
+      69,
+      0,
+      6,
+      8,
+      "INT"
+    ],
+    [
+      94,
+      69,
+      1,
+      6,
+      9,
+      "INT"
+    ],
+    [
+      95,
+      70,
+      0,
+      6,
+      7,
+      "ASSET_LIBRARY"
+    ],
+    [
+      104,
+      75,
+      0,
+      6,
+      5,
+      "STRING"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 3,
+      "title": "BSAI-ComfyUI-H3-Film-Factory百声电影工厂（H3全自动电影短片生成） v1",
+      "bounding": [
+        -1587.8495314025147,
+        -2004.4063850518357,
+        4265.332196882218,
+        2287.631661693692
+      ],
+      "color": "#8AA",
+      "flags": {}
+    },
+    {
+      "id": 2,
+      "title": "Asset Library (资产库)",
+      "bounding": [
+        -99.972208740325,
+        -1947.3868616653892,
+        500.42795139230884,
+        867.177235189872
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 4,
+      "title": "Face Repair Pipeline (人脸修复后处理)",
+      "bounding": [
+        -1390.7200926530945,
+        3739.733497210003,
+        3339.6808996487594,
+        770.3842936395287
+      ],
+      "color": "#886600",
+      "flags": {}
+    },
+    {
+      "id": 5,
+      "title": "HD Upscale Pipeline (高清放大后处理)",
+      "bounding": [
+        2027.234510292833,
+        3754.6698578452815,
+        2259.112698629456,
+        610.779046954709
+      ],
+      "color": "#8AA",
+      "flags": {}
+    },
+    {
+      "id": 6,
+      "title": "Instructions (说明)",
+      "bounding": [
+        -2148.8470687268677,
+        4039.145428849779,
+        475.0886705226209,
+        835.3523085360566
+      ],
+      "color": "#432",
+      "flags": {}
+    },
+    {
+      "id": 7,
+      "title": "Models",
+      "bounding": [
+        -1557.874793536294,
+        -1940.0344877103043,
+        698.1818181818182,
+        800.9090909090912
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 9,
+      "title": "Switch Model and Settings",
+      "bounding": [
+        -841.8267382968965,
+        -1941.6450870822314,
+        725.4710743801654,
+        802.834005285617
+      ],
+      "color": "#3f789e",
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 0.8075249415338686,
+      "offset": [
+        290.3582105209257,
+        1501.9964571702567
+      ]
+    },
+    "qgn_navigation_groups": [],
+    "qgn_locked": false,
+    "frontendVersion": "1.49.6",
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true
+  },
+  "version": 0.4
+}
