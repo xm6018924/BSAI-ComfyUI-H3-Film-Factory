@@ -159,6 +159,10 @@ refine_enable=true, refine_denoise=1.0, refine_steps=4
 refine_upscale_factor=2.0                       # 二采放大 2x → latent 120x68 = 1920x1088
 refine_audio_denoise=0.0                        # 音频锁定，保持一采语音/音效
 ```
+
+**双采流程示意 / Dual-sample flow diagram**：
+![Sol-H3 Self-Lift 双采流程示意（直出 1920×1088）](docs/sol_h3_dual_sample_flow.svg)
+
 > 原理 / How it works: 一采 960×544 → latent 直接放大 2x 到 120×68（不经过 VAE，无编解码损失）→ CONST 重加噪到全量噪声 → 二采 4 步完整去噪 → VAE 解码直出 1920×1088。显存 24GB（RTX 4090/5090 Laptop）可流畅运行。/ First pass 960×544 → latent upscale ×2 to 120×68 (no VAE) → CONST re-noise → 4-step full denoise → decode to 1920×1088. Runs on 24GB VRAM.
 
 ### 原生 H3 模型（20-24 步）/ Native H3

@@ -1,0 +1,68 @@
+<svg width="960" height="330" viewBox="0 0 960 330" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sol-H3 Self-Lift dual-sample flow, direct 1920x1088 output">
+  <rect width="960" height="330" fill="#0f1420" rx="10"/>
+  <text x="20" y="34" font-family="'Microsoft YaHei',system-ui,sans-serif" font-size="17" font-weight="700" fill="#7cc7ff">Film Factory v1.31 — Sol-H3 Self-Lift 双采流程 / Dual-Sample Flow（直出 1920×1088）</text>
+  <text x="20" y="56" font-family="'Microsoft YaHei',system-ui,sans-serif" font-size="12" fill="#8b94a8">示意 · 一采 960×544 → 二采 ×2 → 1920×1088；仅视频成员参与放大/重噪，音频默认锁定 · Diagram · video-only upscale &amp; re-noise, audio locked</text>
+
+  <defs>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#5f8ec9"/></marker>
+  </defs>
+
+  <!-- ① 一采 -->
+  <g>
+    <rect x="14" y="78" width="150" height="80" rx="10" fill="#15233c" stroke="#3d6ea8" stroke-width="1.5"/>
+    <text x="89" y="104" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="13" font-weight="700" fill="#7cc7ff">① 一采（主采样）</text>
+    <text x="89" y="122" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#c3cde0">Pass 1 · FastH3 4 步</text>
+    <text x="89" y="139" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#c3cde0">euler / simple</text>
+    <text x="89" y="156" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="10.5" fill="#8b94a8">960×544 px → latent 60×34</text>
+  </g>
+  <line x1="166" y1="118" x2="206" y2="118" stroke="#5f8ec9" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- ② 潜空间放大 -->
+  <g>
+    <rect x="210" y="78" width="172" height="80" rx="10" fill="#15233c" stroke="#3d6ea8" stroke-width="1.5"/>
+    <text x="296" y="104" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="13" font-weight="700" fill="#7cc7ff">② latent 直接放大 ×2</text>
+    <text x="296" y="122" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#c3cde0">Latent upscale (no VAE)</text>
+    <text x="296" y="139" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#c3cde0">仅视频 · 32px 像素对齐</text>
+    <text x="296" y="156" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="10.5" fill="#8b94a8">→ latent 120×68 = 1920×1088</text>
+  </g>
+  <line x1="384" y1="118" x2="424" y2="118" stroke="#5f8ec9" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- ③ CONST 重加噪 -->
+  <g>
+    <rect x="428" y="78" width="172" height="80" rx="10" fill="#15233c" stroke="#3d6ea8" stroke-width="1.5"/>
+    <text x="514" y="104" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="13" font-weight="700" fill="#7cc7ff">③ CONST 重加噪</text>
+    <text x="514" y="122" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#c3cde0">CONST re-noise</text>
+    <text x="514" y="139" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#c3cde0">视频重噪到 σ₀</text>
+    <text x="514" y="156" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="10.5" fill="#8b94a8">σ·ε+(1-σ)·x · denoise=1.0</text>
+  </g>
+  <line x1="602" y1="118" x2="642" y2="118" stroke="#5f8ec9" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- ④ 二采 -->
+  <g>
+    <rect x="646" y="78" width="150" height="80" rx="10" fill="#15233c" stroke="#3d6ea8" stroke-width="1.5"/>
+    <text x="721" y="104" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="13" font-weight="700" fill="#7cc7ff">④ 二采完整去噪</text>
+    <text x="721" y="122" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#c3cde0">Pass 2 (DisableNoise)</text>
+    <text x="721" y="139" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#c3cde0">4 步 · seed+1</text>
+    <text x="721" y="156" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="10.5" fill="#8b94a8">CONST 加噪 latent 起噪</text>
+  </g>
+  <line x1="798" y1="118" x2="838" y2="118" stroke="#5f8ec9" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- ⑤ VAE 解码 -->
+  <g>
+    <rect x="842" y="78" width="104" height="80" rx="10" fill="#173a2c" stroke="#3d8a66" stroke-width="1.5"/>
+    <text x="894" y="110" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="13" font-weight="700" fill="#6fe3a8">⑤ VAE</text>
+    <text x="894" y="128" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="12" font-weight="700" fill="#e8edf7">解码 Decode</text>
+    <text x="894" y="148" text-anchor="middle" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#8b94a8">1920×1088</text>
+  </g>
+
+  <!-- 音频旁路 -->
+  <g>
+    <rect x="14" y="196" width="700" height="52" rx="8" fill="#1a1833" stroke="#6a5fc9" stroke-width="1.2" stroke-dasharray="5 3"/>
+    <text x="30" y="216" font-family="'Microsoft YaHei',sans-serif" font-size="11.5" fill="#b9a8ff">音频 latent 全程保持 / Audio preserved: ② 不放大 · ③ 噪声置零 · ④ noise_mask=0 锁定</text>
+    <text x="30" y="234" font-family="'Microsoft YaHei',sans-serif" font-size="10.5" fill="#8b94a8">refine_audio_denoise ≥ 0.5 时音频才随视频重噪重绘 · refine_upscaler_model 可选 3D 神经网络放大（需插件+模型）</text>
+  </g>
+
+  <!-- 显存标注 -->
+  <text x="14" y="276" font-family="'Microsoft YaHei',sans-serif" font-size="11" fill="#8b94a8">显存参考 / VRAM: 24GB（RTX 4090 / 5090 Laptop）流畅 · 一采 960×544 → 二采 latent 120×68 峰值约 3-4GB</text>
+  <text x="14" y="300" font-family="'Microsoft YaHei',sans-serif" font-size="10.5" fill="#5f8ec9">配置 / Config: steps=4 · euler · simple · denoise=1.0 · refine_enable=true · refine_denoise=1.0 · refine_steps=4 · refine_upscale_factor=2.0 · refine_audio_denoise=0.0</text>
+</svg>
