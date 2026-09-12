@@ -1308,6 +1308,179 @@ def _sigmas(model, scheduler: str, steps: int, denoise: float):
     return sigmas[-(steps + 1):]
 
 
+# ============================================================
+# v1.31: Sol-H3 Self-Lift 双采技术集成（一采 + 二采直出高清）
+# 移植自 BSAI-ComfyUI-Sol-H3 的 LatentUpscaleAlign 核心语义:
+#   latent 直接放大(不经过VAE) + 像素对齐(H3官方32px) + CONST 重加噪
+#   + 音频锁定(默认) + DisableNoise 二采完整去噪
+# ============================================================
+_FF_UPSCALER_MOD = None
+try:
+    import sys as _sys, os as _os
+    _ff_up_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                               "Comfyui_Minimax_h3_latent_Upscaler", "nodes")
+    if _os.path.isdir(_ff_up_dir) and _ff_up_dir not in _sys.path:
+        _sys.path.insert(0, _ff_up_dir)
+    import minimax_h3_latent_upscaler_3d as _FF_UPSCALER_MOD
+    try:
+        _fp = folder_paths
+        _ff_up_models = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
+                                      "Comfyui_Minimax_h3_latent_Upscaler", "models", "h3_latent_upscalers")
+        if _os.path.isdir(_ff_up_models):
+            _fp.add_model_folder_path("h3_latent_upscalers", _ff_up_models)
+    except Exception:
+        pass
+except Exception:
+    _FF_UPSCALER_MOD = None
+
+
+def _ff_get_upscaler_models():
+    """获取可用的 3D latent upscaler 模型列表; 不可用时返回仅插值选项。"""
+    opts = ["(bilinear插值, 无需模型)"]
+    if _FF_UPSCALER_MOD is not None:
+        try:
+            names = _FF_UPSCALER_MOD.scan_models()
+            opts.extend(sorted(n for n in names if not n.startswith("(")))
+        except Exception:
+            pass
+    return opts
+
+
+def _ff_is_nested(samples):
+    return isinstance(samples, comfy.nested_tensor.NestedTensor)
+
+
+def _ff_extract_members(samples):
+    """NestedTensor -> members 列表; 普通 tensor 原样返回。"""
+    if _ff_is_nested(samples):
+        return list(samples.unbind()), True
+    return [samples], False
+
+
+def _ff_wrap_members(members, was_nested):
+    if was_nested:
+        return comfy.nested_tensor.NestedTensor(members)
+    return members[0]
+
+
+def _ff_snap_to_multiple(n, m):
+    m = max(1, int(m))
+    return max(m, (int(n) // m) * m)
+
+
+def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model=""):
+    """v1.31: 视频 latent [B,C,T,H,W] 空间放大 + 像素对齐(不经过 VAE, 无编解码损失)。
+
+    H3 空间下采样率 16(1920->120 latent); 放大后先按 align_to_px(默认32px) 对齐
+    再换算回 latent 尺寸, 避免官方节点不取整导致的分辨率偏移与边缘色条。
+    音频 latent 保持不动(只放大视频成员)。
+
+    upscaler_model: 选中 3D latent upscaler 文件名时用神经网络语义放大, 否则 bilinear 插值。
+    """
+    import comfy.utils
+    if video.ndim < 4:
+        raise ValueError(f"视频latent至少需要4维 [B,C,H,W], 实际 {tuple(video.shape)}")
+
+    h_lat, w_lat = video.shape[-2], video.shape[-1]
+    latent_mult = max(1, int(align_to_px) // 16)  # 像素32 -> latent步进2(H3下采样16)
+    new_h = _ff_snap_to_multiple(round(h_lat * scale), latent_mult)
+    new_w = _ff_snap_to_multiple(round(w_lat * scale), latent_mult)
+    if new_h == h_lat and new_w == w_lat:
+        return video
+
+    orig_dtype = video.dtype
+    use_model = (upscaler_model and _FF_UPSCALER_MOD is not None
+                 and not upscaler_model.startswith("("))
+    if use_model:
+        try:
+            dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model_dtype = torch.bfloat16
+            s = video.to(device=dev, dtype=model_dtype, copy=True)
+            if s.ndim == 4:
+                s = s.unsqueeze(2)
+            T = s.shape[2]
+            model = _FF_UPSCALER_MOD.load_model(upscaler_model, dev, "bf16")
+            norm_mean, norm_std = _FF_UPSCALER_MOD._make_norm_tensors(dev, model_dtype)
+            with torch.inference_mode():
+                s.sub_(norm_mean).div_(norm_std)
+                out = model(s, scale=float(scale), target_size=(T, new_h, new_w))
+                del s
+                out.mul_(norm_std).add_(norm_mean)
+            out = out.to(device="cpu", dtype=orig_dtype)
+            if dev.type == "cuda":
+                torch.cuda.empty_cache()
+            print(f"[H3 Extender] Refine 3D upscaler: {tuple(video.shape)} -> {tuple(out.shape)} "
+                  f"model={upscaler_model}")
+            return out
+        except Exception as e:
+            print(f"[H3 Extender] Refine 3D upscaler 失败({e}), fallback bilinear")
+
+    # fp16/bf16 插值会量化新网格, 二采出现斑点; 统一 fp32 放大后转回原精度
+    samples = video.float() if video.dtype in (torch.float16, torch.bfloat16) else video
+    _method = "nearest-exact" if str(method) == "nearest" else str(method)
+    out = comfy.utils.common_upscale(samples, new_w, new_h, _method, "disabled")
+    return out.to(dtype=orig_dtype)
+
+
+def _ff_const_add_noise(model, noise_tensor, sigmas, latent, audio_denoise):
+    """v1.31: CONST 重加噪(对齐 Sol-H3 LatentUpscaleAlign 语义, 输入为噪声 tensor):
+    process_latent_in/out 作用于整体 NestedTensor, 在 sigmas[0] 处混合,
+    再 inverse_noise_scaling, 使二采以 σ·ε+(1-σ)·x 而非 (1-σ)²·x 重构。
+    音频锁定: 音频成员噪声置零 + noise_mask 音频=0 (audio_denoise<0.5 时)。
+    """
+    if len(sigmas) == 0 or "samples" not in latent:
+        return latent
+
+    out = dict(latent)
+    latent_image = latent["samples"]
+    members, was_nested = _ff_extract_members(latent_image)
+    n_members, n_was_nested = _ff_extract_members(noise_tensor)
+    if len(n_members) != len(members):
+        raise ValueError(f"噪声成员数 {len(n_members)} 与 latent 成员数 {len(members)} 不一致")
+
+    lock_audio = len(members) >= 2 and float(audio_denoise) < 0.5
+    if lock_audio:
+        # 音频成员噪声置零(保持一采音频)
+        n_members = [torch.zeros_like(t) if i == 1 else t for i, t in enumerate(n_members)]
+
+    # noise_mask: 音频=0(保持), 视频=1(重噪); H3 joint DiT 仍需 mask 显式锁定
+    if lock_audio and was_nested:
+        mask_members = []
+        for i, m in enumerate(members):
+            if i == 0:
+                mask_members.append(torch.ones(
+                    (m.shape[0], 1, m.shape[2], m.shape[3], m.shape[4]),
+                    device=m.device, dtype=torch.float32))
+            elif i == 1:
+                mask_members.append(torch.zeros(
+                    (m.shape[0], 1, m.shape[2], m.shape[3]),
+                    device=m.device, dtype=torch.float32))
+            else:
+                mask_members.append(torch.ones_like(m[:1, :1]))
+        out["noise_mask"] = _ff_wrap_members(mask_members, was_nested=True)
+
+    model_sampling = model.get_model_object("model_sampling")
+    process_latent_out = model.get_model_object("process_latent_out")
+    process_latent_in = model.get_model_object("process_latent_in")
+    sigma_start = sigmas[0]
+
+    latent_image = process_latent_in(latent_image)
+    lat_members, _ = _ff_extract_members(latent_image)
+    mixed = []
+    for lat, noi in zip(lat_members, n_members):
+        m = model_sampling.noise_scaling(sigma_start, noi, lat)
+        if hasattr(model_sampling, "inverse_noise_scaling"):
+            m = model_sampling.inverse_noise_scaling(sigma_start, m)
+        mixed.append(m)
+    mixed_nt = _ff_wrap_members(mixed, was_nested=was_nested or n_was_nested)
+    mixed_nt = process_latent_out(mixed_nt)
+    m_members, _ = _ff_extract_members(mixed_nt)
+    out["samples"] = _ff_wrap_members(
+        [torch.nan_to_num(t, nan=0.0, posinf=0.0, neginf=0.0) for t in m_members],
+        was_nested=was_nested)
+    return out
+
+
 def _upscale_latent_spatial(samples, factor):
     """v1.30: H3 AV latent 空间维度放大。
     H3 latent 为 5D (B, C, T, H, W)，空间下采样率 16（输出 768×1344 → latent 48×84）。
@@ -1348,7 +1521,8 @@ def _upscale_latent_spatial(samples, factor):
 
 def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, scheduler: str, steps: int, denoise: float,
                owner_id=None, clip_index=-1,
-               refine_enable=False, refine_denoise=0.55, refine_steps=4, refine_upscale_factor=1.0):
+               refine_enable=False, refine_denoise=1.0, refine_steps=4, refine_upscale_factor=2.0,
+               refine_upscaler_model="", refine_align_to=32, refine_audio_denoise=0.0):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -1450,48 +1624,60 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     )
     samples = samples.to(comfy.model_management.intermediate_device())
 
-    # v1.30: 二次采样（Refine / Second Sampling）画质修复
-    # 社区主流方案（Director 二次采样、latent upscaler、双采工作流均采用）：
-    # 主采样后用低 denoise（0.3-0.45）重新采样，提升细节、去模糊、去高速运动毛刺；
-    # 可选潜空间放大（1.0-2.0x），放大后二次采样输出更高分辨率。
-    # conditioning 保持不变（角色/场景一致性），seed+1 避免完全相同噪声。
+    # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
+    # 技术流程（对齐 BSAI-ComfyUI-Sol-H3 LatentUpscaleAlign 极速版）：
+    #   1) 一采潜空间结果直接放大（不经过 VAE，无编解码画质损失）：
+    #      NestedTensor 感知——只放大视频成员，音频 latent 保持不动；
+    #      放大后像素对齐 H3 官方 32px 网格（1920x1088 = 120x68 latent）；
+    #      可选 3D latent upscaler 神经网络语义放大（细节更丰富）。
+    #   2) CONST 重加噪：视频重噪到 sigma_start（σ·ε+(1-σ)·x 语义），
+    #      音频默认锁定（零噪声 + noise_mask=0，保持一采音频不重绘）。
+    #   3) DisableNoise 二采：从 CONST 加噪 latent 走完整去噪曲线
+    #      （refine_denoise=1.0 时全量重绘，=0.55 时保留 45% 底图信息）。
     if refine_enable:
         try:
             _r_factor = float(refine_upscale_factor)
-            if _r_factor > 1.0:
-                _old_hw = (samples.shape[-2], samples.shape[-1])
-                samples = _upscale_latent_spatial(samples, _r_factor)
-                print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
-                      f"{_old_hw[1]}x{_old_hw[0]} -> {samples.shape[-1]}x{samples.shape[-2]} (x{_r_factor})")
-
-            _r_denoise = max(0.05, min(0.70, float(refine_denoise)))
             _r_steps = max(1, int(refine_steps))
-            print(f"[H3 Extender] Refine 二次采样: clip={clip_index} denoise={_r_denoise} steps={_r_steps}")
+            _r_denoise = max(0.05, min(1.0, float(refine_denoise)))
+            _r_audio = float(refine_audio_denoise)
+            _r_align = max(8, int(refine_align_to))
+            print(f"[H3 Extender] Refine 双采(Sol-H3 Self-Lift): clip={clip_index} "
+                  f"upscale=x{_r_factor} align={_r_align}px steps={_r_steps} denoise={_r_denoise:.2f} audio={_r_audio}")
 
-            _r_sampler = comfy.samplers.sampler_object(str(sampler_name))
+            # 1) NestedTensor 感知 latent 放大（仅视频，音频保持）+ 像素对齐 + 可选 3D upscaler
+            if _r_factor > 1.0:
+                _members, _was_nested = _ff_extract_members(samples)
+                _old_hw = (tuple(_members[0].shape[-2:]) if _members else None)
+                _up_video = _ff_upscale_video_latent(
+                    _members[0], _r_factor, _r_align, "bilinear", refine_upscaler_model)
+                if tuple(_up_video.shape[-2:]) != tuple(_members[0].shape[-2:]):
+                    samples = _ff_wrap_members([_up_video] + list(_members[1:]), _was_nested)
+                    print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
+                          f"{_old_hw[1]}x{_old_hw[0]} -> {_up_video.shape[-1]}x{_up_video.shape[-2]} (x{_r_factor})")
+
+            # 2) CONST 重加噪（视频重噪到 sigma_start，音频锁定/重绘）
             _r_sigmas = _sigmas(model, scheduler, _r_steps, _r_denoise)
-            _r_latent_image = comfy.sample.fix_empty_latent_channels(
-                model, samples,
-                latent.get("downscale_ratio_spacial", None),
-                latent.get("downscale_ratio_temporal", None),
-            )
-            _r_noise = comfy.sample.prepare_noise(_r_latent_image, int(seed) + 1, None)
+            _r_noise = comfy.sample.prepare_noise(samples, int(seed) + 1, None)
+            _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
+
+            # 3) DisableNoise 二采：从 CONST 加噪 latent 完整去噪（不再 prepare_noise 覆盖）
+            _r_sampler = comfy.samplers.sampler_object(str(sampler_name))
             _r_guider = _BasicGuider(model)
             _r_guider.set_conds(conditioning)
             _r_samples = _r_guider.sample(
                 _r_noise,
-                _r_latent_image,
+                _r_latent["samples"],
                 _r_sampler,
                 _r_sigmas,
-                denoise_mask=None,
+                denoise_mask=_r_latent.get("noise_mask"),
                 callback=None,
                 disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
                 seed=int(seed) + 1,
             )
             samples = _r_samples.to(comfy.model_management.intermediate_device())
-            print(f"[H3 Extender] Refine 二次采样完成: clip={clip_index}")
+            print(f"[H3 Extender] Refine 双采完成: clip={clip_index}")
         except Exception as _re:
-            print(f"[H3 Extender] Refine 二次采样失败（回退主采样结果）: {_re}")
+            print(f"[H3 Extender] Refine 双采失败（回退主采样结果）: {_re}")
             import traceback
             traceback.print_exc()
 
@@ -2608,33 +2794,54 @@ class BSAIH3FilmFactory:
                     "tooltip": "暂停后无干预自动继续渲染的等待秒数。",
                 },
             ),
-            # v1.30: 二次采样画质修复（Refine / Second Sampling）
+            # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
             "refine_enable": (
                 "BOOLEAN",
                 {
                     "default": False,
-                    "tooltip": "二次采样画质修复：主采样后用低 denoise 重新采样，提升细节、去模糊、去高速运动毛刺。社区主流方案（Director二次采样/latent upscaler/双采工作流）。开启后每CLIP渲染时间约增加50%-100%。",
+                    "tooltip": "二采 Sol-H3 Self-Lift 双采：一采潜空间直接放大(不经过VAE)+CONST重加噪+二采完整去噪，直出高清视频（如1920x1088）。开启后每CLIP渲染时间约增加50%-100%。",
                 },
             ),
             "refine_denoise": (
                 "FLOAT",
                 {
-                    "default": 0.55, "min": 0.05, "max": 0.70, "step": 0.01,
-                    "tooltip": "二次采样降噪强度。0.5-0.6 为细节提升黄金区间（双采实测）：过低(<0.3)画质提升微弱，过高(>0.65)会变脸/跑偏。仅 refine_enable 开启时生效。",
+                    "default": 1.0, "min": 0.05, "max": 1.0, "step": 0.01,
+                    "tooltip": "二采 CONST 重加噪目标强度（Sol-H3 双采语义）。1.0=全量重噪重绘（官方双采极速版，画质最佳）；0.55=保留45%底图信息（细节提升但保留原构图）；<0.5 会变脸/跑偏。仅 refine_enable 开启时生效。",
                 },
             ),
             "refine_steps": (
                 "INT",
                 {
                     "default": 4, "min": 1, "max": 20, "step": 1,
-                    "tooltip": "二次采样步数。turbo 模型 4 步足够；步数越多细节越丰富但时间越长。仅 refine_enable 开启时生效。",
+                    "tooltip": "二采步数。turbo 模型 4 步足够；步数越多细节越丰富但时间越长。仅 refine_enable 开启时生效。",
                 },
             ),
             "refine_upscale_factor": (
                 "FLOAT",
                 {
                     "default": 2.0, "min": 1.0, "max": 2.0, "step": 0.1,
-                    "tooltip": "潜空间放大倍数（1.0=不放大）。官方双采极速版推荐2.0x；1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加且可能出现线条/碎玻璃瑕疵。放大后自动二次采样。仅 refine_enable 开启时生效。",
+                    "tooltip": "二采潜空间放大倍数（1.0=不放大）。直出 1920x1088 推荐：一采 960x544 + 2.0x；1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加。放大后自动 CONST 重加噪+二采。仅 refine_enable 开启时生效。",
+                },
+            ),
+            "refine_upscaler_model": (
+                _ff_get_upscaler_models(),
+                {
+                    "default": "(bilinear插值, 无需模型)",
+                    "tooltip": "二采潜空间放大方式：3D latent upscaler 神经网络语义放大（细节更丰富，需 Comfyui_Minimax_h3_latent_Upscaler 插件+模型）；默认 bilinear 插值（无需模型，画质损失小）。",
+                },
+            ),
+            "refine_align_to": (
+                "INT",
+                {
+                    "default": 32, "min": 8, "max": 256, "step": 8,
+                    "tooltip": "二采放大后的像素对齐步长（H3 官方分辨率网格 32px）。1920x1088 已是 32 的倍数；其他分辨率会自动取整到该网格，避免边缘色条。",
+                },
+            ),
+            "refine_audio_denoise": (
+                "FLOAT",
+                {
+                    "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
+                    "tooltip": "二采音频重绘强度：0=锁定一采音频（推荐，音频不重噪、不重绘，保持语音/音效一致）；0.5-1.0=音频随视频一起重噪重绘（可能改变声音）。仅 refine_enable 开启时生效。",
                 },
             ),
         }
@@ -2822,9 +3029,12 @@ class BSAIH3FilmFactory:
         pause_enable = kwargs.get("pause_enable", False)
         pause_timeout = kwargs.get("pause_timeout", 120.0)
         refine_enable = kwargs.get("refine_enable", False)
-        refine_denoise = kwargs.get("refine_denoise", 0.55)
+        refine_denoise = kwargs.get("refine_denoise", 1.0)
         refine_steps = kwargs.get("refine_steps", 4)
-        refine_upscale_factor = kwargs.get("refine_upscale_factor", 1.0)
+        refine_upscale_factor = kwargs.get("refine_upscale_factor", 2.0)
+        refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear插值, 无需模型)")
+        refine_align_to = int(kwargs.get("refine_align_to", 32))
+        refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
         unique_id = kwargs.get("unique_id", None)
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
         clips = _parse_clips_json(clips_json)
@@ -3619,6 +3829,9 @@ class BSAIH3FilmFactory:
                     refine_denoise=float(refine_denoise),
                     refine_steps=int(refine_steps),
                     refine_upscale_factor=float(refine_upscale_factor),
+                    refine_upscaler_model=str(refine_upscaler_model),
+                    refine_align_to=int(refine_align_to),
+                    refine_audio_denoise=float(refine_audio_denoise),
                 )
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(

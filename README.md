@@ -17,7 +17,7 @@
 - **多 Clip 分镜逐帧生成**：`BSAIH3FilmFactory` 一个节点管理整部片子的分镜（CLIP 卡片），每张卡片独立提示词/字幕/音效/资产引用，逐 clip 生成、可预览可暂停。/ Multi-Clip storyboard: each CLIP card has its own prompt / subtitle / audio / asset refs, rendered clip-by-clip with preview & pause.
 - **单 Clip 重渲染**：只重出某一个镜头（改提示词/换资产后重出该段），其余镜头不动。/ Re-render a single Clip only.
 - **参考图资产库**：`BSAI_AssetLibraryInput` 上传图片/视频/音频，提示词用 `@图N` / `@视频N` / `@音频N` 引用。/ Asset library with `@图N` / `@视频N` / `@音频N` notation.
-- **二次采样画质修复（Self-Lift 双采）**：主采样后 latent 放大 + 去噪精修，去除 4 步 FastH3 的模糊。/ Dual-sample refinement to remove blur from 4-step FastH3.
+- **Sol-H3 Self-Lift 双采（v1.31）**：主采样后 latent 直接放大（不经过 VAE）+ CONST 重加噪 + 二采完整去噪，一采+二采直出 1920×1088 高清视频；音频默认锁定不重绘。/ Sol-H3 Self-Lift dual-sampling (v1.31): latent upscale (no VAE) + CONST re-noise + full second pass, direct 1920×1088 output; audio locked by default.
 - **per-Clip 实时预览**：每生成完一个 clip 立即解码预览（图像+音频），可暂停/继续/仅保留当前/合并输出。/ Live preview after each clip with pause / continue / stop / merge controls.
 - **字幕系统**：`BSAI_SubtitleConfig` + `BSAI_SubtitleRenderer` 支持旁白/对白字幕渲染。/ Subtitle config + renderer (narration / dialogue).
 - **上下文帧提取/加载**：从长视频提取上下文帧建立运动连贯链（RAM/磁盘两种方案）。/ Contextual frame extraction & loading for motion continuity (RAM & disk backends).
@@ -119,13 +119,16 @@ python -m pip install -r requirements.txt
 | `pause_enable` | 每 clip 生成完暂停 | `false` | 等待用户操作 |
 | `pause_timeout` | 暂停超时（秒）| `120` | 超时自动继续 |
 
-### 二次采样（画质修复）/ Dual-sample Refine
+### Sol-H3 Self-Lift 双采（v1.31）/ Dual-sample Refine (v1.31)
 | 参数 | 中文说明 | 默认 | 说明 |
 |---|---|---|---|
-| `refine_enable` | 二次采样开关 | `false` | latent 放大+去噪精修 |
-| `refine_denoise` | 二次采样降噪 | `0.35` | **0.3-0.45 黄金区间**；过低修不动模糊、过高改内容 |
-| `refine_steps` | 二次采样步数 | `4` | 放大倍数大时建议 8-12 |
-| `refine_upscale_factor` | 潜空间放大倍数 | `1.0` | 1.0=不放大仅去噪；2.0=分辨率翻倍 |
+| `refine_enable` | 双采开关 | `false` | 开启后执行 Sol-H3 双采：latent 放大 + CONST 重加噪 + 二采去噪 |
+| `refine_denoise` | CONST 重加噪目标强度 | `1.0` | **1.0=全量重噪重绘（官方极速版，画质最佳）**；0.55=保留 45% 底图；<0.5 会变脸 |
+| `refine_steps` | 二采步数 | `4` | turbo 模型 4 步足够；放大倍数大时建议 8-12 |
+| `refine_upscale_factor` | 潜空间放大倍数 | `2.0` | 直出 1920×1088：一采 960×544 + 2.0x |
+| `refine_upscaler_model` | 放大方式 | `(bilinear插值, 无需模型)` | 选 3D latent upscaler 模型=神经网络语义放大（需插件+模型，细节更丰富） |
+| `refine_align_to` | 像素对齐步长 | `32` | H3 官方分辨率网格 32px；其他分辨率自动取整避免边缘色条 |
+| `refine_audio_denoise` | 音频重绘强度 | `0.0` | 0=锁定一采音频（推荐）；0.5-1.0=音频随视频重绘 |
 
 ---
 
@@ -144,8 +147,19 @@ refine_enable=false
 steps=4, sampler=euler, scheduler=simple, denoise=1.0
 width=896, height=576, resolution_mode=manual
 block_cache=false, cache_dit=false, ref_cache=true
-refine_enable=true, refine_denoise=0.45, refine_steps=8, refine_upscale_factor=1.5
+refine_enable=true, refine_denoise=1.0, refine_steps=4, refine_upscale_factor=1.5
 ```
+
+### 直出 1920×1088 高清成片（Sol-H3 双采极速版）/ Direct 1920×1088 output
+```
+steps=4, sampler=euler, scheduler=simple, denoise=1.0
+width=960, height=544, resolution_mode=manual   # 一采小尺寸（960x544 = latent 60x34）
+block_cache=false, cache_dit=false, ref_cache=true
+refine_enable=true, refine_denoise=1.0, refine_steps=4
+refine_upscale_factor=2.0                       # 二采放大 2x → latent 120x68 = 1920x1088
+refine_audio_denoise=0.0                        # 音频锁定，保持一采语音/音效
+```
+> 原理 / How it works: 一采 960×544 → latent 直接放大 2x 到 120×68（不经过 VAE，无编解码损失）→ CONST 重加噪到全量噪声 → 二采 4 步完整去噪 → VAE 解码直出 1920×1088。显存 24GB（RTX 4090/5090 Laptop）可流畅运行。/ First pass 960×544 → latent upscale ×2 to 120×68 (no VAE) → CONST re-noise → 4-step full denoise → decode to 1920×1088. Runs on 24GB VRAM.
 
 ### 原生 H3 模型（20-24 步）/ Native H3
 ```
@@ -169,6 +183,12 @@ Each CLIP card has per-card controls; left border color shows status. Card butto
 5. **暂停/继续/仅当前/中止（⏸）**: 当前 clip 生成完暂停 → ▶ 继续 / ⏹ 仅保留当前并停止 / ✖ 中止；`pause_enable` 自动暂停，`pause_timeout` 超时自动继续。
 6. **合并输出（工具栏）**: 把已生成 clip 合成完整视频；有「重新生成」状态 clip 时先弹窗确认。
 7. **render_enabled（✓/✗）**: 关闭后该 clip 不参与本轮生成。
+
+### v1.31 升级：Sol-H3 Self-Lift 双采集成 / v1.31: Sol-H3 Self-Lift Dual-Sampling
+- **二采引擎升级**：原「低 denoise 部分重绘」升级为 Sol-H3 双采技术——latent 直接放大（NestedTensor 感知，只放大视频、音频保持）+ 像素 32px 对齐 + CONST 重加噪（σ·ε+(1-σ)·x）+ DisableNoise 二采完整去噪，直出 1920×1088 高清成片。/ Second pass upgraded to Sol-H3 Self-Lift: latent upscale (video-only, audio preserved) + 32px alignment + CONST re-noise + full second-pass denoise, direct 1920×1088 output.
+- **3D latent upscaler 可选**：`refine_upscaler_model` 支持 3D 神经网络语义放大（需 `Comfyui_Minimax_h3_latent_Upscaler` 插件），比 bilinear 保留更多高频细节。/ Optional neural 3D upscaler for the refine pass.
+- **音频锁定**：`refine_audio_denoise=0` 时二采不重绘音频（噪声置零 + noise_mask 锁定），保证语音/音效一致。/ Audio lock: no audio re-paint in pass 2 by default.
+- **旧工作流兼容**：`refine_denoise=0.55`（旧默认）在新引擎中等价于"保留 45% 底图的 CONST 部分重绘"，行为自然延续，无需改工作流。/ Backward compatible: old refine_denoise values map to partial CONST re-noise.
 
 ### v1.27+ 升级功能 / v1.27+ features
 - **per-CLIP 外部提示词端口** `clip_prompt_1..12`：可拖线连接任意文本节点（Muye 反推/PrimitiveStringMultiline 等），支持 `@图N/@视频N/@音频N` 资产引用语法。/ External prompt ports per clip, connectable to any text node, with @asset notation.
