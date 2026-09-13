@@ -591,7 +591,7 @@ class MiniMaxH3MotionContextRAM:
                 "context_latent": ("LATENT",),
                 "context_length": (
                     ["22", "5", "39", "56"],
-                    {"default": "22"},
+                    {"default": "39"},
                 ),
                 "audio_context_length": (
                     "INT",
@@ -647,10 +647,56 @@ class MiniMaxH3MotionContextRAM:
             sh = int(source_video.shape[3]) * 16
             tw = int(target_video.shape[4]) * 16
             th = int(target_video.shape[3]) * 16
-            raise ValueError(
-                "MiniMax H3 Motion Context RAM: resolution mismatch "
-                f"{sw}x{sh} -> {tw}x{th}. Latent motion context cannot resize."
+            # v1.25: resolution mismatch no longer aborts the render - the motion
+            # context latent is spatially trilinear-resized to the target latent
+            # resolution. H3 uses RoPE, so spatially interpolated motion features
+            # remain valid conditioning and cross-clip continuity is preserved.
+            _LOG.warning(
+                "[H3 Motion Context] resolution mismatch: context %dx%d -> target %dx%d; "
+                "auto-resizing motion-context latent spatially (trilinear).",
+                sw, sh, tw, th,
             )
+            try:
+                _samples = context_latent["samples"]
+                if getattr(_samples, "is_nested", False):
+                    _parts = list(_samples.unbind())
+                elif isinstance(_samples, (tuple, list)):
+                    _parts = list(_samples)
+                else:
+                    raise ValueError(
+                        "context_latent['samples'] is not a joint AV latent"
+                    )
+                _v = _parts[0]
+                _v = torch.nn.functional.interpolate(
+                    _v,
+                    size=(
+                        int(_v.shape[2]),
+                        int(target_video.shape[3]),
+                        int(target_video.shape[4]),
+                    ),
+                    mode="trilinear",
+                    align_corners=False,
+                )
+                _parts[0] = _v
+                # v1.26: 不能写回 context_latent["samples"]——context_latent 可能是
+                # _LazyDiskLatent（dict 子类），其 __getitem__("samples") 恒从磁盘
+                # mmap 重新加载原始段，写回被忽略（日志实锤：resize 警告后仍报
+                # "context block is larger than target patch grid 120x68 vs 60x34"）。
+                # 改为构造普通 LATENT dict 局部替换，让 _video_tail_from_latent /
+                # _audio_tail_from_latent 读到 resize 后的视频流（音频流保持原样）。
+                context_latent = {
+                    "samples": (
+                        comfy.nested_tensor.NestedTensor(tuple(_parts))
+                        if getattr(_samples, "is_nested", False)
+                        else type(_samples)(_parts)
+                    )
+                }
+                source_video = _v
+            except Exception as _re:
+                raise ValueError(
+                    "MiniMax H3 Motion Context RAM: resolution mismatch "
+                    f"{sw}x{sh} -> {tw}x{th}. Auto-resize failed: {_re}"
+                )
 
         context_frames = int(context_length)
         target_frame_count = _pixel_frames(

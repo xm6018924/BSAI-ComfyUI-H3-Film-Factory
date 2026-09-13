@@ -1916,6 +1916,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             for p in _dm2.parameters()) / 1024 ** 3
                 except Exception:
                     _model_gb2 = 0.0
+                # int8 量化模型: 参数以 fp16 尺寸存于内存(41GB 量级), 实际
+                # 显存占用≈参数量×0.53 (int8 每权重 1 字节 vs fp16 2 字节).
+                # 实测: 参数 41.06GB → int8 显存 21.8GB (日志 21833MB Staged).
+                if _model_gb2 > 0.0:
+                    _model_gb2 *= 0.53
                 if _model_gb2 <= 0.0:
                     _model_gb2 = 21.8  # int8 H3 经验值兜底
                 # workspace 实测表: 60x34→1.5GB(一采) 90x50→2.6GB(11:05 二采)
@@ -1926,9 +1931,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _cands = [f for f in (2.0, 1.5, 1.0) if _orig_f >= f - 1e-6]
                 if not _cands:
                     _cands = [max(1.0, _orig_f)]
-                # 模型驻留(allocated>=4GB)则二采只需 workspace; 否则按
-                # DynamicVRAM 流式重载估算(约 35% 权重峰值驻留) + workspace
-                _mreq2 = 0.0 if _alloc_gb2 >= 4.0 else _model_gb2 * 0.35
+                # 需求估算:
+                #  - 模型未驻留(alloc<4GB, DynamicVRAM 流式): 重载峰值≈35% 权重
+                #  - 模型部分驻留(lowvram, 4GB<=alloc<全量): 二采需把 offloaded
+                #    部分搬回 GPU, 搬运峰值≈(全量-已载)×0.6.
+                #    实测校准: 11:05 x1.5 成功(起点 loaded 9.19GB, ws 2.6GB);
+                #    19:13 x2.0 OOM(起点 loaded 10.34GB, ws 4.5GB, free 0).
+                #    0.6 系数: x2.0 必拦, x1.5 放行(与 11:05 成功经验一致).
+                if _alloc_gb2 >= 4.0:
+                    _mreq2 = max(0.0, _model_gb2 - _alloc_gb2) * 0.6
+                else:
+                    _mreq2 = _model_gb2 * 0.35
                 _chosen2 = None
                 for _f2 in _cands:
                     _ws2 = _ws_tbl.get(round(_f2, 1), 2.6)
@@ -2091,6 +2104,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 尝试用当前 (放大后) samples 重跑 (3D upscaler 已清,
             # 可能腾出足够 VRAM).
             _fb_samples = _samples_pre_upscale if _samples_pre_upscale is not None else samples
+            # v1.48: fallback 前强制加载 diffusion(lowvram 分块驻留 ~10GB),
+            # 避免 x2.0 OOM 后 ComfyUI 将模型全卸(0 loaded), fallback 从零
+            # 流式重载时二次 OOM(19:13 实测: 重载到 allocated 15.42GB 后
+            # 再请求 9.02GB 撞 Device limit; 先驻留 10GB 则 60x34 ws~1.5GB
+            # 总峰值 ~12GB < 23.86, 即 11:05 x1.5 成功同款路径)
+            try:
+                _mm.load_model_gpu(model)
+            except Exception:
+                pass
+            _gc.collect()
+            _torch.cuda.empty_cache()
             _r2_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
             _r2_noise = comfy.sample.prepare_noise(_fb_samples, int(seed) + 1, None)
             _r2_latent = _ff_const_add_noise(model, _r2_noise, _r2_sigmas, {"samples": _fb_samples}, _r_audio)

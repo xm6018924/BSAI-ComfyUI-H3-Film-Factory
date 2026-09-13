@@ -1961,6 +1961,42 @@ def _decode_single_clip_to_blob(
 
     # Decode video latent
     print(f"[H3 Extender]   step 1: loading segment video...")
+    # v1.25: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
+    # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
+    try:
+        import comfy.model_management as _mm
+        import torch as _torch
+        for _lm in list(_mm.current_loaded_models):
+            try:
+                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
+            except Exception:
+                pass
+        _mm.soft_empty_cache(force=True)
+        _torch.cuda.synchronize()
+        _torch.cuda.empty_cache()
+        _a = _torch.cuda.memory_allocated() / 1024 ** 3
+        print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
+    except Exception as _e:
+        print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
+
+    # v1.25: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
+    # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
+    try:
+        import comfy.model_management as _mm
+        import torch as _torch
+        for _lm in list(_mm.current_loaded_models):
+            try:
+                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
+            except Exception:
+                pass
+        _mm.soft_empty_cache(force=True)
+        _torch.cuda.synchronize()
+        _torch.cuda.empty_cache()
+        _a = _torch.cuda.memory_allocated() / 1024 ** 3
+        print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
+    except Exception as _e:
+        print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
+
     v = _load_segment_video(data_path, curr)
     print(f"[H3 Extender]   step 2: vae.decode (shape={tuple(v.shape)})...")
     video = vae.decode(v)
