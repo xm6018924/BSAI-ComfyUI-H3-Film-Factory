@@ -1887,6 +1887,69 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             except Exception as _ve:
                 print(f"[H3 Extender] Refine 二采前显存清理失败(可忽略): {_ve}")
 
+            # v1.47 (2026-09-13 fix #6 二采卡死根治)
+            # 问题(实锤, 与 BSAI-H3-MotionFix v2.9 记录的卡死同根因):
+            #   DynamicVRAM 开启时 H3 int8 模型(21.8GB)以流式加载, 一采后
+            #   完全释放显存(allocated≈0GB); 二采 _r_guider.sample() 触发
+            #   21.8GB 全量重载 + 大 latent attention workspace(x2.0≈4.5GB),
+            #   24GB 卡显存/内存耗尽 → Python 线程阻塞假死(日志停在
+            #   "Model Initializing ... 0/4", 重启复现).
+            #   对照: 11:05 成功运行(DynamicVRAM off)二采前模型驻留 9.19GB,
+            #   二采无需全量重载, 4 步跑通; 17:40 卡死(DynamicVRAM on)
+            #   二采前模型 0.02GB.
+            # 修复: 1) 显存预算预检, 模型不在显存时按流式重载估算, 超限
+            #   自动降级放大倍率(2.0→1.5→1.0)并醒目提示; 2) 二采采样前
+            #   主动 load_model_gpu() 确保模型驻留(防 DynamicVRAM 重载
+            #   假死); 3) 失败走已有 fallback, 绝不假死.
+            try:
+                import torch as _torch2
+                _gpu_free_gb2, _gpu_total_gb2 = _torch2.cuda.mem_get_info()
+                _gpu_free_gb2 /= 1024 ** 3
+                _gpu_total_gb2 /= 1024 ** 3
+                _alloc_gb2 = _torch2.cuda.memory_allocated() / 1024 ** 3
+                _model_gb2 = 0.0
+                try:
+                    _dm2 = getattr(model, "model", None)
+                    if _dm2 is not None:
+                        _model_gb2 = sum(
+                            p.numel() * p.element_size()
+                            for p in _dm2.parameters()) / 1024 ** 3
+                except Exception:
+                    _model_gb2 = 0.0
+                if _model_gb2 <= 0.0:
+                    _model_gb2 = 21.8  # int8 H3 经验值兜底
+                # workspace 实测表: 60x34→1.5GB(一采) 90x50→2.6GB(11:05 二采)
+                # 120x68→4.5GB(代码注释实测峰值)
+                _ws_tbl = {1.0: 1.5, 1.5: 2.6, 2.0: 4.5}
+                _orig_f = float(_r_factor)
+                # 候选倍率从当前值开始逐级下降
+                _cands = [f for f in (2.0, 1.5, 1.0) if _orig_f >= f - 1e-6]
+                if not _cands:
+                    _cands = [max(1.0, _orig_f)]
+                # 模型驻留(allocated>=4GB)则二采只需 workspace; 否则按
+                # DynamicVRAM 流式重载估算(约 35% 权重峰值驻留) + workspace
+                _mreq2 = 0.0 if _alloc_gb2 >= 4.0 else _model_gb2 * 0.35
+                _chosen2 = None
+                for _f2 in _cands:
+                    _ws2 = _ws_tbl.get(round(_f2, 1), 2.6)
+                    if _mreq2 + _ws2 <= _gpu_free_gb2 - 1.5:
+                        _chosen2 = _f2
+                        break
+                print(f"[H3 Extender] Refine 显存预算(v1.47): 模型~{_model_gb2:.1f}GB "
+                      f"驻留alloc={_alloc_gb2:.1f}GB 可用显存={_gpu_free_gb2:.1f}GB/"
+                      f"{_gpu_total_gb2:.0f}GB 需求~{_mreq2 + _ws_tbl.get(round(_orig_f, 1), 2.6):.1f}GB")
+                if _chosen2 is not None and _chosen2 < _orig_f - 1e-6:
+                    _r_factor = _chosen2
+                    print(f"[H3 Extender] Refine 放大倍率已自动降级: x{_orig_f} -> x{_chosen2} "
+                          f"(24GB 级显存 + int8 {_model_gb2:.1f}GB 模型下 x{_orig_f} 二采会假死, "
+                          f"见 v1.47 显存预算)")
+                elif _chosen2 is None:
+                    print(f"[H3 Extender] Refine 警告: 显存预算不足(需求>可用), "
+                          f"二采将尝试流式采样, 若卡死请关闭 DynamicVRAM 启动 "
+                          f"(--disable-dynamic-vram) 或换 w4a8 轻量模型")
+            except Exception as _mp2:
+                print(f"[H3 Extender] Refine 显存预算预检失败(可忽略): {_mp2}")
+
             # v1.38 (2026-09-13 fix): 在放大前 deep copy 一采原始 samples,
             # 留作 OOM fallback 用. 120x68 (2.0x) OOM 后, 重跑时直接用
             # 60x34 一采原始尺寸, attention workspace 从 4.47GB 降到
@@ -1953,6 +2016,21 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
 
             # 3) DisableNoise 二采：从 CONST 加噪 latent 完整去噪（不再 prepare_noise 覆盖）
+            # v1.47: 采样前主动确保 diffusion 模型驻留显存. DynamicVRAM
+            # 模式下模型一采后会被完全释放(allocated≈0GB), 若依赖按需重载,
+            # 21.8GB 全量加载在 24GB 卡上会假死(见 v1.47 预算注释).
+            # load_model_gpu 同步加载, OOM 抛异常可走下方 fallback, 不静默卡死.
+            try:
+                import torch as _torch3
+                import comfy.model_management as _mm3
+                if _torch3.cuda.memory_allocated() / 1024 ** 3 < 1.0:
+                    print("[H3 Extender] Refine 二采前模型不在显存, 主动加载到 VRAM ...")
+                    _mm3.load_model_gpu(model)
+                    _torch3.cuda.synchronize()
+                    print(f"[H3 Extender] Refine 模型驻留完成: "
+                          f"allocated={_torch3.cuda.memory_allocated() / 1024 ** 3:.1f}GB")
+            except Exception as _lg2:
+                print(f"[H3 Extender] Refine 主动加载模型失败, 走 DynamicVRAM 按需流式: {_lg2}")
             _r_sampler = comfy.samplers.sampler_object(str(sampler_name))
             _r_guider = _BasicGuider(model)
             _r_guider.set_conds(conditioning)
