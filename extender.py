@@ -1771,6 +1771,19 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         preview_x0 = preview_x0.tensors[0]
                     if previewer is not None:
                         img = previewer.decode_latent_to_preview(preview_x0)
+                        # v1.46: H3 latent 预览是 latent 格点直接映射(60x34 等),
+                        # 不放大则前端看到的就是一张极小的缩略图, 视觉上"糊成一片"。
+                        # 放大到实际视频分辨率(LANCZOS 平滑), 让一采预览真实可辨。
+                        try:
+                            _pv_w, _pv_h = img.size
+                            _pv_scale = 16
+                            if _pv_w < 320 or _pv_h < 320:
+                                img = img.resize(
+                                    (_pv_w * _pv_scale, _pv_h * _pv_scale),
+                                    Image.LANCZOS,
+                                )
+                        except Exception:
+                            pass
                     else:
                         # Manual fallback: take first 3 channels, normalize to 0-255
                         # Handle 5D video latents by taking the first time step
