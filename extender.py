@@ -33,8 +33,11 @@ import zipfile
 import numpy as np
 import torch
 import torchaudio
+import types
 import comfy.model_management
 import comfy.nested_tensor
+import comfy.ops
+import comfy.quant_ops
 import comfy.sample
 import comfy.samplers
 import comfy.utils
@@ -122,6 +125,42 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
     if i < 0 or i >= len(segments):
         return None, None
     curr = segments[i]
+
+    # v1.25: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
+    # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
+    try:
+        import comfy.model_management as _mm
+        import torch as _torch
+        for _lm in list(_mm.current_loaded_models):
+            try:
+                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
+            except Exception:
+                pass
+        _mm.soft_empty_cache(force=True)
+        _torch.cuda.synchronize()
+        _torch.cuda.empty_cache()
+        _a = _torch.cuda.memory_allocated() / 1024 ** 3
+        print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
+    except Exception as _e:
+        print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
+
+    # v1.25: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
+    # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
+    try:
+        import comfy.model_management as _mm
+        import torch as _torch
+        for _lm in list(_mm.current_loaded_models):
+            try:
+                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
+            except Exception:
+                pass
+        _mm.soft_empty_cache(force=True)
+        _torch.cuda.synchronize()
+        _torch.cuda.empty_cache()
+        _a = _torch.cuda.memory_allocated() / 1024 ** 3
+        print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
+    except Exception as _e:
+        print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
 
     # Video latent -> pixels [T,C,H,W] in [0,1]
     try:
@@ -303,6 +342,150 @@ def _apply_h3_block_cache(model, residual_diff_threshold=0.12, cache_device="cpu
         return model
     except Exception as _e:
         print(f"[H3 Extender] block cache unavailable, running without acceleration: {_e}")
+        return model
+
+
+# ============================================================
+# v1.40 (2026-09-13): 自动注入 MiniMax H3 省显存 patches
+# v1.39 失败原因: 我试图复制 KJNodes 的 forward 逻辑, 但 cast_to_input /
+# self.kj_num_chunks / quant_ops.ck 几个 API 签名/属性对不上, 抄错了.
+#
+# v1.40 改用: 直接 import KJNodes 已经验证过的 3 个 plain function
+# (minimax_mlp_chunked_forward / minimax_attn_lowmem_forward /
+# minimax_block_lowmem_forward), 然后用 KJNodes 自己的 MiniMaxChunkFeedForward
+# + MiniMaxLowVRAMAttention 节点里完全相同的 add_object_patch 流程. 不
+# 再自己抄代码, 复用 KJNodes 已经能跑通的实现.
+#
+# 24GB 物理卡跑 1.5x/2.0x 二采的硬性要求:
+#   - FFN SwiGLU token 切 2 块 → peak FFN 显存减半
+#   - attention 头切 4 块 → sol_attn workspace 缩 1/4 (6.46GB → ~1.6GB)
+# ============================================================
+
+# Lazy import KJNodes pure functions (避免 ComfyUI 启动时硬依赖)
+def _ff_get_kj_forward_fns():
+    """返回 KJNodes 已经验证过的 3 个 plain function. 失败时返回 None.
+
+    v1.41: 之前用 from custom_nodes.ComfyUI_KJNodes 失败 — 插件文件夹名是
+    ComfyUI-KJNodes (带连字符), Python module 名不允许连字符, 必须用
+    importlib.util.spec_from_file_location 走文件直加载. 此函数只取
+    minimax_mlp_chunked_forward / minimax_attn_lowmem_forward /
+    minimax_block_lowmem_forward 三个 plain function, 它们的源码在
+    ComfyUI-KJNodes/nodes/minimax_nodes.py 顶部 def 段, 不依赖 KJNodes
+    自己的 nodes.py 顶层 (那里会拉 comfy_aimdo.vram_buffer 等可选依赖).
+    """
+    import importlib.util as _ilu
+    import os as _os
+    # 找 ComfyUI-KJNodes 目录
+    try:
+        import folder_paths as _fp
+        _bases = list(_fp.get_folder_paths("custom_nodes")) + [_fp.base_path]
+    except Exception:
+        _bases = []
+    kj_root = None
+    for _b in _bases:
+        _cand = _os.path.join(str(_b), "ComfyUI-KJNodes")
+        if _os.path.isdir(_cand):
+            kj_root = _cand
+            break
+    if kj_root is None:
+        print("[H3 Extender] v1.41 KJNodes 目录未找到 (在 custom_nodes 下找不到 ComfyUI-KJNodes)")
+        return None
+    # 直加载 minimax_nodes.py
+    fpath = _os.path.join(kj_root, "nodes", "minimax_nodes.py")
+    if not _os.path.isfile(fpath):
+        print(f"[H3 Extender] v1.41 找不到 {fpath}")
+        return None
+    spec = _ilu.spec_from_file_location("_kj_minimax_v141", fpath)
+    if spec is None or spec.loader is None:
+        print(f"[H3 Extender] v1.41 spec_from_file_location 失败")
+        return None
+    mod = _ilu.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(mod)
+    except Exception as _ex:
+        # minimax_nodes.py 顶部会 import comfy.model_management / comfy.ops /
+        # comfy.quant_ops, 其中任一个缺都会 raise. 但 你的 ComfyUI venv 已
+        # 经能加载这些 (Sol-H3 也 import), 所以这个 _ex 几乎不会发生.
+        print(f"[H3 Extender] v1.41 exec_module 失败: {_ex}")
+        return None
+    if not all(hasattr(mod, n) for n in ("minimax_mlp_chunked_forward",
+                                          "minimax_attn_lowmem_forward",
+                                          "minimax_block_lowmem_forward")):
+        print("[H3 Extender] v1.41 mod 缺 3 个函数")
+        return None
+    return (mod.minimax_mlp_chunked_forward,
+            mod.minimax_attn_lowmem_forward,
+            mod.minimax_block_lowmem_forward)
+
+
+def _ff_apply_h3_lowvram_patches(model, ff_chunks=2, ff_seq_threshold=4096,
+                                 attn_head_chunks=4, verbose=True):
+    """v1.40: 在 Extender 内部为 H3 model 注入 KJNodes 已验证的省显存 patches.
+
+    完整复刻 ComfyUI-KJNodes 的 MiniMaxChunkFeedForward.execute + MiniMaxLowVRAMAttention.execute
+    流程 (mm.cast_to(weight, device) 2 个位置参数 + add_object_patch + transformer_options 写
+    minimax_head_chunks + sol_take_forward). 不再自己抄 forward 内部, 完全交给 KJNodes 实现.
+    """
+    try:
+        if model is None:
+            return model
+        # 1) 拿 KJNodes 纯函数
+        kj = _ff_get_kj_forward_fns()
+        if kj is None:
+            print("[H3 Extender] v1.40 KJNodes 不可用, 跳过省显存 patches (会按老路径 OOM)")
+            return model
+        kj_mlp, kj_attn, kj_block = kj
+
+        # 2) 幂等性: 已在 model_options 里有 minimax_head_chunks, 不重复套
+        to = model.model_options.get("transformer_options", {}) or {}
+        already_lowvram = to.get("minimax_head_chunks") is not None
+        m = model if already_lowvram else model.clone()
+        diffusion_model = m.get_model_object("diffusion_model")
+        blocks = getattr(diffusion_model, "blocks", None)
+        if not blocks or not hasattr(blocks[0], "attn") or not hasattr(blocks[0].attn, "qkv_proj"):
+            print("[H3 Extender] v1.40 model 不是 MiniMax H3 (无 attn.qkv_proj), 跳过")
+            return model
+
+        # 3) FFN chunking — 复用 KJNodes 的 MiniMaxFFNChunkPatch + minimax_mlp_chunked_forward
+        if ff_chunks > 1 and not already_lowvram and hasattr(blocks[0], "mlp"):
+            for idx, block in enumerate(blocks):
+                # 先设属性, 然后调 KJNodes minimax_mlp_chunked_forward
+                # 它的逻辑是 self.kj_seq_threshold / self.kj_num_chunks
+                block.mlp.kj_num_chunks = ff_chunks
+                block.mlp.kj_seq_threshold = ff_seq_threshold
+                m.add_object_patch(
+                    f"diffusion_model.blocks.{idx}.mlp.forward",
+                    types.MethodType(kj_mlp, block.mlp),
+                )
+
+        # 4) attention low-mem — 完全照搬 KJNodes MiniMaxLowVRAMAttention.execute
+        if attn_head_chunks > 1:
+            m.model_options.setdefault("transformer_options", {})
+            m.model_options["transformer_options"]["minimax_head_chunks"] = attn_head_chunks
+        # sol_take_forward 每次都设 (幂等)
+        m.model_options["transformer_options"]["sol_take_forward"] = kj_attn
+
+        for idx, block in enumerate(blocks):
+            m.add_object_patch(
+                f"diffusion_model.blocks.{idx}.forward",
+                types.MethodType(kj_block, block),
+            )
+            attn_key = f"diffusion_model.blocks.{idx}.attn.forward"
+            if attn_key in m.object_patches:
+                # 已有其他 patch (如 Sol-Attn 走 _uses_optimized_attention 路径),
+                # 保留它, 它会从 transformer_options 读 head_chunks
+                continue
+            m.add_object_patch(attn_key, types.MethodType(kj_attn, block.attn))
+
+        if verbose:
+            print(f"[H3 Extender] v1.40 注入 H3 低显存 patches (复用 KJNodes): "
+                  f"ff_chunks={ff_chunks} attn_head_chunks={attn_head_chunks} "
+                  f"blocks={len(blocks)} already_patched={already_lowvram}")
+        return m
+    except Exception as _pv_err:
+        print(f"[H3 Extender] v1.40 注入失败(回退原 model, 24GB 卡会 OOM): {_pv_err}")
+        import traceback
+        traceback.print_exc()
         return model
 
 
@@ -1521,7 +1704,7 @@ def _upscale_latent_spatial(samples, factor):
 
 def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, scheduler: str, steps: int, denoise: float,
                owner_id=None, clip_index=-1,
-               refine_enable=False, refine_denoise=1.0, refine_steps=4, refine_upscale_factor=2.0,
+               refine_enable=False, refine_denoise=0.55, refine_steps=4, refine_upscale_factor=1.5,
                refine_upscaler_model="", refine_align_to=32, refine_audio_denoise=0.0):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
@@ -1641,8 +1824,71 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _r_denoise = max(0.05, min(1.0, float(refine_denoise)))
             _r_audio = float(refine_audio_denoise)
             _r_align = max(8, int(refine_align_to))
+            # v1.44: 选了 3D upscaler 模型但 factor<=1.0 时自动提升到 1.5.
+            # factor=1.0 会跳过 _ff_upscale_video_latent(), 3D upscaler
+            # 白选了, 二采只是对同分辨率 latent 重加噪再去噪, 画质必糊.
+            _has_upscaler = (refine_upscaler_model
+                             and not str(refine_upscaler_model).startswith("(")
+                             and _FF_UPSCALER_MOD is not None)
+            if _has_upscaler and _r_factor <= 1.0:
+                print(f"[H3 Extender] Refine: 选了 3D upscaler 但 factor={_r_factor}, "
+                      f"自动提升到 1.5 以启用语义放大")
+                _r_factor = 1.5
             print(f"[H3 Extender] Refine 双采(Sol-H3 Self-Lift): clip={clip_index} "
                   f"upscale=x{_r_factor} align={_r_align}px steps={_r_steps} denoise={_r_denoise:.2f} audio={_r_audio}")
+
+            # v1.43 (2026-09-13 fix #4): 不再 unload_all_models()!
+            # v1.32~v1.36 的 unload_all_models() 虽然释放了显存, 但把
+            # diffusion 模型也卸了, 导致二采采样时 ComfyUI 以 full
+            # lowvram 模式重载 (日志: "0.00 MB loaded, 19996.14 MB
+            # offloaded"), 每个 layer 都要 CPU↔GPU 搬运, 造成显存碎片
+            # 和峰值飙升, 必然 OOM.
+            #
+            # 参考 Sol-H3 双采极速版工作流: 一采和二采共用同一 model
+            # 对象, 模型始终保持 loaded 状态, 二采只需额外 attention
+            # workspace (~1-2GB), 总计 ~22GB 能装进 24GB 卡.
+            #
+            # 策略: 只做 GC + empty_cache 清理中间张量, 保留 diffusion
+            # 在 VRAM. 3D upscaler 缓存在 _ff_upscale_video_latent()
+            # 之后单独清理.
+            try:
+                import comfy.model_management as _mm
+                import torch as _torch
+                import gc as _gc
+                _gc.collect()
+                _mm.soft_empty_cache(force=True)
+                _torch.cuda.synchronize()
+                _torch.cuda.empty_cache()
+                try:
+                    _torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+                _a = _torch.cuda.memory_allocated() / 1024 ** 3
+                _r = _torch.cuda.memory_reserved() / 1024 ** 3
+                _f, _t = _torch.cuda.mem_get_info()
+                _free_gb = _f / 1024 ** 3
+                _total_gb = _t / 1024 ** 3
+                print(f"[H3 Extender] Refine 二采前显存状态(v1.43 保留diffusion): "
+                      f"allocated={_a:.2f}GB reserved={_r:.2f}GB "
+                      f"device_free={_free_gb:.2f}GB/{_total_gb:.2f}GB")
+            except Exception as _ve:
+                print(f"[H3 Extender] Refine 二采前显存清理失败(可忽略): {_ve}")
+
+            # v1.38 (2026-09-13 fix): 在放大前 deep copy 一采原始 samples,
+            # 留作 OOM fallback 用. 120x68 (2.0x) OOM 后, 重跑时直接用
+            # 60x34 一采原始尺寸, attention workspace 从 4.47GB 降到
+            # ~1.5GB, 24GB 卡稳过. 注意: 仅在 _r_factor > 1.0 时备份,
+            # 省一份显存; 同时 audio latent 不备份 (audio 不放大不重画).
+            _samples_pre_upscale = None
+            if _r_factor > 1.0:
+                try:
+                    _samples_pre_upscale = samples.clone() if hasattr(samples, "clone") else None
+                    if _samples_pre_upscale is not None and isinstance(_samples_pre_upscale, dict):
+                        if "samples" in _samples_pre_upscale:
+                            _samples_pre_upscale["samples"] = _samples_pre_upscale["samples"].clone()
+                except Exception as _bp_err:
+                    print(f"[H3 Extender] Refine 备份一采 samples 失败(可忽略): {_bp_err}")
+                    _samples_pre_upscale = None
 
             # 1) NestedTensor 感知 latent 放大（仅视频，音频保持）+ 像素对齐 + 可选 3D upscaler
             if _r_factor > 1.0:
@@ -1655,8 +1901,41 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
                           f"{_old_hw[1]}x{_old_hw[0]} -> {_up_video.shape[-1]}x{_up_video.shape[-2]} (x{_r_factor})")
 
+            # v1.43: 3D upscaler 用完后立即清缓存, 释放 VRAM 给二采 diffusion.
+            # MODEL_CACHE 不受 ComfyUI model_management 管理 (不在
+            # current_loaded_models 里), ComfyUI 无法自动让位, 必须手动清.
+            if _r_factor > 1.0 and refine_upscaler_model and _FF_UPSCALER_MOD is not None:
+                try:
+                    _cache = getattr(_FF_UPSCALER_MOD, "MODEL_CACHE", None)
+                    if isinstance(_cache, dict) and _cache:
+                        for _k, _m in list(_cache.items()):
+                            try:
+                                _m.to("cpu")
+                            except Exception:
+                                pass
+                            del _m
+                            del _cache[_k]
+                        import gc as _gc
+                        import torch as _torch
+                        _gc.collect()
+                        _torch.cuda.synchronize()
+                        _torch.cuda.empty_cache()
+                        print(f"[H3 Extender] Refine 3D upscaler 缓存已清理, 释放 VRAM 给二采")
+                except Exception as _uc_err:
+                    print(f"[H3 Extender] Refine 清 3D upscaler cache 失败(可忽略): {_uc_err}")
+
             # 2) CONST 重加噪（视频重噪到 sigma_start，音频锁定/重绘）
-            _r_sigmas = _sigmas(model, scheduler, _r_steps, _r_denoise)
+            # v1.33: 二采调度器对齐官方示例工作流（Sol-H3 双采极速版）——beta + denoise 0.55 保留底图细化
+            _r_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
+            # v1.45 (2026-09-13 fix #5 画面糊成一片根因): CONST 加噪的噪声必须用真实随机噪声
+            # (σ·ε+(1-σ)·x 混合), 但喂给 KSAMPLER.sample 的 noise 参数必须用空噪声!
+            # 原因: CFGGuider.sample -> KSAMPLER.sample 内部会对 noise 再执行一次
+            #   noise = model_sampling.noise_scaling(sigmas[0], noise, latent_image)
+            #   即 latent_image + noise*sigma. 若把 CONST 已加噪的 latent 与真实噪声同时传入,
+            #   会二次加噪(双重噪声), 二采从过噪起点开始, 4步去噪不足, 输出残留噪声/细节丢失,
+            #   画面"糊成一片+像素化故障风". 官方 Sol-H3 DualSample 工作流二采正是用
+            #   DisableNoise(Noise_EmptyNoise -> prepare_empty_noise 全零噪声) 走同一入口,
+            #   此处完全对齐.
             _r_noise = comfy.sample.prepare_noise(samples, int(seed) + 1, None)
             _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
 
@@ -1665,7 +1944,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _r_guider = _BasicGuider(model)
             _r_guider.set_conds(conditioning)
             _r_samples = _r_guider.sample(
-                _r_noise,
+                comfy.sample.prepare_empty_noise(samples),
                 _r_latent["samples"],
                 _r_sampler,
                 _r_sigmas,
@@ -1676,10 +1955,120 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             )
             samples = _r_samples.to(comfy.model_management.intermediate_device())
             print(f"[H3 Extender] Refine 双采完成: clip={clip_index}")
+        except torch.cuda.OutOfMemoryError as _oom:
+            # v1.43 (2026-09-13 fix #4): OOM fallback 不再 unload_all_models()!
+            # v1.37 的 fallback 每次 unload_all_models() 都把 diffusion
+            # 推入 full lowvram 模式 (0 MB loaded, 20 GB offloaded),
+            # 导致 fallback 本身也 OOM.
+            #
+            # v1.43 策略: diffusion 保持 loaded, 只清 3D upscaler 缓存
+            # + GC + empty_cache, 然后用备份的一采原始 samples (60x34)
+            # 重跑二采. 原始尺寸 attention workspace ~1.5GB, 加上
+            # 已加载的 diffusion ~20GB, 总计 ~22GB 能装进 24GB 卡.
+            print(f"[H3 Extender] Refine OOM: {_oom}")
+            print(f"[H3 Extender] 自动 fallback (v1.43 保留diffusion)")
+            import gc as _gc
+            import comfy.model_management as _mm
+            import torch as _torch
+            _gc.collect()
+            # 清 3D upscaler 缓存释放 VRAM
+            if _FF_UPSCALER_MOD is not None:
+                try:
+                    _cache = getattr(_FF_UPSCALER_MOD, "MODEL_CACHE", None)
+                    if isinstance(_cache, dict) and _cache:
+                        for _k, _m in list(_cache.items()):
+                            try:
+                                _m.to("cpu")
+                            except Exception:
+                                pass
+                            del _m
+                            del _cache[_k]
+                except Exception:
+                    pass
+            _gc.collect()
+            _mm.soft_empty_cache(force=True)
+            _torch.cuda.synchronize()
+            _torch.cuda.empty_cache()
+            try:
+                _torch.cuda.ipc_collect()
+            except Exception:
+                pass
+            _torch.cuda.synchronize()
+            _torch.cuda.empty_cache()
+            # v1.43: 如果有备份的一采原始 samples, 直接用它们重跑
+            # (跳过放大, attention workspace 最小). 没有备份时,
+            # 尝试用当前 (放大后) samples 重跑 (3D upscaler 已清,
+            # 可能腾出足够 VRAM).
+            _fb_samples = _samples_pre_upscale if _samples_pre_upscale is not None else samples
+            _r2_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
+            _r2_noise = comfy.sample.prepare_noise(_fb_samples, int(seed) + 1, None)
+            _r2_latent = _ff_const_add_noise(model, _r2_noise, _r2_sigmas, {"samples": _fb_samples}, _r_audio)
+            _r2_sampler = comfy.samplers.sampler_object(str(sampler_name))
+            _r2_guider = _BasicGuider(model)
+            _r2_guider.set_conds(conditioning)
+            try:
+                _r2_samples = _r2_guider.sample(
+                    _r2_noise,
+                    _r2_latent["samples"],
+                    _r2_sampler,
+                    _r2_sigmas,
+                    denoise_mask=_r2_latent.get("noise_mask"),
+                    callback=None,
+                    disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+                    seed=int(seed) + 1,
+                )
+                samples = _r2_samples.to(comfy.model_management.intermediate_device())
+                _fb_label = "原始备份" if _samples_pre_upscale is not None else "当前(放大后)"
+                print(f"[H3 Extender] Refine fallback (v1.43 {_fb_label}) 完成: clip={clip_index}")
+            except torch.cuda.OutOfMemoryError as _oom2:
+                print(f"[H3 Extender] Refine fallback 仍 OOM: {_oom2}")
+                print(f"[H3 Extender] 已回退到一采结果; 建议手动把 refine_upscale_factor 改成 1.0 重新跑")
         except Exception as _re:
             print(f"[H3 Extender] Refine 双采失败（回退主采样结果）: {_re}")
             import traceback
             traceback.print_exc()
+            # v1.36 (2026-09-12 fix): 二采 OOM 兜底后, 用 unload_all_models()
+            # 真把 diffusion/TE/VAE detach 掉, 避免 20GB VideoVAE 加载时
+            # _decode_single_clip_to_blob 报 "loaded completely 20653MB"
+            # 之后下一个 clip 又 OOM.
+            try:
+                import comfy.model_management as _mm
+                import torch as _torch
+                import gc as _gc
+                _gc.collect()
+                try:
+                    _mm.unload_all_models()
+                except Exception:
+                    pass
+                if _FF_UPSCALER_MOD is not None:
+                    try:
+                        _cache = getattr(_FF_UPSCALER_MOD, "MODEL_CACHE", None)
+                        if isinstance(_cache, dict) and _cache:
+                            for _k, _m in list(_cache.items()):
+                                try:
+                                    _m.to("cpu")
+                                except Exception:
+                                    pass
+                                del _m
+                                del _cache[_k]
+                    except Exception:
+                        pass
+                _gc.collect()
+                _mm.soft_empty_cache(force=True)
+                _torch.cuda.synchronize()
+                _torch.cuda.empty_cache()
+                try:
+                    _torch.cuda.ipc_collect()
+                except Exception:
+                    pass
+                _torch.cuda.synchronize()
+                _torch.cuda.empty_cache()
+                _a = _torch.cuda.memory_allocated() / 1024 ** 3
+                _f, _t = _torch.cuda.mem_get_info()
+                print(f"[H3 Extender] Refine 失败后兜底释放(v1.36): allocated={_a:.2f}GB "
+                      f"device_free={_f / 1024 ** 3:.2f}GB/{_t / 1024 ** 3:.2f}GB")
+            except Exception as _ve2:
+                print(f"[H3 Extender] Refine 失败后兜底释放失败(可忽略): {_ve2}")
 
     out = latent_out.copy()
     out.pop("downscale_ratio_spacial", None)
@@ -2674,7 +3063,7 @@ class BSAIH3FilmFactory:
             "sampler_name": (sampler_names, {"default": default_sampler}),
             "scheduler": (scheduler_names, {"default": default_scheduler}),
             "denoise": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1.0, "step": 0.01}),
-            "context_length": (["22", "5", "39", "56"], {"default": "22"}),
+            "context_length": (["22", "5", "39", "56"], {"default": "39"}),
             "audio_context_length": ("INT", {"default": 0, "min": 0, "max": 240, "step": 1}),
             "clips_json": (
                 "STRING",
@@ -2819,7 +3208,7 @@ class BSAIH3FilmFactory:
             "refine_upscale_factor": (
                 "FLOAT",
                 {
-                    "default": 2.0, "min": 1.0, "max": 2.0, "step": 0.1,
+                    "default": 1.5, "min": 1.0, "max": 2.0, "step": 0.1,
                     "tooltip": "二采潜空间放大倍数（1.0=不放大）。直出 1920x1088 推荐：一采 960x544 + 2.0x；1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加。放大后自动 CONST 重加噪+二采。仅 refine_enable 开启时生效。",
                 },
             ),
@@ -3029,12 +3418,13 @@ class BSAIH3FilmFactory:
         pause_enable = kwargs.get("pause_enable", False)
         pause_timeout = kwargs.get("pause_timeout", 120.0)
         refine_enable = kwargs.get("refine_enable", False)
-        refine_denoise = kwargs.get("refine_denoise", 1.0)
+        refine_denoise = kwargs.get("refine_denoise", 0.55)
         refine_steps = kwargs.get("refine_steps", 4)
-        refine_upscale_factor = kwargs.get("refine_upscale_factor", 2.0)
+        refine_upscale_factor = kwargs.get("refine_upscale_factor", 1.5)
         refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear插值, 无需模型)")
         refine_align_to = int(kwargs.get("refine_align_to", 32))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
+        print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
         unique_id = kwargs.get("unique_id", None)
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
         clips = _parse_clips_json(clips_json)
@@ -3642,6 +4032,18 @@ class BSAIH3FilmFactory:
 
         # Build the accelerated sampling model once for the whole pass.
         sampling_model = model
+        # v1.44: 恢复 ff_chunks=2, attn_head_chunks=4 (对齐 Sol-H3 双采极速版).
+        # v1.42 降到 chunks=1/head_chunks=2 是因为 unload_all_models() 导致
+        # full lowvram 重载, CPU↔GPU 搬运越多 peak 越高. v1.43 已移除
+        # unload_all_models(), diffusion 保持 loaded, 不存在 per-layer
+        # 搬运开销, 可以安全使用更激进的 chunking 来降低临时张量显存,
+        # 给 1.5x 二采 attention workspace 留更多余量.
+        sampling_model = _ff_apply_h3_lowvram_patches(
+            sampling_model,
+            ff_chunks=2,
+            ff_seq_threshold=4096,
+            attn_head_chunks=4,
+        )
         if int(cache_dit):
             sampling_model = _apply_cache_dit(
                 model,
