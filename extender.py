@@ -2351,6 +2351,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             except torch.cuda.OutOfMemoryError as _oom2:
                 print(f"[H3 Extender] Refine fallback 仍 OOM: {_oom2}")
                 print(f"[H3 Extender] 已回退到一采结果; 建议手动把 refine_upscale_factor 改成 1.0 重新跑")
+            finally:
+                # v1.65: 恢复 prepare_sampling, 防污染后续采样(下一 clip / 其它工作流)
+                try:
+                    _sh_fb._prepare_sampling = _bsai_orig_prepare_fb
+                except Exception:
+                    pass
         except Exception as _re:
             print(f"[H3 Extender] Refine 双采失败（回退主采样结果）: {_re}")
             import traceback
