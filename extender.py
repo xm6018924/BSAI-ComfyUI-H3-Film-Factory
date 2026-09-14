@@ -1,4 +1,4 @@
-"""
+﻿"""
 MiniMax H3 Extender
 ===================
 
@@ -1450,9 +1450,41 @@ def _make_ref2va_conditioning(
             _gc2.collect()
             import comfy.model_management as _cmm2
             _cmm2.cleanup_models_gc()
+            # v1.49: TE 是 ModelPatcherDynamic(VBAR), unload_all_models() 走 detach 分支
+            # 不释放 VBAR 显存(同 :1386-1387 自证)。实测 TE 11.7GB 常驻不松, 导致 21.8GB
+            # DiT 只能流式(89s/it)。改为对所有已加载模型(含 TE 自身, 不跳过 clip.patcher)
+            # 走 partially_unload(offload_device, 1e32) VBAR 真释放路径, 再 unload_all + 空缓存。
+            # 二采复用已编码 conditioning(不重 encode), 此处卸 TE 不影响二采/VAE/3D upscaler。
+            for _lm2 in list(_cmm2.current_loaded_models):
+                try:
+                    _lm2.model.partially_unload(_lm2.model.offload_device, 1e32)
+                except Exception:
+                    pass
             _cmm2.unload_all_models()
             _cmm2.cleanup_models()
             _cmm2.soft_empty_cache(force=True)
+            import torch as _torch2
+            _torch2.cuda.synchronize()
+            _torch2.cuda.empty_cache()
+            _torch2.cuda.ipc_collect()
+        except Exception:
+            pass
+        # v1.53: ComfyUI 的 unload 只把权重移回 CPU RAM（current_loaded_models 保留引用，
+        # 物理内存不释放）。TE 15GB + DiT 21.8GB + VAE 驻留会把系统物理内存顶满，
+        # cudaHostRegister 锁页注册失败 → "Pin error." 刷屏 + offload 换页拖慢。
+        # 配合 bat --cache-none（禁用节点结果缓存，消除 CLIPLoader 输出对 clip 的跨轮持有），
+        # 此处把 TE 从 current_loaded_models 摘除，函数返回后 clip 引用归零，gc 真正释放 ~15GB RAM。
+        try:
+            import gc as _gc53
+            import comfy.model_management as _cmm53
+            _te_patcher53 = getattr(clip, "patcher", None)
+            for _lm53 in list(_cmm53.current_loaded_models):
+                try:
+                    if _lm53.model is _te_patcher53:
+                        _cmm53.current_loaded_models.remove(_lm53)
+                except Exception:
+                    pass
+            _gc53.collect()
         except Exception:
             pass
         try:
@@ -1473,6 +1505,10 @@ def _make_ref2va_conditioning(
 class _BasicGuider(comfy.samplers.CFGGuider):
     def set_conds(self, positive):
         self.inner_set_conds({"positive": positive})
+
+    # v1.52: 不再覆写 outer_sample. force_full_load=True 把 21.8GB 全拉满会在
+    # process_conds 阶段 OOM (23.86GB 物理上限). 改由 EXTRA_RESERVED_VRAM 抬到 ~5.5GB,
+    # 让 ComfyUI 自动把权重驻留预算压到 ~16GB, 尾部 ~5.8GB offload, 留 ~6GB 给 conds/workspace.
 
 
 def _sigmas(model, scheduler: str, steps: int, denoise: float):
@@ -1705,7 +1741,8 @@ def _upscale_latent_spatial(samples, factor):
 def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, scheduler: str, steps: int, denoise: float,
                owner_id=None, clip_index=-1,
                refine_enable=False, refine_denoise=0.55, refine_steps=4, refine_upscale_factor=1.5,
-               refine_upscaler_model="", refine_align_to=32, refine_audio_denoise=0.0):
+               refine_upscaler_model="", refine_align_to=32, refine_audio_denoise=0.0,
+               tiled_refine=False, tile_count=4, tile_overlap=128):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -1760,7 +1797,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     pbar = comfy.utils.ProgressBar(total_steps)
     _last_sent_step = {"v": -1}
 
+    _cb_t0 = {"t": None}
     def _latent_preview_callback(step, x0, x, total_steps_arg):
+        # v1.55: 每步耗时诊断——定位第 4 步固定 ~430s 的瓶颈(计算/IO/卸载)
+        try:
+            import time as _t55
+            _now55 = _t55.time()
+            if _cb_t0["t"] is not None:
+                print(f"[H3 Extender] step耗时诊断: step={step}/{total_steps_arg} 距上步 {_now55-_cb_t0['t']:.1f}s")
+            _cb_t0["t"] = _now55
+        except Exception:
+            pass
         pbar.update_absolute(step + 1, total_steps_arg)
         if owner_id is not None:
             # Only send every 2nd step to reduce bandwidth
@@ -1808,6 +1855,35 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
 
     callback = _latent_preview_callback if owner_id is not None else None
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
+    # v1.52: force_full_load=True 把 21.8GB 全拉满 -> process_conds OOM (物理 23.86GB).
+    # 改走 ComfyUI 自带预算: 把 EXTRA_RESERVED_VRAM 从 CLI 的 0 抬到 5.5GB, 让
+    # minimum_inference_memory = 0.8+5.5 = 6.3GB; lowvram_model_memory = free - minimum_inference
+    # ≈ 22 - 6.3 = 15.7GB 权重驻留, 尾部 ~6GB offload, 留 ~6GB 给 conds(cross_attn)+workspace.
+    # 不再 force_full_load, 也不覆写 outer_sample. ComfyUI 自己按预算装, process_conds 有地放.
+    try:
+        import torch as _t1
+        import comfy.model_management as _mm1
+        _t1.cuda.empty_cache()
+        try: _t1.cuda.ipc_collect()
+        except Exception: pass
+        _free_os, _tot_os = _t1.cuda.mem_get_info()
+        _free_os /= 1024 ** 3; _tot_os /= 1024 ** 3
+        # v1.52: 抬 reserve 到 5.5GB (仅本实例, 不写回 CLI)
+        try: _mm1.EXTRA_RESERVED_VRAM = int(5.5 * 1024 ** 3)
+        except Exception: pass
+        print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB), reserve->5.5GB")
+        if _free_os >= 18.0:
+            _mm1.load_models_gpu([model])   # 默认预算: 驻留 ~16GB, 尾部 offload
+            _t1.cuda.synchronize()
+            try:
+                _res = model.loaded_size() / 1024 ** 3
+                _tot = model.model_size() / 1024 ** 3
+                print(f"[H3 Extender] 一采前 DiT 驻留: resident={_res:.1f}GB / total={_tot:.1f}GB (offload ~{_tot-_res:.1f}GB)")
+            except Exception: pass
+        else:
+            print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
+    except Exception as _lp1:
+        print(f"[H3 Extender] 一采前驻留预算设置失败(走按需流式): {_lp1}")
     samples = guider.sample(
         noise,
         latent_image,
@@ -1938,19 +2014,23 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 #    实测校准: 11:05 x1.5 成功(起点 loaded 9.19GB, ws 2.6GB);
                 #    19:13 x2.0 OOM(起点 loaded 10.34GB, ws 4.5GB, free 0).
                 #    0.6 系数: x2.0 必拦, x1.5 放行(与 11:05 成功经验一致).
-                if _alloc_gb2 >= 4.0:
-                    _mreq2 = max(0.0, _model_gb2 - _alloc_gb2) * 0.6
-                else:
-                    _mreq2 = _model_gb2 * 0.35
+                # v1.65 (2026-09-14 fix #9 二采 x2.0 OOM 根治):
+                # 实测 19:34 二采 x2.0: 旧预算(0.6 系数)算出需求 15.1GB<18.1GB
+                # 放行, 但 load_models_gpu 全量驻留 21.72GB, Sol-Attn kernel
+                # 连 603MB workspace 都分不出 → kernel failed×3 → fallback 到
+                # 普通注意力 workspace 9.23GB 更大 → 二次 OOM → 回退一采.
+                # 新预算: 驻留目标 = min(free,total) - workspace - 3GB 余量,
+                # 驻留 <10GB 视为换页过重 → 逐级降 factor(在放大前拦截).
                 _chosen2 = None
                 for _f2 in _cands:
                     _ws2 = _ws_tbl.get(round(_f2, 1), 2.6)
-                    if _mreq2 + _ws2 <= _gpu_free_gb2 - 1.5:
+                    _resident_target2 = min(_gpu_free_gb2, _gpu_total_gb2) - _ws2 - 3.0
+                    if _resident_target2 >= 10.0:
                         _chosen2 = _f2
                         break
-                print(f"[H3 Extender] Refine 显存预算(v1.47): 模型~{_model_gb2:.1f}GB "
+                print(f"[H3 Extender] Refine 显存预算(v1.65): 模型~{_model_gb2:.1f}GB "
                       f"驻留alloc={_alloc_gb2:.1f}GB 可用显存={_gpu_free_gb2:.1f}GB/"
-                      f"{_gpu_total_gb2:.0f}GB 需求~{_mreq2 + _ws_tbl.get(round(_orig_f, 1), 2.6):.1f}GB")
+                      f"{_gpu_total_gb2:.0f}GB 驻留目标~{min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tbl.get(round(_orig_f, 1), 2.6) - 3.0:.1f}GB")
                 if _chosen2 is not None and _chosen2 < _orig_f - 1e-6:
                     _r_factor = _chosen2
                     print(f"[H3 Extender] Refine 放大倍率已自动降级: x{_orig_f} -> x{_chosen2} "
@@ -2036,27 +2116,141 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             try:
                 import torch as _torch3
                 import comfy.model_management as _mm3
-                if _torch3.cuda.memory_allocated() / 1024 ** 3 < 1.0:
-                    print("[H3 Extender] Refine 二采前模型不在显存, 主动加载到 VRAM ...")
-                    _mm3.load_model_gpu(model)
+                # v1.54: 一采后 allocated≈3.7GB(显存碎片/cache) 不代表模型驻留——原判断
+                # `allocated<1.0` 会漏判(3.75>1.0 跳过加载), 二采 0 驻留全流式,
+                # 每步 21.8GB 换页 → 实测 209s/it. 改以 model.loaded_size() 判断
+                # 实际权重驻留, <12GB 即主动重驻留(reserve 5.5GB 预算: 驻留 ~11-16GB,
+                # 尾部 offload, 比全流式少换一半以上权重).
+                _res_gb = 0.0
+                try:
+                    _res_gb = model.loaded_size() / 1024 ** 3
+                except Exception:
+                    pass
+                if _res_gb < 12.0:
+                    # v1.65: 二采前驻留控制——先卸载再按 reserve 重载, 让加载器按
+                    # reserve 预算重新平衡驻留量, 给 Sol-Attn workspace 让位.
+                    # 实测 19:34 x2.0: 直接 load_models_gpu 全量驻留 21.72GB,
+                    # Sol-Attn kernel 603MB workspace 分不出 → OOM.
+                    # reserve = 模型 - (total - ws - 3GB 余量 - 1.5GB conds):
+                    #   x2.0(ws4.5): ~6.8GB -> 驻留 ~15GB
+                    #   x1.5(ws2.6): ~4.9GB -> 驻留 ~17GB
+                    #   x1.0(ws1.5): ~4.2GB -> 驻留 ~17.5GB
+                    try:
+                        _ws_need2 = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                        _r_reserve_gb = _model_gb2 - (_gpu_total_gb2 - _ws_need2 - 3.0 - 1.5)
+                        _r_reserve_gb = max(3.0, min(8.0, _r_reserve_gb))
+                        try:
+                            _mm3.unload_model(model)  # 先卸载, 重载时才按新 reserve 预算
+                        except Exception:
+                            pass
+                        _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
+                    except Exception:
+                        _r_reserve_gb = 8.0 if tiled_refine else 5.5
+                        try:
+                            _mm3.unload_model(model)
+                        except Exception:
+                            pass
+                        _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
+                    print(f"[H3 Extender] Refine 二采前 DiT 驻留 {_res_gb:.1f}GB < 12GB, 重新驻留到 VRAM (reserve->{_r_reserve_gb:.1f}GB) ...")
+                    _mm3.load_models_gpu([model])
                     _torch3.cuda.synchronize()
-                    print(f"[H3 Extender] Refine 模型驻留完成: "
-                          f"allocated={_torch3.cuda.memory_allocated() / 1024 ** 3:.1f}GB")
+                    try:
+                        _res2 = model.loaded_size() / 1024 ** 3
+                        print(f"[H3 Extender] Refine 二采前 DiT 驻留: resident={_res2:.1f}GB / total={model.model_size()/1024**3:.1f}GB")
+                    except Exception:
+                        pass
+                    # v1.65: 验证 Sol-Attn workspace 空间, 不足时醒目提示(采样走
+                    # lowvram 换页兜底, 不会静默 OOM; 下次跑会在预算区提前降级).
+                    try:
+                        import torch as _torch65
+                        _f65, _t65 = _torch65.cuda.mem_get_info()
+                        _free65 = _f65 / 1024 ** 3
+                        _ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                        if _free65 < _ws65 + 2.0:
+                            print(f"[H3 Extender] Refine 警告: 二采 workspace 空间不足 "
+                                  f"(free={_free65:.1f}GB < ws {_ws65:.1f}GB+2GB), "
+                                  f"采样将靠 lowvram 换页兜底, 建议下次降低 refine_upscale_factor")
+                    except Exception:
+                        pass
             except Exception as _lg2:
                 print(f"[H3 Extender] Refine 主动加载模型失败, 走 DynamicVRAM 按需流式: {_lg2}")
             _r_sampler = comfy.samplers.sampler_object(str(sampler_name))
+            # v1.48 分块二采(默认关): 长空间轴分块, 激活/attention workspace 随 tile_count
+            # 线性下降. 算法移植自 MiniMaxH3 Director spatial_tiled_sampling.py (Apache-2.0).
+            # 包装器对非 packed latent / 小尺寸自动回退全帧, 不破坏既有流程.
+            _r_restore_tiles = None
+            if tiled_refine:
+                try:
+                    import os as _os_t, importlib.util as _ilu_t
+                    _tiles_path = _os_t.path.join(_os_t.path.dirname(_os_t.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
+                    _tiles_spec = _ilu_t.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path)
+                    _tiles_mod = _ilu_t.module_from_spec(_tiles_spec)
+                    _tiles_spec.loader.exec_module(_tiles_mod)
+                    _r_restore_tiles = _tiles_mod.wrap_sampler_spatial_tiles(
+                        _r_sampler, n_tiles=int(tile_count), overlap_pixels=int(tile_overlap))
+                    print(f"[H3 Extender] Refine 分块二采已启用: n_tiles={tile_count} overlap={tile_overlap}px")
+                except Exception as _te_t:
+                    print(f"[H3 Extender] Refine 分块包装失败(回退全帧): {_te_t}")
+                    _r_restore_tiles = None
+            # v1.56: 二采挂耗时诊断 callback——一采 callback 是外层函数局部变量,
+            # 二采取不到, 且二采 callback=None 无法定位第 4 步固定 ~420s 的瓶颈.
+            _r_cb_t0 = {"t": None}
+            def _r_step_cb(step, x0, x, total):
+                try:
+                    import time as _t56
+                    _now56 = _t56.time()
+                    if _r_cb_t0["t"] is not None:
+                        print(f"[H3 Extender] refine耗时诊断: step={step+1}/{total} 距上步 {_now56-_r_cb_t0['t']:.1f}s")
+                    _r_cb_t0["t"] = _now56
+                except Exception:
+                    pass
+                # v1.62: Sol-Attn sigma 门修复(工作流 end_percent 0.9->1.0)已验证:
+                # step4 428s -> 134s. 原 sol_attn 计数诊断因模块以 spec 方式加载
+                # 无法共享 _stats, 移除, 保留耗时诊断即可.
             _r_guider = _BasicGuider(model)
             _r_guider.set_conds(conditioning)
-            _r_samples = _r_guider.sample(
-                comfy.sample.prepare_empty_noise(samples),
-                _r_latent["samples"],
-                _r_sampler,
-                _r_sigmas,
-                denoise_mask=_r_latent.get("noise_mask"),
-                callback=None,
-                disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
-                seed=int(seed) + 1,
-            )
+            # v1.64: 恢复 v1.59 驻留补丁(v1.61 改诊断时误删)——二采采样前
+            # 跳过 sampler_helpers._prepare_sampling 的 load_models_gpu/free_memory,
+            # 防止 prepare 按全幅 latent 估算把刚驻留的模型全卸(0.00 MB remains,
+            # 全流式换页 21.8GB/步). v1.63 已修分块+refs mismatch, 分块重新启用.
+            # 驻留量由 reserve(分块 8GB/非分块 5.5GB) 决定, 换页只限 offload 尾部.
+            import comfy.sampler_helpers as _sh59
+            _bsai_orig_prepare = _sh59._prepare_sampling
+            def _bsai_refine_prepare(model, noise_shape, conds, model_options=None, force_full_load=False, force_offload=False):
+                try:
+                    # 模型已驻留, 跳过 load_models_gpu 防 free_memory 全卸
+                    return model.model, conds, []
+                except Exception as _pe59:
+                    print(f"[H3 Extender] v1.64 跳过prepare-load失败, 回退原路径: {_pe59}")
+                    return _bsai_orig_prepare(model, noise_shape, conds, model_options=model_options,
+                                              force_full_load=force_full_load, force_offload=force_offload)
+            if not (tile_count and int(tile_count) > 1):
+                # v1.65: 仅非分块安装驻留补丁. 分块时 DynamicVRAM 会在
+                # 12.9GB 驻留基础上把模型全量加载到 21.7GB -> sol_attn
+                # workspace OOM(v1.64 实测). 分块走原生 prepare 全流式
+                # (0 驻留逐 block 换页, 313s/it 稳).
+                _sh59._prepare_sampling = _bsai_refine_prepare
+            try:
+                _r_samples = _r_guider.sample(
+                    comfy.sample.prepare_empty_noise(samples),
+                    _r_latent["samples"],
+                    _r_sampler,
+                    _r_sigmas,
+                    denoise_mask=_r_latent.get("noise_mask"),
+                    callback=_r_step_cb,
+                    disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+                    seed=int(seed) + 1,
+                )
+            finally:
+                try:
+                    _sh59._prepare_sampling = _bsai_orig_prepare
+                except Exception:
+                    pass
+                if _r_restore_tiles is not None:
+                    try:
+                        _r_restore_tiles()
+                    except Exception:
+                        pass
             samples = _r_samples.to(comfy.model_management.intermediate_device())
             print(f"[H3 Extender] Refine 双采完成: clip={clip_index}")
         except torch.cuda.OutOfMemoryError as _oom:
@@ -2109,8 +2303,18 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 流式重载时二次 OOM(19:13 实测: 重载到 allocated 15.42GB 后
             # 再请求 9.02GB 撞 Device limit; 先驻留 10GB 则 60x34 ws~1.5GB
             # 总峰值 ~12GB < 23.86, 即 11:05 x1.5 成功同款路径)
+            # v1.65: fallback 前卸载再按 reserve 重载(驻留 ~11GB), 给 Sol-Attn
+            # workspace 让位——旧逻辑全量驻留 16.39GB 后普通注意力 9.23GB
+            # workspace 仍装不下(19:34 实测二次 OOM). 先卸载再加载, 加载器
+            # 才会按新 reserve 预算重新平衡; 同时 bypass prepare_sampling 防
+            # ComfyUI 采样前按全幅 latent 把模型全载回 21.8GB.
             try:
-                _mm.load_model_gpu(model)
+                try:
+                    _mm.unload_model(model)
+                except Exception:
+                    pass
+                _mm.EXTRA_RESERVED_VRAM = int(10.0 * 1024 ** 3)
+                _mm.load_models_gpu([model])
             except Exception:
                 pass
             _gc.collect()
@@ -2121,6 +2325,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _r2_sampler = comfy.samplers.sampler_object(str(sampler_name))
             _r2_guider = _BasicGuider(model)
             _r2_guider.set_conds(conditioning)
+            import comfy.sampler_helpers as _sh_fb
+            _bsai_orig_prepare_fb = _sh_fb._prepare_sampling
+            def _bsai_fb_prepare(model, noise_shape, conds, model_options=None, force_full_load=False, force_offload=False):
+                try:
+                    return model.model, conds, []
+                except Exception:
+                    return _bsai_orig_prepare_fb(model, noise_shape, conds, model_options=model_options,
+                                                  force_full_load=force_full_load, force_offload=force_offload)
+            _sh_fb._prepare_sampling = _bsai_fb_prepare
             try:
                 _r2_samples = _r2_guider.sample(
                     _r2_noise,
@@ -2128,7 +2341,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _r2_sampler,
                     _r2_sigmas,
                     denoise_mask=_r2_latent.get("noise_mask"),
-                    callback=None,
+                    callback=_r_step_cb,
                     disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
                     seed=int(seed) + 1,
                 )
@@ -3348,6 +3561,18 @@ class BSAIH3FilmFactory:
                     "tooltip": "二采音频重绘强度：0=锁定一采音频（推荐，音频不重噪、不重绘，保持语音/音效一致）；0.5-1.0=音频随视频一起重噪重绘（可能改变声音）。仅 refine_enable 开启时生效。",
                 },
             ),
+            "tiled_refine": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "v1.48 分块二采(默认关)。开启后二采沿长空间轴分块采样，激活/attention workspace 随 tile_count 线性下降，根治外部进程挤占显存后 21.8GB 模型 + 全幅 workspace OOM/假死。算法移植自 MiniMaxH3 Director spatial tiling (Apache-2.0)。显存大时保持关。仅 refine_enable 开启时生效。"},
+            ),
+            "tile_count": (
+                "INT",
+                {"default": 4, "min": 1, "max": 8, "step": 1, "tooltip": "二采空间分块数。越大显存越低、速度越慢(Director 演示 4)。仅 tiled_refine 开启时生效。"},
+            ),
+            "tile_overlap": (
+                "INT",
+                {"default": 128, "min": 0, "max": 512, "step": 16, "tooltip": "相邻块重叠像素(raised-cosine 融合)。Director 演示 128。仅 tiled_refine 开启时生效。"},
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -3539,6 +3764,9 @@ class BSAIH3FilmFactory:
         refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear插值, 无需模型)")
         refine_align_to = int(kwargs.get("refine_align_to", 32))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
+        tiled_refine = bool(kwargs.get("tiled_refine", False))
+        tile_count = int(kwargs.get("tile_count", 4))
+        tile_overlap = int(kwargs.get("tile_overlap", 128))
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
         unique_id = kwargs.get("unique_id", None)
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
@@ -4349,6 +4577,9 @@ class BSAIH3FilmFactory:
                     refine_upscaler_model=str(refine_upscaler_model),
                     refine_align_to=int(refine_align_to),
                     refine_audio_denoise=float(refine_audio_denoise),
+                    tiled_refine=bool(tiled_refine),
+                    tile_count=int(tile_count),
+                    tile_overlap=int(tile_overlap),
                 )
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
@@ -5055,7 +5286,8 @@ if getattr(PromptServer, "instance", None) is not None:
                         removed += 1
                     except Exception:
                         pass
-            print(f"[H3 Extender] ref2va cache cleared on asset change: removed={removed}")
+            if removed > 0:
+                print(f"[H3 Extender] ref2va cache cleared on asset change: removed={removed}")
             return web.json_response({"ok": True, "removed": removed, "path": str(root)})
         except Exception as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
