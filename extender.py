@@ -3835,7 +3835,7 @@ class BSAIH3FilmFactory:
                 ["custom", "极速", "均衡", "精细"],
                 {
                     "default": "均衡",
-                    "tooltip": "v1.83 速度预设。极速=一采4步+二采2步(视频验证质量保住, 总耗时约减半)；均衡=一采6步+二采4步(旧默认)；精细=一采8步+二采6步。custom=按下方各widget显式值。",
+                    "tooltip": "v1.85 速度预设。极速=一采4步+二采3步+denoise0.5(写实动态优化, ~20min/clip)；均衡=一采6步+二采4步(旧默认, ~28min)；精细=一采8步+二采6步(~40min)。custom=按下方各widget显式值。",
                 },
             ),
         }
@@ -4036,7 +4036,10 @@ class BSAIH3FilmFactory:
         speed_preset = str(kwargs.get("speed_preset", "均衡"))
         _sp_old = (steps, refine_steps, tile_count, refine_denoise)
         if speed_preset == "极速":
-            steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.55
+            # v1.85: 二采 2->3 步 + denoise 0.55->0.5. 写实动态(打斗)场景 2 步二采
+            # 在 55% 重噪下收敛不足导致画面发糊, 3 步收敛更好保留高频细节.
+            # 耗时 ~20min/clip(原~15min), 仍比均衡(6+4, ~28min)省 ~28%.
+            steps, refine_steps, tile_count, refine_denoise = 4, 3, 4, 0.5
         elif speed_preset == "均衡":
             steps, refine_steps, tile_count, refine_denoise = 6, 4, 4, 0.55
         elif speed_preset == "精细":

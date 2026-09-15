@@ -3650,6 +3650,23 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
             return web.Response(status=400, text="Invalid preview file name")
         path = _comfyui_temp_dir() / name
         if not path.exists() or not path.is_file():
+            # v1.85: 文件缺失(重启清空 temp/外部清理)时, 从链 manifest blob 重建,
+            # 任何机器重启后预览自动恢复. 文件名格式: _clippv_{owner}_{idx}_{hex}.mp4
+            _m85 = re.match(r"^_clippv_([A-Za-z0-9_\-]+)_(\d+)_[A-Fa-f0-9]+\.mp4$", name)
+            if _m85:
+                _o85, _i85 = _m85.group(1), int(_m85.group(2))
+                try:
+                    _dp85, _mp85 = _chain_paths(f"extender_{_safe_name(_o85)}")
+                    _mf85 = _load_manifest_from_paths(_dp85, _mp85)
+                    _segs85 = [dict(x) for x in _mf85.get("segments", [])] if _mf85 else []
+                    if 0 <= _i85 < len(_segs85):
+                        _blob85 = _segs85[_i85].get("decoded_mp4_blob")
+                        if _blob85:
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            _copy_blob_to_file(_dp85, _blob85, path)
+                except Exception as _e85:
+                    _LOG.warning("H3 preview rebuild failed for %s: %s", name, _e85)
+        if not path.exists() or not path.is_file():
             return web.Response(status=404, text="Preview file not found")
         return web.FileResponse(
             path,

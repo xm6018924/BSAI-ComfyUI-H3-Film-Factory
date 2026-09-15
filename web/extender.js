@@ -182,6 +182,16 @@ function renderPreviewPanel(panel, clip, index, node, runtime) {
         video.preload = "metadata";
         video.style.cssText = videoStyle;
         video.src = clip._previewVideoUrl;
+        // v1.85: 残留 URL 的文件可能已被清空(temp 清理/外部删除), 播放失败时
+        // 清除残留并重新渲染面板 -> 重新 fetch(blob 重建或"未渲染"提示), 不再黑屏.
+        video.onerror = () => {
+            if (clip._previewRebuilding) return;
+            clip._previewRebuilding = true;
+            clip._previewVideoUrl = null;
+            clip._previewLoaded = false;
+            renderPreviewPanel(panel, clip, index, node, runtime);
+            requestAnimationFrame(() => { clip._previewRebuilding = false; syncDomHeight(node, runtime, false); });
+        };
         contentWrap.appendChild(video);
         panel.appendChild(contentWrap);
         return;
