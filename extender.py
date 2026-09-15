@@ -3828,6 +3828,16 @@ class BSAIH3FilmFactory:
                 "INT",
                 {"default": 128, "min": 0, "max": 512, "step": 16, "tooltip": "相邻块重叠像素(raised-cosine 融合)。Director 演示 128。仅 tiled_refine 开启时生效。"},
             ),
+            # v1.83: 速度预设 - 落地 B站 MiniMax急速工作流(comfyu-Selflift)技术:
+            # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
+            # 24G 跑 15s 208wpx(1920x1088) 极速模式预计 ~10-12 分钟/clip.
+            "speed_preset": (
+                ["custom", "极速", "均衡", "精细"],
+                {
+                    "default": "均衡",
+                    "tooltip": "v1.83 速度预设。极速=一采4步+二采2步(视频验证质量保住, 总耗时约减半)；均衡=一采6步+二采4步(旧默认)；精细=一采8步+二采6步。custom=按下方各widget显式值。",
+                },
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -4022,6 +4032,17 @@ class BSAIH3FilmFactory:
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
         tile_overlap = int(kwargs.get("tile_overlap", 128))
+        # v1.83: 速度预设覆盖 (先于 REFINE-PARAMS 打印, 保证日志反映实际生效参数)
+        speed_preset = str(kwargs.get("speed_preset", "均衡"))
+        _sp_old = (steps, refine_steps, tile_count, refine_denoise)
+        if speed_preset == "极速":
+            steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.55
+        elif speed_preset == "均衡":
+            steps, refine_steps, tile_count, refine_denoise = 6, 4, 4, 0.55
+        elif speed_preset == "精细":
+            steps, refine_steps, tile_count, refine_denoise = 8, 6, 4, 0.55
+        if speed_preset != "custom":
+            print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
         unique_id = kwargs.get("unique_id", None)
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
