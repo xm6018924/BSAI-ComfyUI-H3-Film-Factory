@@ -3832,10 +3832,10 @@ class BSAIH3FilmFactory:
             # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
             # 24G 跑 15s 208wpx(1920x1088) 极速模式预计 ~10-12 分钟/clip.
             "speed_preset": (
-                ["custom", "极速", "均衡", "精细"],
+                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"],
                 {
                     "default": "均衡",
-                    "tooltip": "v1.85 速度预设。极速=一采4步+二采3步+denoise0.5(写实动态优化, ~20min/clip)；均衡=一采6步+二采4步(旧默认, ~28min)；精细=一采8步+二采6步(~40min)。custom=按下方各widget显式值。",
+                    "tooltip": "v1.86 速度预设。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(旧默认, ~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流(UNETLoader+ApplyVDNH3)使用：一采固定 VDN 8 步(蒸馏最优,质量≈dense 50 步)，二采 3/4/6 步。custom=按下方各widget显式值。",
                 },
             ),
         }
@@ -4043,6 +4043,17 @@ class BSAIH3FilmFactory:
         elif speed_preset == "均衡":
             steps, refine_steps, tile_count, refine_denoise = 6, 4, 4, 0.55
         elif speed_preset == "精细":
+            steps, refine_steps, tile_count, refine_denoise = 8, 6, 4, 0.55
+        elif speed_preset == "极速-VDN":
+            # v1.86: VDN 档 (搭配 VDN 版工作流). 一采固定 8 步(VDN DMD 蒸馏最优步数,
+            # 质量≈dense 50 步, 且线性注意力长链更稳), 二采 3 步快速收敛.
+            # 需用 VDN 工作流提供 model(UNETLoader+ApplyVDNH3, 跳过 FastH3 LoRA/Sol-Attn).
+            steps, refine_steps, tile_count, refine_denoise = 8, 3, 4, 0.5
+        elif speed_preset == "均衡-VDN":
+            # 一采 VDN 8 步 + 二采 4 步: 推荐档, 质量接近精细(FastH3 8+6), 时间省 ~25%.
+            steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.55
+        elif speed_preset == "精细-VDN":
+            # 一采 VDN 8 步 + 二采 6 步: 与 FastH3 精细同画质, 一采更快更稳.
             steps, refine_steps, tile_count, refine_denoise = 8, 6, 4, 0.55
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")

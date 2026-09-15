@@ -9,20 +9,18 @@
 
 ## 🚀 最新更新 / Latest Updates
 
-### v1.84 (2026-09-15) — 预览播放修复 + 缓存迁移加固 / Preview Playback Fix + Migration Hardening
-- **预览播放修复 / Preview playback fix**: 新增插件自服务路由 GET /h3_extender/clip_preview/file?name=<file>，CLIP 预览直接从 ComfyUI\temp 读取，绕开 ComfyUI /view?type=temp 的 older_paths.get_temp_directory() 路径解析不一致（部分机器被其它插件 set_temp_directory() 改到系统 Temp 后，预览 404 无法播放）。写读同源，**任何机器行为一致**。
-- **缓存迁移加固 / Chain-cache migration hardening**: 链缓存目录迁移（v1.82 起从 custom_nodes/.../cache 迁到 ComfyUI/bsai_h3_chain_cache）改为**复制失败不写 .migrated_v182 标记**（下次启动自动重试补齐）+ **复制后校验文件大小一致**，杜绝大文件（如 772MB h3cache）静默失败丢链。
+### v1.86 (2026-09-15) — VDN-H3 极速档 + Bullet Time Lora 集成 / VDN-H3 Presets + Bullet Time LoRA
+- **VDN-H3 速度档 / VDN-H3 speed presets**: speed_preset 新增 **极速-VDN / Turbo-VDN**、**均衡-VDN / Balanced-VDN**、**精细-VDN / Fine-VDN** 三档。VDN 模式一采固定 8 步（Video DeltaNet DMD 蒸馏最优，质量≈dense 50 步、长链线性注意力更稳），二采 3/4/6 步。需搭配 **VDN 版工作流**（workflows/电影工厂工作流-VDN版-均衡VDN8+4（tile_overlap128）.json）——UNETLoader+ApplyVDNH3 替换 Sol-H3 链路，自动跳过 FastH3 LoRA/Sol-Attn。／Three new presets for the ComfyUI-VDN-H3 pipeline: pass-1 fixed at 8 VDN steps (≈dense-50 quality), refine at 3/4/6 steps. Use the VDN workflow (UNETLoader + ApplyVDNH3 replaces the Sol-H3 chain).
+- **Bullet Time LoRA 集成 / Bullet Time LoRA**: 两个工作流（FastH3 版 & VDN 版）均在 Lora Stack 挂载 **BulletTime-MMH3.safetensors @ 0.5**，配合 BSAI-MiniMAX-H3-Prompt 的子弹时间模板触发词（ullet time + time-slow 强化句）使用。／Both workflows mount **BulletTime-MMH3.safetensors @ 0.5** in the LoRA stack, paired with the bullet-time trigger words in the prompt templates.
 
-### v1.83 (2026-09-15) — 速度预设 Speed Preset 🚀
-主节点 BSAIH3FilmFactory 新增 **speed_preset** 下拉参数（位于 	ile_overlap 之后）：**极速 / Turbo**、**均衡 / Balanced**、**精细 / Fine**。
-
-| 预设 / Preset | 一采步数 / Pass1 steps | 二采步数 / Refine steps | 二采分块 / Tiles | 二采降噪 / denoise | 单 Clip 耗时（24G · 15s · 208万像素）/ per-Clip (24G · 15s · 2.08M px) |
+| 预设 / Preset | 一采步数 / Pass1 steps | 二采步数 / Refine steps | 二采分块 / Tiles | 二采降噪 / denoise | 单 Clip 耗时 / per-Clip |
 |---|---|---|---|---|---|
-| 极速 Turbo | 4 | 2 | 4 | 0.55 | ~15 min（比默认省 ~46%）|
-| 均衡 Balanced | 6 | 4 | 4 | 0.55 | ~28 min |
-| 精细 Fine | 8 | 6 | 4 | 0.55 | ~40 min |
-
-极速模式落地自 **MiniMax 急速工作流（comfyu-Selflift 技术）**：低分辨率一采构图 → 3D latent 神经放大 → 高分辨率二采只跑 2 步。**24GB 显存可跑 15 秒 200 万像素**。写实打斗建议配合 	ile_overlap=128 工作流使用：workflows/电影工厂工作流-最新版-scale X2（tile_overlap128-毛刺修复版）.json。
+| 极速 Turbo (FastH3) | 4 | 3 | 4 | 0.5 | ~20 min |
+| 均衡 Balanced (FastH3) | 6 | 4 | 4 | 0.55 | ~28 min |
+| 精细 Fine (FastH3) | 8 | 6 | 4 | 0.55 | ~40 min |
+| 极速-VDN Turbo-VDN | 8 (VDN) | 3 | 4 | 0.5 | ~20 min |
+| 均衡-VDN Balanced-VDN | 8 (VDN) | 4 | 4 | 0.55 | ~28 min |
+| 精细-VDN Fine-VDN | 8 (VDN) | 6 | 4 | 0.55 | ~40 min |
 
 > 完整版本历史 / Full changelog → **CHANGELOG.md**
 
