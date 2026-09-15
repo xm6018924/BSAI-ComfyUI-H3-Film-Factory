@@ -7,6 +7,27 @@
 
 ---
 
+## 🚀 最新更新 / Latest Updates
+
+### v1.84 (2026-09-15) — 预览播放修复 + 缓存迁移加固 / Preview Playback Fix + Migration Hardening
+- **预览播放修复 / Preview playback fix**: 新增插件自服务路由 GET /h3_extender/clip_preview/file?name=<file>，CLIP 预览直接从 ComfyUI\temp 读取，绕开 ComfyUI /view?type=temp 的 older_paths.get_temp_directory() 路径解析不一致（部分机器被其它插件 set_temp_directory() 改到系统 Temp 后，预览 404 无法播放）。写读同源，**任何机器行为一致**。
+- **缓存迁移加固 / Chain-cache migration hardening**: 链缓存目录迁移（v1.82 起从 custom_nodes/.../cache 迁到 ComfyUI/bsai_h3_chain_cache）改为**复制失败不写 .migrated_v182 标记**（下次启动自动重试补齐）+ **复制后校验文件大小一致**，杜绝大文件（如 772MB h3cache）静默失败丢链。
+
+### v1.83 (2026-09-15) — 速度预设 Speed Preset 🚀
+主节点 BSAIH3FilmFactory 新增 **speed_preset** 下拉参数（位于 	ile_overlap 之后）：**极速 / Turbo**、**均衡 / Balanced**、**精细 / Fine**。
+
+| 预设 / Preset | 一采步数 / Pass1 steps | 二采步数 / Refine steps | 二采分块 / Tiles | 二采降噪 / denoise | 单 Clip 耗时（24G · 15s · 208万像素）/ per-Clip (24G · 15s · 2.08M px) |
+|---|---|---|---|---|---|
+| 极速 Turbo | 4 | 2 | 4 | 0.55 | ~15 min（比默认省 ~46%）|
+| 均衡 Balanced | 6 | 4 | 4 | 0.55 | ~28 min |
+| 精细 Fine | 8 | 6 | 4 | 0.55 | ~40 min |
+
+极速模式落地自 **MiniMax 急速工作流（comfyu-Selflift 技术）**：低分辨率一采构图 → 3D latent 神经放大 → 高分辨率二采只跑 2 步。**24GB 显存可跑 15 秒 200 万像素**。写实打斗建议配合 	ile_overlap=128 工作流使用：workflows/电影工厂工作流-最新版-scale X2（tile_overlap128-毛刺修复版）.json。
+
+> 完整版本历史 / Full changelog → **CHANGELOG.md**
+
+---
+
 ## 插件介绍 / Introduction
 
 **H3 Film Factory** 是 BSAI 出品的 MiniMax H3 一站式电影制作节点集。它把"剧本分镜 → 逐镜头生成 → 画质修复 → 字幕 → 拼接成片"的完整影视流程整合进 ComfyUI：
