@@ -24,6 +24,7 @@ import math
 import os
 import re
 from pathlib import Path
+import contextlib
 import secrets
 import shutil
 import subprocess
@@ -105,6 +106,30 @@ def _comfyui_temp_dir():
         except Exception:
             import tempfile as _tf
             return Path(_tf.gettempdir())
+
+
+@contextlib.contextmanager
+def _aimdo_disabled():
+    """v1.78: H3 分块采样与 aimdo 内存图(malloc_graph)不兼容。
+    4090 ComfyUI 0.35 跑后期 clip 二采时显存不足, malloc_graph_push 报
+    'aimdo memory compile error' 断链。采样期间临时禁用 malloc_graph_begin/end,
+    采样后恢复, 不影响其它节点/工作流。"""
+    _mp = None
+    try:
+        import comfy.model_prefetch as _mp
+        _ob, _oe = _mp.malloc_graph_begin, _mp.malloc_graph_end
+        _mp.malloc_graph_begin = lambda device: None
+        _mp.malloc_graph_end = lambda: None
+    except Exception:
+        _mp = None
+    try:
+        yield
+    finally:
+        if _mp is not None:
+            try:
+                _mp.malloc_graph_begin, _mp.malloc_graph_end = _ob, _oe
+            except Exception:
+                pass
 
 
 def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None, async_encode=False):
@@ -2370,7 +2395,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # (0 驻留逐 block 换页, 313s/it 稳).
                 _sh59._prepare_sampling = _bsai_refine_prepare
             try:
-                _r_samples = _r_guider.sample(
+                with _aimdo_disabled():
+                    _r_samples = _r_guider.sample(
                     comfy.sample.prepare_empty_noise(samples),
                     _r_latent["samples"],
                     _r_sampler,
@@ -2474,7 +2500,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                                   force_full_load=force_full_load, force_offload=force_offload)
             _sh_fb._prepare_sampling = _bsai_fb_prepare
             try:
-                _r2_samples = _r2_guider.sample(
+                with _aimdo_disabled():
+                    _r2_samples = _r2_guider.sample(
                     _r2_noise,
                     _r2_latent["samples"],
                     _r2_sampler,
