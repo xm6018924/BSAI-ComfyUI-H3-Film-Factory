@@ -590,6 +590,7 @@ const BSAI_BILINGUAL_LABELS = {
     "refine_denoise": "二次采样降噪（0.3-0.45黄金区间）",
     "refine_steps": "二次采样步数",
     "refine_upscale_factor": "潜空间放大倍数（1.0=不放大）",
+    "speed_preset": "速度预设（极速4+2步 / 均衡6+4步 / 精细8+6步 / custom）",
 };
 function bsaiApplyBilingualLabels(node) {
     if (!node || !node.widgets) return;
