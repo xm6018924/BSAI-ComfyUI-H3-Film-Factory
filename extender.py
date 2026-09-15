@@ -132,6 +132,51 @@ def _aimdo_disabled():
                 pass
 
 
+def _release_dynamic_vram(tag=""):
+    """v1.81 (2026-09-15 fix #11): 4090 DynamicVRAM 二采前 staged 池残留致 CUDA abort。
+
+    现象: 4090 (ComfyUI 0.35 + DynamicVRAM 流式) 一采完成后, 模型权重仍留在
+    prefetch/vbar staged 池 (21833MB Staged), ComfyUI 标准 unload_all_models()
+    对 dynamic 模型返回 "0 models unloaded" 无效; 二采前 device_free 只剩
+    ~1GB, 分块采样触发 21.8GB 重载 + workspace 分配 -> CUDA 驱动级
+    "Fatal Python error: Aborted" (线程 dump 在 bsai_h3_spatial_tiles.py)。
+    修复: 调用 comfy.model_prefetch.cleanup_prefetch_queues() (vbar_unpin
+    释放 staged 权重) + cleanup_malloc_graph() + unload_all_models() +
+    empty_cache, 让二采前显存回到 20GB+。对非 DynamicVRAM (5090) 为 no-op。
+    """
+    import torch as _t81
+    try:
+        import comfy.model_prefetch as _mp81
+        for _fn81 in ("cleanup_prefetch_queues", "cleanup_malloc_graph"):
+            _f81 = getattr(_mp81, _fn81, None)
+            if _f81 is not None:
+                try:
+                    _f81()
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        import comfy.model_management as _mm81
+        try:
+            _mm81.unload_all_models()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    try:
+        _t81.cuda.empty_cache()
+        _t81.cuda.synchronize()
+    except Exception:
+        pass
+    try:
+        _f81, _t81b = _t81.cuda.mem_get_info()
+        print(f"[H3 Extender] v1.81 显存释放[{tag}]: "
+              f"free={_f81/1024**3:.2f}GB/{_t81b/1024**3:.2f}GB")
+    except Exception:
+        pass
+
+
 def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None, async_encode=False):
     """Decode a single cached clip to MP4 and store as blob for frontend preview.
     v1.70: async_encode=True 时 encode 段在后台线程执行, 返回
@@ -1997,6 +2042,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     try:
         import torch as _t1
         import comfy.model_management as _mm1
+        # v1.81: 一采前也释放 DynamicVRAM staged, 保证一采起始显存充足 (4090 保险)。
+        try:
+            _release_dynamic_vram("pass1")
+        except Exception:
+            pass
         _t1.cuda.empty_cache()
         try: _t1.cuda.ipc_collect()
         except Exception: pass
@@ -2096,6 +2146,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                       f"device_free={_free_gb:.2f}GB/{_total_gb:.2f}GB")
             except Exception as _ve:
                 print(f"[H3 Extender] Refine 二采前显存清理失败(可忽略): {_ve}")
+
+            # v1.81: 二采前强制释放 DynamicVRAM staged 池 (4090 CUDA abort 修复),
+            # 必须在显存预算检查之前, 让预算看到释放后的真实可用显存。
+            try:
+                _release_dynamic_vram("refine")
+            except Exception as _rv81:
+                print(f"[H3 Extender] v1.81 二采前显存释放异常(可忽略): {_rv81}")
 
             # v1.47 (2026-09-13 fix #6 二采卡死根治)
             # 问题(实锤, 与 BSAI-H3-MotionFix v2.9 记录的卡死同根因):
