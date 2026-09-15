@@ -6458,22 +6458,57 @@
     },
     {
       "id": 1330,
-      "type": "UNETLoader",
+      "type": "BSAIVDNH3Loader",
       "pos": [
         200,
         800
       ],
       "size": [
-        320,
-        60
+        340,
+        160
       ],
       "flags": {},
       "order": 0,
       "mode": 0,
       "inputs": [
         {
-          "name": "model_name",
+          "name": "backbone",
           "type": "COMBO",
+          "link": null
+        },
+        {
+          "name": "vdn_stage",
+          "type": "COMBO",
+          "link": null
+        },
+        {
+          "name": "merge_linear_branch",
+          "type": "BOOLEAN",
+          "link": null
+        },
+        {
+          "name": "software_fallback",
+          "type": "BOOLEAN",
+          "link": null
+        },
+        {
+          "name": "quality_mode",
+          "type": "COMBO",
+          "link": null
+        },
+        {
+          "name": "merge_default_lora",
+          "type": "BOOLEAN",
+          "link": null
+        },
+        {
+          "name": "merge_turbo_lora",
+          "type": "BOOLEAN",
+          "link": null
+        },
+        {
+          "name": "lora_strength",
+          "type": "FLOAT",
           "link": null
         },
         {
@@ -6486,57 +6521,34 @@
         {
           "name": "MODEL",
           "type": "MODEL",
+          "links": [
+            479
+          ]
+        },
+        {
+          "name": "info",
+          "type": "STRING",
+          "links": null
+        },
+        {
+          "name": "stage_dir",
+          "type": "STRING",
           "links": null
         }
       ],
       "properties": {
-        "Node name for S&R": "UNETLoader"
+        "Node name for S&R": "BSAIVDNH3Loader"
       },
       "widgets_values": [
         "minimax_h3_fl2va_int8_convrot.safetensors",
-        "default"
-      ]
-    },
-    {
-      "id": 1331,
-      "type": "ApplyVDNH3",
-      "pos": [
-        560,
-        800
-      ],
-      "size": [
-        320,
-        120
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "model",
-          "type": "MODEL",
-          "link": 482
-        }
-      ],
-      "outputs": [
-        {
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ApplyVDNH3"
-      },
-      "widgets_values": [
         "stage-dmd-step-250",
         true,
-        1.0,
-        "merge",
-        "auto",
-        "auto",
+        true,
+        "⚡ 速度优先 (8步+turbo)",
         false,
-        "grouped"
+        true,
+        1.0,
+        "default"
       ]
     }
   ],
@@ -6975,7 +6987,7 @@
     ],
     [
       479,
-      1331,
+      1330,
       0,
       276,
       0,
@@ -6996,14 +7008,6 @@
       250,
       9,
       "STRING"
-    ],
-    [
-      482,
-      1330,
-      0,
-      1331,
-      0,
-      "MODEL"
     ]
   ],
   "groups": [
