@@ -1858,8 +1858,29 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 factors = [[1.0 if i == c else 0.0 for i in range(ch)] for c in range(min(3, ch))]
                 while len(factors) < 3:
                     factors.append([0.0] * ch)
-                previewer = latent_preview.Latent2RGBPreviewer(factors)
-                print(f"[H3 Extender] using fallback Latent2RGB previewer (channels={ch})")
+                # v1.75 (2026-09-15 fix #11): 兼容不同 ComfyUI 版本的 Latent2RGBPreviewer。
+                # 新版构造时 transpose(0,1) (linear 需要 (in,out)); 4090 pro_v36_lig 等旧版
+                # 不转置 (linear 直接 x@W 需 (in,out) 语义不同), 传 (3,24) 会每步刷
+                # "mat1 and mat2 shapes cannot be multiplied" 报错。
+                # 解法: 构造后用 2x2 探针实测 decode, 失败自动用转置 factors 重试,
+                # 再失败回退 None (走下方手动 RGB 预览, 不依赖 latent_preview 实现)。
+                previewer = None
+                _probe_ok = False
+                for _factors_try in (factors, [list(r) for r in zip(*factors)]):
+                    try:
+                        _pv_try = latent_preview.Latent2RGBPreviewer(_factors_try)
+                        _probe = _pv_try.decode_latent_to_preview(
+                            preview_x0_test[:, :, :2, :2]
+                            if preview_x0_test.ndim == 4 else preview_x0_test[:, :, 0, :2, :2])
+                        previewer = _pv_try
+                        _probe_ok = True
+                        break
+                    except Exception:
+                        continue
+                if _probe_ok:
+                    print(f"[H3 Extender] using fallback Latent2RGB previewer (channels={ch})")
+                else:
+                    print(f"[H3 Extender] fallback previewer 两种 factors 均失败, 用手动 RGB 预览")
             except Exception as _e2:
                 print(f"[H3 Extender] fallback previewer also failed: {_e2}")
                 previewer = None
