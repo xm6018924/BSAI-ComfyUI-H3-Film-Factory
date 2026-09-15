@@ -2359,9 +2359,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _res_gb = model.loaded_size() / 1024 ** 3
                 except Exception:
                     pass
-                if _res_gb < 12.0 and not (tile_count and int(tile_count) > 1):
-                    # v1.68: 分块时跳过重载(白加载后被 prepare 全卸, 纯浪费);
-                    # 直接走原生 prepare 全流式(313s/it 稳). 非分块保留 v1.65 重载.
+                if _res_gb < 12.0:
+                    # v1.87: 分块二采也走重驻留。v1.68 曾对 tile_count>1 跳过重载
+                    # 导致二采 0 loaded + 20GB 全流式换页(实测 313s/it, 极速-VDN
+                    # 二采 3步x4tile ≈ 60min)。实测 reserve 8.0 预算下 19.5GB 基座
+                    # 可驻留 ~13.6GB + offload ~6GB, 换页量减少 2/3, 分块采样提速
+                    # 2-3 倍。prepare(CONST加噪)在 load 之前已完成, 不会被卸。
                     # v1.65: 二采前驻留控制——先卸载再按 reserve 重载, 让加载器按
                     # reserve 预算重新平衡驻留量, 给 Sol-Attn workspace 让位.
                     # 实测 19:34 x2.0: 直接 load_models_gpu 全量驻留 21.72GB,
