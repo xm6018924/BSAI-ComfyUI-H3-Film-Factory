@@ -2042,6 +2042,16 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     try:
         import torch as _t1
         import comfy.model_management as _mm1
+        # v1.84: 根治量化权重低显存流转的无声闪退。用户启动参数 --async-offload
+        # 使 NUM_STREAMS>=1, int8量化权重(comfy_quant)在 CPU<->GPU 异步搬运时
+        # 与 forward 复用存在竞态, 导致 step2/8 后进程无声消失(无traceback/驱动事件)。
+        # 这里强制 NUM_STREAMS=0 (等价 --disable-async-offload), 搬运同步化。
+        try:
+            if getattr(_mm1, "NUM_STREAMS", 0) != 0:
+                _mm1.NUM_STREAMS = 0
+                print("[H3 Extender] 已禁用异步 offload (NUM_STREAMS=0, 同步搬运防量化权重竞态闪退)", flush=True)
+        except Exception:
+            pass
         # v1.81: 一采前也释放 DynamicVRAM staged, 保证一采起始显存充足 (4090 保险)。
         try:
             _release_dynamic_vram("pass1")
@@ -2052,12 +2062,16 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         except Exception: pass
         _free_os, _tot_os = _t1.cuda.mem_get_info()
         _free_os /= 1024 ** 3; _tot_os /= 1024 ** 3
-        # v1.52: 抬 reserve 到 5.5GB (仅本实例, 不写回 CLI)
-        try: _mm1.EXTRA_RESERVED_VRAM = int(5.5 * 1024 ** 3)
+        # v1.84: reserve 5.5->4.0GB（实测: 2.0全量驻留->free=0 process_conds OOM;
+        # 3.0->free=0.22GB 仍OOM; 5.5->驻留16.2+offload3.7 流转崩; 4.0->驻留~17.5GB
+        # +offload~2GB, free~2.5GB, 流转量减半）。量化权重低显存流转在
+        # cudaMallocAsync+async-offload 下会无声硬崩(step2/8 后进程消失),
+        # 配合启动参数去掉 --async-offload 根治。
+        try: _mm1.EXTRA_RESERVED_VRAM = int(4.0 * 1024 ** 3)
         except Exception: pass
-        print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB), reserve->5.5GB")
+        print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB), reserve->4.0GB")
         if _free_os >= 18.0:
-            _mm1.load_models_gpu([model])   # 默认预算: 驻留 ~16GB, 尾部 offload
+            _mm1.load_models_gpu([model])   # reserve 4.0 预算: 驻留 ~17.5GB, 尾部 ~2GB offload
             _t1.cuda.synchronize()
             try:
                 _res = model.loaded_size() / 1024 ** 3
