@@ -4540,8 +4540,12 @@ class BSAIH3FilmFactory:
         elif any_replace and first_sel > 0:
             _need_pre = first_sel
         if _need_pre is not None:
-            _pre_m = _load_manifest_from_paths(data_path, manifest_path)
-            _pre_n = len(_pre_m.get("segments", [])) if _pre_m else 0
+            try:
+                _pre_m = _load_manifest_from_paths(data_path, manifest_path)
+                _pre_n = len(_pre_m.get("segments", [])) if _pre_m else 0
+            except Exception:
+                _pre_m = None
+                _pre_n = 0
             if _pre_n < _need_pre:
                 _from = max(0, _pre_n)
                 if select_override is not None:

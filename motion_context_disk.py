@@ -249,11 +249,19 @@ def _chain_paths(owner_id):
 
 
 def _write_json_atomic(path, payload):
+    """v1.79: 原子写 + .bak 双保险。manifest 丢失(0字节/损坏)会导致
+    断点续跑失效(h3cache 有数据但段数只能从 json 读), 故每写一份主文件
+    就同步写一份 .bak, 读取时可回退。"""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, path)
+    try:
+        bak = path.with_name(path.name + ".bak")
+        bak.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _dtype_name(tensor):
@@ -365,15 +373,39 @@ def _recover_manifest(data_path, manifest_path, manifest):
 def _load_manifest_from_paths(data_path, manifest_path):
     data_path = Path(data_path)
     manifest_path = Path(manifest_path)
-    if not manifest_path.exists():
+    manifest = None
+    candidates = [manifest_path]
+    bak = manifest_path.with_name(manifest_path.name + ".bak")
+    if not manifest_path.exists() and bak.exists():
+        candidates = [bak]
+    elif manifest_path.exists():
+        candidates = [manifest_path]
+        if bak.exists():
+            candidates.append(bak)
+    elif not bak.exists():
         return None
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if int(manifest.get("version", -1)) != CACHE_VERSION:
-        raise ValueError(
-            f"H3 Disk Cache version {manifest.get('version')} is incompatible; "
-            f"expected {CACHE_VERSION}."
-        )
-    return _recover_manifest(data_path, manifest_path, manifest)
+    last_err = None
+    for cand in candidates:
+        try:
+            text = cand.read_text(encoding="utf-8")
+            if not text.strip():
+                continue
+            parsed = json.loads(text)
+            if int(parsed.get("version", -1)) != CACHE_VERSION:
+                continue
+            manifest = parsed
+            break
+        except Exception as exc:
+            last_err = exc
+            continue
+    if manifest is None:
+        if last_err is not None:
+            return None
+        return None
+    try:
+        return _recover_manifest(data_path, manifest_path, manifest)
+    except Exception:
+        return manifest
 
 
 def _load_manifest(cache):
