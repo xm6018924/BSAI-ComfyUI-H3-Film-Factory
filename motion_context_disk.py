@@ -194,6 +194,7 @@ _NODE_DIR = Path(__file__).resolve().parent
 # bsai_h3_chain_cache 位于 ComfyUI 根下, 与 custom_nodes 和系统 Temp 隔离,
 # 避开常见清空源。旧目录数据由 _ensure_cache_root() 首次使用时自动迁移。
 _CACHE_ROOT = (_NODE_DIR.parents[1] / "bsai_h3_chain_cache")
+_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_\-]+\.mp4")
 _DATA_MAGIC = b"H3MCACHE12\x00"
 _DATA_START = len(_DATA_MAGIC)
 
@@ -250,10 +251,13 @@ def _ensure_cache_root():
     if not _flag.exists():
         try:
             _legacy = _NODE_DIR / "cache"
+            _has_legacy = False
+            _any_fail = False
             if _legacy.exists() and _legacy != _CACHE_ROOT:
                 import shutil as _sh82
                 _moved = False
                 for _p in _legacy.iterdir():
+                    _has_legacy = True
                     try:
                         if _p.is_dir():
                             _dst = _CACHE_ROOT / _p.name
@@ -265,19 +269,25 @@ def _ensure_cache_root():
                             _dst = _CACHE_ROOT / _p.name
                             if not _dst.exists():
                                 _sh82.copy2(_p, _dst)
+                                # v1.84: 复制后校验大小, 防止 772MB h3cache 静默失败丢链
+                                if _dst.stat().st_size != _p.stat().st_size:
+                                    raise RuntimeError("copy size mismatch")
                                 _moved = True
-                    except Exception:
-                        pass
-                _flag.touch()
+                    except Exception as _e84:
+                        _any_fail = True
+                        print(f"[H3 Extender] v1.82 迁移跳过 {_p.name}: {_e84}")
                 if _moved:
-                    print("[H3 Extender] v1.82 链缓存已迁移: "
-                          "custom_nodes/.../cache -> ComfyUI/bsai_h3_chain_cache")
-        except Exception as _m82:
-            try:
+                    if not _any_fail:
+                        _flag.touch()
+                        print("[H3 Extender] v1.82 链缓存已迁移: "
+                              "custom_nodes/.../cache -> ComfyUI/bsai_h3_chain_cache")
+                    else:
+                        # 部分失败: 不标记, 下次启动自动重试补齐
+                        print("[H3 Extender] v1.82 迁移部分完成, 未标记, 下次启动重试")
+            if not _has_legacy:
                 _flag.touch()
-            except Exception:
-                pass
-            print(f"[H3 Extender] v1.82 缓存迁移失败(可忽略): {_m82}")
+        except Exception as _m82:
+            print(f"[H3 Extender] v1.82 缓存迁移异常(下次重试): {_m82}")
     return _CACHE_ROOT
 
 
@@ -3628,6 +3638,26 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
         except Exception as exc:
             _LOG.exception("H3 clip preview failed")
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    @PromptServer.instance.routes.get("/h3_extender/clip_preview/file")
+    async def h3_extender_clip_preview_file(request):
+        """v1.84: 插件自服务预览 MP4, 绕开 ComfyUI /view?type=temp 的
+        folder_paths.get_temp_directory() 解析不一致 (4090 的 temp 被其它插件
+        set_temp_directory() 改到系统 Temp 后, /view 读不到 ComfyUI\temp 里的
+        文件 → 404 无法播放). 本路由直接从 _comfyui_temp_dir() 读, 写读同源."""
+        name = str(request.query.get("name", "")).strip()
+        if not name or not _SAFE_NAME_RE.fullmatch(name):
+            return web.Response(status=400, text="Invalid preview file name")
+        path = _comfyui_temp_dir() / name
+        if not path.exists() or not path.is_file():
+            return web.Response(status=404, text="Preview file not found")
+        return web.FileResponse(
+            path,
+            headers={
+                "Content-Type": "video/mp4",
+                "Cache-Control": "no-store",
+            },
+        )
 
 
 class MiniMaxH3MotionContextDiskFinalDecode:

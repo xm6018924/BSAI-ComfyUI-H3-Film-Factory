@@ -84,6 +84,14 @@ function clipPreviewMediaUrl(info) {
     params.set("filename", info?.filename || "");
     params.set("type", info?.type || "temp");
     params.set("subfolder", info?.subfolder || "");
+    // v1.84: temp 类型预览改用插件自服务路由, 绕开 ComfyUI /view?type=temp
+    // 的 folder_paths.get_temp_directory() 解析不一致(4090 被其它插件改到系统
+    // Temp 后 /view 404 无法播放). 插件路由直接从 ComfyUI\temp 读, 写读同源.
+    if (info?.type === "temp" && info?.filename) {
+        const p2 = new URLSearchParams();
+        p2.set("name", info.filename);
+        return api.apiURL("/h3_extender/clip_preview/file?" + p2.toString());
+    }
     return api.apiURL("/view?" + params.toString());
 }
 
