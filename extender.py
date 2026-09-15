@@ -89,6 +89,24 @@ FPS = 24
 AUDIO_LATENT_FPS = 40
 
 
+def _comfyui_temp_dir():
+    """插件安装的 ComfyUI 根目录/temp——不依赖 folder_paths.get_temp_directory(),
+    避免被其它插件 set_temp_directory() 改到系统 Temp(如 latentsync_*), 保证每台
+    机器上预览/CLIP 临时文件都落在各自的 .\\ComfyUI\\temp。"""
+    try:
+        _root = Path(__file__).resolve().parents[2]
+        _d = _root / "temp"
+        _d.mkdir(parents=True, exist_ok=True)
+        return _d
+    except Exception:
+        try:
+            import folder_paths as _fp
+            return _comfyui_temp_dir()
+        except Exception:
+            import tempfile as _tf
+            return Path(_tf.gettempdir())
+
+
 def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None, async_encode=False):
     """Decode a single cached clip to MP4 and store as blob for frontend preview.
     v1.70: async_encode=True 时 encode 段在后台线程执行, 返回
@@ -4855,7 +4873,7 @@ class BSAIH3FilmFactory:
                                 _blob = _segs[_j].get("decoded_mp4_blob")
                                 if _blob is not None:
                                     import folder_paths as _fp
-                                    _temp_dir = Path(_fp.get_temp_directory())
+                                    _temp_dir = _comfyui_temp_dir()
                                     _out_name = f"h3_clip_{owner}_{_j + _seg_off_cur + 1}_{int(time.time())}.mp4"
                                     _out_path = _temp_dir / _out_name
                                     _copy_blob_to_file(data_path, _blob, _out_path)
@@ -5202,7 +5220,7 @@ class BSAIH3FilmFactory:
                     segments = [dict(x) for x in final_manifest["segments"]]
                     root = _ensure_cache_root()
                     import folder_paths as _fp
-                    temp_dir = Path(_fp.get_temp_directory())
+                    temp_dir = _comfyui_temp_dir()
                     clips_info = []
                     for si, seg in enumerate(segments):
                         blob = seg.get("decoded_mp4_blob")
@@ -5408,7 +5426,7 @@ if getattr(PromptServer, "instance", None) is not None:
         kind = str(request.query.get("kind", "latent")).strip().lower()
         try:
             if kind == "clips":
-                d = Path(folder_paths.get_temp_directory())
+                d = _comfyui_temp_dir()
             else:
                 d = _ensure_cache_root()
             d = d.resolve()

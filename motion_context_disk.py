@@ -219,6 +219,24 @@ def _safe_name(value):
     return value or "h3_chain"
 
 
+def _comfyui_temp_dir():
+    """插件安装的 ComfyUI 根目录/temp——不依赖 folder_paths.get_temp_directory(),
+    避免被其它插件 set_temp_directory() 改到系统 Temp(如 latentsync_*), 保证每台
+    机器上预览/CLIP 临时文件都落在各自的 .\\ComfyUI\\temp。"""
+    try:
+        _root = Path(__file__).resolve().parents[2]
+        _d = _root / "temp"
+        _d.mkdir(parents=True, exist_ok=True)
+        return _d
+    except Exception:
+        try:
+            import folder_paths as _fp
+            return Path(_fp.get_temp_directory())
+        except Exception:
+            import tempfile as _tf
+            return Path(_tf.gettempdir())
+
+
 def _ensure_cache_root():
     _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
     return _CACHE_ROOT
@@ -1471,7 +1489,7 @@ def _comfy_media_item(path, fps, media_type):
         }
 
     if str(media_type) == "temp":
-        root = Path(folder_paths.get_temp_directory()).resolve()
+        root = _comfyui_temp_dir().resolve()
     else:
         root = Path(folder_paths.get_output_directory()).resolve()
 
@@ -1496,7 +1514,7 @@ def _comfy_media_item(path, fps, media_type):
 
 def _preview_temp_root():
     if folder_paths is not None:
-        root = Path(folder_paths.get_temp_directory()).resolve()
+        root = _comfyui_temp_dir().resolve()
     else:
         root = _ensure_cache_root() / "_preview"
     root.mkdir(parents=True, exist_ok=True)
@@ -3521,7 +3539,7 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
                 return web.json_response({"ok": False, "error": "Clip has no decoded video yet."}, status=404)
             fps = float(manifest.get("fps", FPS))
             if folder_paths is not None:
-                temp_dir = Path(folder_paths.get_temp_directory())
+                temp_dir = _comfyui_temp_dir()
             else:
                 temp_dir = _ensure_cache_root()
             temp_dir.mkdir(parents=True, exist_ok=True)
