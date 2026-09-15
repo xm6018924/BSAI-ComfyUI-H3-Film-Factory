@@ -1120,13 +1120,59 @@ def _replace_output_from_preview(
     return destination
 
 
+_NVENC_PRESET = {"ultrafast": "p1", "superfast": "p1", "veryfast": "p2", "faster": "p3",
+                 "fast": "p4", "medium": "p5", "slow": "p6", "slower": "p7"}
+
+
+def _nvenc_available(ffmpeg, codec="h264"):
+    """v1.66: 检测 ffmpeg 是否支持 NVENC 硬编(结果缓存). RTX 5090 硬编比
+    libx264/libx265 软编快 5-10 倍, 用于 preview blob / final export."""
+    import subprocess as _sp
+    import tempfile
+    key = (str(ffmpeg), codec)
+    _cache = getattr(_nvenc_available, "_cache", {})
+    if key in _cache:
+        return _cache[key]
+    ok = False
+    try:
+        with tempfile.TemporaryFile() as _f:
+            _p = _sp.run(
+                [str(ffmpeg), "-hide_banner", "-encoders"],
+                stdout=_sp.PIPE, stderr=_sp.STDOUT, timeout=20,
+            )
+            text = _p.stdout.decode("utf-8", errors="replace")
+        enc = "h264_nvenc" if codec == "h264" else "hevc_nvenc"
+        ok = f" {enc} " in f" {text} " or f"{enc} " in text
+    except Exception:
+        ok = False
+    _cache[key] = ok
+    _nvenc_available._cache = _cache
+    return ok
+
+
+def _h264_enc_args(ffmpeg, preset="fast", crf=17):
+    if _nvenc_available(ffmpeg, "h264"):
+        p = _NVENC_PRESET.get(str(preset), "p4")
+        return ["-c:v", "h264_nvenc", "-preset", p, "-cq", str(int(crf)),
+                "-rc", "vbr", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", str(preset), "-crf", str(int(crf)), "-pix_fmt", "yuv420p"]
+
+
+def _hevc_enc_args(ffmpeg, preset="fast", crf=17):
+    if _nvenc_available(ffmpeg, "hevc"):
+        p = _NVENC_PRESET.get(str(preset), "p4")
+        return ["-c:v", "hevc_nvenc", "-preset", p, "-cq", str(int(crf)),
+                "-rc", "vbr", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx265", "-preset", str(preset), "-crf", str(int(crf)), "-pix_fmt", "yuv420p"]
+
+
 def _start_video_encoder(ffmpeg, temp_video, width, height, fps, codec, crf, preset, log_path):
     if str(codec) == "H.265 / HEVC":
-        enc = ["-c:v", "libx265", "-preset", str(preset), "-crf", str(int(crf)), "-pix_fmt", "yuv420p"]
+        enc = _hevc_enc_args(ffmpeg, preset, crf)
     elif str(codec) == "FFV1 lossless":
         enc = ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]
     else:
-        enc = ["-c:v", "libx264", "-preset", str(preset), "-crf", str(int(crf)), "-pix_fmt", "yuv420p"]
+        enc = _h264_enc_args(ffmpeg, preset, crf)
 
     cmd = [
         ffmpeg, "-y",
@@ -1146,10 +1192,17 @@ def _start_video_encoder(ffmpeg, temp_video, width, height, fps, codec, crf, pre
     return proc, log_f
 
 
-def _write_image_frames(proc, images, batch_frames=8):
+def _write_image_frames(proc, images, batch_frames=64):
+    """v1.69: batch 8->64——362 帧 1080p raw 传输 2.2GB, 大 batch 减少 Python
+    循环/pipe 小写次数, 缓解 CPU/内存压力下的编码瓶颈(实测 132s -> 预期 ~50s).
+    v1.70: uint8 CPU tensor 直写快路径(async encode 预转产物, 不再逐批转换)."""
     if proc.stdin is None:
         raise RuntimeError("Disk Final Decode: ffmpeg stdin is closed.")
     n = int(images.shape[0])
+    if images.dtype == torch.uint8 and not images.is_cuda:
+        for i in range(0, n, int(batch_frames)):
+            proc.stdin.write(images[i:i + int(batch_frames)].contiguous().numpy().tobytes(order="C"))
+        return
     for i in range(0, n, int(batch_frames)):
         part = images[i:i + int(batch_frames), ..., :3]
         part = (
@@ -1629,10 +1682,10 @@ def _ffmpeg_color_filter(timeline):
 
 def _video_reencode_args(codec, crf, preset):
     if str(codec) == "H.265 / HEVC":
-        return ["-c:v", "libx265", "-preset", str(preset), "-crf", str(int(crf)), "-pix_fmt", "yuv420p"]
+        return _hevc_enc_args(_find_ffmpeg(), preset, crf)
     if str(codec) == "FFV1 lossless":
         return ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "gbrp"]
-    return ["-c:v", "libx264", "-preset", str(preset), "-crf", str(int(crf)), "-pix_fmt", "yuv420p"]
+    return _h264_enc_args(_find_ffmpeg(), preset, crf)
 
 
 def _apply_color_timeline_to_file(
@@ -1923,6 +1976,7 @@ def _decode_single_clip_to_blob(
     audio_vae,
     fps,
     ffmpeg=None,
+    async_encode=False,
 ):
     """Decode one cached clip's latent to an MP4 blob and persist it in the segment.
 
@@ -1954,6 +2008,10 @@ def _decode_single_clip_to_blob(
         return curr
 
     print(f"[H3 Extender] _decode_single_clip_to_blob: clip={i} data_path={data_path} ffmpeg={ffmpeg}")
+    import time as _t66
+    _t66_t0 = _t66.time()
+    def _t66_mark(tag):
+        print(f"[H3 Extender]   decode耗时[{tag}]: {_t66.time()-_t66_t0:.1f}s (累计)")
 
     trim = int(curr.get("trim_frames", 0)) if i > 0 else 0
     total_frames = int(curr["frames"])
@@ -1961,26 +2019,9 @@ def _decode_single_clip_to_blob(
 
     # Decode video latent
     print(f"[H3 Extender]   step 1: loading segment video...")
-    # v1.25: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
+    # v1.69: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
     # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
-    try:
-        import comfy.model_management as _mm
-        import torch as _torch
-        for _lm in list(_mm.current_loaded_models):
-            try:
-                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
-            except Exception:
-                pass
-        _mm.soft_empty_cache(force=True)
-        _torch.cuda.synchronize()
-        _torch.cuda.empty_cache()
-        _a = _torch.cuda.memory_allocated() / 1024 ** 3
-        print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
-    except Exception as _e:
-        print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
-
-    # v1.25: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
-    # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
+    # (v1.25 曾重复两遍, 已删其一, 功能不变)
     try:
         import comfy.model_management as _mm
         import torch as _torch
@@ -2005,6 +2046,7 @@ def _decode_single_clip_to_blob(
             -1, video.shape[-3], video.shape[-2], video.shape[-1]
         )
     print(f"[H3 Extender]   step 2 done: video shape={tuple(video.shape)}")
+    _t66_mark("VAE decode")
 
     # Trim leading context overlap (clip 2+)
     if trim > 0:
@@ -2029,147 +2071,190 @@ def _decode_single_clip_to_blob(
             audio["waveform"] = wave[..., trim_samples:]
             print(f"[H3 Extender]   trimmed {trim_samples} audio samples ({trim} frames @ {sr}Hz)")
 
-    # Encode to MP4 (video + audio)
-    root = _ensure_cache_root()
-    token = f"clipdec_{_safe_name(str(owner_id))}_{i}_{uuid.uuid4().hex[:8]}"
-    temp_mp4 = root / f"_{token}.mp4"
+    # v1.70: encode 段拆为内部函数——统一预转 uint8 CPU 后编码(不再逐批 GPU->CPU
+    # 拷贝); async_encode=True 时在后台线程执行(encode ~55s 与下一段 GPU 工作
+    # 并行, 省 ~55s/段), 主线程立即继续; encode 只占 CPU pipe + NVENC, 与主
+    # 线程 GPU 无显存冲突. 同步路径(安全回退)行为与 v1.69 完全一致.
+    video_cpu = (
+        video.detach().float().clamp(0.0, 1.0).mul(255.0).add_(0.5)
+        .to(torch.uint8).cpu().contiguous()
+    )
+    del video
 
-    print(f"[H3 Extender]   step 4: encoding MP4 with audio (ffmpeg={ffmpeg}, temp={temp_mp4}, frames={out_frames})...")
-    if ffmpeg is None:
-        raise TypeError(f"ffmpeg is None — cannot encode preview. _find_ffmpeg() should have raised RuntimeError.")
+    def _encode_and_store(video_u8, audio_in):
+        # Encode to MP4 (video + audio)
+        root = _ensure_cache_root()
+        token = f"clipdec_{_safe_name(str(owner_id))}_{i}_{uuid.uuid4().hex[:8]}"
+        temp_mp4 = root / f"_{token}.mp4"
 
-    # Write raw PCM audio to a temp file for ffmpeg
-    temp_wav = None
-    has_audio = audio.get("waveform") is not None and int(audio["waveform"].shape[-1]) > 1
-    if has_audio:
+        print(f"[H3 Extender]   step 4: encoding MP4 with audio (ffmpeg={ffmpeg}, temp={temp_mp4}, frames={out_frames})...")
+        if ffmpeg is None:
+            raise TypeError(f"ffmpeg is None — cannot encode preview. _find_ffmpeg() should have raised RuntimeError.")
+
+        # Write raw PCM audio to a temp file for ffmpeg
+        temp_wav = None
+        has_audio = audio.get("waveform") is not None and int(audio["waveform"].shape[-1]) > 1
+        if has_audio:
+            try:
+                sr = int(audio["sample_rate"])
+                wave = audio["waveform"]
+                # Ensure stereo
+                if wave.ndim == 3:
+                    wave = wave.squeeze(0)
+                if wave.shape[0] == 1:
+                    wave = wave.repeat(2, 1)
+                # Convert float -> int16
+                wav_np = (wave.detach().float().clamp(-1.0, 1.0) * 32767.0).to(torch.int16).cpu().numpy()
+                import wave as _wave
+                temp_wav = root / f"_{token}.wav"
+                with _wave.open(str(temp_wav), "wb") as wf:
+                    wf.setnchannels(2)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sr)
+                    wf.writeframes(wav_np.T.tobytes())
+                print(f"[H3 Extender]   audio PCM ready: {temp_wav.name}, {wav_np.shape[1]} samples @ {sr}Hz")
+            except Exception as _wav_err:
+                print(f"[H3 Extender]   audio PCM write failed, falling back to video-only: {_wav_err}")
+                has_audio = False
+                if temp_wav and temp_wav.exists():
+                    try:
+                        temp_wav.unlink()
+                    except Exception:
+                        pass
+                temp_wav = None
+
+        # Encode video and mux audio in one pass
+        h, w = int(video_u8.shape[1]), int(video_u8.shape[2])
+        video_log = root / f"_{token}_video.log"
+        proc = None
+        log_f = None
         try:
-            sr = int(audio["sample_rate"])
-            wave = audio["waveform"]
-            # Ensure stereo
-            if wave.ndim == 3:
-                wave = wave.squeeze(0)
-            if wave.shape[0] == 1:
-                wave = wave.repeat(2, 1)
-            # Convert float -> int16
-            wav_np = (wave.detach().float().clamp(-1.0, 1.0) * 32767.0).to(torch.int16).cpu().numpy()
-            import wave as _wave
-            temp_wav = root / f"_{token}.wav"
-            with _wave.open(str(temp_wav), "wb") as wf:
-                wf.setnchannels(2)
-                wf.setsampwidth(2)
-                wf.setframerate(sr)
-                wf.writeframes(wav_np.T.tobytes())
-            print(f"[H3 Extender]   audio PCM ready: {temp_wav.name}, {wav_np.shape[1]} samples @ {sr}Hz")
-        except Exception as _wav_err:
-            print(f"[H3 Extender]   audio PCM write failed, falling back to video-only: {_wav_err}")
-            has_audio = False
+            cmd = [
+                ffmpeg, "-y",
+                "-f", "rawvideo",
+                "-pix_fmt", "rgb24",
+                "-s:v", f"{w}x{h}",
+                "-r", f"{float(fps):.9f}",
+                "-i", "pipe:0",
+            ]
+            if has_audio and temp_wav is not None:
+                cmd += ["-i", str(temp_wav)]
+                cmd += _h264_enc_args(ffmpeg, "ultrafast", 17)
+                cmd += ["-c:a", "aac", "-b:a", "192k"]
+                cmd += ["-shortest"]
+            else:
+                cmd += ["-an"]
+                cmd += _h264_enc_args(ffmpeg, "ultrafast", 17)
+            cmd += [str(temp_mp4)]
+
+            log_f = open(video_log, "wb")
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log_f)
+            _write_image_frames(proc, video_u8)
+            _finish_process(proc, log_f, video_log, "H3 clip preview encoder")
+            proc = None
+            log_f = None
+        finally:
+            if proc is not None:
+                try:
+                    if proc.stdin is not None:
+                        proc.stdin.close()
+                except Exception:
+                    pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            if log_f is not None:
+                try:
+                    log_f.close()
+                except Exception:
+                    pass
+            try:
+                if video_log.exists():
+                    video_log.unlink()
+            except OSError:
+                pass
             if temp_wav and temp_wav.exists():
                 try:
                     temp_wav.unlink()
                 except Exception:
                     pass
-            temp_wav = None
 
-    # Encode video and mux audio in one pass
-    h, w = int(video.shape[1]), int(video.shape[2])
-    video_log = root / f"_{token}_video.log"
-    proc = None
-    log_f = None
-    try:
-        cmd = [
-            ffmpeg, "-y",
-            "-f", "rawvideo",
-            "-pix_fmt", "rgb24",
-            "-s:v", f"{w}x{h}",
-            "-r", f"{float(fps):.9f}",
-            "-i", "pipe:0",
-        ]
-        if has_audio and temp_wav is not None:
-            cmd += ["-i", str(temp_wav)]
-            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "17", "-pix_fmt", "yuv420p"]
-            cmd += ["-c:a", "aac", "-b:a", "192k"]
-            cmd += ["-shortest"]
-        else:
-            cmd += ["-an"]
-            cmd += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "17", "-pix_fmt", "yuv420p"]
-        cmd += [str(temp_mp4)]
+        if not temp_mp4.exists():
+            print(f"[H3 Extender]   step 4 failed: temp_mp4 does not exist after encode")
+            return None
+        print(f"[H3 Extender]   step 4 done: mp4 size={temp_mp4.stat().st_size}")
+        _t66_mark("MP4 encode")
 
-        log_f = open(video_log, "wb")
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log_f)
-        _write_image_frames(proc, video)
-        _finish_process(proc, log_f, video_log, "H3 clip preview encoder")
-        proc = None
-        log_f = None
-    finally:
-        if proc is not None:
-            try:
-                if proc.stdin is not None:
-                    proc.stdin.close()
-            except Exception:
-                pass
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        if log_f is not None:
-            try:
-                log_f.close()
-            except Exception:
-                pass
+        # Read encoded MP4 and store as blob in the cache file
+        latent_end = int(curr.get("latent_end", _latent_payload_end(curr)))
+        with open(data_path, "r+b", buffering=0) as f:
+            f.seek(0, 2)
+            f.truncate(latent_end)
+            f.seek(latent_end)
+            render_spec = _write_blob_raw(f, temp_mp4)
+            audio_spec = _write_tensor_raw(f, audio["waveform"])
+            segment_end = int(f.tell())
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Clean up temp file
         try:
-            if video_log.exists():
-                video_log.unlink()
-        except OSError:
+            temp_mp4.unlink()
+        except Exception:
             pass
-        if temp_wav and temp_wav.exists():
+
+        # Update manifest
+        curr["latent_end"] = latent_end
+        curr["decoded_mp4_blob"] = render_spec
+        curr["decoded_mp4_version"] = 2
+        curr["decoded_mp4_has_audio"] = has_audio
+        curr["decoded_audio"] = {
+            "waveform": audio_spec,
+            "sample_rate": int(audio["sample_rate"]),
+            "timeline_gain": 1.0,
+        }
+        curr["segment_end"] = segment_end
+        segments[i] = curr
+
+        updated = dict(manifest)
+        updated["segments"] = segments
+        updated["build"] = BUILD
+        updated["updated_at"] = time.time()
+        _write_json_atomic(manifest_path, updated)
+        return curr
+
+
+
+    if async_encode:
+        # v1.70: RAM 保护——encode 线程持有 video_cpu(0.7GB uint8), 系统内存
+        # 严重不足(<1.5GB free)时回退同步编码, 避免与主线程/系统换页叠加.
+        try:
+            import psutil as _ps70
+            _ram_free70 = _ps70.virtual_memory().available / 2**30
+        except Exception:
+            _ram_free70 = 99.0
+        if _ram_free70 < 1.5:
+            print(f'[H3 Extender]   encode async 跳过(RAM free={_ram_free70:.1f}GB < 1.5GB), 同步编码')
+            return _encode_and_store(video_cpu, audio)
+        import threading as _thr70
+        _ev70 = _thr70.Event()
+
+        def _run_async():
             try:
-                temp_wav.unlink()
-            except Exception:
-                pass
+                _encode_and_store(video_cpu, audio)
+            except Exception as _enc70:
+                print(f"[H3 Extender]   async encode failed: {_enc70}")
+                import traceback as _tb70
+                _tb70.print_exc()
+            finally:
+                _ev70.set()
 
-    if not temp_mp4.exists():
-        print(f"[H3 Extender]   step 4 failed: temp_mp4 does not exist after encode")
-        return None
-    print(f"[H3 Extender]   step 4 done: mp4 size={temp_mp4.stat().st_size}")
-
-    # Read encoded MP4 and store as blob in the cache file
-    latent_end = int(curr.get("latent_end", _latent_payload_end(curr)))
-    with open(data_path, "r+b", buffering=0) as f:
-        f.seek(0, 2)
-        f.truncate(latent_end)
-        f.seek(latent_end)
-        render_spec = _write_blob_raw(f, temp_mp4)
-        audio_spec = _write_tensor_raw(f, audio["waveform"])
-        segment_end = int(f.tell())
-        f.flush()
-        os.fsync(f.fileno())
-
-    # Clean up temp file
-    try:
-        temp_mp4.unlink()
-    except Exception:
-        pass
-
-    # Update manifest
-    curr["latent_end"] = latent_end
-    curr["decoded_mp4_blob"] = render_spec
-    curr["decoded_mp4_version"] = 2
-    curr["decoded_mp4_has_audio"] = has_audio
-    curr["decoded_audio"] = {
-        "waveform": audio_spec,
-        "sample_rate": int(audio["sample_rate"]),
-        "timeline_gain": 1.0,
-    }
-    curr["segment_end"] = segment_end
-    segments[i] = curr
-
-    updated = dict(manifest)
-    updated["segments"] = segments
-    updated["build"] = BUILD
-    updated["updated_at"] = time.time()
-    _write_json_atomic(manifest_path, updated)
-    return curr
-
+        _thr70.Thread(target=_run_async, daemon=True).start()
+        print(f"[H3 Extender]   encode async: 后台线程已启动, 主线程继续下一段")
+        return {"async": True, "done_event": _ev70}
+    else:
+        return _encode_and_store(video_cpu, audio)
 
 def _encode_corrected_segment_video_mp4(
     ffmpeg,

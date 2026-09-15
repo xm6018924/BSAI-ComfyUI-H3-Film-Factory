@@ -89,8 +89,10 @@ FPS = 24
 AUDIO_LATENT_FPS = 40
 
 
-def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None):
-    """Decode a single cached clip to MP4 and store as blob for frontend preview."""
+def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None, async_encode=False):
+    """Decode a single cached clip to MP4 and store as blob for frontend preview.
+    v1.70: async_encode=True 时 encode 段在后台线程执行, 返回
+    {"async": True, "done_event": threading.Event}."""
     return _decode_single_clip_to_blob(
         owner_id=owner,
         clip_index=clip_index,
@@ -98,6 +100,7 @@ def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=N
         audio_vae=audio_vae,
         fps=fps,
         ffmpeg=ffmpeg,
+        async_encode=async_encode,
     )
 
 
@@ -110,6 +113,35 @@ def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=N
 # output ports.  This lets downstream upscale nodes (e.g. BSAI-H3-upscale-4K)
 # consume the film as soon as the run returns, without a second VAE decode.
 # ---------------------------------------------------------------------------
+
+
+def _read_frames_from_mp4(path, ffmpeg, total_frames, trim, width, height):
+    """v1.67: 从已编码 MP4 blob 读帧(preview decode 产物), 返回 [T,H,W,C] float 0-1
+    cpu tensor. 替代 _decode_clip_to_av 里重复的 VAE decode(2X 时每段省 ~30-60s).
+    MP4 已按 trim 裁剪, 帧数以实际 raw 数据为准(编码器可能微调)."""
+    import subprocess as _sp
+    import numpy as _np
+    n = max(0, int(total_frames) - int(trim))
+    if n == 0:
+        return None
+    try:
+        _p = _sp.run(
+            [str(ffmpeg), "-y", "-i", str(path),
+             "-f", "rawvideo", "-pix_fmt", "rgb24",
+             "-s:v", f"{int(width)}x{int(height)}", "-"],
+            stdout=_sp.PIPE, stderr=_sp.DEVNULL, timeout=600,
+        )
+    except Exception as _e:
+        print(f"[H3 Extender] MP4 读帧失败: {_e}")
+        return None
+    raw = _p.stdout
+    one = int(width) * int(height) * 3
+    actual = len(raw) // one
+    if actual == 0:
+        return None
+    arr = _np.frombuffer(raw[:actual * one], dtype=_np.uint8).reshape(
+        actual, int(height), int(width), 3)
+    return torch.from_numpy(arr.copy()).float().div_(255.0)
 
 
 def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
@@ -161,6 +193,44 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
         print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
     except Exception as _e:
         print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
+
+    # v1.67: 优先从 preview decode 已产出的 MP4 blob 读帧(预览画质), 省一次
+    # 2X VAE decode(~30-60s/段). 音频仍走音频 VAE(秒级). blob 缺失/失败回退 VAE.
+    _blob = curr.get("decoded_mp4_blob")
+    if _blob is not None:
+        try:
+            _root = _ensure_cache_root()
+            _tmp = _root / f"_avread_{uuid.uuid4().hex[:8]}.mp4"
+            _copy_blob_to_file(data_path, _blob, _tmp)
+            _imgs = _read_frames_from_mp4(
+                str(_tmp), _find_ffmpeg(),
+                int(curr.get("frames", 0)), int(curr.get("trim_frames", 0)) if i > 0 else 0,
+                int(curr.get("width", 1920)), int(curr.get("height", 1080)),
+            )
+            try:
+                _tmp.unlink()
+            except Exception:
+                pass
+            if _imgs is not None and int(_imgs.shape[0]) > 0:
+                images = _imgs
+                audio = None
+                try:
+                    if audio_vae is not None:
+                        audio = _decode_single_audio(data_path, curr, audio_vae, float(fps))
+                        if audio is not None and int(curr.get("trim_frames", 0)) > 0:
+                            sr = int(audio["sample_rate"])
+                            trim_samples = int(round(float(int(curr.get("trim_frames", 0))) / float(fps) * sr))
+                            wave = audio["waveform"]
+                            if trim_samples > 0 and trim_samples < int(wave.shape[-1]):
+                                audio = dict(audio)
+                                audio["waveform"] = wave[..., trim_samples:]
+                except Exception as _e:
+                    print(f"[H3 Extender] _decode_clip_to_av audio decode failed clip={i}: {_e}")
+                    audio = None
+                print(f"[H3 Extender] _decode_clip_to_av: clip={i} 复用 MP4 blob ({images.shape[0]} 帧, 跳过 VAE decode)")
+                return images, audio
+        except Exception as _mp4err:
+            print(f"[H3 Extender] _decode_clip_to_av MP4 读帧失败, 回退 VAE decode: {_mp4err}")
 
     # Video latent -> pixels [T,C,H,W] in [0,1]
     try:
@@ -2031,6 +2101,34 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] Refine 显存预算(v1.65): 模型~{_model_gb2:.1f}GB "
                       f"驻留alloc={_alloc_gb2:.1f}GB 可用显存={_gpu_free_gb2:.1f}GB/"
                       f"{_gpu_total_gb2:.0f}GB 驻留目标~{min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tbl.get(round(_orig_f, 1), 2.6) - 3.0:.1f}GB")
+                # v1.74 (2026-09-15 fix #10): 链几何一致性 —— 链上已有段时禁止 per-clip 降级。
+                # 实测: 全量链渲染到 clip=7 时显存预算波动, 自动降级 2.0->1.5,
+                # 二采 latent 从 120x68 变成 90x50, 与前段几何不一致,
+                # Disk Join 报 "latent geometry changed" 中断整链 (4.5h 白跑).
+                # 第一段(链空)允许降级(全局一致); 链上已有段时保持原 factor,
+                # 若 OOM 由 v1.74b 把 fallback 输出 bilinear 对齐到链上几何。
+                try:
+                    _cp74, _cmp74 = _chain_paths(f"extender_{_safe_name(str(owner_id))}")
+                    _cm74 = _load_manifest_from_paths(_cp74, _cmp74)
+                    _cg74 = _cm74.get("geometry") if _cm74 is not None else None
+                    if _cg74 is not None:
+                        _chh74 = int(_cg74.get("video_h", 0))
+                        _chw74 = int(_cg74.get("video_w", 0))
+                        if _chh74 > 0 and _chw74 > 0 and _chosen2 is not None \
+                                and _chosen2 < _orig_f - 1e-6:
+                            _snap74 = max(1, _r_align // 16)
+                            _m74a, _w74a = _ff_extract_members(samples)
+                            _cur_h74, _cur_w74 = _m74a[0].shape[-2:]
+                            _dg_h74 = _ff_snap_to_multiple(round(_cur_h74 * _chosen2), _snap74)
+                            _dg_w74 = _ff_snap_to_multiple(round(_cur_w74 * _chosen2), _snap74)
+                            if (_dg_h74, _dg_w74) != (_chh74, _chw74):
+                                print(f"[H3 Extender] v1.74: 链上已有 {_chw74}x{_chh74} 段, "
+                                      f"降级 x{_orig_f}->x{_chosen2} 会变几何 "
+                                      f"({_dg_w74}x{_dg_h74}), 禁止 per-clip 降级(避免断链), "
+                                      f"保持 x{_orig_f}")
+                                _chosen2 = _orig_f
+                except Exception as _ga74:
+                    print(f"[H3 Extender] v1.74 链几何检查失败(可忽略): {_ga74}")
                 if _chosen2 is not None and _chosen2 < _orig_f - 1e-6:
                     _r_factor = _chosen2
                     print(f"[H3 Extender] Refine 放大倍率已自动降级: x{_orig_f} -> x{_chosen2} "
@@ -2126,7 +2224,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _res_gb = model.loaded_size() / 1024 ** 3
                 except Exception:
                     pass
-                if _res_gb < 12.0:
+                if _res_gb < 12.0 and not (tile_count and int(tile_count) > 1):
+                    # v1.68: 分块时跳过重载(白加载后被 prepare 全卸, 纯浪费);
+                    # 直接走原生 prepare 全流式(313s/it 稳). 非分块保留 v1.65 重载.
                     # v1.65: 二采前驻留控制——先卸载再按 reserve 重载, 让加载器按
                     # reserve 预算重新平衡驻留量, 给 Sol-Attn workspace 让位.
                     # 实测 19:34 x2.0: 直接 load_models_gpu 全量驻留 21.72GB,
@@ -2403,6 +2503,32 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                       f"device_free={_f / 1024 ** 3:.2f}GB/{_t / 1024 ** 3:.2f}GB")
             except Exception as _ve2:
                 print(f"[H3 Extender] Refine 失败后兜底释放失败(可忽略): {_ve2}")
+
+    # v1.74b (2026-09-15 fix #10): 链几何对齐 —— 若链上已有段且本次 latent 几何不同
+    # (per-clip 降级被拦截后仍可能 OOM fallback 到一采尺寸 / 异常路径),
+    # bilinear 放大到链上几何, 保证 Disk Join 不断链。
+    try:
+        _cp74b, _cmp74b = _chain_paths(f"extender_{_safe_name(str(owner_id))}")
+        _cm74b = _load_manifest_from_paths(_cp74b, _cmp74b)
+        _cg74b = _cm74b.get("geometry") if _cm74b is not None else None
+        if _cg74b is not None:
+            _chh74b = int(_cg74b.get("video_h", 0))
+            _chw74b = int(_cg74b.get("video_w", 0))
+            if _chh74b > 0 and _chw74b > 0:
+                _m74, _w74 = _ff_extract_members(samples)
+                _v74 = _m74[0]
+                _old_h74, _old_w74 = int(_v74.shape[-2]), int(_v74.shape[-1])
+                if _old_h74 != _chh74b or _old_w74 != _chw74b:
+                    import torch as _torch74
+                    _v74 = _torch74.nn.functional.interpolate(
+                        _v74, size=(int(_v74.shape[2]), _chh74b, _chw74b),
+                        mode="trilinear", align_corners=False)
+                    _m74[0] = _v74
+                    samples = _ff_wrap_members(_m74, _w74)
+                    print(f"[H3 Extender] v1.74b: latent 几何对齐到链上 "
+                          f"{_chw74b}x{_chh74b} (原 {_old_w74}x{_old_h74})")
+    except Exception as _ga74b:
+        print(f"[H3 Extender] v1.74b 几何对齐失败(可忽略): {_ga74b}")
 
     out = latent_out.copy()
     out.pop("downscale_ratio_spacial", None)
@@ -4413,6 +4539,7 @@ class BSAIH3FilmFactory:
         out_audios = []
         _av_decoded = set()
         paused_break = False  # v1.13: 用户暂停/停止后禁止自动合并
+        _pending_enc = []  # v1.70: async encode 队列 [(done_event, clip_index)]
 
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
@@ -4640,15 +4767,23 @@ class BSAIH3FilmFactory:
                         f"Decoding preview for clip {i + 1}/{len(clips)}",
                     )
                     _ff = _find_ffmpeg()
-                    print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'}")
-                    _decode_single_clip_preview(
+                    # v1.73: 重渲染(single_clip_replace)时 disk 链是局部链(segments 从
+                    # first_sel 开始, segments[0]=clip[first_sel]), decode/AV 输出必须用
+                    # 局部索引 i-first_sel, 否则 clip_index 越界导致 preview 解码失败.
+                    _seg_off = first_sel if (single_clip_replace and first_sel is not None and first_sel > 0) else 0
+                    _seg_idx = (i - _seg_off) if i >= _seg_off else i
+                    print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'} seg_idx={_seg_idx} seg_off={_seg_off}")
+                    _dec_res = _decode_single_clip_preview(
                         owner=owner,
-                        clip_index=i,
+                        clip_index=_seg_idx,
                         vae=vae,
                         audio_vae=audio_vae,
                         fps=float(FPS),
                         ffmpeg=_ff,
+                        async_encode=True,
                     )
+                    if isinstance(_dec_res, dict) and _dec_res.get("async"):
+                        _pending_enc.append((_dec_res["done_event"], _seg_idx))
                 except Exception as _pv_err:
                     # Preview decode failure should never abort the main render loop.
                     _preview_error = str(_pv_err)
@@ -4668,13 +4803,21 @@ class BSAIH3FilmFactory:
             # Each CLIP is decoded to IMAGE+AUDIO as soon as it finishes and
             # emitted before the next clip starts (streaming output).
             # v1.21: 单 clip 重渲染也执行 per-clip AV 解码，推送 WebSocket 给 BSAI Premiere Pro。
-            print(f"[H3 Extender] DEBUG AV decode clip={i} cond={not paused_break and int(output_image_audio)}")
-            if not paused_break and int(output_image_audio):
+            # v1.70: AV 输出延后处理——encode 在后台线程, blob 落盘后输出才可读.
+            # encode ~55s << 一采+二采 ~29min, 队列首项已完成的先输出(FIFO 保持
+            # clip 序); 本段刚启动未完成的留到下段处理. 暂停停止时跳过输出.
+            print(f"[H3 Extender] DEBUG AV decode clip={i} cond={not paused_break and int(output_image_audio)} pending={len(_pending_enc)}")
+            # v1.73b: 消费端防御性重算 seg 偏移(避免 decode 异常路径下 _seg_off 未定义)
+            _seg_off_cur = first_sel if (single_clip_replace and first_sel is not None and first_sel > 0) else 0
+            while _pending_enc and _pending_enc[0][0].is_set():
+                _ev_done, _j = _pending_enc.pop(0)
+                if not (not paused_break and int(output_image_audio)):
+                    continue
                 try:
-                    cimg, caud = _decode_clip_to_av(owner, i, vae, audio_vae, float(FPS))
+                    cimg, caud = _decode_clip_to_av(owner, _j, vae, audio_vae, float(FPS))
                     if cimg is not None and int(cimg.shape[0]) > 0:
                         out_images.append(cimg)
-                        _av_decoded.add(i)
+                        _av_decoded.add(_j)
                     if caud is not None:
                         out_audios.append(caud)
 
@@ -4682,28 +4825,28 @@ class BSAIH3FilmFactory:
                     # the path over WebSocket so BSAI Premiere Pro can
                     # auto-import the clip immediately (per-clip streaming).
                     _clip_video_path = None
-                    _clip_name = clips[i].get("name", f"CLIP{i+1}") if i < len(clips) else f"CLIP{i+1}"
+                    _clip_name = clips[_j + _seg_off_cur].get("name", f"CLIP{_j + _seg_off_cur + 1}") if (_j + _seg_off_cur) < len(clips) else f"CLIP{_j + _seg_off_cur + 1}"
                     try:
                         _m = _load_manifest_from_paths(data_path, manifest_path)
                         if _m and _m.get("segments"):
                             _segs = [dict(x) for x in _m["segments"]]
-                            if i < len(_segs):
-                                _blob = _segs[i].get("decoded_mp4_blob")
+                            if _j < len(_segs):
+                                _blob = _segs[_j].get("decoded_mp4_blob")
                                 if _blob is not None:
                                     import folder_paths as _fp
                                     _temp_dir = Path(_fp.get_temp_directory())
-                                    _out_name = f"h3_clip_{owner}_{i+1}_{int(time.time())}.mp4"
+                                    _out_name = f"h3_clip_{owner}_{_j + _seg_off_cur + 1}_{int(time.time())}.mp4"
                                     _out_path = _temp_dir / _out_name
                                     _copy_blob_to_file(data_path, _blob, _out_path)
                                     _clip_video_path = str(_out_path)
-                                    print(f"[H3 Extender] per-clip video ready: clip {i+1} -> {_out_path}")
+                                    print(f"[H3 Extender] per-clip video ready: clip {_j+1} -> {_out_path}")
                     except Exception as _ve:
-                        print(f"[H3 Extender] per-clip video extract failed clip={i}: {_ve}")
+                        print(f"[H3 Extender] per-clip video extract failed clip={_j}: {_ve}")
 
-                    _send_clip_av_output(owner, i, len(clips), cimg, caud,
+                    _send_clip_av_output(owner, _j, len(clips), cimg, caud,
                                           video_path=_clip_video_path, clip_name=_clip_name)
                 except Exception as _av_err:
-                    print(f"[H3 Extender] per-clip AV output failed clip={i}: {_av_err}")
+                    print(f"[H3 Extender] per-clip AV output failed clip={_j}: {_av_err}")
 
 
         # All clips rendered; the last handle is the active cached prefix
@@ -5078,6 +5221,14 @@ class BSAIH3FilmFactory:
                 traceback.print_exc()
 
         # Decode any validated (cached, not re-generated) clips so the
+        # v1.70: 等待所有 async encode 完成(blob 落盘), final AV 输出才能读全.
+        for _ev_done, _j in _pending_enc:
+            try:
+                _ev_done.wait(timeout=600)
+            except Exception:
+                pass
+        _pending_enc = []
+
         # IMAGE/AUDIO outputs always carry the complete film.
         # v1.18: render_partial 静默，跳过 AV 汇总解码。
         if int(output_image_audio) and not suppress_auto_merge:
