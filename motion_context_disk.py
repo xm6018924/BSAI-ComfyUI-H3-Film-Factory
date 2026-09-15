@@ -188,7 +188,12 @@ CACHE_TYPE = "H3_MOTION_DISK_CACHE"
 _LOG = logging.getLogger("minimax_h3_tail_from_latent.motion_context_disk")
 
 _NODE_DIR = Path(__file__).resolve().parent
-_CACHE_ROOT = _NODE_DIR / "cache"
+# v1.82 (2026-09-15 fix #12): 链缓存目录迁移到 ComfyUI 根下独立目录。
+# 4090 重启后 custom_nodes\...\cache 被外部(启动脚本/Gigabyte 备份软件等)
+# 整个清空重建, 443MB h3cache 链缓存丢失只能从头渲染。新目录
+# bsai_h3_chain_cache 位于 ComfyUI 根下, 与 custom_nodes 和系统 Temp 隔离,
+# 避开常见清空源。旧目录数据由 _ensure_cache_root() 首次使用时自动迁移。
+_CACHE_ROOT = (_NODE_DIR.parents[1] / "bsai_h3_chain_cache")
 _DATA_MAGIC = b"H3MCACHE12\x00"
 _DATA_START = len(_DATA_MAGIC)
 
@@ -239,6 +244,40 @@ def _comfyui_temp_dir():
 
 def _ensure_cache_root():
     _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    # v1.82: 首次使用新目录时, 若旧 cache 目录有链缓存(h3cache/json/ref2va),
+    # 自动复制迁移, 避免升级后旧链丢失。只迁移 >1KB 的持久文件, 不迁临时垃圾。
+    _flag = _CACHE_ROOT / ".migrated_v182"
+    if not _flag.exists():
+        try:
+            _legacy = _NODE_DIR / "cache"
+            if _legacy.exists() and _legacy != _CACHE_ROOT:
+                import shutil as _sh82
+                _moved = False
+                for _p in _legacy.iterdir():
+                    try:
+                        if _p.is_dir():
+                            _dst = _CACHE_ROOT / _p.name
+                            if not _dst.exists():
+                                _sh82.copytree(_p, _dst)
+                                _moved = True
+                        elif _p.suffix in (".json", ".h3cache", ".bak", ".pt", ".mp4") \
+                                and _p.stat().st_size > 1024:
+                            _dst = _CACHE_ROOT / _p.name
+                            if not _dst.exists():
+                                _sh82.copy2(_p, _dst)
+                                _moved = True
+                    except Exception:
+                        pass
+                _flag.touch()
+                if _moved:
+                    print("[H3 Extender] v1.82 链缓存已迁移: "
+                          "custom_nodes/.../cache -> ComfyUI/bsai_h3_chain_cache")
+        except Exception as _m82:
+            try:
+                _flag.touch()
+            except Exception:
+                pass
+            print(f"[H3 Extender] v1.82 缓存迁移失败(可忽略): {_m82}")
     return _CACHE_ROOT
 
 
