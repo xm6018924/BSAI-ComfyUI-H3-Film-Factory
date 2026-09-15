@@ -1,5 +1,5 @@
 {
-  "id": "30c7f10a-4fca-44f3-b155-d2703cbfee3d",
+  "id": "4030a9bc-8c26-4240-9520-991654473328",
   "revision": 0,
   "last_node_id": 1334,
   "last_link_id": 484,
@@ -16,7 +16,7 @@
         26
       ],
       "flags": {},
-      "order": 46,
+      "order": 48,
       "mode": 4,
       "inputs": [
         {
@@ -64,7 +64,7 @@
         956.467614743495
       ],
       "flags": {},
-      "order": 56,
+      "order": 58,
       "mode": 4,
       "inputs": [
         {
@@ -370,7 +370,7 @@
         98
       ],
       "flags": {},
-      "order": 62,
+      "order": 64,
       "mode": 4,
       "inputs": [
         {
@@ -714,7 +714,7 @@
         106
       ],
       "flags": {},
-      "order": 35,
+      "order": 37,
       "mode": 4,
       "inputs": [
         {
@@ -807,7 +807,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 39,
+      "order": 41,
       "mode": 4,
       "inputs": [
         {
@@ -878,7 +878,7 @@
         76.00000000000006
       ],
       "flags": {},
-      "order": 50,
+      "order": 52,
       "mode": 4,
       "inputs": [
         {
@@ -927,7 +927,7 @@
         76
       ],
       "flags": {},
-      "order": 49,
+      "order": 51,
       "mode": 4,
       "inputs": [
         {
@@ -976,7 +976,7 @@
         88.70184960778016
       ],
       "flags": {},
-      "order": 47,
+      "order": 49,
       "mode": 4,
       "inputs": [
         {
@@ -1025,7 +1025,7 @@
         76
       ],
       "flags": {},
-      "order": 53,
+      "order": 55,
       "mode": 4,
       "inputs": [
         {
@@ -1074,7 +1074,7 @@
         76.00000000000006
       ],
       "flags": {},
-      "order": 54,
+      "order": 56,
       "mode": 4,
       "inputs": [
         {
@@ -1314,7 +1314,12 @@
           "二采输出结果": false,
           "BSAI Sol-H3 Loader (极速版)": true,
           "BSAI VDN-H3 Loader · 权重加载（基座+线性分支+LoRA）": true,
-          "Lora 组合": false
+          "Lora 组合": false,
+          "① FastH3 链路: 开关=OFF  ② VDN 链路: 开关=ON ": true,
+          "① FastH3=OFF  ② VDN 链路: 开关=ON": true,
+          "① FastH3=OFF  ② VDN =ON": true,
+          "画幅比例+像素大小选择": true,
+          "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json": true
         },
         "managerMode": "custom",
         "customManagedGroups": [
@@ -1597,7 +1602,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 59,
+      "order": 61,
       "mode": 4,
       "inputs": [
         {
@@ -1670,7 +1675,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 36,
+      "order": 38,
       "mode": 4,
       "inputs": [
         {
@@ -1806,7 +1811,7 @@
         78
       ],
       "flags": {},
-      "order": 57,
+      "order": 59,
       "mode": 4,
       "inputs": [
         {
@@ -1883,7 +1888,7 @@
         86
       ],
       "flags": {},
-      "order": 40,
+      "order": 42,
       "mode": 4,
       "inputs": [
         {
@@ -1950,7 +1955,7 @@
         592.3301397205264
       ],
       "flags": {},
-      "order": 45,
+      "order": 47,
       "mode": 4,
       "inputs": [
         {
@@ -2055,7 +2060,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 38,
+      "order": 40,
       "mode": 4,
       "inputs": [
         {
@@ -2104,7 +2109,7 @@
         220.4102913062394
       ],
       "flags": {},
-      "order": 60,
+      "order": 62,
       "mode": 4,
       "inputs": [
         {
@@ -2154,7 +2159,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 37,
+      "order": 39,
       "mode": 4,
       "inputs": [
         {
@@ -2250,7 +2255,7 @@
         338
       ],
       "flags": {},
-      "order": 63,
+      "order": 65,
       "mode": 4,
       "inputs": [
         {
@@ -2332,7 +2337,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 64,
+      "order": 66,
       "mode": 4,
       "inputs": [
         {
@@ -2389,7 +2394,7 @@
         88
       ],
       "flags": {},
-      "order": 52,
+      "order": 54,
       "mode": 4,
       "inputs": [
         {
@@ -2438,7 +2443,7 @@
         268
       ],
       "flags": {},
-      "order": 42,
+      "order": 44,
       "mode": 4,
       "inputs": [
         {
@@ -2536,7 +2541,7 @@
         88.70184960778016
       ],
       "flags": {},
-      "order": 51,
+      "order": 53,
       "mode": 4,
       "inputs": [
         {
@@ -2787,7 +2792,12 @@
           "二采输出结果": false,
           "BSAI Sol-H3 Loader (极速版)": true,
           "BSAI VDN-H3 Loader · 权重加载（基座+线性分支+LoRA）": true,
-          "Lora 组合": false
+          "Lora 组合": false,
+          "① FastH3 链路: 开关=OFF  ② VDN 链路: 开关=ON ": true,
+          "① FastH3=OFF  ② VDN 链路: 开关=ON": true,
+          "① FastH3=OFF  ② VDN =ON": true,
+          "画幅比例+像素大小选择": true,
+          "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json": true
         },
         "managerMode": "custom",
         "customManagedGroups": [
@@ -2990,7 +3000,7 @@
           },
           {
             "id": 1787495037261.793,
-            "group_name": "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）",
+            "group_name": "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json",
             "enabled": true,
             "linkage": {
               "on_enable": [],
@@ -3078,7 +3088,6 @@
           "多参生视频 = ture ；图生视频 = False": true,
           "图片输入区": true,
           "BSAI MotionFix 重拍 ⑮ PDD 8步加速 (官方Acc)": false,
-          "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）": true,
           "BSAI① FastH3 专用加载器 (Dense兼容)": false,
           "Minimax H3 官版模型": true,
           "Minimax-h3_Singularity_ref2va_v1.3": true,
@@ -3110,18 +3119,23 @@
           "二采输出结果": false,
           "BSAI Sol-H3 Loader (极速版)": true,
           "BSAI VDN-H3 Loader · 权重加载（基座+线性分支+LoRA）": true,
-          "Lora 组合": false
+          "Lora 组合": false,
+          "① FastH3 链路: 开关=OFF  ② VDN 链路: 开关=ON ": true,
+          "① FastH3=OFF  ② VDN 链路: 开关=ON": true,
+          "① FastH3=OFF  ② VDN =ON": true,
+          "画幅比例+像素大小选择": true,
+          "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json": true
         },
         "managerMode": "custom",
         "customManagedGroups": [
           "BSAI_H3_Film_Factory_分镜脚本生成工作流 v1.0",
-          "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）",
+          "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json",
           "BSAI_资产库生成工作流 Asset_Library_Auto_List_v1.0 (v1.0-自动-手动2in1)"
         ],
         "customGroupOrder": [
           "BSAI_H3_Film_Factory_分镜脚本生成工作流 v1.0",
           "BSAI_资产库生成工作流 Asset_Library_Auto_List_v1.0 (v1.0-自动-手动2in1)",
-          "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）"
+          "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json"
         ],
         "enableTabs": false,
         "tabWidth": 65,
@@ -3205,7 +3219,7 @@
         },
         {
           "id": 1787495037261.793,
-          "group_name": "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）",
+          "group_name": "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json",
           "enabled": true,
           "linkage": {
             "on_enable": [],
@@ -3254,13 +3268,13 @@
       "managerMode": "custom",
       "customManagedGroups": [
         "BSAI_H3_Film_Factory_分镜脚本生成工作流 v1.0",
-        "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）",
+        "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json",
         "BSAI_资产库生成工作流 Asset_Library_Auto_List_v1.0 (v1.0-自动-手动2in1)"
       ],
       "customGroupOrder": [
         "BSAI_H3_Film_Factory_分镜脚本生成工作流 v1.0",
         "BSAI_资产库生成工作流 Asset_Library_Auto_List_v1.0 (v1.0-自动-手动2in1)",
-        "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）"
+        "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json"
       ]
     },
     {
@@ -3399,7 +3413,7 @@
         461.5578714499309
       ],
       "flags": {},
-      "order": 41,
+      "order": 43,
       "mode": 4,
       "inputs": [
         {
@@ -3552,7 +3566,7 @@
         661.1967529145334
       ],
       "flags": {},
-      "order": 65,
+      "order": 67,
       "mode": 4,
       "inputs": [
         {
@@ -3617,7 +3631,7 @@
         88
       ],
       "flags": {},
-      "order": 48,
+      "order": 50,
       "mode": 4,
       "inputs": [
         {
@@ -3732,7 +3746,7 @@
         312
       ],
       "flags": {},
-      "order": 43,
+      "order": 45,
       "mode": 4,
       "inputs": [
         {
@@ -4082,7 +4096,7 @@
         3206.000000000001
       ],
       "flags": {},
-      "order": 58,
+      "order": 60,
       "mode": 0,
       "inputs": [
         {
@@ -4314,7 +4328,7 @@
         1,
         "39",
         0,
-        "{\"version\":1,\"clips\":[{\"id\":\"clip_1\",\"name\":\"\",\"prompt\":\"：高楼天台-剑光如虹 武打模板：combat_sword_duel｜Trigger Words｜触发词：prfight1 0-3秒：极缓推、中景。冷白晨光从背后切入，凌薇@图1踏出天台门，一号杀手自水箱后闪出，汉剑2直刺凌薇@图1咽喉。凌薇@图1侧身以钛合金保险箱1格挡汉剑2剑尖，火星四溅。音效：汉剑2剑尖刮过钛合金保险箱1表面的尖锐金属摩擦声，凌薇@图1高跟短靴踏碎积水声。 3-6秒：手持微晃、中近景。剑光切分晨雾，一号杀手连劈三剑，凌薇@图1旋身贴剑走位，乌黑马尾甩出弧线，反手以掌根拍击汉剑2剑脊。音效：衣料破风声，三记金属碰撞声。 6-9秒：环绕、中景。凌薇@图1低身扫堂腿，一号杀手后跳避开，汉剑2剑尖下撩。凌薇@图1借势前翻，白色长筒袜在空中划出弧线，落地于一号杀手身侧。音效：高跟短靴碾地声，汉剑2剑风呼啸。 9-12秒：微移、近景。凌薇@图1抓住汉剑2格挡空隙，银质腰链甩动，一记高鞭腿踢中一号杀手持剑手腕，汉剑2脱手旋转飞起，钉入女儿墙水泥缝。音效：鞭腿破风，汉剑2钉入水泥的闷响。 12-15秒：升降、中全景。凌薇@图1一记旋身侧踹将一号杀手踹向天台边缘护栏，一号杀手翻越护栏坠向消防梯。凌薇@图1整理白色皮夹克衣领，转身走向楼梯间。音效：重物坠落声，天台风声。\",\"seed\":2156347159019848,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_promptEl\":{},\"_storyboardFilled\":true},{\"id\":\"clip_2_mu2obajk\",\"name\":\"\",\"prompt\":\"：旧城窄巷-警棍对短刀 武打模板：wd_baton_vs_knife｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。暖黄路灯与冷蓝霓虹交叠，凌薇@图1步入窄巷，二号杀手自侧门冲出，短刀直削凌薇@图1颈侧。凌薇@图1甩出伸缩警棍格挡，刀刃刮过棍身火花四溅。音效：短刀刃刮过伸缩警棍的金属刮擦声，高跟短靴踏入积水声。 3-6秒：微移、中近景。二号杀手翻腕削腕，凌薇@图1伸缩警棍下劈反劈，连续三记低扫。二号杀手立刀格挡后退，撞翻墙角纸箱。音效：刀刃与警棍碰撞声，纸箱坍塌声。 6-9秒：环绕、中景。凌薇@图1借墙反蹬，身体横空，伸缩警棍斜劈打落短刀，短刀滑入排水沟。二号杀手赤手后退。音效：高跟短靴蹬墙声，伸缩警棍破风声，短刀落水声。 9-12秒：手持微晃、近景。凌薇@图1落地贴身，一记膝撞击中二号杀手腹部，二号杀手躬身后退，被压进晾衣绳堆，衣物翻落罩住其头脸。音效：膝撞闷响，布料撕裂声。 12-15秒：极缓推、中全景。凌薇@图1收回伸缩警棍，踏过积水倒影，头也不回走出巷口。二号杀手掀开衣物半跪喘息。音效：高跟短靴踩水声，晾衣绳吱呀声。\",\"seed\":5351704745624641,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_3_mu2obajk\",\"name\":\"\",\"prompt\":\"：地铁车厢-飞镖雨 武打模板：combat_hidden_weapons｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。地铁进站急停，冷白灯光闪烁，三号杀手自车厢另一端甩出六棱飞镖雨。凌薇@图1俯身弯腰，六棱飞镖钉入座椅与金属扶手。音效：六棱飞镖钉入金属的钝响，地铁刹车声。 3-6秒：环绕、中近景。凌薇@图1沿扶手杆荡起，身体横空，白色超短裙裙摆翻飞，空中踢回两枚六棱飞镖。三号杀手侧滚避开。音效：布料破风声，六棱飞镖旋转声。 6-9秒：微移、近景。三号杀手再掷三枚六棱飞镖，凌薇@图1落地以钛合金保险箱格挡，飞镖钉入箱面。凌薇@图1顺势滑步贴近。音效：六棱飞镖钉入钛合金保险箱箱面闷响。 9-12秒：手持微晃、中景。凌薇@图1贴身擒住三号杀手手腕，借离心力旋转，将剩余六棱飞镖甩飞钉入广告灯箱，灯箱爆裂冷光四溅。音效：灯箱碎裂声，六棱飞镖入墙声。 12-15秒：极缓推、中全景。车门开启，凌薇@图1将三号杀手推出车厢，三号杀手跌落在站台上。凌薇@图1整理乌黑马尾，走出车厢。音效：车门蜂鸣，高跟短靴踏站台声。\",\"seed\":734105989266250,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_4_mu2obajk\",\"name\":\"\",\"prompt\":\"：高架快速路-红缨枪 武打模板：wd_spear_vs_saber｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。橙红逆光中，凌薇@图1驾驶黑色机车疾驰，四号杀手驾驶摩托并排逼近，红缨枪横扫刺来。凌薇@图1俯身压把，枪尖擦过白色皮夹克肩部。音效：引擎轰鸣，红缨枪枪尖破风声。 3-6秒：环绕、中全景。四号杀手回枪点刺连扎，凌薇@图1侧身夹住枪杆，借机车速度拖拽四号杀手。两车缠斗，在车流缝隙中穿行。音效：引擎轰鸣，红缨枪枪杆刮擦声。 6-9秒：升降、中景。凌薇@图1松开车把，跃起踏过四号杀手车头，空中夺枪，反手横扫。四号杀手侧倾避让。音效：高跟短靴踏车头声，红缨枪横扫破风。 9-12秒：微移、中全景。凌薇@图1落回自己机车，红缨枪横扫将四号杀手扫下高架护栏。四号杀手坠向桥下，摩托翻滚倒地。音效：重物坠地声，摩托刮擦火花声。 12-15秒：极缓推、大全景。凌薇@图1单手弃枪，红缨枪插入护栏缝隙，她拧油门加速冲出逆光，乌黑马尾在风中拉成直线。音效：引擎轰鸣渐远，风声。\",\"seed\":4654356415525557,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_5_mu2obajk\",\"name\":\"\",\"prompt\":\"：城中村屋顶-一对多突围 武打模板：combat_one_vs_many｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。橙红夕照下，凌薇@图1跃上屋顶，钢管悍匪甲与钢管悍匪乙从两侧围拢，酒瓶醉汉自前方逼近。凌薇@图1低身滑步穿过第一排，银质腰链甩动。音效：脚步声，钢管拖地声。 3-6秒：环绕、中近景。凌薇@图1一记肘击击中钢管悍匪甲下颌，钢管悍匪甲后仰倒地。凌薇@图1回身鞭腿扫倒钢管悍匪乙。凌薇@图1再以掌刀劈中酒瓶醉汉持酒瓶手腕，酒瓶脱手落地碎裂。音效：肘击闷响，酒瓶落地碎裂声。 6-9秒：升降、中景。砍刀狂徒挥砍刀横扫，铁链壮汉甩铁链锁喉。凌薇@图1弯腰躲过砍刀，反手抓住铁链借力荡起，双腿夹住铁链壮汉头部旋身将铁链壮汉甩倒。音效：砍刀破风，铁链哗啦声。 9-12秒：手持微晃、中近景。棒球棍痞子挥棒球棍砸来，双节棍瘦猴甩双节棍连击。凌薇@图1侧闪避开棒球棍，贴身以肘破双节棍节奏，一记回旋踢同时命中棒球棍痞子与双节棍瘦猴面部。音效：棒球棍砸空声，双节棍碰撞声，踢击闷响。 12-15秒：极缓推、中全景。徒手大汉从背后扑来，凌薇@图1转身一记高扫踢中徒手大汉太阳穴，徒手大汉侧倒于晒台边缘。钢管悍匪甲仰卧于左侧水箱旁，钢管悍匪乙趴伏于晾衣绳下，酒瓶醉汉蜷缩于墙角，砍刀狂徒半跪于太阳能板前，铁链壮汉仰躺于晒台中缝，棒球棍痞子侧卧于排水管边，双节棍瘦猴蜷伏于天台门槛处。凌薇@图1立于屋顶边沿，乌黑马尾在橙红夕照中飞扬。音效：重物倒地声，凌薇@图1呼吸声。\",\"seed\":6096364782452644,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_6_mu2obajk\",\"name\":\"\",\"prompt\":\"：集装箱码头-关刀对双刀 武打模板：wd_guandao_vs_twinblades｜Trigger Words｜触发词：prfight1 0-3秒：升降、中景。青蓝暮色下，凌薇@图1从集装箱顶跃下，六号杀手双刀出鞘，左右开弓。凌薇@图1脚踢起靠墙的关刀接住，长柄横扫拉开距离。音效：高跟短靴落地声，关刀破风。 3-6秒：手持微晃、中近景。六号杀手双刀滚地切入近身，凌薇@图1挂刀封挡，刀光在集装箱壁溅出火星。六号杀手双刀连斩。音效：双刀斩中关刀刀杆的金属碰撞声，火星滋滋声。 6-9秒：环绕、中景。凌薇@图1全身扫刀逼退六号杀手，关刀横扫集装箱壁拉出刺目火花。六号杀手后跳避开。音效：关刀刮过集装箱壁刺耳声。 9-12秒：微移、近景。六号杀手双刀再进，凌薇@图1回身五花扫刀接俯身斩腿，关刀扫中六号杀手脚踝，双刀脱手飞出钉入集装箱。音效：关刀斩中脚踝闷响，双刀入箱声。 12-15秒：升降、中全景。凌薇@图1以关刀刀背拍倒六号杀手，纵身跃上集装箱顶。六号杀手倒在箱间通道。音效：刀背拍击声，凌薇@图1踏箱顶远去声。\",\"seed\":5788087800744172,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_7_mu2obajk\",\"name\":\"\",\"prompt\":\"：过街天桥-太极化劲 武打模板：ma_taiji_vs_sanda｜Trigger Words｜触发词：prfight1 0-3秒：微移、中景。蓝紫夜幕下，凌薇@图1行至天桥中央，七号杀手白袍老者拦路。凌薇@图1快拳快腿猛攻，七号杀手侧身以手背化解，借力将凌薇@图1引偏撞向桥栏。音效：衣料破风，鞋底摩擦桥面声。 3-6秒：环绕、中近景。七号杀手推手化劲连消带打，凌薇@图1连攻数招皆被卸力，身形被牵动旋转。围观人群在桥两侧避让。音效：手掌相触的绵密拍击声，围观人群惊呼声。 6-9秒：手持微晃、近景。凌薇@图1稳住重心，凝神以柔克柔，借七号杀手推手之力旋身反缠，银质腰链甩动。七号杀手重心被引。音效：鞋底碾地声，衣袍翻飞声。 9-12秒：升降、中景。凌薇@图1借力一记过肩摔将七号杀手摔向桥下绿化带，七号杀手白袍翻卷入灌木丛。音效：重物落入灌木声，枝叶断裂声。 12-15秒：极缓推、中全景。凌薇@图1整理衣领走过天桥，人群自动让开。桥下七号杀手缓缓起身，拱手行礼。音效：高跟短靴踏桥面声，远处车流声。\",\"seed\":3669047847787487,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_8_mu2obajk\",\"name\":\"\",\"prompt\":\"：商场中庭-泰拳肘膝 武打模板：ma_muaythai_vs_boxing｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。冷白天光透过玻璃穹顶，凌薇@图1穿行中庭，八号杀手自喷泉水池后冲出，组合拳连续轰击。凌薇@图1双臂格挡后退两步。音效：拳头砸中手臂闷响，喷泉流水声。 3-6秒：环绕、中近景。八号杀手顶膝横扫，凌薇@图1侧闪反击摆拳，八号杀手肘击回敬，玻璃护栏震出裂痕。两人在中庭大理石地面缠斗。音效：膝撞破风，肘击碰撞声。 6-9秒：微移、中景。凌薇@图1一套拳腿组合逼退八号杀手，八号杀手泰拳低扫反击，凌薇@图1抬腿格挡。两人分开对峙。音效：拳腿交击声，鞋底摩擦大理石声。 9-12秒：升降、中景。凌薇@图1侧闪避开八号杀手肘击，转身一记高扫踢中八号杀手太阳穴，八号杀手身躯旋转跌入喷泉水池，水花四溅。音效：高扫破风，落水巨大水花声。 12-15秒：极缓推、中全景。凌薇@图1快步穿过中庭，水珠沿白色长筒袜滑落。八号杀手从水池中撑起。音效：高跟短靴踏大理石声，水滴声。\",\"seed\":5795515146658663,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_9_mu2obajk\",\"name\":\"\",\"prompt\":\"：机场高速匝道-子弹时间闪避 武打模板：combat_bullet_time_dodge｜Trigger Words｜触发词：prfight1, prslow1 0-3秒：手持微晃、中景。金黄夕照下，凌薇@图1乘坐的出租车驶上匝道，九号杀手自天桥伏击，狙击步枪连发穿甲弹击碎挡风玻璃。凌薇@图1推开车门翻滚出车。音效：玻璃碎裂声，枪声，急刹声。 3-6秒：环绕、中近景（慢动作）。子弹时间开启，凌薇@图1身体后仰悬停，弹道擦过乌黑发梢，金属碎片在空气中凝滞。音效：空气凝滞的嗡鸣，弹壳落地声。 6-9秒：微移、特写（慢动作）。子弹时间持续，凌薇@图1在慢动作中伸手抓起地面钢制车牌，白色超短裙裙摆飘起凝滞。九号杀手在天桥调整狙击步枪枪口。音效：金属摩擦慢速拉长声。 9-12秒：手持微晃、中景。恢复正常速度，凌薇@图1甩出钢制车牌，车牌旋转击落天桥上九号杀手的狙击步枪瞄准镜，九号杀手后退躲避。音效：破风声，金属击中声，枪械坠落声。 12-15秒：极缓推、中全景。凌薇@图1翻身跃过护栏，跑向机场方向。九号杀手失去目标，天桥上只剩破碎的狙击步枪。音效：高跟短靴落地声，风声。\",\"seed\":7614902884076740,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_10_mu2obajk\",\"name\":\"\",\"prompt\":\"：机场停机坪-终结一击 武打模板：combat_finishing_blow｜Trigger Words｜触发词：prfight1, prfin1, prslow1 0-3秒：极缓推、中景。金色夕照铺满停机坪，直升机旋翼轰鸣，终极杀手自舱门跃出，战术刀直刺凌薇@图1。凌薇@图1眼神骤冷，侧身闪过。音效：直升机旋翼轰鸣，战术刀破风。 3-6秒：环绕、中近景。终极杀手战术刀连刺三刀，凌薇@图1旋身侧闪，一手拍中终极杀手持刀手腕，战术刀脱手旋转飞出。音效：掌拍手腕闷响，战术刀落地声。 6-9秒：微移、特写。终极杀手赤手扑来，凌薇@图1扎稳马步沉肩运气，银质腰链绷紧。终极杀手近身瞬间，凌薇@图1贴身寸劲爆发。音效：蓄力呼吸声，寸劲爆发闷响。 9-12秒：手持微晃、中景（慢动作）。慢镜终结，凌薇@图1一记寸拳击中终极杀手胸口，终极杀手身躯在慢动作中倒飞，撞上直升机舱门，舱门震响。音效：寸拳命中闷响慢速拉长，舱门震响。 12-15秒：极缓推、中全景。凌薇@图1走向雇主，取出百声AI芯递出，雇主接过百声AI芯。雇主说：“百声AI芯，终于到了。”（声线：中年男声，语速：中，情绪：沉稳）。凌薇@图1转身走向夕阳，乌黑马尾在旋翼气流中飞扬。音效：旋翼轰鸣，脚步声。\",\"seed\":2447564665149309,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}}],\"global_prompt\":\"[整体风格]：电影级写实风格，幽闭、紧迫且充满感官张力的氛围，冷调光影与肉体暖色形成强烈反差，都市追逃与冷兵器暴力美学。\\n\\n[角色档案]：\\n凌薇@图1，高马尾青年女性，乌黑高马尾长发，纯银发圈，黑色缎面抹胸打底，白色短款机车皮夹克，黑色超短裙，白色长筒袜，黑色高跟短靴，银质腰链，皮质反光与白皙肌肤形成高对比。\\n一号杀手@图2，西装剑客男性，油亮黑色背头短发，黑色墨镜，白色立领衬衫，黑色修身西装，黑色西裤，黑色尖头皮鞋，冷峻硬质面料泛哑光。\\n二号杀手@图3，短刀巷战男性，棕色侧分背头，黑色皮夹克，深灰紧身背心，黑色工装裤，黑色马丁靴，皮面磨损泛旧光。\\n三号杀手@图4，暗器女忍者，黑色高马尾，黑色忍者面罩，黑色紧身夜行衣，黑色护腕绑腿，黑色布靴，哑光黑布料隐于暗处。\\n四号杀手@图5，机车党男性，脏金色脏辫，黑色骷髅头巾，黑色铆钉皮背心，黑色皮裤，黑色机车靴，油亮皮革泛金属铆钉反光。\\n钢管悍匪甲@图6，光头壮汉，光头，黑色紧身背心，迷彩工装裤，黑色军靴，壮硕肌肉布满纹身。\\n钢管悍匪乙@图7，红发痞子，红色莫西干发型，红色机车皮衣，破洞牛仔裤，白色运动鞋。\\n酒瓶醉汉@图8，卷发醉汉，乱蓬蓬黑色卷发，脏污工装外套，卡其裤，黑色胶鞋，醉态踉跄。\\n砍刀狂徒@图9，赤膊刀客，黑色束发马尾，黑色皮围裙，深蓝牛仔裤，棕色工作靴，赤膊手臂。\\n铁链壮汉@图10，寸头力士，黑色寸头，无袖紧身黑T恤，深灰宽大工装裤，黑色重型靴。\\n棒球棍痞子@图11，棒球帽混混，反戴黑色棒球帽，白色宽松T恤，黑色运动裤，黑白滑板鞋。\\n双节棍瘦猴@图12，金发瘦子，金色挑染短发，黑色紧身背心，紧身牛仔裤，白色帆布鞋。\\n徒手大汉@图13，络腮胡壮汉，黑色络腮胡，敞胸红格衬衫，深蓝直筒裤，黑色皮靴，胸毛外露。\\n六号杀手@图14，双刀武生男性，黑色束发武生冠，白底黑边练功服，红色束腰，黑色布鞋，京剧武行身段。\\n七号杀手@图15，太极宗师男性，银白长发高束发髻，白色道袍，深灰长裤，白底黑布鞋，仙风道骨。\\n八号杀手@图16，泰拳冠军男性，黑色光头，缠红色麻绳拳头，黑色泰拳短裤，赤足，肌肉油亮。\\n九号杀手@图17，狙击手男性，黑色战术帽，深绿迷彩作战服，黑色战术手套，黑色战术靴。\\n终极杀手@图18，战术刀男性，黑色寸头，黑色战术背心，黑色作战长裤，黑色战术靴，下颌一道旧疤。\\n雇主@图19，中年男性，银灰背头短发，白色衬衫，深灰西装，深灰西裤，黑色皮鞋，金属腕表，面料挺括泛冷光。\\n\\n[道具档案]：\\n百声AI芯@图20，银蓝色菱形芯片，钛合金外壳，表面蚀刻发光电路纹理，拇指大小，边缘泛冰蓝冷光。\\n钛合金保险箱@图21，银灰色钛合金手提箱，哑光磨砂表面，四角铆钉，掌心大小，表面有细密划痕反光。\\n汉剑@图22，银白剑身，寒光凛冽，黑色缠绳剑柄，三尺长，剑刃泛冷冽白光。\\n伸缩警棍@图23，黑色金属警棍，哑光表面，收束时一掌长，甩出后二尺，握柄有防滑纹路。\\n六棱飞镖@图24，黑色六棱飞镖，哑光钢质，掌心大小，边缘锋利，飞行时泛幽冷微光。\\n红缨枪@图25，深红枪缨，银白枪头，乌木枪杆，丈二长，枪尖泛冷白寒光。\\n钢管@图26，灰色铁质钢管，直径四厘米，两尺长，表面锈迹与磨损反光。\\n酒瓶@图27，深绿色玻璃酒瓶，瓶身缠破旧布条，一尺长，反光浑浊。\\n砍刀@图28，灰白刀刃，红棕刀柄，两尺长，刀身有斑驳锈迹，刃口反光。\\n铁链@图29，黑色铁链，拇指粗环扣，五尺长，表面铁锈泛暗哑光。\\n棒球棍@图30，黑色铝制棒球棍，白色握带，三尺长，棍身泛金属亮光。\\n双节棍@图31，黑色钢质双节棍，银白铁链连接，两节各一尺，金属泛哑光。\\n关刀@图32，深绿刀杆，银白阔刃，红缨坠饰，七尺长，刀刃泛冷白寒光。\\n双刀@图33，银白双刀，黑色缠绳刀柄，各三尺，刀身泛冷冽白光。\\n狙击步枪@图34，墨绿战术涂装狙击步枪，黑色枪管，加装瞄准镜，五尺长，枪身泛哑光。\\n战术刀@图35，黑色战术刀，锯齿刀背，虎纹刀柄，一尺长，刀刃泛暗冷光。\\n短刀@图46，黑色战术短刀，全刃刀身，G10防滑刀柄，七寸长，配Kydex刀鞘，刀刃泛幽蓝冷光。\\n\\n[场景档案]：\\n高楼天台@图36（清晨），冷白晨光，雾霭未散。水泥地面泛潮，暗色水渍反光。四周女儿墙围合，边缘铁质护栏锈迹斑斑。天台中央立一座水箱，爬梯泛铁灰冷光。远景城市天际线在雾中若隐若现，停机坪起降灯光闪烁。\\n旧城窄巷@图37（雨后黄昏），暖黄路灯与冷蓝霓虹交叠，潮湿沥青地面倒映霓虹光斑。两侧老楼砖墙斑驳，晾衣绳横拉巷顶，衣物投下碎影。墙角堆叠纸箱与垃圾桶。远景巷口车流灯光拉成光带。\\n地铁车厢@图38（深夜），冷白荧光灯管，车厢地面金属反光。两侧座椅整齐排列，银色扶手杆纵向延伸，广告灯箱透出冷蓝光。车窗映出外部隧道灯影飞掠。车厢内空荡，仅零星吊环晃动。\\n高架快速路@图39（黄昏逆光），橙红夕阳逆光，天色昏黄。深灰沥青路面泛暖色反光。两侧金属护栏延伸，城市高楼剪影层叠。车流穿梭，车灯拉出红白光带。桥下是密集的旧城区屋顶。\\n城中村屋顶@图40（日暮），橙红夕照，屋顶连片。水泥晒台布满裂缝，积水泛金光。晾衣绳密布，衣物翻飞。太阳能热水器阵列泛金属反光。四周握手楼墙皮斑驳，远景城中村延绵至天际线。\\n集装箱码头@图41（暮色），青蓝冷光暮色，海风潮湿。深灰水泥地面泛油光，集装箱红蓝黄绿错落堆叠，金属箱壁反射夕照。龙门吊高耸，剪影如巨兽。远景海面泛银白波光，货轮灯火闪烁。\\n过街天桥@图42（华灯初上），蓝紫夜幕，桥面暖黄灯光。灰色桥面水泥泛光，金属护栏反光。两侧玻璃护栏映出城市霓虹。桥下车辆灯光川流。远景商业区霓虹灯牌层层叠叠。\\n商场中庭@图43（白天），冷白天光透过玻璃穹顶倾泻，中央喷泉水池泛银白水光。浅色大理石地面倒映穹顶光影。四周玻璃护栏，多层商铺霓虹闪烁。中庭挑空，扶梯交叉，人流在远景穿行。\\n机场高速匝道@图44（日落），金黄夕照低垂，天色橙红。深灰沥青路面泛暖光，白色车道线清晰。两侧水泥护栏延伸，匝道弯曲盘旋。远景机场航站楼玻璃幕墙反光刺目，飞机起降剪影。\\n机场停机坪@图45（黄昏金辉），金色夕照铺满停机坪，地面水泥泛暖金反光。远处一架直升机旋翼轰鸣，舱门敞开。周围地面标线纵横，引导灯闪烁。远景货运航站楼巨大剪影，天际线被夕阳染成金红。\"}",
+        "{\"version\":1,\"clips\":[{\"id\":\"clip_1\",\"name\":\"\",\"prompt\":\"：高楼天台-剑光如虹 武打模板：combat_sword_duel｜Trigger Words｜触发词：prfight1 0-3秒：极缓推、中景。冷白晨光从背后切入，凌薇@图1踏出天台门，一号杀手自水箱后闪出，汉剑2直刺凌薇@图1咽喉。凌薇@图1侧身以钛合金保险箱1格挡汉剑2剑尖，火星四溅。音效：汉剑2剑尖刮过钛合金保险箱1表面的尖锐金属摩擦声，凌薇@图1高跟短靴踏碎积水声。 3-6秒：手持微晃、中近景。剑光切分晨雾，一号杀手连劈三剑，凌薇@图1旋身贴剑走位，乌黑马尾甩出弧线，反手以掌根拍击汉剑2剑脊。音效：衣料破风声，三记金属碰撞声。 6-9秒：环绕、中景。凌薇@图1低身扫堂腿，一号杀手后跳避开，汉剑2剑尖下撩。凌薇@图1借势前翻，白色长筒袜在空中划出弧线，落地于一号杀手身侧。音效：高跟短靴碾地声，汉剑2剑风呼啸。 9-12秒：微移、近景。凌薇@图1抓住汉剑2格挡空隙，银质腰链甩动，一记高鞭腿踢中一号杀手持剑手腕，汉剑2脱手旋转飞起，钉入女儿墙水泥缝。音效：鞭腿破风，汉剑2钉入水泥的闷响。 12-15秒：升降、中全景。凌薇@图1一记旋身侧踹将一号杀手踹向天台边缘护栏，一号杀手翻越护栏坠向消防梯。凌薇@图1整理白色皮夹克衣领，转身走向楼梯间。音效：重物坠落声，天台风声。\",\"seed\":2272814619863259,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_promptEl\":{},\"_storyboardFilled\":true},{\"id\":\"clip_2_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：旧城窄巷-警棍对短刀 武打模板：wd_baton_vs_knife｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。暖黄路灯与冷蓝霓虹交叠，凌薇@图1步入窄巷，二号杀手自侧门冲出，短刀直削凌薇@图1颈侧。凌薇@图1甩出伸缩警棍格挡，刀刃刮过棍身火花四溅。音效：短刀刃刮过伸缩警棍的金属刮擦声，高跟短靴踏入积水声。 3-6秒：微移、中近景。二号杀手翻腕削腕，凌薇@图1伸缩警棍下劈反劈，连续三记低扫。二号杀手立刀格挡后退，撞翻墙角纸箱。音效：刀刃与警棍碰撞声，纸箱坍塌声。 6-9秒：环绕、中景。凌薇@图1借墙反蹬，身体横空，伸缩警棍斜劈打落短刀，短刀滑入排水沟。二号杀手赤手后退。音效：高跟短靴蹬墙声，伸缩警棍破风声，短刀落水声。 9-12秒：手持微晃、近景。凌薇@图1落地贴身，一记膝撞击中二号杀手腹部，二号杀手躬身后退，被压进晾衣绳堆，衣物翻落罩住其头脸。音效：膝撞闷响，布料撕裂声。 12-15秒：极缓推、中全景。凌薇@图1收回伸缩警棍，踏过积水倒影，头也不回走出巷口。二号杀手掀开衣物半跪喘息。音效：高跟短靴踩水声，晾衣绳吱呀声。\",\"seed\":194456425452037,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_3_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：地铁车厢-飞镖雨 武打模板：combat_hidden_weapons｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。地铁进站急停，冷白灯光闪烁，三号杀手自车厢另一端甩出六棱飞镖雨。凌薇@图1俯身弯腰，六棱飞镖钉入座椅与金属扶手。音效：六棱飞镖钉入金属的钝响，地铁刹车声。 3-6秒：环绕、中近景。凌薇@图1沿扶手杆荡起，身体横空，白色超短裙裙摆翻飞，空中踢回两枚六棱飞镖。三号杀手侧滚避开。音效：布料破风声，六棱飞镖旋转声。 6-9秒：微移、近景。三号杀手再掷三枚六棱飞镖，凌薇@图1落地以钛合金保险箱格挡，飞镖钉入箱面。凌薇@图1顺势滑步贴近。音效：六棱飞镖钉入钛合金保险箱箱面闷响。 9-12秒：手持微晃、中景。凌薇@图1贴身擒住三号杀手手腕，借离心力旋转，将剩余六棱飞镖甩飞钉入广告灯箱，灯箱爆裂冷光四溅。音效：灯箱碎裂声，六棱飞镖入墙声。 12-15秒：极缓推、中全景。车门开启，凌薇@图1将三号杀手推出车厢，三号杀手跌落在站台上。凌薇@图1整理乌黑马尾，走出车厢。音效：车门蜂鸣，高跟短靴踏站台声。\",\"seed\":256095642041083,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_4_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：高架快速路-红缨枪 武打模板：wd_spear_vs_saber｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。橙红逆光中，凌薇@图1驾驶黑色机车疾驰，四号杀手驾驶摩托并排逼近，红缨枪横扫刺来。凌薇@图1俯身压把，枪尖擦过白色皮夹克肩部。音效：引擎轰鸣，红缨枪枪尖破风声。 3-6秒：环绕、中全景。四号杀手回枪点刺连扎，凌薇@图1侧身夹住枪杆，借机车速度拖拽四号杀手。两车缠斗，在车流缝隙中穿行。音效：引擎轰鸣，红缨枪枪杆刮擦声。 6-9秒：升降、中景。凌薇@图1松开车把，跃起踏过四号杀手车头，空中夺枪，反手横扫。四号杀手侧倾避让。音效：高跟短靴踏车头声，红缨枪横扫破风。 9-12秒：微移、中全景。凌薇@图1落回自己机车，红缨枪横扫将四号杀手扫下高架护栏。四号杀手坠向桥下，摩托翻滚倒地。音效：重物坠地声，摩托刮擦火花声。 12-15秒：极缓推、大全景。凌薇@图1单手弃枪，红缨枪插入护栏缝隙，她拧油门加速冲出逆光，乌黑马尾在风中拉成直线。音效：引擎轰鸣渐远，风声。\",\"seed\":8318154542560768,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_5_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：城中村屋顶-一对多突围 武打模板：combat_one_vs_many｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。橙红夕照下，凌薇@图1跃上屋顶，钢管悍匪甲与钢管悍匪乙从两侧围拢，酒瓶醉汉自前方逼近。凌薇@图1低身滑步穿过第一排，银质腰链甩动。音效：脚步声，钢管拖地声。 3-6秒：环绕、中近景。凌薇@图1一记肘击击中钢管悍匪甲下颌，钢管悍匪甲后仰倒地。凌薇@图1回身鞭腿扫倒钢管悍匪乙。凌薇@图1再以掌刀劈中酒瓶醉汉持酒瓶手腕，酒瓶脱手落地碎裂。音效：肘击闷响，酒瓶落地碎裂声。 6-9秒：升降、中景。砍刀狂徒挥砍刀横扫，铁链壮汉甩铁链锁喉。凌薇@图1弯腰躲过砍刀，反手抓住铁链借力荡起，双腿夹住铁链壮汉头部旋身将铁链壮汉甩倒。音效：砍刀破风，铁链哗啦声。 9-12秒：手持微晃、中近景。棒球棍痞子挥棒球棍砸来，双节棍瘦猴甩双节棍连击。凌薇@图1侧闪避开棒球棍，贴身以肘破双节棍节奏，一记回旋踢同时命中棒球棍痞子与双节棍瘦猴面部。音效：棒球棍砸空声，双节棍碰撞声，踢击闷响。 12-15秒：极缓推、中全景。徒手大汉从背后扑来，凌薇@图1转身一记高扫踢中徒手大汉太阳穴，徒手大汉侧倒于晒台边缘。钢管悍匪甲仰卧于左侧水箱旁，钢管悍匪乙趴伏于晾衣绳下，酒瓶醉汉蜷缩于墙角，砍刀狂徒半跪于太阳能板前，铁链壮汉仰躺于晒台中缝，棒球棍痞子侧卧于排水管边，双节棍瘦猴蜷伏于天台门槛处。凌薇@图1立于屋顶边沿，乌黑马尾在橙红夕照中飞扬。音效：重物倒地声，凌薇@图1呼吸声。\",\"seed\":4108091328578559,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_6_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：集装箱码头-关刀对双刀 武打模板：wd_guandao_vs_twinblades｜Trigger Words｜触发词：prfight1 0-3秒：升降、中景。青蓝暮色下，凌薇@图1从集装箱顶跃下，六号杀手双刀出鞘，左右开弓。凌薇@图1脚踢起靠墙的关刀接住，长柄横扫拉开距离。音效：高跟短靴落地声，关刀破风。 3-6秒：手持微晃、中近景。六号杀手双刀滚地切入近身，凌薇@图1挂刀封挡，刀光在集装箱壁溅出火星。六号杀手双刀连斩。音效：双刀斩中关刀刀杆的金属碰撞声，火星滋滋声。 6-9秒：环绕、中景。凌薇@图1全身扫刀逼退六号杀手，关刀横扫集装箱壁拉出刺目火花。六号杀手后跳避开。音效：关刀刮过集装箱壁刺耳声。 9-12秒：微移、近景。六号杀手双刀再进，凌薇@图1回身五花扫刀接俯身斩腿，关刀扫中六号杀手脚踝，双刀脱手飞出钉入集装箱。音效：关刀斩中脚踝闷响，双刀入箱声。 12-15秒：升降、中全景。凌薇@图1以关刀刀背拍倒六号杀手，纵身跃上集装箱顶。六号杀手倒在箱间通道。音效：刀背拍击声，凌薇@图1踏箱顶远去声。\",\"seed\":7410654583552486,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_7_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：过街天桥-太极化劲 武打模板：ma_taiji_vs_sanda｜Trigger Words｜触发词：prfight1 0-3秒：微移、中景。蓝紫夜幕下，凌薇@图1行至天桥中央，七号杀手白袍老者拦路。凌薇@图1快拳快腿猛攻，七号杀手侧身以手背化解，借力将凌薇@图1引偏撞向桥栏。音效：衣料破风，鞋底摩擦桥面声。 3-6秒：环绕、中近景。七号杀手推手化劲连消带打，凌薇@图1连攻数招皆被卸力，身形被牵动旋转。围观人群在桥两侧避让。音效：手掌相触的绵密拍击声，围观人群惊呼声。 6-9秒：手持微晃、近景。凌薇@图1稳住重心，凝神以柔克柔，借七号杀手推手之力旋身反缠，银质腰链甩动。七号杀手重心被引。音效：鞋底碾地声，衣袍翻飞声。 9-12秒：升降、中景。凌薇@图1借力一记过肩摔将七号杀手摔向桥下绿化带，七号杀手白袍翻卷入灌木丛。音效：重物落入灌木声，枝叶断裂声。 12-15秒：极缓推、中全景。凌薇@图1整理衣领走过天桥，人群自动让开。桥下七号杀手缓缓起身，拱手行礼。音效：高跟短靴踏桥面声，远处车流声。\",\"seed\":500127677793701,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_8_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：商场中庭-泰拳肘膝 武打模板：ma_muaythai_vs_boxing｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。冷白天光透过玻璃穹顶，凌薇@图1穿行中庭，八号杀手自喷泉水池后冲出，组合拳连续轰击。凌薇@图1双臂格挡后退两步。音效：拳头砸中手臂闷响，喷泉流水声。 3-6秒：环绕、中近景。八号杀手顶膝横扫，凌薇@图1侧闪反击摆拳，八号杀手肘击回敬，玻璃护栏震出裂痕。两人在中庭大理石地面缠斗。音效：膝撞破风，肘击碰撞声。 6-9秒：微移、中景。凌薇@图1一套拳腿组合逼退八号杀手，八号杀手泰拳低扫反击，凌薇@图1抬腿格挡。两人分开对峙。音效：拳腿交击声，鞋底摩擦大理石声。 9-12秒：升降、中景。凌薇@图1侧闪避开八号杀手肘击，转身一记高扫踢中八号杀手太阳穴，八号杀手身躯旋转跌入喷泉水池，水花四溅。音效：高扫破风，落水巨大水花声。 12-15秒：极缓推、中全景。凌薇@图1快步穿过中庭，水珠沿白色长筒袜滑落。八号杀手从水池中撑起。音效：高跟短靴踏大理石声，水滴声。\",\"seed\":6716119429362838,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_9_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：机场高速匝道-子弹时间闪避 武打模板：combat_bullet_time_dodge｜Trigger Words｜触发词：prfight1, prslow1 0-3秒：手持微晃、中景。金黄夕照下，凌薇@图1乘坐的出租车驶上匝道，九号杀手自天桥伏击，狙击步枪连发穿甲弹击碎挡风玻璃。凌薇@图1推开车门翻滚出车。音效：玻璃碎裂声，枪声，急刹声。 3-6秒：环绕、中近景（慢动作）。子弹时间开启，凌薇@图1身体后仰悬停，弹道擦过乌黑发梢，金属碎片在空气中凝滞。音效：空气凝滞的嗡鸣，弹壳落地声。 6-9秒：微移、特写（慢动作）。子弹时间持续，凌薇@图1在慢动作中伸手抓起地面钢制车牌，白色超短裙裙摆飘起凝滞。九号杀手在天桥调整狙击步枪枪口。音效：金属摩擦慢速拉长声。 9-12秒：手持微晃、中景。恢复正常速度，凌薇@图1甩出钢制车牌，车牌旋转击落天桥上九号杀手的狙击步枪瞄准镜，九号杀手后退躲避。音效：破风声，金属击中声，枪械坠落声。 12-15秒：极缓推、中全景。凌薇@图1翻身跃过护栏，跑向机场方向。九号杀手失去目标，天桥上只剩破碎的狙击步枪。音效：高跟短靴落地声，风声。\",\"seed\":5813216497440244,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_10_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：机场停机坪-终结一击 武打模板：combat_finishing_blow｜Trigger Words｜触发词：prfight1, prfin1, prslow1 0-3秒：极缓推、中景。金色夕照铺满停机坪，直升机旋翼轰鸣，终极杀手自舱门跃出，战术刀直刺凌薇@图1。凌薇@图1眼神骤冷，侧身闪过。音效：直升机旋翼轰鸣，战术刀破风。 3-6秒：环绕、中近景。终极杀手战术刀连刺三刀，凌薇@图1旋身侧闪，一手拍中终极杀手持刀手腕，战术刀脱手旋转飞出。音效：掌拍手腕闷响，战术刀落地声。 6-9秒：微移、特写。终极杀手赤手扑来，凌薇@图1扎稳马步沉肩运气，银质腰链绷紧。终极杀手近身瞬间，凌薇@图1贴身寸劲爆发。音效：蓄力呼吸声，寸劲爆发闷响。 9-12秒：手持微晃、中景（慢动作）。慢镜终结，凌薇@图1一记寸拳击中终极杀手胸口，终极杀手身躯在慢动作中倒飞，撞上直升机舱门，舱门震响。音效：寸拳命中闷响慢速拉长，舱门震响。 12-15秒：极缓推、中全景。凌薇@图1走向雇主，取出百声AI芯递出，雇主接过百声AI芯。雇主说：“百声AI芯，终于到了。”（声线：中年男声，语速：中，情绪：沉稳）。凌薇@图1转身走向夕阳，乌黑马尾在旋翼气流中飞扬。音效：旋翼轰鸣，脚步声。\",\"seed\":6156376272888077,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}}],\"global_prompt\":\"[整体风格]：电影级写实风格，幽闭、紧迫且充满感官张力的氛围，冷调光影与肉体暖色形成强烈反差，都市追逃与冷兵器暴力美学。\\n\\n[角色档案]：\\n凌薇@图1，高马尾青年女性，乌黑高马尾长发，纯银发圈，黑色缎面抹胸打底，白色短款机车皮夹克，黑色超短裙，白色长筒袜，黑色高跟短靴，银质腰链，皮质反光与白皙肌肤形成高对比。\\n一号杀手@图2，西装剑客男性，油亮黑色背头短发，黑色墨镜，白色立领衬衫，黑色修身西装，黑色西裤，黑色尖头皮鞋，冷峻硬质面料泛哑光。\\n二号杀手@图3，短刀巷战男性，棕色侧分背头，黑色皮夹克，深灰紧身背心，黑色工装裤，黑色马丁靴，皮面磨损泛旧光。\\n三号杀手@图4，暗器女忍者，黑色高马尾，黑色忍者面罩，黑色紧身夜行衣，黑色护腕绑腿，黑色布靴，哑光黑布料隐于暗处。\\n四号杀手@图5，机车党男性，脏金色脏辫，黑色骷髅头巾，黑色铆钉皮背心，黑色皮裤，黑色机车靴，油亮皮革泛金属铆钉反光。\\n钢管悍匪甲@图6，光头壮汉，光头，黑色紧身背心，迷彩工装裤，黑色军靴，壮硕肌肉布满纹身。\\n钢管悍匪乙@图7，红发痞子，红色莫西干发型，红色机车皮衣，破洞牛仔裤，白色运动鞋。\\n酒瓶醉汉@图8，卷发醉汉，乱蓬蓬黑色卷发，脏污工装外套，卡其裤，黑色胶鞋，醉态踉跄。\\n砍刀狂徒@图9，赤膊刀客，黑色束发马尾，黑色皮围裙，深蓝牛仔裤，棕色工作靴，赤膊手臂。\\n铁链壮汉@图10，寸头力士，黑色寸头，无袖紧身黑T恤，深灰宽大工装裤，黑色重型靴。\\n棒球棍痞子@图11，棒球帽混混，反戴黑色棒球帽，白色宽松T恤，黑色运动裤，黑白滑板鞋。\\n双节棍瘦猴@图12，金发瘦子，金色挑染短发，黑色紧身背心，紧身牛仔裤，白色帆布鞋。\\n徒手大汉@图13，络腮胡壮汉，黑色络腮胡，敞胸红格衬衫，深蓝直筒裤，黑色皮靴，胸毛外露。\\n六号杀手@图14，双刀武生男性，黑色束发武生冠，白底黑边练功服，红色束腰，黑色布鞋，京剧武行身段。\\n七号杀手@图15，太极宗师男性，银白长发高束发髻，白色道袍，深灰长裤，白底黑布鞋，仙风道骨。\\n八号杀手@图16，泰拳冠军男性，黑色光头，缠红色麻绳拳头，黑色泰拳短裤，赤足，肌肉油亮。\\n九号杀手@图17，狙击手男性，黑色战术帽，深绿迷彩作战服，黑色战术手套，黑色战术靴。\\n终极杀手@图18，战术刀男性，黑色寸头，黑色战术背心，黑色作战长裤，黑色战术靴，下颌一道旧疤。\\n雇主@图19，中年男性，银灰背头短发，白色衬衫，深灰西装，深灰西裤，黑色皮鞋，金属腕表，面料挺括泛冷光。\\n\\n[道具档案]：\\n百声AI芯@图20，银蓝色菱形芯片，钛合金外壳，表面蚀刻发光电路纹理，拇指大小，边缘泛冰蓝冷光。\\n钛合金保险箱@图21，银灰色钛合金手提箱，哑光磨砂表面，四角铆钉，掌心大小，表面有细密划痕反光。\\n汉剑@图22，银白剑身，寒光凛冽，黑色缠绳剑柄，三尺长，剑刃泛冷冽白光。\\n伸缩警棍@图23，黑色金属警棍，哑光表面，收束时一掌长，甩出后二尺，握柄有防滑纹路。\\n六棱飞镖@图24，黑色六棱飞镖，哑光钢质，掌心大小，边缘锋利，飞行时泛幽冷微光。\\n红缨枪@图25，深红枪缨，银白枪头，乌木枪杆，丈二长，枪尖泛冷白寒光。\\n钢管@图26，灰色铁质钢管，直径四厘米，两尺长，表面锈迹与磨损反光。\\n酒瓶@图27，深绿色玻璃酒瓶，瓶身缠破旧布条，一尺长，反光浑浊。\\n砍刀@图28，灰白刀刃，红棕刀柄，两尺长，刀身有斑驳锈迹，刃口反光。\\n铁链@图29，黑色铁链，拇指粗环扣，五尺长，表面铁锈泛暗哑光。\\n棒球棍@图30，黑色铝制棒球棍，白色握带，三尺长，棍身泛金属亮光。\\n双节棍@图31，黑色钢质双节棍，银白铁链连接，两节各一尺，金属泛哑光。\\n关刀@图32，深绿刀杆，银白阔刃，红缨坠饰，七尺长，刀刃泛冷白寒光。\\n双刀@图33，银白双刀，黑色缠绳刀柄，各三尺，刀身泛冷冽白光。\\n狙击步枪@图34，墨绿战术涂装狙击步枪，黑色枪管，加装瞄准镜，五尺长，枪身泛哑光。\\n战术刀@图35，黑色战术刀，锯齿刀背，虎纹刀柄，一尺长，刀刃泛暗冷光。\\n短刀@图46，黑色战术短刀，全刃刀身，G10防滑刀柄，七寸长，配Kydex刀鞘，刀刃泛幽蓝冷光。\\n\\n[场景档案]：\\n高楼天台@图36（清晨），冷白晨光，雾霭未散。水泥地面泛潮，暗色水渍反光。四周女儿墙围合，边缘铁质护栏锈迹斑斑。天台中央立一座水箱，爬梯泛铁灰冷光。远景城市天际线在雾中若隐若现，停机坪起降灯光闪烁。\\n旧城窄巷@图37（雨后黄昏），暖黄路灯与冷蓝霓虹交叠，潮湿沥青地面倒映霓虹光斑。两侧老楼砖墙斑驳，晾衣绳横拉巷顶，衣物投下碎影。墙角堆叠纸箱与垃圾桶。远景巷口车流灯光拉成光带。\\n地铁车厢@图38（深夜），冷白荧光灯管，车厢地面金属反光。两侧座椅整齐排列，银色扶手杆纵向延伸，广告灯箱透出冷蓝光。车窗映出外部隧道灯影飞掠。车厢内空荡，仅零星吊环晃动。\\n高架快速路@图39（黄昏逆光），橙红夕阳逆光，天色昏黄。深灰沥青路面泛暖色反光。两侧金属护栏延伸，城市高楼剪影层叠。车流穿梭，车灯拉出红白光带。桥下是密集的旧城区屋顶。\\n城中村屋顶@图40（日暮），橙红夕照，屋顶连片。水泥晒台布满裂缝，积水泛金光。晾衣绳密布，衣物翻飞。太阳能热水器阵列泛金属反光。四周握手楼墙皮斑驳，远景城中村延绵至天际线。\\n集装箱码头@图41（暮色），青蓝冷光暮色，海风潮湿。深灰水泥地面泛油光，集装箱红蓝黄绿错落堆叠，金属箱壁反射夕照。龙门吊高耸，剪影如巨兽。远景海面泛银白波光，货轮灯火闪烁。\\n过街天桥@图42（华灯初上），蓝紫夜幕，桥面暖黄灯光。灰色桥面水泥泛光，金属护栏反光。两侧玻璃护栏映出城市霓虹。桥下车辆灯光川流。远景商业区霓虹灯牌层层叠叠。\\n商场中庭@图43（白天），冷白天光透过玻璃穹顶倾泻，中央喷泉水池泛银白水光。浅色大理石地面倒映穹顶光影。四周玻璃护栏，多层商铺霓虹闪烁。中庭挑空，扶梯交叉，人流在远景穿行。\\n机场高速匝道@图44（日落），金黄夕照低垂，天色橙红。深灰沥青路面泛暖光，白色车道线清晰。两侧水泥护栏延伸，匝道弯曲盘旋。远景机场航站楼玻璃幕墙反光刺目，飞机起降剪影。\\n机场停机坪@图45（黄昏金辉），金色夕照铺满停机坪，地面水泥泛暖金反光。远处一架直升机旋翼轰鸣，舱门敞开。周围地面标线纵横，引导灯闪烁。远景货运航站楼巨大剪影，天际线被夕阳染成金红。\"}",
         "manual",
         1,
         "{\"version\":2,\"refs\":[null,null,null,null,null,null,null,null,null]}",
@@ -4354,7 +4368,7 @@
         "denoise": 1,
         "context_length": "39",
         "audio_context_length": 0,
-        "clips_json": "{\"version\":1,\"clips\":[{\"id\":\"clip_1\",\"name\":\"\",\"prompt\":\"：高楼天台-剑光如虹 武打模板：combat_sword_duel｜Trigger Words｜触发词：prfight1 0-3秒：极缓推、中景。冷白晨光从背后切入，凌薇@图1踏出天台门，一号杀手自水箱后闪出，汉剑2直刺凌薇@图1咽喉。凌薇@图1侧身以钛合金保险箱1格挡汉剑2剑尖，火星四溅。音效：汉剑2剑尖刮过钛合金保险箱1表面的尖锐金属摩擦声，凌薇@图1高跟短靴踏碎积水声。 3-6秒：手持微晃、中近景。剑光切分晨雾，一号杀手连劈三剑，凌薇@图1旋身贴剑走位，乌黑马尾甩出弧线，反手以掌根拍击汉剑2剑脊。音效：衣料破风声，三记金属碰撞声。 6-9秒：环绕、中景。凌薇@图1低身扫堂腿，一号杀手后跳避开，汉剑2剑尖下撩。凌薇@图1借势前翻，白色长筒袜在空中划出弧线，落地于一号杀手身侧。音效：高跟短靴碾地声，汉剑2剑风呼啸。 9-12秒：微移、近景。凌薇@图1抓住汉剑2格挡空隙，银质腰链甩动，一记高鞭腿踢中一号杀手持剑手腕，汉剑2脱手旋转飞起，钉入女儿墙水泥缝。音效：鞭腿破风，汉剑2钉入水泥的闷响。 12-15秒：升降、中全景。凌薇@图1一记旋身侧踹将一号杀手踹向天台边缘护栏，一号杀手翻越护栏坠向消防梯。凌薇@图1整理白色皮夹克衣领，转身走向楼梯间。音效：重物坠落声，天台风声。\",\"seed\":2156347159019848,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_promptEl\":{},\"_storyboardFilled\":true},{\"id\":\"clip_2_mu2obajk\",\"name\":\"\",\"prompt\":\"：旧城窄巷-警棍对短刀 武打模板：wd_baton_vs_knife｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。暖黄路灯与冷蓝霓虹交叠，凌薇@图1步入窄巷，二号杀手自侧门冲出，短刀直削凌薇@图1颈侧。凌薇@图1甩出伸缩警棍格挡，刀刃刮过棍身火花四溅。音效：短刀刃刮过伸缩警棍的金属刮擦声，高跟短靴踏入积水声。 3-6秒：微移、中近景。二号杀手翻腕削腕，凌薇@图1伸缩警棍下劈反劈，连续三记低扫。二号杀手立刀格挡后退，撞翻墙角纸箱。音效：刀刃与警棍碰撞声，纸箱坍塌声。 6-9秒：环绕、中景。凌薇@图1借墙反蹬，身体横空，伸缩警棍斜劈打落短刀，短刀滑入排水沟。二号杀手赤手后退。音效：高跟短靴蹬墙声，伸缩警棍破风声，短刀落水声。 9-12秒：手持微晃、近景。凌薇@图1落地贴身，一记膝撞击中二号杀手腹部，二号杀手躬身后退，被压进晾衣绳堆，衣物翻落罩住其头脸。音效：膝撞闷响，布料撕裂声。 12-15秒：极缓推、中全景。凌薇@图1收回伸缩警棍，踏过积水倒影，头也不回走出巷口。二号杀手掀开衣物半跪喘息。音效：高跟短靴踩水声，晾衣绳吱呀声。\",\"seed\":5351704745624641,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_3_mu2obajk\",\"name\":\"\",\"prompt\":\"：地铁车厢-飞镖雨 武打模板：combat_hidden_weapons｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。地铁进站急停，冷白灯光闪烁，三号杀手自车厢另一端甩出六棱飞镖雨。凌薇@图1俯身弯腰，六棱飞镖钉入座椅与金属扶手。音效：六棱飞镖钉入金属的钝响，地铁刹车声。 3-6秒：环绕、中近景。凌薇@图1沿扶手杆荡起，身体横空，白色超短裙裙摆翻飞，空中踢回两枚六棱飞镖。三号杀手侧滚避开。音效：布料破风声，六棱飞镖旋转声。 6-9秒：微移、近景。三号杀手再掷三枚六棱飞镖，凌薇@图1落地以钛合金保险箱格挡，飞镖钉入箱面。凌薇@图1顺势滑步贴近。音效：六棱飞镖钉入钛合金保险箱箱面闷响。 9-12秒：手持微晃、中景。凌薇@图1贴身擒住三号杀手手腕，借离心力旋转，将剩余六棱飞镖甩飞钉入广告灯箱，灯箱爆裂冷光四溅。音效：灯箱碎裂声，六棱飞镖入墙声。 12-15秒：极缓推、中全景。车门开启，凌薇@图1将三号杀手推出车厢，三号杀手跌落在站台上。凌薇@图1整理乌黑马尾，走出车厢。音效：车门蜂鸣，高跟短靴踏站台声。\",\"seed\":734105989266250,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_4_mu2obajk\",\"name\":\"\",\"prompt\":\"：高架快速路-红缨枪 武打模板：wd_spear_vs_saber｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。橙红逆光中，凌薇@图1驾驶黑色机车疾驰，四号杀手驾驶摩托并排逼近，红缨枪横扫刺来。凌薇@图1俯身压把，枪尖擦过白色皮夹克肩部。音效：引擎轰鸣，红缨枪枪尖破风声。 3-6秒：环绕、中全景。四号杀手回枪点刺连扎，凌薇@图1侧身夹住枪杆，借机车速度拖拽四号杀手。两车缠斗，在车流缝隙中穿行。音效：引擎轰鸣，红缨枪枪杆刮擦声。 6-9秒：升降、中景。凌薇@图1松开车把，跃起踏过四号杀手车头，空中夺枪，反手横扫。四号杀手侧倾避让。音效：高跟短靴踏车头声，红缨枪横扫破风。 9-12秒：微移、中全景。凌薇@图1落回自己机车，红缨枪横扫将四号杀手扫下高架护栏。四号杀手坠向桥下，摩托翻滚倒地。音效：重物坠地声，摩托刮擦火花声。 12-15秒：极缓推、大全景。凌薇@图1单手弃枪，红缨枪插入护栏缝隙，她拧油门加速冲出逆光，乌黑马尾在风中拉成直线。音效：引擎轰鸣渐远，风声。\",\"seed\":4654356415525557,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_5_mu2obajk\",\"name\":\"\",\"prompt\":\"：城中村屋顶-一对多突围 武打模板：combat_one_vs_many｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。橙红夕照下，凌薇@图1跃上屋顶，钢管悍匪甲与钢管悍匪乙从两侧围拢，酒瓶醉汉自前方逼近。凌薇@图1低身滑步穿过第一排，银质腰链甩动。音效：脚步声，钢管拖地声。 3-6秒：环绕、中近景。凌薇@图1一记肘击击中钢管悍匪甲下颌，钢管悍匪甲后仰倒地。凌薇@图1回身鞭腿扫倒钢管悍匪乙。凌薇@图1再以掌刀劈中酒瓶醉汉持酒瓶手腕，酒瓶脱手落地碎裂。音效：肘击闷响，酒瓶落地碎裂声。 6-9秒：升降、中景。砍刀狂徒挥砍刀横扫，铁链壮汉甩铁链锁喉。凌薇@图1弯腰躲过砍刀，反手抓住铁链借力荡起，双腿夹住铁链壮汉头部旋身将铁链壮汉甩倒。音效：砍刀破风，铁链哗啦声。 9-12秒：手持微晃、中近景。棒球棍痞子挥棒球棍砸来，双节棍瘦猴甩双节棍连击。凌薇@图1侧闪避开棒球棍，贴身以肘破双节棍节奏，一记回旋踢同时命中棒球棍痞子与双节棍瘦猴面部。音效：棒球棍砸空声，双节棍碰撞声，踢击闷响。 12-15秒：极缓推、中全景。徒手大汉从背后扑来，凌薇@图1转身一记高扫踢中徒手大汉太阳穴，徒手大汉侧倒于晒台边缘。钢管悍匪甲仰卧于左侧水箱旁，钢管悍匪乙趴伏于晾衣绳下，酒瓶醉汉蜷缩于墙角，砍刀狂徒半跪于太阳能板前，铁链壮汉仰躺于晒台中缝，棒球棍痞子侧卧于排水管边，双节棍瘦猴蜷伏于天台门槛处。凌薇@图1立于屋顶边沿，乌黑马尾在橙红夕照中飞扬。音效：重物倒地声，凌薇@图1呼吸声。\",\"seed\":6096364782452644,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_6_mu2obajk\",\"name\":\"\",\"prompt\":\"：集装箱码头-关刀对双刀 武打模板：wd_guandao_vs_twinblades｜Trigger Words｜触发词：prfight1 0-3秒：升降、中景。青蓝暮色下，凌薇@图1从集装箱顶跃下，六号杀手双刀出鞘，左右开弓。凌薇@图1脚踢起靠墙的关刀接住，长柄横扫拉开距离。音效：高跟短靴落地声，关刀破风。 3-6秒：手持微晃、中近景。六号杀手双刀滚地切入近身，凌薇@图1挂刀封挡，刀光在集装箱壁溅出火星。六号杀手双刀连斩。音效：双刀斩中关刀刀杆的金属碰撞声，火星滋滋声。 6-9秒：环绕、中景。凌薇@图1全身扫刀逼退六号杀手，关刀横扫集装箱壁拉出刺目火花。六号杀手后跳避开。音效：关刀刮过集装箱壁刺耳声。 9-12秒：微移、近景。六号杀手双刀再进，凌薇@图1回身五花扫刀接俯身斩腿，关刀扫中六号杀手脚踝，双刀脱手飞出钉入集装箱。音效：关刀斩中脚踝闷响，双刀入箱声。 12-15秒：升降、中全景。凌薇@图1以关刀刀背拍倒六号杀手，纵身跃上集装箱顶。六号杀手倒在箱间通道。音效：刀背拍击声，凌薇@图1踏箱顶远去声。\",\"seed\":5788087800744172,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_7_mu2obajk\",\"name\":\"\",\"prompt\":\"：过街天桥-太极化劲 武打模板：ma_taiji_vs_sanda｜Trigger Words｜触发词：prfight1 0-3秒：微移、中景。蓝紫夜幕下，凌薇@图1行至天桥中央，七号杀手白袍老者拦路。凌薇@图1快拳快腿猛攻，七号杀手侧身以手背化解，借力将凌薇@图1引偏撞向桥栏。音效：衣料破风，鞋底摩擦桥面声。 3-6秒：环绕、中近景。七号杀手推手化劲连消带打，凌薇@图1连攻数招皆被卸力，身形被牵动旋转。围观人群在桥两侧避让。音效：手掌相触的绵密拍击声，围观人群惊呼声。 6-9秒：手持微晃、近景。凌薇@图1稳住重心，凝神以柔克柔，借七号杀手推手之力旋身反缠，银质腰链甩动。七号杀手重心被引。音效：鞋底碾地声，衣袍翻飞声。 9-12秒：升降、中景。凌薇@图1借力一记过肩摔将七号杀手摔向桥下绿化带，七号杀手白袍翻卷入灌木丛。音效：重物落入灌木声，枝叶断裂声。 12-15秒：极缓推、中全景。凌薇@图1整理衣领走过天桥，人群自动让开。桥下七号杀手缓缓起身，拱手行礼。音效：高跟短靴踏桥面声，远处车流声。\",\"seed\":3669047847787487,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_8_mu2obajk\",\"name\":\"\",\"prompt\":\"：商场中庭-泰拳肘膝 武打模板：ma_muaythai_vs_boxing｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。冷白天光透过玻璃穹顶，凌薇@图1穿行中庭，八号杀手自喷泉水池后冲出，组合拳连续轰击。凌薇@图1双臂格挡后退两步。音效：拳头砸中手臂闷响，喷泉流水声。 3-6秒：环绕、中近景。八号杀手顶膝横扫，凌薇@图1侧闪反击摆拳，八号杀手肘击回敬，玻璃护栏震出裂痕。两人在中庭大理石地面缠斗。音效：膝撞破风，肘击碰撞声。 6-9秒：微移、中景。凌薇@图1一套拳腿组合逼退八号杀手，八号杀手泰拳低扫反击，凌薇@图1抬腿格挡。两人分开对峙。音效：拳腿交击声，鞋底摩擦大理石声。 9-12秒：升降、中景。凌薇@图1侧闪避开八号杀手肘击，转身一记高扫踢中八号杀手太阳穴，八号杀手身躯旋转跌入喷泉水池，水花四溅。音效：高扫破风，落水巨大水花声。 12-15秒：极缓推、中全景。凌薇@图1快步穿过中庭，水珠沿白色长筒袜滑落。八号杀手从水池中撑起。音效：高跟短靴踏大理石声，水滴声。\",\"seed\":5795515146658663,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_9_mu2obajk\",\"name\":\"\",\"prompt\":\"：机场高速匝道-子弹时间闪避 武打模板：combat_bullet_time_dodge｜Trigger Words｜触发词：prfight1, prslow1 0-3秒：手持微晃、中景。金黄夕照下，凌薇@图1乘坐的出租车驶上匝道，九号杀手自天桥伏击，狙击步枪连发穿甲弹击碎挡风玻璃。凌薇@图1推开车门翻滚出车。音效：玻璃碎裂声，枪声，急刹声。 3-6秒：环绕、中近景（慢动作）。子弹时间开启，凌薇@图1身体后仰悬停，弹道擦过乌黑发梢，金属碎片在空气中凝滞。音效：空气凝滞的嗡鸣，弹壳落地声。 6-9秒：微移、特写（慢动作）。子弹时间持续，凌薇@图1在慢动作中伸手抓起地面钢制车牌，白色超短裙裙摆飘起凝滞。九号杀手在天桥调整狙击步枪枪口。音效：金属摩擦慢速拉长声。 9-12秒：手持微晃、中景。恢复正常速度，凌薇@图1甩出钢制车牌，车牌旋转击落天桥上九号杀手的狙击步枪瞄准镜，九号杀手后退躲避。音效：破风声，金属击中声，枪械坠落声。 12-15秒：极缓推、中全景。凌薇@图1翻身跃过护栏，跑向机场方向。九号杀手失去目标，天桥上只剩破碎的狙击步枪。音效：高跟短靴落地声，风声。\",\"seed\":7614902884076740,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_10_mu2obajk\",\"name\":\"\",\"prompt\":\"：机场停机坪-终结一击 武打模板：combat_finishing_blow｜Trigger Words｜触发词：prfight1, prfin1, prslow1 0-3秒：极缓推、中景。金色夕照铺满停机坪，直升机旋翼轰鸣，终极杀手自舱门跃出，战术刀直刺凌薇@图1。凌薇@图1眼神骤冷，侧身闪过。音效：直升机旋翼轰鸣，战术刀破风。 3-6秒：环绕、中近景。终极杀手战术刀连刺三刀，凌薇@图1旋身侧闪，一手拍中终极杀手持刀手腕，战术刀脱手旋转飞出。音效：掌拍手腕闷响，战术刀落地声。 6-9秒：微移、特写。终极杀手赤手扑来，凌薇@图1扎稳马步沉肩运气，银质腰链绷紧。终极杀手近身瞬间，凌薇@图1贴身寸劲爆发。音效：蓄力呼吸声，寸劲爆发闷响。 9-12秒：手持微晃、中景（慢动作）。慢镜终结，凌薇@图1一记寸拳击中终极杀手胸口，终极杀手身躯在慢动作中倒飞，撞上直升机舱门，舱门震响。音效：寸拳命中闷响慢速拉长，舱门震响。 12-15秒：极缓推、中全景。凌薇@图1走向雇主，取出百声AI芯递出，雇主接过百声AI芯。雇主说：“百声AI芯，终于到了。”（声线：中年男声，语速：中，情绪：沉稳）。凌薇@图1转身走向夕阳，乌黑马尾在旋翼气流中飞扬。音效：旋翼轰鸣，脚步声。\",\"seed\":2447564665149309,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}}],\"global_prompt\":\"[整体风格]：电影级写实风格，幽闭、紧迫且充满感官张力的氛围，冷调光影与肉体暖色形成强烈反差，都市追逃与冷兵器暴力美学。\\n\\n[角色档案]：\\n凌薇@图1，高马尾青年女性，乌黑高马尾长发，纯银发圈，黑色缎面抹胸打底，白色短款机车皮夹克，黑色超短裙，白色长筒袜，黑色高跟短靴，银质腰链，皮质反光与白皙肌肤形成高对比。\\n一号杀手@图2，西装剑客男性，油亮黑色背头短发，黑色墨镜，白色立领衬衫，黑色修身西装，黑色西裤，黑色尖头皮鞋，冷峻硬质面料泛哑光。\\n二号杀手@图3，短刀巷战男性，棕色侧分背头，黑色皮夹克，深灰紧身背心，黑色工装裤，黑色马丁靴，皮面磨损泛旧光。\\n三号杀手@图4，暗器女忍者，黑色高马尾，黑色忍者面罩，黑色紧身夜行衣，黑色护腕绑腿，黑色布靴，哑光黑布料隐于暗处。\\n四号杀手@图5，机车党男性，脏金色脏辫，黑色骷髅头巾，黑色铆钉皮背心，黑色皮裤，黑色机车靴，油亮皮革泛金属铆钉反光。\\n钢管悍匪甲@图6，光头壮汉，光头，黑色紧身背心，迷彩工装裤，黑色军靴，壮硕肌肉布满纹身。\\n钢管悍匪乙@图7，红发痞子，红色莫西干发型，红色机车皮衣，破洞牛仔裤，白色运动鞋。\\n酒瓶醉汉@图8，卷发醉汉，乱蓬蓬黑色卷发，脏污工装外套，卡其裤，黑色胶鞋，醉态踉跄。\\n砍刀狂徒@图9，赤膊刀客，黑色束发马尾，黑色皮围裙，深蓝牛仔裤，棕色工作靴，赤膊手臂。\\n铁链壮汉@图10，寸头力士，黑色寸头，无袖紧身黑T恤，深灰宽大工装裤，黑色重型靴。\\n棒球棍痞子@图11，棒球帽混混，反戴黑色棒球帽，白色宽松T恤，黑色运动裤，黑白滑板鞋。\\n双节棍瘦猴@图12，金发瘦子，金色挑染短发，黑色紧身背心，紧身牛仔裤，白色帆布鞋。\\n徒手大汉@图13，络腮胡壮汉，黑色络腮胡，敞胸红格衬衫，深蓝直筒裤，黑色皮靴，胸毛外露。\\n六号杀手@图14，双刀武生男性，黑色束发武生冠，白底黑边练功服，红色束腰，黑色布鞋，京剧武行身段。\\n七号杀手@图15，太极宗师男性，银白长发高束发髻，白色道袍，深灰长裤，白底黑布鞋，仙风道骨。\\n八号杀手@图16，泰拳冠军男性，黑色光头，缠红色麻绳拳头，黑色泰拳短裤，赤足，肌肉油亮。\\n九号杀手@图17，狙击手男性，黑色战术帽，深绿迷彩作战服，黑色战术手套，黑色战术靴。\\n终极杀手@图18，战术刀男性，黑色寸头，黑色战术背心，黑色作战长裤，黑色战术靴，下颌一道旧疤。\\n雇主@图19，中年男性，银灰背头短发，白色衬衫，深灰西装，深灰西裤，黑色皮鞋，金属腕表，面料挺括泛冷光。\\n\\n[道具档案]：\\n百声AI芯@图20，银蓝色菱形芯片，钛合金外壳，表面蚀刻发光电路纹理，拇指大小，边缘泛冰蓝冷光。\\n钛合金保险箱@图21，银灰色钛合金手提箱，哑光磨砂表面，四角铆钉，掌心大小，表面有细密划痕反光。\\n汉剑@图22，银白剑身，寒光凛冽，黑色缠绳剑柄，三尺长，剑刃泛冷冽白光。\\n伸缩警棍@图23，黑色金属警棍，哑光表面，收束时一掌长，甩出后二尺，握柄有防滑纹路。\\n六棱飞镖@图24，黑色六棱飞镖，哑光钢质，掌心大小，边缘锋利，飞行时泛幽冷微光。\\n红缨枪@图25，深红枪缨，银白枪头，乌木枪杆，丈二长，枪尖泛冷白寒光。\\n钢管@图26，灰色铁质钢管，直径四厘米，两尺长，表面锈迹与磨损反光。\\n酒瓶@图27，深绿色玻璃酒瓶，瓶身缠破旧布条，一尺长，反光浑浊。\\n砍刀@图28，灰白刀刃，红棕刀柄，两尺长，刀身有斑驳锈迹，刃口反光。\\n铁链@图29，黑色铁链，拇指粗环扣，五尺长，表面铁锈泛暗哑光。\\n棒球棍@图30，黑色铝制棒球棍，白色握带，三尺长，棍身泛金属亮光。\\n双节棍@图31，黑色钢质双节棍，银白铁链连接，两节各一尺，金属泛哑光。\\n关刀@图32，深绿刀杆，银白阔刃，红缨坠饰，七尺长，刀刃泛冷白寒光。\\n双刀@图33，银白双刀，黑色缠绳刀柄，各三尺，刀身泛冷冽白光。\\n狙击步枪@图34，墨绿战术涂装狙击步枪，黑色枪管，加装瞄准镜，五尺长，枪身泛哑光。\\n战术刀@图35，黑色战术刀，锯齿刀背，虎纹刀柄，一尺长，刀刃泛暗冷光。\\n短刀@图46，黑色战术短刀，全刃刀身，G10防滑刀柄，七寸长，配Kydex刀鞘，刀刃泛幽蓝冷光。\\n\\n[场景档案]：\\n高楼天台@图36（清晨），冷白晨光，雾霭未散。水泥地面泛潮，暗色水渍反光。四周女儿墙围合，边缘铁质护栏锈迹斑斑。天台中央立一座水箱，爬梯泛铁灰冷光。远景城市天际线在雾中若隐若现，停机坪起降灯光闪烁。\\n旧城窄巷@图37（雨后黄昏），暖黄路灯与冷蓝霓虹交叠，潮湿沥青地面倒映霓虹光斑。两侧老楼砖墙斑驳，晾衣绳横拉巷顶，衣物投下碎影。墙角堆叠纸箱与垃圾桶。远景巷口车流灯光拉成光带。\\n地铁车厢@图38（深夜），冷白荧光灯管，车厢地面金属反光。两侧座椅整齐排列，银色扶手杆纵向延伸，广告灯箱透出冷蓝光。车窗映出外部隧道灯影飞掠。车厢内空荡，仅零星吊环晃动。\\n高架快速路@图39（黄昏逆光），橙红夕阳逆光，天色昏黄。深灰沥青路面泛暖色反光。两侧金属护栏延伸，城市高楼剪影层叠。车流穿梭，车灯拉出红白光带。桥下是密集的旧城区屋顶。\\n城中村屋顶@图40（日暮），橙红夕照，屋顶连片。水泥晒台布满裂缝，积水泛金光。晾衣绳密布，衣物翻飞。太阳能热水器阵列泛金属反光。四周握手楼墙皮斑驳，远景城中村延绵至天际线。\\n集装箱码头@图41（暮色），青蓝冷光暮色，海风潮湿。深灰水泥地面泛油光，集装箱红蓝黄绿错落堆叠，金属箱壁反射夕照。龙门吊高耸，剪影如巨兽。远景海面泛银白波光，货轮灯火闪烁。\\n过街天桥@图42（华灯初上），蓝紫夜幕，桥面暖黄灯光。灰色桥面水泥泛光，金属护栏反光。两侧玻璃护栏映出城市霓虹。桥下车辆灯光川流。远景商业区霓虹灯牌层层叠叠。\\n商场中庭@图43（白天），冷白天光透过玻璃穹顶倾泻，中央喷泉水池泛银白水光。浅色大理石地面倒映穹顶光影。四周玻璃护栏，多层商铺霓虹闪烁。中庭挑空，扶梯交叉，人流在远景穿行。\\n机场高速匝道@图44（日落），金黄夕照低垂，天色橙红。深灰沥青路面泛暖光，白色车道线清晰。两侧水泥护栏延伸，匝道弯曲盘旋。远景机场航站楼玻璃幕墙反光刺目，飞机起降剪影。\\n机场停机坪@图45（黄昏金辉），金色夕照铺满停机坪，地面水泥泛暖金反光。远处一架直升机旋翼轰鸣，舱门敞开。周围地面标线纵横，引导灯闪烁。远景货运航站楼巨大剪影，天际线被夕阳染成金红。\"}",
+        "clips_json": "{\"version\":1,\"clips\":[{\"id\":\"clip_1\",\"name\":\"\",\"prompt\":\"：高楼天台-剑光如虹 武打模板：combat_sword_duel｜Trigger Words｜触发词：prfight1 0-3秒：极缓推、中景。冷白晨光从背后切入，凌薇@图1踏出天台门，一号杀手自水箱后闪出，汉剑2直刺凌薇@图1咽喉。凌薇@图1侧身以钛合金保险箱1格挡汉剑2剑尖，火星四溅。音效：汉剑2剑尖刮过钛合金保险箱1表面的尖锐金属摩擦声，凌薇@图1高跟短靴踏碎积水声。 3-6秒：手持微晃、中近景。剑光切分晨雾，一号杀手连劈三剑，凌薇@图1旋身贴剑走位，乌黑马尾甩出弧线，反手以掌根拍击汉剑2剑脊。音效：衣料破风声，三记金属碰撞声。 6-9秒：环绕、中景。凌薇@图1低身扫堂腿，一号杀手后跳避开，汉剑2剑尖下撩。凌薇@图1借势前翻，白色长筒袜在空中划出弧线，落地于一号杀手身侧。音效：高跟短靴碾地声，汉剑2剑风呼啸。 9-12秒：微移、近景。凌薇@图1抓住汉剑2格挡空隙，银质腰链甩动，一记高鞭腿踢中一号杀手持剑手腕，汉剑2脱手旋转飞起，钉入女儿墙水泥缝。音效：鞭腿破风，汉剑2钉入水泥的闷响。 12-15秒：升降、中全景。凌薇@图1一记旋身侧踹将一号杀手踹向天台边缘护栏，一号杀手翻越护栏坠向消防梯。凌薇@图1整理白色皮夹克衣领，转身走向楼梯间。音效：重物坠落声，天台风声。\",\"seed\":2272814619863259,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_promptEl\":{},\"_storyboardFilled\":true},{\"id\":\"clip_2_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：旧城窄巷-警棍对短刀 武打模板：wd_baton_vs_knife｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。暖黄路灯与冷蓝霓虹交叠，凌薇@图1步入窄巷，二号杀手自侧门冲出，短刀直削凌薇@图1颈侧。凌薇@图1甩出伸缩警棍格挡，刀刃刮过棍身火花四溅。音效：短刀刃刮过伸缩警棍的金属刮擦声，高跟短靴踏入积水声。 3-6秒：微移、中近景。二号杀手翻腕削腕，凌薇@图1伸缩警棍下劈反劈，连续三记低扫。二号杀手立刀格挡后退，撞翻墙角纸箱。音效：刀刃与警棍碰撞声，纸箱坍塌声。 6-9秒：环绕、中景。凌薇@图1借墙反蹬，身体横空，伸缩警棍斜劈打落短刀，短刀滑入排水沟。二号杀手赤手后退。音效：高跟短靴蹬墙声，伸缩警棍破风声，短刀落水声。 9-12秒：手持微晃、近景。凌薇@图1落地贴身，一记膝撞击中二号杀手腹部，二号杀手躬身后退，被压进晾衣绳堆，衣物翻落罩住其头脸。音效：膝撞闷响，布料撕裂声。 12-15秒：极缓推、中全景。凌薇@图1收回伸缩警棍，踏过积水倒影，头也不回走出巷口。二号杀手掀开衣物半跪喘息。音效：高跟短靴踩水声，晾衣绳吱呀声。\",\"seed\":194456425452037,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_3_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：地铁车厢-飞镖雨 武打模板：combat_hidden_weapons｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。地铁进站急停，冷白灯光闪烁，三号杀手自车厢另一端甩出六棱飞镖雨。凌薇@图1俯身弯腰，六棱飞镖钉入座椅与金属扶手。音效：六棱飞镖钉入金属的钝响，地铁刹车声。 3-6秒：环绕、中近景。凌薇@图1沿扶手杆荡起，身体横空，白色超短裙裙摆翻飞，空中踢回两枚六棱飞镖。三号杀手侧滚避开。音效：布料破风声，六棱飞镖旋转声。 6-9秒：微移、近景。三号杀手再掷三枚六棱飞镖，凌薇@图1落地以钛合金保险箱格挡，飞镖钉入箱面。凌薇@图1顺势滑步贴近。音效：六棱飞镖钉入钛合金保险箱箱面闷响。 9-12秒：手持微晃、中景。凌薇@图1贴身擒住三号杀手手腕，借离心力旋转，将剩余六棱飞镖甩飞钉入广告灯箱，灯箱爆裂冷光四溅。音效：灯箱碎裂声，六棱飞镖入墙声。 12-15秒：极缓推、中全景。车门开启，凌薇@图1将三号杀手推出车厢，三号杀手跌落在站台上。凌薇@图1整理乌黑马尾，走出车厢。音效：车门蜂鸣，高跟短靴踏站台声。\",\"seed\":256095642041083,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_4_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：高架快速路-红缨枪 武打模板：wd_spear_vs_saber｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。橙红逆光中，凌薇@图1驾驶黑色机车疾驰，四号杀手驾驶摩托并排逼近，红缨枪横扫刺来。凌薇@图1俯身压把，枪尖擦过白色皮夹克肩部。音效：引擎轰鸣，红缨枪枪尖破风声。 3-6秒：环绕、中全景。四号杀手回枪点刺连扎，凌薇@图1侧身夹住枪杆，借机车速度拖拽四号杀手。两车缠斗，在车流缝隙中穿行。音效：引擎轰鸣，红缨枪枪杆刮擦声。 6-9秒：升降、中景。凌薇@图1松开车把，跃起踏过四号杀手车头，空中夺枪，反手横扫。四号杀手侧倾避让。音效：高跟短靴踏车头声，红缨枪横扫破风。 9-12秒：微移、中全景。凌薇@图1落回自己机车，红缨枪横扫将四号杀手扫下高架护栏。四号杀手坠向桥下，摩托翻滚倒地。音效：重物坠地声，摩托刮擦火花声。 12-15秒：极缓推、大全景。凌薇@图1单手弃枪，红缨枪插入护栏缝隙，她拧油门加速冲出逆光，乌黑马尾在风中拉成直线。音效：引擎轰鸣渐远，风声。\",\"seed\":8318154542560768,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_5_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：城中村屋顶-一对多突围 武打模板：combat_one_vs_many｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。橙红夕照下，凌薇@图1跃上屋顶，钢管悍匪甲与钢管悍匪乙从两侧围拢，酒瓶醉汉自前方逼近。凌薇@图1低身滑步穿过第一排，银质腰链甩动。音效：脚步声，钢管拖地声。 3-6秒：环绕、中近景。凌薇@图1一记肘击击中钢管悍匪甲下颌，钢管悍匪甲后仰倒地。凌薇@图1回身鞭腿扫倒钢管悍匪乙。凌薇@图1再以掌刀劈中酒瓶醉汉持酒瓶手腕，酒瓶脱手落地碎裂。音效：肘击闷响，酒瓶落地碎裂声。 6-9秒：升降、中景。砍刀狂徒挥砍刀横扫，铁链壮汉甩铁链锁喉。凌薇@图1弯腰躲过砍刀，反手抓住铁链借力荡起，双腿夹住铁链壮汉头部旋身将铁链壮汉甩倒。音效：砍刀破风，铁链哗啦声。 9-12秒：手持微晃、中近景。棒球棍痞子挥棒球棍砸来，双节棍瘦猴甩双节棍连击。凌薇@图1侧闪避开棒球棍，贴身以肘破双节棍节奏，一记回旋踢同时命中棒球棍痞子与双节棍瘦猴面部。音效：棒球棍砸空声，双节棍碰撞声，踢击闷响。 12-15秒：极缓推、中全景。徒手大汉从背后扑来，凌薇@图1转身一记高扫踢中徒手大汉太阳穴，徒手大汉侧倒于晒台边缘。钢管悍匪甲仰卧于左侧水箱旁，钢管悍匪乙趴伏于晾衣绳下，酒瓶醉汉蜷缩于墙角，砍刀狂徒半跪于太阳能板前，铁链壮汉仰躺于晒台中缝，棒球棍痞子侧卧于排水管边，双节棍瘦猴蜷伏于天台门槛处。凌薇@图1立于屋顶边沿，乌黑马尾在橙红夕照中飞扬。音效：重物倒地声，凌薇@图1呼吸声。\",\"seed\":4108091328578559,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_6_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：集装箱码头-关刀对双刀 武打模板：wd_guandao_vs_twinblades｜Trigger Words｜触发词：prfight1 0-3秒：升降、中景。青蓝暮色下，凌薇@图1从集装箱顶跃下，六号杀手双刀出鞘，左右开弓。凌薇@图1脚踢起靠墙的关刀接住，长柄横扫拉开距离。音效：高跟短靴落地声，关刀破风。 3-6秒：手持微晃、中近景。六号杀手双刀滚地切入近身，凌薇@图1挂刀封挡，刀光在集装箱壁溅出火星。六号杀手双刀连斩。音效：双刀斩中关刀刀杆的金属碰撞声，火星滋滋声。 6-9秒：环绕、中景。凌薇@图1全身扫刀逼退六号杀手，关刀横扫集装箱壁拉出刺目火花。六号杀手后跳避开。音效：关刀刮过集装箱壁刺耳声。 9-12秒：微移、近景。六号杀手双刀再进，凌薇@图1回身五花扫刀接俯身斩腿，关刀扫中六号杀手脚踝，双刀脱手飞出钉入集装箱。音效：关刀斩中脚踝闷响，双刀入箱声。 12-15秒：升降、中全景。凌薇@图1以关刀刀背拍倒六号杀手，纵身跃上集装箱顶。六号杀手倒在箱间通道。音效：刀背拍击声，凌薇@图1踏箱顶远去声。\",\"seed\":7410654583552486,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_7_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：过街天桥-太极化劲 武打模板：ma_taiji_vs_sanda｜Trigger Words｜触发词：prfight1 0-3秒：微移、中景。蓝紫夜幕下，凌薇@图1行至天桥中央，七号杀手白袍老者拦路。凌薇@图1快拳快腿猛攻，七号杀手侧身以手背化解，借力将凌薇@图1引偏撞向桥栏。音效：衣料破风，鞋底摩擦桥面声。 3-6秒：环绕、中近景。七号杀手推手化劲连消带打，凌薇@图1连攻数招皆被卸力，身形被牵动旋转。围观人群在桥两侧避让。音效：手掌相触的绵密拍击声，围观人群惊呼声。 6-9秒：手持微晃、近景。凌薇@图1稳住重心，凝神以柔克柔，借七号杀手推手之力旋身反缠，银质腰链甩动。七号杀手重心被引。音效：鞋底碾地声，衣袍翻飞声。 9-12秒：升降、中景。凌薇@图1借力一记过肩摔将七号杀手摔向桥下绿化带，七号杀手白袍翻卷入灌木丛。音效：重物落入灌木声，枝叶断裂声。 12-15秒：极缓推、中全景。凌薇@图1整理衣领走过天桥，人群自动让开。桥下七号杀手缓缓起身，拱手行礼。音效：高跟短靴踏桥面声，远处车流声。\",\"seed\":500127677793701,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_8_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：商场中庭-泰拳肘膝 武打模板：ma_muaythai_vs_boxing｜Trigger Words｜触发词：prfight1 0-3秒：手持微晃、中景。冷白天光透过玻璃穹顶，凌薇@图1穿行中庭，八号杀手自喷泉水池后冲出，组合拳连续轰击。凌薇@图1双臂格挡后退两步。音效：拳头砸中手臂闷响，喷泉流水声。 3-6秒：环绕、中近景。八号杀手顶膝横扫，凌薇@图1侧闪反击摆拳，八号杀手肘击回敬，玻璃护栏震出裂痕。两人在中庭大理石地面缠斗。音效：膝撞破风，肘击碰撞声。 6-9秒：微移、中景。凌薇@图1一套拳腿组合逼退八号杀手，八号杀手泰拳低扫反击，凌薇@图1抬腿格挡。两人分开对峙。音效：拳腿交击声，鞋底摩擦大理石声。 9-12秒：升降、中景。凌薇@图1侧闪避开八号杀手肘击，转身一记高扫踢中八号杀手太阳穴，八号杀手身躯旋转跌入喷泉水池，水花四溅。音效：高扫破风，落水巨大水花声。 12-15秒：极缓推、中全景。凌薇@图1快步穿过中庭，水珠沿白色长筒袜滑落。八号杀手从水池中撑起。音效：高跟短靴踏大理石声，水滴声。\",\"seed\":6716119429362838,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_9_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：机场高速匝道-子弹时间闪避 武打模板：combat_bullet_time_dodge｜Trigger Words｜触发词：prfight1, prslow1 0-3秒：手持微晃、中景。金黄夕照下，凌薇@图1乘坐的出租车驶上匝道，九号杀手自天桥伏击，狙击步枪连发穿甲弹击碎挡风玻璃。凌薇@图1推开车门翻滚出车。音效：玻璃碎裂声，枪声，急刹声。 3-6秒：环绕、中近景（慢动作）。子弹时间开启，凌薇@图1身体后仰悬停，弹道擦过乌黑发梢，金属碎片在空气中凝滞。音效：空气凝滞的嗡鸣，弹壳落地声。 6-9秒：微移、特写（慢动作）。子弹时间持续，凌薇@图1在慢动作中伸手抓起地面钢制车牌，白色超短裙裙摆飘起凝滞。九号杀手在天桥调整狙击步枪枪口。音效：金属摩擦慢速拉长声。 9-12秒：手持微晃、中景。恢复正常速度，凌薇@图1甩出钢制车牌，车牌旋转击落天桥上九号杀手的狙击步枪瞄准镜，九号杀手后退躲避。音效：破风声，金属击中声，枪械坠落声。 12-15秒：极缓推、中全景。凌薇@图1翻身跃过护栏，跑向机场方向。九号杀手失去目标，天桥上只剩破碎的狙击步枪。音效：高跟短靴落地声，风声。\",\"seed\":5813216497440244,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}},{\"id\":\"clip_10_mu2p3g9x\",\"name\":\"\",\"prompt\":\"：机场停机坪-终结一击 武打模板：combat_finishing_blow｜Trigger Words｜触发词：prfight1, prfin1, prslow1 0-3秒：极缓推、中景。金色夕照铺满停机坪，直升机旋翼轰鸣，终极杀手自舱门跃出，战术刀直刺凌薇@图1。凌薇@图1眼神骤冷，侧身闪过。音效：直升机旋翼轰鸣，战术刀破风。 3-6秒：环绕、中近景。终极杀手战术刀连刺三刀，凌薇@图1旋身侧闪，一手拍中终极杀手持刀手腕，战术刀脱手旋转飞出。音效：掌拍手腕闷响，战术刀落地声。 6-9秒：微移、特写。终极杀手赤手扑来，凌薇@图1扎稳马步沉肩运气，银质腰链绷紧。终极杀手近身瞬间，凌薇@图1贴身寸劲爆发。音效：蓄力呼吸声，寸劲爆发闷响。 9-12秒：手持微晃、中景（慢动作）。慢镜终结，凌薇@图1一记寸拳击中终极杀手胸口，终极杀手身躯在慢动作中倒飞，撞上直升机舱门，舱门震响。音效：寸拳命中闷响慢速拉长，舱门震响。 12-15秒：极缓推、中全景。凌薇@图1走向雇主，取出百声AI芯递出，雇主接过百声AI芯。雇主说：“百声AI芯，终于到了。”（声线：中年男声，语速：中，情绪：沉稳）。凌薇@图1转身走向夕阳，乌黑马尾在旋翼气流中飞扬。音效：旋翼轰鸣，脚步声。\",\"seed\":6156376272888077,\"seed_mode\":\"randomize\",\"duration\":\"15\",\"validated\":false,\"context_enabled\":true,\"color_adjustment\":{\"saturation\":100,\"contrast\":100,\"brightness\":100},\"card_height\":0,\"collapsed\":false,\"subtitle\":\"\",\"subtitle_enabled\":false,\"subtitle_mode\":\"manual\",\"subtitle_auto_dialogue\":true,\"subtitle_auto_narration\":false,\"subtitle_auto_lyrics\":false,\"subtitle_font\":\"msyh.ttc\",\"subtitle_font_size\":24,\"subtitle_color\":\"#FFFFFF\",\"subtitle_box\":false,\"subtitle_box_color\":\"#000000\",\"subtitle_box_width\":2,\"rfe_frame_count\":15,\"rfe_selection_mode\":\"last_n\",\"rfe_start_frame\":0,\"rfe_end_frame\":0,\"rfe_max_output_frames\":9,\"rfe_sampling_method\":\"even\",\"rfe_save_frames\":false,\"rfe_output_subdir\":\"contextual_series\",\"rfe_filename_prefix\":\"frame\",\"render_enabled\":true,\"replace_mode\":false,\"_storyboardFilled\":true,\"_promptEl\":{}}],\"global_prompt\":\"[整体风格]：电影级写实风格，幽闭、紧迫且充满感官张力的氛围，冷调光影与肉体暖色形成强烈反差，都市追逃与冷兵器暴力美学。\\n\\n[角色档案]：\\n凌薇@图1，高马尾青年女性，乌黑高马尾长发，纯银发圈，黑色缎面抹胸打底，白色短款机车皮夹克，黑色超短裙，白色长筒袜，黑色高跟短靴，银质腰链，皮质反光与白皙肌肤形成高对比。\\n一号杀手@图2，西装剑客男性，油亮黑色背头短发，黑色墨镜，白色立领衬衫，黑色修身西装，黑色西裤，黑色尖头皮鞋，冷峻硬质面料泛哑光。\\n二号杀手@图3，短刀巷战男性，棕色侧分背头，黑色皮夹克，深灰紧身背心，黑色工装裤，黑色马丁靴，皮面磨损泛旧光。\\n三号杀手@图4，暗器女忍者，黑色高马尾，黑色忍者面罩，黑色紧身夜行衣，黑色护腕绑腿，黑色布靴，哑光黑布料隐于暗处。\\n四号杀手@图5，机车党男性，脏金色脏辫，黑色骷髅头巾，黑色铆钉皮背心，黑色皮裤，黑色机车靴，油亮皮革泛金属铆钉反光。\\n钢管悍匪甲@图6，光头壮汉，光头，黑色紧身背心，迷彩工装裤，黑色军靴，壮硕肌肉布满纹身。\\n钢管悍匪乙@图7，红发痞子，红色莫西干发型，红色机车皮衣，破洞牛仔裤，白色运动鞋。\\n酒瓶醉汉@图8，卷发醉汉，乱蓬蓬黑色卷发，脏污工装外套，卡其裤，黑色胶鞋，醉态踉跄。\\n砍刀狂徒@图9，赤膊刀客，黑色束发马尾，黑色皮围裙，深蓝牛仔裤，棕色工作靴，赤膊手臂。\\n铁链壮汉@图10，寸头力士，黑色寸头，无袖紧身黑T恤，深灰宽大工装裤，黑色重型靴。\\n棒球棍痞子@图11，棒球帽混混，反戴黑色棒球帽，白色宽松T恤，黑色运动裤，黑白滑板鞋。\\n双节棍瘦猴@图12，金发瘦子，金色挑染短发，黑色紧身背心，紧身牛仔裤，白色帆布鞋。\\n徒手大汉@图13，络腮胡壮汉，黑色络腮胡，敞胸红格衬衫，深蓝直筒裤，黑色皮靴，胸毛外露。\\n六号杀手@图14，双刀武生男性，黑色束发武生冠，白底黑边练功服，红色束腰，黑色布鞋，京剧武行身段。\\n七号杀手@图15，太极宗师男性，银白长发高束发髻，白色道袍，深灰长裤，白底黑布鞋，仙风道骨。\\n八号杀手@图16，泰拳冠军男性，黑色光头，缠红色麻绳拳头，黑色泰拳短裤，赤足，肌肉油亮。\\n九号杀手@图17，狙击手男性，黑色战术帽，深绿迷彩作战服，黑色战术手套，黑色战术靴。\\n终极杀手@图18，战术刀男性，黑色寸头，黑色战术背心，黑色作战长裤，黑色战术靴，下颌一道旧疤。\\n雇主@图19，中年男性，银灰背头短发，白色衬衫，深灰西装，深灰西裤，黑色皮鞋，金属腕表，面料挺括泛冷光。\\n\\n[道具档案]：\\n百声AI芯@图20，银蓝色菱形芯片，钛合金外壳，表面蚀刻发光电路纹理，拇指大小，边缘泛冰蓝冷光。\\n钛合金保险箱@图21，银灰色钛合金手提箱，哑光磨砂表面，四角铆钉，掌心大小，表面有细密划痕反光。\\n汉剑@图22，银白剑身，寒光凛冽，黑色缠绳剑柄，三尺长，剑刃泛冷冽白光。\\n伸缩警棍@图23，黑色金属警棍，哑光表面，收束时一掌长，甩出后二尺，握柄有防滑纹路。\\n六棱飞镖@图24，黑色六棱飞镖，哑光钢质，掌心大小，边缘锋利，飞行时泛幽冷微光。\\n红缨枪@图25，深红枪缨，银白枪头，乌木枪杆，丈二长，枪尖泛冷白寒光。\\n钢管@图26，灰色铁质钢管，直径四厘米，两尺长，表面锈迹与磨损反光。\\n酒瓶@图27，深绿色玻璃酒瓶，瓶身缠破旧布条，一尺长，反光浑浊。\\n砍刀@图28，灰白刀刃，红棕刀柄，两尺长，刀身有斑驳锈迹，刃口反光。\\n铁链@图29，黑色铁链，拇指粗环扣，五尺长，表面铁锈泛暗哑光。\\n棒球棍@图30，黑色铝制棒球棍，白色握带，三尺长，棍身泛金属亮光。\\n双节棍@图31，黑色钢质双节棍，银白铁链连接，两节各一尺，金属泛哑光。\\n关刀@图32，深绿刀杆，银白阔刃，红缨坠饰，七尺长，刀刃泛冷白寒光。\\n双刀@图33，银白双刀，黑色缠绳刀柄，各三尺，刀身泛冷冽白光。\\n狙击步枪@图34，墨绿战术涂装狙击步枪，黑色枪管，加装瞄准镜，五尺长，枪身泛哑光。\\n战术刀@图35，黑色战术刀，锯齿刀背，虎纹刀柄，一尺长，刀刃泛暗冷光。\\n短刀@图46，黑色战术短刀，全刃刀身，G10防滑刀柄，七寸长，配Kydex刀鞘，刀刃泛幽蓝冷光。\\n\\n[场景档案]：\\n高楼天台@图36（清晨），冷白晨光，雾霭未散。水泥地面泛潮，暗色水渍反光。四周女儿墙围合，边缘铁质护栏锈迹斑斑。天台中央立一座水箱，爬梯泛铁灰冷光。远景城市天际线在雾中若隐若现，停机坪起降灯光闪烁。\\n旧城窄巷@图37（雨后黄昏），暖黄路灯与冷蓝霓虹交叠，潮湿沥青地面倒映霓虹光斑。两侧老楼砖墙斑驳，晾衣绳横拉巷顶，衣物投下碎影。墙角堆叠纸箱与垃圾桶。远景巷口车流灯光拉成光带。\\n地铁车厢@图38（深夜），冷白荧光灯管，车厢地面金属反光。两侧座椅整齐排列，银色扶手杆纵向延伸，广告灯箱透出冷蓝光。车窗映出外部隧道灯影飞掠。车厢内空荡，仅零星吊环晃动。\\n高架快速路@图39（黄昏逆光），橙红夕阳逆光，天色昏黄。深灰沥青路面泛暖色反光。两侧金属护栏延伸，城市高楼剪影层叠。车流穿梭，车灯拉出红白光带。桥下是密集的旧城区屋顶。\\n城中村屋顶@图40（日暮），橙红夕照，屋顶连片。水泥晒台布满裂缝，积水泛金光。晾衣绳密布，衣物翻飞。太阳能热水器阵列泛金属反光。四周握手楼墙皮斑驳，远景城中村延绵至天际线。\\n集装箱码头@图41（暮色），青蓝冷光暮色，海风潮湿。深灰水泥地面泛油光，集装箱红蓝黄绿错落堆叠，金属箱壁反射夕照。龙门吊高耸，剪影如巨兽。远景海面泛银白波光，货轮灯火闪烁。\\n过街天桥@图42（华灯初上），蓝紫夜幕，桥面暖黄灯光。灰色桥面水泥泛光，金属护栏反光。两侧玻璃护栏映出城市霓虹。桥下车辆灯光川流。远景商业区霓虹灯牌层层叠叠。\\n商场中庭@图43（白天），冷白天光透过玻璃穹顶倾泻，中央喷泉水池泛银白水光。浅色大理石地面倒映穹顶光影。四周玻璃护栏，多层商铺霓虹闪烁。中庭挑空，扶梯交叉，人流在远景穿行。\\n机场高速匝道@图44（日落），金黄夕照低垂，天色橙红。深灰沥青路面泛暖光，白色车道线清晰。两侧水泥护栏延伸，匝道弯曲盘旋。远景机场航站楼玻璃幕墙反光刺目，飞机起降剪影。\\n机场停机坪@图45（黄昏金辉），金色夕照铺满停机坪，地面水泥泛暖金反光。远处一架直升机旋翼轰鸣，舱门敞开。周围地面标线纵横，引导灯闪烁。远景货运航站楼巨大剪影，天际线被夕阳染成金红。\"}",
         "resolution_mode": "manual",
         "megapixels": 1,
         "refs_json": "{\"version\":2,\"refs\":[null,null,null,null,null,null,null,null,null]}",
@@ -4380,205 +4394,8 @@
         "tiled_refine": true,
         "tile_count": 4,
         "tile_overlap": 128,
-        "speed_preset": "",
+        "speed_preset": "均衡",
         "h3_extender_timeline": ""
-      }
-    },
-    {
-      "id": 198,
-      "type": "CLIPLoader",
-      "pos": [
-        -3290.7194275654892,
-        -1848.507895934466
-      ],
-      "size": [
-        596.9179870533656,
-        106
-      ],
-      "flags": {},
-      "order": 25,
-      "mode": 0,
-      "inputs": [
-        {
-          "label": "CLIP名称",
-          "name": "clip_name",
-          "type": "COMBO",
-          "widget": {
-            "name": "clip_name"
-          },
-          "link": null
-        },
-        {
-          "label": "类型",
-          "name": "type",
-          "type": "COMBO",
-          "widget": {
-            "name": "type"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "label": "CLIP",
-          "name": "CLIP",
-          "type": "CLIP",
-          "slot_index": 0,
-          "links": [
-            338,
-            392
-          ]
-        }
-      ],
-      "title": "CLIP 文本编码器 (qwen3vl 32B)",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.34.0",
-        "Node name for S&R": "CLIPLoader",
-        "enableTabs": false,
-        "tabWidth": 65,
-        "tabXOffset": 10,
-        "hasSecondTab": false,
-        "secondTabText": "Send Back",
-        "secondTabOffset": 80,
-        "secondTabWidth": 65,
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.8",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-        "minimax",
-        "default"
-      ],
-      "widgets_values_named": {
-        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-        "type": "minimax",
-        "device": "default"
-      }
-    },
-    {
-      "id": 195,
-      "type": "VAELoader",
-      "pos": [
-        -3290.285648299523,
-        -1701.0776077580285
-      ],
-      "size": [
-        598.8831409716165,
-        58
-      ],
-      "flags": {},
-      "order": 26,
-      "mode": 0,
-      "inputs": [
-        {
-          "label": "vae名称",
-          "name": "vae_name",
-          "type": "COMBO",
-          "widget": {
-            "name": "vae_name"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "VAE",
-          "type": "VAE",
-          "slot_index": 0,
-          "links": [
-            322,
-            339
-          ]
-        }
-      ],
-      "title": "视频 VAE (int8_convrot)",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.34.0",
-        "Node name for S&R": "VAELoader",
-        "enableTabs": false,
-        "tabWidth": 65,
-        "tabXOffset": 10,
-        "hasSecondTab": false,
-        "secondTabText": "Send Back",
-        "secondTabOffset": 80,
-        "secondTabWidth": 65,
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.8",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "minimax_h3_video_vae_int8_convrot.safetensors"
-      ],
-      "widgets_values_named": {
-        "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
-      }
-    },
-    {
-      "id": 197,
-      "type": "VAELoader",
-      "pos": [
-        -3283.637281730128,
-        -1599.4805310015345
-      ],
-      "size": [
-        592.0501572585533,
-        58
-      ],
-      "flags": {},
-      "order": 27,
-      "mode": 0,
-      "inputs": [
-        {
-          "label": "vae名称",
-          "name": "vae_name",
-          "type": "COMBO",
-          "widget": {
-            "name": "vae_name"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "name": "VAE",
-          "type": "VAE",
-          "slot_index": 0,
-          "links": [
-            323,
-            340
-          ]
-        }
-      ],
-      "title": "音频 VAE (fp32)",
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.34.0",
-        "Node name for S&R": "VAELoader",
-        "enableTabs": false,
-        "tabWidth": 65,
-        "tabXOffset": 10,
-        "hasSecondTab": false,
-        "secondTabText": "Send Back",
-        "secondTabOffset": 80,
-        "secondTabWidth": 65,
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.8",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "minimax_h3_audio_vae_fp32.safetensors"
-      ],
-      "widgets_values_named": {
-        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
       }
     },
     {
@@ -4595,7 +4412,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 28,
+      "order": 25,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -4644,7 +4461,7 @@
         1392.5534625411751
       ],
       "flags": {},
-      "order": 61,
+      "order": 63,
       "mode": 0,
       "inputs": [
         {
@@ -4706,160 +4523,6 @@
       "color": "#2a2"
     },
     {
-      "id": 276,
-      "type": "Lora Loader Stack (rgthree)",
-      "pos": [
-        -3289.2791186577524,
-        -1454.615226512874
-      ],
-      "size": [
-        599.3678591623456,
-        246
-      ],
-      "flags": {},
-      "order": 55,
-      "mode": 4,
-      "inputs": [
-        {
-          "label": "模型",
-          "name": "model",
-          "type": "MODEL",
-          "link": 479
-        },
-        {
-          "label": "CLIP",
-          "name": "clip",
-          "type": "CLIP",
-          "link": 392
-        },
-        {
-          "label": "LoRA_01",
-          "name": "lora_01",
-          "type": "COMBO",
-          "widget": {
-            "name": "lora_01"
-          },
-          "link": null
-        },
-        {
-          "label": "强度_01",
-          "name": "strength_01",
-          "type": "FLOAT",
-          "widget": {
-            "name": "strength_01"
-          },
-          "link": null
-        },
-        {
-          "label": "LoRA_02",
-          "name": "lora_02",
-          "type": "COMBO",
-          "widget": {
-            "name": "lora_02"
-          },
-          "link": null
-        },
-        {
-          "label": "强度_02",
-          "name": "strength_02",
-          "type": "FLOAT",
-          "widget": {
-            "name": "strength_02"
-          },
-          "link": null
-        },
-        {
-          "label": "LoRA_03",
-          "name": "lora_03",
-          "type": "COMBO",
-          "widget": {
-            "name": "lora_03"
-          },
-          "link": null
-        },
-        {
-          "label": "强度_03",
-          "name": "strength_03",
-          "type": "FLOAT",
-          "widget": {
-            "name": "strength_03"
-          },
-          "link": null
-        },
-        {
-          "label": "LoRA_04",
-          "name": "lora_04",
-          "type": "COMBO",
-          "widget": {
-            "name": "lora_04"
-          },
-          "link": null
-        },
-        {
-          "label": "强度_04",
-          "name": "strength_04",
-          "type": "FLOAT",
-          "widget": {
-            "name": "strength_04"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "label": "模型",
-          "name": "MODEL",
-          "type": "MODEL",
-          "links": [
-            480
-          ]
-        },
-        {
-          "label": "CLIP",
-          "name": "CLIP",
-          "type": "CLIP",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "rgthree-comfy",
-        "ver": "2c5342a8cb0eaecaabf61435a5f37dd594c510ba",
-        "Node name for S&R": "Lora Loader Stack (rgthree)",
-        "enableTabs": false,
-        "tabWidth": 65,
-        "tabXOffset": 10,
-        "hasSecondTab": false,
-        "secondTabText": "Send Back",
-        "secondTabOffset": 80,
-        "secondTabWidth": 65,
-        "ue_properties": {
-          "widget_ue_connectable": {},
-          "version": "7.8",
-          "input_ue_unconnectable": {}
-        }
-      },
-      "widgets_values": [
-        "minimax_h3_lms_v1.0_r64-细节纹理增强lora.safetensors",
-        0,
-        "BulletTime-MMH3.safetensors",
-        0.5,
-        "minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors",
-        0,
-        "H3电影质感V0.4 .safetensors",
-        1
-      ],
-      "widgets_values_named": {
-        "lora_01": "minimax_h3_lms_v1.0_r64-细节纹理增强lora.safetensors",
-        "strength_01": 0,
-        "lora_02": "BulletTime-MMH3.safetensors",
-        "strength_02": 0.5,
-        "lora_03": "minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors",
-        "strength_03": 0,
-        "lora_04": "H3电影质感V0.4 .safetensors",
-        "strength_04": 1
-      }
-    },
-    {
       "id": 330,
       "type": "PrimitiveStringMultiline",
       "pos": [
@@ -4873,7 +4536,7 @@
       "flags": {
         "collapsed": false
       },
-      "order": 29,
+      "order": 26,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -4922,7 +4585,7 @@
         594
       ],
       "flags": {},
-      "order": 30,
+      "order": 27,
       "mode": 0,
       "inputs": [
         {
@@ -5015,7 +4678,7 @@
         251.95770962708275
       ],
       "flags": {},
-      "order": 31,
+      "order": 28,
       "mode": 0,
       "inputs": [],
       "outputs": [],
@@ -5202,21 +4865,6 @@
             }
           },
           {
-            "id": 1789476595223.843,
-            "group_name": "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）",
-            "enabled": true,
-            "linkage": {
-              "on_enable": [],
-              "on_disable": []
-            },
-            "parameterBinding": {
-              "enabled": false,
-              "nodeId": "",
-              "paramName": "",
-              "mapping": "normal"
-            }
-          },
-          {
             "id": 1789476595223.4731,
             "group_name": "BSAI_H3_Film_Factory_分镜脚本生成工作流 v1.0",
             "enabled": false,
@@ -5328,7 +4976,12 @@
           "预览输出规则": false,
           "BSAI VDN-H3 Loader · 权重加载（基座+线性分支+LoRA）": true,
           "BSAI Sol-H3 Loader (极速版)": true,
-          "Lora 组合": false
+          "Lora 组合": false,
+          "① FastH3 链路: 开关=OFF  ② VDN 链路: 开关=ON ": true,
+          "① FastH3=OFF  ② VDN 链路: 开关=ON": true,
+          "① FastH3=OFF  ② VDN =ON": true,
+          "画幅比例+像素大小选择": true,
+          "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json": true
         },
         "managerMode": "custom",
         "customManagedGroups": [
@@ -5530,21 +5183,6 @@
           }
         },
         {
-          "id": 1789476595223.843,
-          "group_name": "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）",
-          "enabled": true,
-          "linkage": {
-            "on_enable": [],
-            "on_disable": []
-          },
-          "parameterBinding": {
-            "enabled": false,
-            "nodeId": "",
-            "paramName": "",
-            "mapping": "normal"
-          }
-        },
-        {
           "id": 1789476595223.4731,
           "group_name": "BSAI_H3_Film_Factory_分镜脚本生成工作流 v1.0",
           "enabled": false,
@@ -5661,7 +5299,7 @@
         290
       ],
       "flags": {},
-      "order": 32,
+      "order": 29,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -5723,7 +5361,7 @@
         790
       ],
       "flags": {},
-      "order": 33,
+      "order": 30,
       "mode": 0,
       "inputs": [],
       "outputs": [
@@ -5819,18 +5457,398 @@
       }
     },
     {
-      "id": 226,
-      "type": "ResolutionSelector",
+      "id": 502,
+      "type": "Note",
       "pos": [
-        -3060.7630687513624,
-        -1128.1366703890085
+        -3957.8054300193407,
+        -2841.27689796717
       ],
       "size": [
-        385.9837767803009,
-        150
+        599.4484422741325,
+        170.96475675360307
+      ],
+      "flags": {},
+      "order": 31,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "BSAI_H3_Film_Factory_电影工厂多合一·双链路切换版使用说明",
+      "properties": {
+        "text": ""
+      },
+      "widgets_values": [
+        "【多合一·双链路切换 / Dual-Chain Switch】\n\n① FastH3 链路: 开关=OFF → BSAI_SolH3_Loader 一采; 250档位: 极速(4+3)/均衡(6+4)/精细(8+6)\n② VDN 链路: 开关=ON → BSAIVDNH3Loader(⚡8步+turbo) 一采; 250档位: 极速-VDN(8+3)/均衡-VDN(8+4)/精细-VDN(8+6)\n\n③ BulletTime LoRA 已挂 276 槽2 @0.5 (子弹时间模板触发词自动生效)\n④ tile_overlap=128 已设 (去毛刺)\n⑤ 4K: latent upscale x2 内置 (960x544 -> 1920x1088), FinalDecode 后如需真4K可BSAI-Premiere节点放大"
+      ],
+      "widgets_values_named": {
+        "text": "【多合一·双链路切换 / Dual-Chain Switch】\n\n① FastH3 链路: 开关=OFF → BSAI_SolH3_Loader 一采; 250档位: 极速(4+3)/均衡(6+4)/精细(8+6)\n② VDN 链路: 开关=ON → BSAIVDNH3Loader(⚡8步+turbo) 一采; 250档位: 极速-VDN(8+3)/均衡-VDN(8+4)/精细-VDN(8+6)\n\n③ BulletTime LoRA 已挂 276 槽2 @0.5 (子弹时间模板触发词自动生效)\n④ tile_overlap=128 已设 (去毛刺)\n⑤ 4K: latent upscale x2 内置 (960x544 -> 1920x1088), FinalDecode 后如需真4K可BSAI-Premiere节点放大"
+      },
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 198,
+      "type": "CLIPLoader",
+      "pos": [
+        -3289.4674743174273,
+        -1859.1244900433007
+      ],
+      "size": [
+        596.9179870533656,
+        106
+      ],
+      "flags": {},
+      "order": 32,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "CLIP名称",
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "label": "类型",
+          "name": "type",
+          "type": "COMBO",
+          "widget": {
+            "name": "type"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "CLIP",
+          "name": "CLIP",
+          "type": "CLIP",
+          "slot_index": 0,
+          "links": [
+            338,
+            392
+          ]
+        }
+      ],
+      "title": "CLIP 文本编码器 (qwen3vl 32B)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "CLIPLoader",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "minimax",
+        "default"
+      ],
+      "widgets_values_named": {
+        "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+        "type": "minimax",
+        "device": "default"
+      }
+    },
+    {
+      "id": 195,
+      "type": "VAELoader",
+      "pos": [
+        -3288.3826793624685,
+        -1712.1449080926925
+      ],
+      "size": [
+        598.8831409716165,
+        58
+      ],
+      "flags": {},
+      "order": 33,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "vae名称",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            322,
+            339
+          ]
+        }
+      ],
+      "title": "视频 VAE (int8_convrot)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "VAELoader",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "minimax_h3_video_vae_int8_convrot.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_video_vae_int8_convrot.safetensors"
+      }
+    },
+    {
+      "id": 197,
+      "type": "VAELoader",
+      "pos": [
+        -3282.886109781291,
+        -1615.80600135627
+      ],
+      "size": [
+        592.0501572585533,
+        58
       ],
       "flags": {},
       "order": 34,
+      "mode": 0,
+      "inputs": [
+        {
+          "label": "vae名称",
+          "name": "vae_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "vae_name"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "name": "VAE",
+          "type": "VAE",
+          "slot_index": 0,
+          "links": [
+            323,
+            340
+          ]
+        }
+      ],
+      "title": "音频 VAE (fp32)",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.34.0",
+        "Node name for S&R": "VAELoader",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "minimax_h3_audio_vae_fp32.safetensors"
+      ],
+      "widgets_values_named": {
+        "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+      }
+    },
+    {
+      "id": 276,
+      "type": "Lora Loader Stack (rgthree)",
+      "pos": [
+        -3282.117946078836,
+        -1484.111245037227
+      ],
+      "size": [
+        599.3678591623456,
+        246
+      ],
+      "flags": {},
+      "order": 57,
+      "mode": 4,
+      "inputs": [
+        {
+          "label": "模型",
+          "name": "model",
+          "type": "MODEL",
+          "link": 479
+        },
+        {
+          "label": "CLIP",
+          "name": "clip",
+          "type": "CLIP",
+          "link": 392
+        },
+        {
+          "label": "LoRA_01",
+          "name": "lora_01",
+          "type": "COMBO",
+          "widget": {
+            "name": "lora_01"
+          },
+          "link": null
+        },
+        {
+          "label": "强度_01",
+          "name": "strength_01",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength_01"
+          },
+          "link": null
+        },
+        {
+          "label": "LoRA_02",
+          "name": "lora_02",
+          "type": "COMBO",
+          "widget": {
+            "name": "lora_02"
+          },
+          "link": null
+        },
+        {
+          "label": "强度_02",
+          "name": "strength_02",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength_02"
+          },
+          "link": null
+        },
+        {
+          "label": "LoRA_03",
+          "name": "lora_03",
+          "type": "COMBO",
+          "widget": {
+            "name": "lora_03"
+          },
+          "link": null
+        },
+        {
+          "label": "强度_03",
+          "name": "strength_03",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength_03"
+          },
+          "link": null
+        },
+        {
+          "label": "LoRA_04",
+          "name": "lora_04",
+          "type": "COMBO",
+          "widget": {
+            "name": "lora_04"
+          },
+          "link": null
+        },
+        {
+          "label": "强度_04",
+          "name": "strength_04",
+          "type": "FLOAT",
+          "widget": {
+            "name": "strength_04"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "label": "模型",
+          "name": "MODEL",
+          "type": "MODEL",
+          "links": [
+            480
+          ]
+        },
+        {
+          "label": "CLIP",
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "rgthree-comfy",
+        "ver": "2c5342a8cb0eaecaabf61435a5f37dd594c510ba",
+        "Node name for S&R": "Lora Loader Stack (rgthree)",
+        "enableTabs": false,
+        "tabWidth": 65,
+        "tabXOffset": 10,
+        "hasSecondTab": false,
+        "secondTabText": "Send Back",
+        "secondTabOffset": 80,
+        "secondTabWidth": 65,
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.8",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "minimax_h3_lms_v1.0_r64-细节纹理增强lora.safetensors",
+        0,
+        "BulletTime-MMH3.safetensors",
+        0.5,
+        "minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors",
+        0,
+        "H3电影质感V0.4 .safetensors",
+        1
+      ],
+      "widgets_values_named": {
+        "lora_01": "minimax_h3_lms_v1.0_r64-细节纹理增强lora.safetensors",
+        "strength_01": 0,
+        "lora_02": "BulletTime-MMH3.safetensors",
+        "strength_02": 0.5,
+        "lora_03": "minimax_h3_fl2v_turbo_4step_v1.1_768p_comfyui_bf16.safetensors",
+        "strength_03": 0,
+        "lora_04": "H3电影质感V0.4 .safetensors",
+        "strength_04": 1
+      }
+    },
+    {
+      "id": 226,
+      "type": "ResolutionSelector",
+      "pos": [
+        -2992.207258914395,
+        -1141.0581000808054
+      ],
+      "size": [
+        308.04332539585755,
+        150
+      ],
+      "flags": {},
+      "order": 35,
       "mode": 0,
       "showAdvanced": true,
       "inputs": [
@@ -5909,18 +5927,54 @@
       }
     },
     {
+      "id": 501,
+      "type": "PrimitiveBoolean",
+      "pos": [
+        -3266.350469387581,
+        -1147.8426665127315
+      ],
+      "size": [
+        210,
+        58
+      ],
+      "flags": {},
+      "order": 36,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "BOOLEAN",
+          "type": "BOOLEAN",
+          "links": [
+            487
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.35.0",
+        "Node name for S&R": "PrimitiveBoolean"
+      },
+      "widgets_values": [
+        false
+      ],
+      "widgets_values_named": {
+        "value": false
+      }
+    },
+    {
       "id": 500,
       "type": "ComfySwitchNode",
       "pos": [
-        -380,
-        -4160
+        -3263.4902413504283,
+        -1047.5936808404053
       ],
       "size": [
-        225,
-        96
+        210,
+        78
       ],
       "flags": {},
-      "order": 24,
+      "order": 46,
       "mode": 0,
       "inputs": [
         {
@@ -5955,66 +6009,16 @@
       ],
       "properties": {
         "cnr_id": "comfy-core",
-        "cnr_type": "ComfySwitchNode",
-        "Node name for S&R": "ComfySwitchNode"
+        "ver": "0.35.0",
+        "Node name for S&R": "ComfySwitchNode",
+        "cnr_type": "ComfySwitchNode"
       },
       "widgets_values": [
         false
-      ]
-    },
-    {
-      "id": 501,
-      "type": "PrimitiveBoolean",
-      "pos": [
-        -650,
-        -4140
       ],
-      "size": [
-        200,
-        58
-      ],
-      "flags": {},
-      "order": 23,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "BOOLEAN",
-          "type": "BOOLEAN",
-          "links": [
-            487
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "PrimitiveBoolean"
-      },
-      "widgets_values": [
-        false
-      ]
-    },
-    {
-      "id": 502,
-      "type": "Note",
-      "pos": [
-        -760,
-        -4320
-      ],
-      "size": [
-        430,
-        210
-      ],
-      "flags": {},
-      "order": 22,
-      "mode": 0,
-      "inputs": [],
-      "outputs": [],
-      "properties": {
-        "text": ""
-      },
-      "widgets_values": [
-        "【多合一·双链路切换 / Dual-Chain Switch】\n\n① FastH3 链路: 开关=OFF → BSAI_SolH3_Loader 一采; 250档位: 极速(4+3)/均衡(6+4)/精细(8+6)\n② VDN 链路: 开关=ON → BSAIVDNH3Loader(⚡8步+turbo) 一采; 250档位: 极速-VDN(8+3)/均衡-VDN(8+4)/精细-VDN(8+6)\n\n③ BulletTime LoRA 已挂 276 槽2 @0.5 (子弹时间模板触发词自动生效)\n④ tile_overlap=128 已设 (去毛刺)\n⑤ 4K: latent upscale x2 内置 (960x544 -> 1920x1088), FinalDecode 后如需真4K可外接放大"
-      ]
+      "widgets_values_named": {
+        "switch": false
+      }
     }
   ],
   "links": [
@@ -6502,7 +6506,7 @@
   "groups": [
     {
       "id": 3,
-      "title": "BSAI_H3_Film_Factory_电影工厂-电影分镜成片工作流 v4.0（全自动）",
+      "title": "BSAI_H3_Film_Factory电影工厂128分钟大电影版-多合一版（FastH3+VDN双链路·tile_overlap128).json",
       "bounding": [
         -3328.9971732751555,
         -3176.1792603554272,
@@ -6698,10 +6702,10 @@
       "bounding": [
         -3319.607062670831,
         -2764.1851323876526,
-        655.4066764577506,
-        870.6562516250951
+        654.8558170286028,
+        866.2493761919154
       ],
-      "color": "#3f789e",
+      "color": "#a1309b",
       "flags": {}
     },
     {
@@ -6713,29 +6717,53 @@
         655.4346117801101,
         367.78870178986335
       ],
-      "color": "#3f789e",
+      "color": "#b06634",
       "flags": {}
     },
     {
       "id": 30,
       "title": "Lora 组合",
       "bounding": [
-        -3303.240852447764,
-        -1527.5716934434704,
+        -3297.6821800263674,
+        -1550.657711337743,
         628.2352253354939,
-        339.6970691210256
+        322.1697236481514
       ],
       "color": "#3f789e",
+      "flags": {}
+    },
+    {
+      "id": 31,
+      "title": "① FastH3=OFF  ② VDN =ON",
+      "bounding": [
+        -3294.4365047146007,
+        -1216.339460218741,
+        282.7226702791172,
+        257.77736122486556
+      ],
+      "color": "#b58b2a",
+      "flags": {}
+    },
+    {
+      "id": 32,
+      "title": "画幅比例+像素大小选择",
+      "bounding": [
+        -2997.9739144428827,
+        -1214.8371163210668,
+        330.7976750047146,
+        256.27501732719077
+      ],
+      "color": "#b58b2a",
       "flags": {}
     }
   ],
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.9315591076018889,
+      "scale": 0.9315591076018943,
       "offset": [
-        4443.897568098764,
-        2326.869052233579
+        3907.8089976507003,
+        3906.9591507839127
       ]
     },
     "qgn_navigation_groups": [],
