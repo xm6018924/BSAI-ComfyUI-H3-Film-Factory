@@ -2157,12 +2157,12 @@ def _decode_single_clip_to_blob(
             ]
             if has_audio and temp_wav is not None:
                 cmd += ["-i", str(temp_wav)]
-                cmd += _h264_enc_args(ffmpeg, "ultrafast", 17)
+                cmd += _h264_enc_args(ffmpeg, "fast", 14)
                 cmd += ["-c:a", "aac", "-b:a", "192k"]
                 cmd += ["-shortest"]
             else:
                 cmd += ["-an"]
-                cmd += _h264_enc_args(ffmpeg, "ultrafast", 17)
+                cmd += _h264_enc_args(ffmpeg, "fast", 14)
             cmd += [str(temp_mp4)]
 
             log_f = open(video_log, "wb")
@@ -2300,8 +2300,8 @@ def _encode_corrected_segment_video_mp4(
             h,
             fps,
             "H.264",
-            17,
-            "ultrafast",
+            14,
+            "fast",
             video_log,
         )
         _write_image_frames(proc, video)
