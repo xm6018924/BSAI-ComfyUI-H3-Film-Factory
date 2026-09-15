@@ -4547,6 +4547,14 @@ class BSAIH3FilmFactory:
                 _pre_m = None
                 _pre_n = 0
             if _pre_n < _need_pre:
+                try:
+                    import os as _os
+                    _jz = _os.path.getsize(manifest_path) if _os.path.exists(manifest_path) else None
+                    _bz = _os.path.getsize(str(manifest_path) + ".bak") if _os.path.exists(str(manifest_path) + ".bak") else None
+                    _dz = _os.path.getsize(data_path) if _os.path.exists(data_path) else None
+                    print(f"[H3 Extender] v1.80 cache诊断: json={_jz}字节 bak={_bz}字节 h3cache={_dz}字节")
+                except Exception:
+                    pass
                 _from = max(0, _pre_n)
                 if select_override is not None:
                     select_override = set(range(_from, len(clips)))
