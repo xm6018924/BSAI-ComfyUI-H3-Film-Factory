@@ -317,6 +317,11 @@ def _plan_regions(video_shape, n_tiles: int, overlap_pixels: int):
 
 def _invoke_model(model_k, x, sigma, denoise_mask, call_kw: dict):
     kwargs = {key: value for key, value in call_kw.items() if value is not None}
+    # v1.96: 分块二采时模型按 DynamicVRAM staged 调度(大部分权重 offload),
+    # tile forward 前强制同步, 消除异步 paging 搬运与 in-place modulation
+    # (model.py _mod_scale_shift) 的竞态 —— 否则偶发 Fatal Python error: Aborted。
+    if x.is_cuda and getattr(model_k, "_tiled_active", False):
+        torch.cuda.synchronize()
     return type(model_k).__call__(model_k, x, sigma, denoise_mask, **kwargs)
 
 
@@ -347,8 +352,11 @@ def _tiled_model_call(
         return _invoke_model(model_k, x, sigma, denoise_mask, call_kw)
 
     streams = list(comfy.utils.unpack_latents(x, full_shapes))
+    _prev_tiled = getattr(model_k, "_tiled_active", False)
+    model_k._tiled_active = True
     video = streams[0]
     if not isinstance(video, torch.Tensor) or video.ndim != 5:
+        model_k._tiled_active = _prev_tiled
         return _invoke_model(model_k, x, sigma, denoise_mask, call_kw)
 
     plan = getattr(model_k, "_director_spatial_plan", None)
@@ -373,6 +381,7 @@ def _tiled_model_call(
                 [(a, b) for a, b, *_ in plan["regions"]],
             )
     if plan is None:
+        model_k._tiled_active = _prev_tiled
         return _invoke_model(model_k, x, sigma, denoise_mask, call_kw)
 
     axis = plan["axis"]
@@ -458,6 +467,7 @@ def _tiled_model_call(
         base.latent_shapes = saved_shapes
         model_k.latent_image = saved_latent_image
         model_k.noise = saved_noise
+        model_k._tiled_active = _prev_tiled
 
     merged = [video_acc / weights.clamp(min=1e-8)]
     if audio_acc is not None and len(streams) > 1:
