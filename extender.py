@@ -4433,6 +4433,20 @@ class BSAIH3FilmFactory:
         resolved_width = int(resolution["width"])
         resolved_height = int(resolution["height"])
 
+        # v1.98: 渲染前分辨率诊断——断点被清时先看这里, 一眼定位清空原因
+        _diag_geom = manifest.get("geometry")
+        _diag_cache = cache_resolution or {}
+        print(
+            f"[H3 Extender] v1.98 分辨率诊断: mode={resolution_mode} mp={megapixels} "
+            f"manual=({width}x{height}) guide_idx={requested_resolution.get('guide_ref')} "
+            f"guide_dim=({requested_resolution.get('guide_src_width')}x{requested_resolution.get('guide_src_height')}) "
+            f"guide_fallback={requested_resolution.get('fallback')} "
+            f"requested={resolved_width}x{resolved_height} "
+            f"cache_segments={len(segments)} cache_geom={_diag_geom} "
+            f"cache_res={int(_diag_cache.get('width', 0) or 0)}x{int(_diag_cache.get('height', 0) or 0)} "
+            f"cache_has_segments={cache_has_segments}"
+        )
+
         requested_mismatch = bool(
             cache_has_segments
             and (
