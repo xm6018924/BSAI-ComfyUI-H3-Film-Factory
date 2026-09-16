@@ -2070,6 +2070,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         try: _mm1.EXTRA_RESERVED_VRAM = int(4.0 * 1024 ** 3)
         except Exception: pass
         print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB), reserve->4.0GB")
+        # v1.91: 一采前同样解除 16GB fraction 限制(与二采一致), 避免
+        # staged 15.25GB + workspace 临界超限. 全链路可用物理 23.86GB.
+        try:
+            _cur_frac91b = _t1.cuda.get_per_process_memory_fraction()
+            if _cur_frac91b < 1.0:
+                _t1.cuda.set_per_process_memory_fraction(1.0)
+                print(f"[H3 Extender] v1.91 一采前解除 fraction 限制: {_cur_frac91b:.3f} -> 1.0")
+        except Exception as _e91b:
+            print(f"[H3 Extender] v1.91 一采前 fraction reset 失败: {_e91b}")
         if _free_os >= 18.0:
             _mm1.load_models_gpu([model])   # reserve 4.0 预算: 驻留 ~17.5GB, 尾部 ~2GB offload
             _t1.cuda.synchronize()
@@ -2489,6 +2498,21 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # workspace OOM(v1.64 实测). 分块走原生 prepare 全流式
                 # (0 驻留逐 block 换页, 313s/it 稳).
                 _sh59._prepare_sampling = _bsai_refine_prepare
+            # v1.91: 解除 torch allocator 人为 16GB fraction 限制——运行中
+            # 某库调用过 set_per_process_memory_fraction, 使 torch 可用上限
+            # 仅 16GB, 二采全帧 staged 15.25GB + 4K workspace 3.05GB = 18.3GB
+            # 被判 OOM 回退一采. reset 1.0 后 torch 用满物理 23.86GB,
+            # 全帧二采不再 OOM. LLM 全在 CPU, 无其他显存用户, reset 安全.
+            try:
+                import torch as _t91
+                _cur_frac91 = _t91.cuda.get_per_process_memory_fraction()
+                _t91.cuda.set_per_process_memory_fraction(1.0)
+                if _cur_frac91 < 1.0:
+                    print(f"[H3 Extender] v1.91 解除 fraction 限制: {_cur_frac91:.3f} -> 1.0 (二采可用 23.86GB)")
+                else:
+                    print(f"[H3 Extender] v1.91 fraction 已是 1.0, 无需解除")
+            except Exception as _e91:
+                print(f"[H3 Extender] v1.91 fraction reset 失败: {_e91}")
             try:
                 with _aimdo_disabled():
                     _r_samples = _r_guider.sample(
