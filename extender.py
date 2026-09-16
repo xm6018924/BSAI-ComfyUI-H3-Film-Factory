@@ -2360,63 +2360,75 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 except Exception:
                     pass
                 if _res_gb < 12.0:
-                    # v1.87: 分块二采也走重驻留。v1.68 曾对 tile_count>1 跳过重载
-                    # 导致二采 0 loaded + 20GB 全流式换页(实测 313s/it, 极速-VDN
-                    # 二采 3步x4tile ≈ 60min)。实测 reserve 8.0 预算下 19.5GB 基座
-                    # 可驻留 ~13.6GB + offload ~6GB, 换页量减少 2/3, 分块采样提速
-                    # 2-3 倍。prepare(CONST加噪)在 load 之前已完成, 不会被卸。
-                    # v1.65: 二采前驻留控制——先卸载再按 reserve 重载, 让加载器按
-                    # reserve 预算重新平衡驻留量, 给 Sol-Attn workspace 让位.
-                    # 实测 19:34 x2.0: 直接 load_models_gpu 全量驻留 21.72GB,
-                    # Sol-Attn kernel 603MB workspace 分不出 → OOM.
-                    # reserve = 模型 - (total - ws - 3GB 余量 - 1.5GB conds):
-                    #   x2.0(ws4.5): ~6.8GB -> 驻留 ~15GB
-                    #   x1.5(ws2.6): ~4.9GB -> 驻留 ~17GB
-                    #   x1.0(ws1.5): ~4.2GB -> 驻留 ~17.5GB
+                    # v1.89: DynamicVRAM 模式检测——模型 is_dynamic() 时 load_models_gpu
+                    # 只重新 staged(不真正驻留), 且 staged ~20GB 分配占满显存, 分块
+                    # 初始化死等 staged 完成 -> 死锁(4090 实测: resident=0.0GB,
+                    # 卡 0/6 Model Initializing)。dynamic 模式跳过手动重驻留,
+                    # 交 DynamicVRAM 自身调度(一采同路径实测 57s/it 正常)。
                     try:
-                        _ws_need2 = _ws_tbl.get(round(_r_factor, 1), 2.6)
-                        _r_reserve_gb = _model_gb2 - (_gpu_total_gb2 - _ws_need2 - 3.0 - 1.5)
-                        _r_reserve_gb = max(3.0, min(8.0, _r_reserve_gb))
-                        # v1.88: 分块二采时 ComfyUI 按全幅估算 workspace(ws_need2)并判断
-                        # free < ws+2GB 就卸载驻留模型(实测: reserve5.0->驻留16.3GB free5.2GB
-                        # <6.5GB -> Unloaded到0 loaded -> 分块forward死锁0/3)。
-                        # 分块时提高 reserve 下限至 7.5GB: 驻留~14.3GB + offload~5.2GB +
-                        # free~7.2GB > ws6.5GB, ComfyUI 不再卸载, 分块forward正常换页。
-                        if tiled_refine:
-                            _r_reserve_gb = max(_r_reserve_gb, 7.5)
+                        _is_dyn = bool(getattr(getattr(model, "model", None), "is_dynamic", lambda: False)())
+                    except Exception:
+                        _is_dyn = False
+                    if _is_dyn:
+                        print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
+                    else:
+                        # v1.87: 分块二采也走重驻留。v1.68 曾对 tile_count>1 跳过重载
+                        # 导致二采 0 loaded + 20GB 全流式换页(实测 313s/it, 极速-VDN
+                        # 二采 3步x4tile ≈ 60min)。实测 reserve 8.0 预算下 19.5GB 基座
+                        # 可驻留 ~13.6GB + offload ~6GB, 换页量减少 2/3, 分块采样提速
+                        # 2-3 倍。prepare(CONST加噪)在 load 之前已完成, 不会被卸。
+                        # v1.65: 二采前驻留控制——先卸载再按 reserve 重载, 让加载器按
+                        # reserve 预算重新平衡驻留量, 给 Sol-Attn workspace 让位.
+                        # 实测 19:34 x2.0: 直接 load_models_gpu 全量驻留 21.72GB,
+                        # Sol-Attn kernel 603MB workspace 分不出 → OOM.
+                        # reserve = 模型 - (total - ws - 3GB 余量 - 1.5GB conds):
+                        #   x2.0(ws4.5): ~6.8GB -> 驻留 ~15GB
+                        #   x1.5(ws2.6): ~4.9GB -> 驻留 ~17GB
+                        #   x1.0(ws1.5): ~4.2GB -> 驻留 ~17.5GB
                         try:
-                            _mm3.unload_model(model)  # 先卸载, 重载时才按新 reserve 预算
+                            _ws_need2 = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                            _r_reserve_gb = _model_gb2 - (_gpu_total_gb2 - _ws_need2 - 3.0 - 1.5)
+                            _r_reserve_gb = max(3.0, min(8.0, _r_reserve_gb))
+                            # v1.88: 分块二采时 ComfyUI 按全幅估算 workspace(ws_need2)并判断
+                            # free < ws+2GB 就卸载驻留模型(实测: reserve5.0->驻留16.3GB free5.2GB
+                            # <6.5GB -> Unloaded到0 loaded -> 分块forward死锁0/3)。
+                            # 分块时提高 reserve 下限至 7.5GB: 驻留~14.3GB + offload~5.2GB +
+                            # free~7.2GB > ws6.5GB, ComfyUI 不再卸载, 分块forward正常换页。
+                            if tiled_refine:
+                                _r_reserve_gb = max(_r_reserve_gb, 7.5)
+                            try:
+                                _mm3.unload_model(model)  # 先卸载, 重载时才按新 reserve 预算
+                            except Exception:
+                                pass
+                            _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
+                        except Exception:
+                            _r_reserve_gb = 8.0 if tiled_refine else 5.5
+                            try:
+                                _mm3.unload_model(model)
+                            except Exception:
+                                pass
+                            _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
+                        print(f"[H3 Extender] Refine 二采前 DiT 驻留 {_res_gb:.1f}GB < 12GB, 重新驻留到 VRAM (reserve->{_r_reserve_gb:.1f}GB) ...")
+                        _mm3.load_models_gpu([model])
+                        _torch3.cuda.synchronize()
+                        try:
+                            _res2 = model.loaded_size() / 1024 ** 3
+                            print(f"[H3 Extender] Refine 二采前 DiT 驻留: resident={_res2:.1f}GB / total={model.model_size()/1024**3:.1f}GB")
                         except Exception:
                             pass
-                        _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
-                    except Exception:
-                        _r_reserve_gb = 8.0 if tiled_refine else 5.5
+                        # v1.65: 验证 Sol-Attn workspace 空间, 不足时醒目提示(采样走
+                        # lowvram 换页兜底, 不会静默 OOM; 下次跑会在预算区提前降级).
                         try:
-                            _mm3.unload_model(model)
+                            import torch as _torch65
+                            _f65, _t65 = _torch65.cuda.mem_get_info()
+                            _free65 = _f65 / 1024 ** 3
+                            _ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                            if _free65 < _ws65 + 2.0:
+                                print(f"[H3 Extender] Refine 警告: 二采 workspace 空间不足 "
+                                      f"(free={_free65:.1f}GB < ws {_ws65:.1f}GB+2GB), "
+                                      f"采样将靠 lowvram 换页兜底, 建议下次降低 refine_upscale_factor")
                         except Exception:
                             pass
-                        _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
-                    print(f"[H3 Extender] Refine 二采前 DiT 驻留 {_res_gb:.1f}GB < 12GB, 重新驻留到 VRAM (reserve->{_r_reserve_gb:.1f}GB) ...")
-                    _mm3.load_models_gpu([model])
-                    _torch3.cuda.synchronize()
-                    try:
-                        _res2 = model.loaded_size() / 1024 ** 3
-                        print(f"[H3 Extender] Refine 二采前 DiT 驻留: resident={_res2:.1f}GB / total={model.model_size()/1024**3:.1f}GB")
-                    except Exception:
-                        pass
-                    # v1.65: 验证 Sol-Attn workspace 空间, 不足时醒目提示(采样走
-                    # lowvram 换页兜底, 不会静默 OOM; 下次跑会在预算区提前降级).
-                    try:
-                        import torch as _torch65
-                        _f65, _t65 = _torch65.cuda.mem_get_info()
-                        _free65 = _f65 / 1024 ** 3
-                        _ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)
-                        if _free65 < _ws65 + 2.0:
-                            print(f"[H3 Extender] Refine 警告: 二采 workspace 空间不足 "
-                                  f"(free={_free65:.1f}GB < ws {_ws65:.1f}GB+2GB), "
-                                  f"采样将靠 lowvram 换页兜底, 建议下次降低 refine_upscale_factor")
-                    except Exception:
-                        pass
             except Exception as _lg2:
                 print(f"[H3 Extender] Refine 主动加载模型失败, 走 DynamicVRAM 按需流式: {_lg2}")
             _r_sampler = comfy.samplers.sampler_object(str(sampler_name))
