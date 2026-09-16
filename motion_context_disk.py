@@ -602,13 +602,41 @@ def _append_segment(data_path, latent, index, trim_frames, validated, manifest):
     }, _geometry(video, audio)
 
 
-def _truncate_chain(data_path, manifest_path, manifest, index):
+def _backup_chain_before_truncate(data_path, manifest_path, reason):
+    """v1.97: truncate 前自动备份链(数据+manifest), 误清可恢复。
+    备份到同目录 chain_<name>.<ts>.preclear.h3cache/.json, 保留最近 3 份。"""
+    try:
+        import time as _t, shutil as _sh
+        stem = Path(manifest_path).name
+        name = stem[:-5] if stem.endswith(".json") else stem
+        ts = _t.strftime("%Y%m%d_%H%M%S")
+        if Path(data_path).exists() and Path(data_path).stat().st_size > 0:
+            _sh.copy2(data_path, Path(data_path).with_name(f"{name}.{ts}.preclear.h3cache"))
+        if Path(manifest_path).exists():
+            _sh.copy2(manifest_path, Path(manifest_path).with_name(f"{name}.{ts}.preclear.json"))
+        print(f"[H3 Extender] v1.97 清链前备份: {name}.{ts}.preclear.* (reason={reason})")
+        # 只保留最近 3 份备份
+        try:
+            backups = sorted(Path(manifest_path).parent.glob(f"{name}.*.preclear.json"))
+            for old in backups[:-3]:
+                old.unlink(missing_ok=True)
+                Path(str(old).replace(".preclear.json", ".preclear.h3cache")).unlink(missing_ok=True)
+        except Exception:
+            pass
+    except Exception as _bk:
+        print(f"[H3 Extender] v1.97 备份失败: {_bk}")
+
+
+def _truncate_chain(data_path, manifest_path, manifest, index, reason=""):
     """
     Keep clips [0:index), discard index and everything after it.
     Manifest prefix is committed first, so an interruption can only roll back.
     """
     index = max(0, int(index))
     old = [dict(x) for x in manifest.get("segments", [])]
+    if index == 0 and old:
+        # v1.97: 全清(truncate 0)前自动备份, 并在日志里写明触发原因
+        _backup_chain_before_truncate(data_path, manifest_path, reason or "truncate0")
     prefix = old[:index]
     truncate_at = _DATA_START if not prefix else _segment_end(prefix[-1])
 

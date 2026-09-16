@@ -4271,8 +4271,10 @@ class BSAIH3FilmFactory:
 
         # If cards were removed, trim the physical cache immediately.
         if len(manifest.get("segments", [])) > len(clips):
+            print(f"[H3 Extender] v1.97 卡片数减少({len(manifest.get('segments', []))} -> {len(clips)}), 修剪尾部缓存段")
             manifest = _truncate_chain(
-                data_path, manifest_path, manifest, len(clips)
+                data_path, manifest_path, manifest, len(clips),
+                reason=f"cards_removed {len(manifest.get('segments', []))}->{len(clips)}",
             )
 
         # Clear stale tail latents before a full render pass.
@@ -4443,7 +4445,15 @@ class BSAIH3FilmFactory:
         if requested_mismatch:
             # Resolution is the one unavoidable global invalidation: latent
             # geometry cannot be mixed inside one sequential disk chain.
-            manifest = _truncate_chain(data_path, manifest_path, manifest, 0)
+            _old_r = cache_resolution or {}
+            print(
+                f"[H3 Extender] v1.97 分辨率变化, 链已清空(旧 {int(_old_r.get('width',0))}x{int(_old_r.get('height',0))} "
+                f"-> 新 {resolved_width}x{resolved_height}); 若这是误操作请恢复参数后从备份恢复链"
+            )
+            manifest = _truncate_chain(
+                data_path, manifest_path, manifest, 0,
+                reason=f"resolution {int(_old_r.get('width',0))}x{int(_old_r.get('height',0))}->{resolved_width}x{resolved_height}",
+            )
             segments = []
             cache_resolution = None
             cache_has_segments = False
@@ -4486,6 +4496,7 @@ class BSAIH3FilmFactory:
         prev_asset_refs_key = manifest.get("asset_refs_key", "")
         if asset_refs_key and prev_asset_refs_key and asset_refs_key != prev_asset_refs_key:
             print(f"[H3 Extender] Asset library refs changed, invalidating all cached clips")
+            print(f"[H3 Extender] v1.97 asset key对比: prev={prev_asset_refs_key[:8]}... new={asset_refs_key[:8]}... (磁盘段数={len(manifest.get('segments', []))})")
             # v1.95: 不再全清链——保留磁盘 latent 段作 motion context 前置。
             # asset_refs_key 是全库路径 hash, 加/换一张图就变, 全清会导致
             # 断点失效(选 CLIP3 必须从 CLIP1 补渲)。保留段 + 标 validated=True
