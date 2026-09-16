@@ -108,6 +108,21 @@ def _comfyui_temp_dir():
             return Path(_tf.gettempdir())
 
 
+def _clip_output_dir():
+    """v1.94: 正式 clip 成片(h3_clip_*.mp4)的持久目录——ComfyUI/output/bsai_clips/.
+    ComfyUI 启动会清空 temp, 重启后 Premiere Pro 时间线上的 clip 路径全部失效
+    (Video track V1 produced no output) 且无法挑选 clipN 复用. output 目录重启
+    保留, 与链缓存 bsai_h3_chain_cache 同级持久化. 预览 _clippv_* 仍走 temp
+    (v1.85 已支持从 manifest blob 重建)."""
+    try:
+        _root = Path(__file__).resolve().parents[2]
+        _d = _root / "output" / "bsai_clips"
+        _d.mkdir(parents=True, exist_ok=True)
+        return _d
+    except Exception:
+        return _comfyui_temp_dir()
+
+
 @contextlib.contextmanager
 def _aimdo_disabled():
     """v1.78: H3 分块采样与 aimdo 内存图(malloc_graph)不兼容。
@@ -5128,7 +5143,7 @@ class BSAIH3FilmFactory:
                                 _blob = _segs[_j].get("decoded_mp4_blob")
                                 if _blob is not None:
                                     import folder_paths as _fp
-                                    _temp_dir = _comfyui_temp_dir()
+                                    _temp_dir = _clip_output_dir()
                                     _out_name = f"h3_clip_{owner}_{_j + _seg_off_cur + 1}_{int(time.time())}.mp4"
                                     _out_path = _temp_dir / _out_name
                                     _copy_blob_to_file(data_path, _blob, _out_path)
@@ -5475,7 +5490,7 @@ class BSAIH3FilmFactory:
                     segments = [dict(x) for x in final_manifest["segments"]]
                     root = _ensure_cache_root()
                     import folder_paths as _fp
-                    temp_dir = _comfyui_temp_dir()
+                    temp_dir = _clip_output_dir()
                     clips_info = []
                     for si, seg in enumerate(segments):
                         blob = seg.get("decoded_mp4_blob")
@@ -5677,11 +5692,12 @@ if getattr(PromptServer, "instance", None) is not None:
     async def h3_extender_cache_open(request):
         """v1.16: 打开 latent 缓存目录 / CLIP 视频输出目录，并返回路径+文件列表。
         kind=latent -> cache/（chain_extender_*.h3cache 等）
-        kind=clips  -> ComfyUI temp/（h3_clip_*.mp4，即 BSAI Premiere Pro 接收端口读取的文件目录）"""
+        kind=clips  -> ComfyUI output/bsai_clips/（v1.94 持久化 h3_clip_*.mp4，
+        重启不清空，Premiere Pro 时间线路径重启后仍有效）"""
         kind = str(request.query.get("kind", "latent")).strip().lower()
         try:
             if kind == "clips":
-                d = _comfyui_temp_dir()
+                d = _clip_output_dir()
             else:
                 d = _ensure_cache_root()
             d = d.resolve()
