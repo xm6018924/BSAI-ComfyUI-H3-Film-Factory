@@ -2377,6 +2377,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         _ws_need2 = _ws_tbl.get(round(_r_factor, 1), 2.6)
                         _r_reserve_gb = _model_gb2 - (_gpu_total_gb2 - _ws_need2 - 3.0 - 1.5)
                         _r_reserve_gb = max(3.0, min(8.0, _r_reserve_gb))
+                        # v1.88: 分块二采时 ComfyUI 按全幅估算 workspace(ws_need2)并判断
+                        # free < ws+2GB 就卸载驻留模型(实测: reserve5.0->驻留16.3GB free5.2GB
+                        # <6.5GB -> Unloaded到0 loaded -> 分块forward死锁0/3)。
+                        # 分块时提高 reserve 下限至 7.5GB: 驻留~14.3GB + offload~5.2GB +
+                        # free~7.2GB > ws6.5GB, ComfyUI 不再卸载, 分块forward正常换页。
+                        if tiled_refine:
+                            _r_reserve_gb = max(_r_reserve_gb, 7.5)
                         try:
                             _mm3.unload_model(model)  # 先卸载, 重载时才按新 reserve 预算
                         except Exception:
