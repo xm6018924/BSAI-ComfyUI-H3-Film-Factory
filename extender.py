@@ -2364,9 +2364,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     # 只重新 staged(不真正驻留), 且 staged ~20GB 分配占满显存, 分块
                     # 初始化死等 staged 完成 -> 死锁(4090 实测: resident=0.0GB,
                     # 卡 0/6 Model Initializing)。dynamic 模式跳过手动重驻留,
-                    # 交 DynamicVRAM 自身调度(一采同路径实测 57s/it 正常)。
+                    # 交 DynamicVRAM 自身调度(一采同路径实测正常)。
+                    # v1.89b: is_dynamic() 是 ModelPatcher 方法(model_patcher.py L403),
+                    # 直接调 model.is_dynamic(), 不要取 model.model(v1.89 误写导致检测失效)。
                     try:
-                        _is_dyn = bool(getattr(getattr(model, "model", None), "is_dynamic", lambda: False)())
+                        _is_dyn = bool(model.is_dynamic())
                     except Exception:
                         _is_dyn = False
                     if _is_dyn:
