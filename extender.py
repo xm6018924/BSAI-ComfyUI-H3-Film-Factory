@@ -2503,6 +2503,31 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 仅 16GB, 二采全帧 staged 15.25GB + 4K workspace 3.05GB = 18.3GB
             # 被判 OOM 回退一采. reset 1.0 后 torch 用满物理 23.86GB,
             # 全帧二采不再 OOM. LLM 全在 CPU, 无其他显存用户, reset 安全.
+            # v1.93 (2026-09-16): 释放 aimdo VRAMBuffer(cast buffer, 一采加载期
+            # 累积至 ~8.5GB 后常驻不释放). 主二采全程 _aimdo_disabled(), 该缓冲
+            # 在二采阶段纯占显存——释放后 factor 2.0 全帧二采账本:
+            # staged 15.4GB + workspace 3.08GB = 18.5GB < 23.86GB, 不再 OOM.
+            try:
+                import comfy.model_management as _mm93
+                _released93 = 0
+                for _k93 in list(_mm93.STREAM_AIMDO_CAST_BUFFERS):
+                    try:
+                        _buf93 = _mm93.STREAM_AIMDO_CAST_BUFFERS.pop(_k93)
+                        del _buf93
+                        _released93 += 1
+                    except Exception:
+                        pass
+                if _released93:
+                    import gc as _gc93
+                    import torch as _torch93
+                    _gc93.collect()
+                    _torch93.cuda.synchronize()
+                    _torch93.cuda.empty_cache()
+                    print(f"[H3 Extender] v1.93 已释放 aimdo cast buffer x{_released93} (~8GB VRAM 回归可用)")
+                else:
+                    print(f"[H3 Extender] v1.93 无 aimdo cast buffer 需释放")
+            except Exception as _e93:
+                print(f"[H3 Extender] v1.93 释放 aimdo cast buffer 失败: {_e93}")
             try:
                 import torch as _t91
                 _cur_frac91 = _t91.cuda.get_per_process_memory_fraction()
