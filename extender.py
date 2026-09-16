@@ -4086,7 +4086,14 @@ class BSAIH3FilmFactory:
             # v1.86: VDN 档 (搭配 VDN 版工作流). 一采固定 8 步(VDN DMD 蒸馏最优步数,
             # 质量≈dense 50 步, 且线性注意力长链更稳), 二采 3 步快速收敛.
             # 需用 VDN 工作流提供 model(UNETLoader+ApplyVDNH3, 跳过 FastH3 LoRA/Sol-Attn).
+            # v1.90: 极速档强制关分块——实测 DynamicVRAM 下分块二采 900s/步
+            # (0驻留全staged × 4 tile 序列 + overlap 重复计算), 全帧 1 次连续
+            # staged 预计 ~400-500s/步. 画质档(均衡/精细/均衡-VDN/精细-VDN)
+            # 保留分块防 4K 全幅 OOM. 24GB 卡全帧 DynamicVRAM staged 有兜底.
             steps, refine_steps, tile_count, refine_denoise = 8, 3, 4, 0.5
+            if tiled_refine:
+                tiled_refine = False
+                print(f"[H3 Extender] v1.90 极速-VDN: 强制关分块(全帧二采), 原 tiled_refine=True 已覆盖")
         elif speed_preset == "均衡-VDN":
             # 一采 VDN 8 步 + 二采 4 步: 推荐档, 质量接近精细(FastH3 8+6), 时间省 ~25%.
             steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.55
