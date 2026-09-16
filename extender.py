@@ -2582,30 +2582,54 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 尝试用当前 (放大后) samples 重跑 (3D upscaler 已清,
             # 可能腾出足够 VRAM).
             _fb_samples = _samples_pre_upscale if _samples_pre_upscale is not None else samples
-            # v1.48: fallback 前强制加载 diffusion(lowvram 分块驻留 ~10GB),
-            # 避免 x2.0 OOM 后 ComfyUI 将模型全卸(0 loaded), fallback 从零
-            # 流式重载时二次 OOM(19:13 实测: 重载到 allocated 15.42GB 后
-            # 再请求 9.02GB 撞 Device limit; 先驻留 10GB 则 60x34 ws~1.5GB
-            # 总峰值 ~12GB < 23.86, 即 11:05 x1.5 成功同款路径)
-            # v1.65: fallback 前卸载再按 reserve 重载(驻留 ~11GB), 给 Sol-Attn
-            # workspace 让位——旧逻辑全量驻留 16.39GB 后普通注意力 9.23GB
-            # workspace 仍装不下(19:34 实测二次 OOM). 先卸载再加载, 加载器
-            # 才会按新 reserve 预算重新平衡; 同时 bypass prepare_sampling 防
-            # ComfyUI 采样前按全幅 latent 把模型全载回 21.8GB.
+            # v1.92 (2026-09-16): 主二采全帧 OOM 时, 不再无条件卸载重载——
+            # DynamicVRAM 下卸载重载实测把模型 staged 到 21.36GB, 再加
+            # 2.24GB workspace 二次 OOM(5090 v1.91 实测: 15.40+3.08 后
+            # fallback 21.36+2.24 仍 OOM). 策略改为:
+            #   1. 保持当前 staged 状态(驻留>2GB 时绝不卸载);
+            #   2. 若主二采是全帧(v1.90 极速-VDN 强制关分块), 降级安装
+            #      分块包装器重跑放大版——x2.0 画质完整, 分块 workspace
+            #      ~1.1GB + staged ~15.4GB < 24GB 可跑(4090 实测 374s/步);
+            #   3. 仅当模型已被全卸(<2GB)或分块包装失败时, 才用原始尺寸
+            #      (x1.0) 兜底, 绝不再回退到一采无增强结果.
+            _fb_use_tiles = False
             try:
+                if not (tile_count and int(tile_count) > 1):
+                    import os as _os_t2, importlib.util as _ilu_t2
+                    _tiles_path2 = _os_t2.path.join(_os_t2.path.dirname(_os_t2.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
+                    _tiles_spec2 = _ilu_t2.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path2)
+                    _tiles_mod2 = _ilu_t2.module_from_spec(_tiles_spec2)
+                    _tiles_spec2.loader.exec_module(_tiles_mod2)
+                    _r_restore_tiles = _tiles_mod2.wrap_sampler_spatial_tiles(
+                        _r_sampler, n_tiles=int(tile_count) if tile_count else 4, overlap_pixels=int(tile_overlap))
+                    _fb_use_tiles = True
+                    print(f"[H3 Extender] v1.92 fallback: 降级分块重跑放大版 n_tiles={tile_count if tile_count else 4}")
+            except Exception as _te2:
+                _fb_use_tiles = False
+                print(f"[H3 Extender] v1.92 fallback 分块包装失败, 用原始尺寸兜底: {_te2}")
+            _fb_use = samples if _fb_use_tiles else _fb_samples
+            # v1.92: 仅当模型已被 ComfyUI 全卸(<2GB)时才卸载重载; 否则保持
+            # 当前 staged 状态(DynamicVRAM 下卸载重载会 staged 21.36GB 二次 OOM).
+            try:
+                _fb_loaded_gb = model.loaded_size() / 1024 ** 3
+            except Exception:
+                _fb_loaded_gb = 0.0
+            if _fb_loaded_gb < 2.0:
                 try:
-                    _mm.unload_model(model)
+                    try:
+                        _mm.unload_model(model)
+                    except Exception:
+                        pass
+                    _mm.EXTRA_RESERVED_VRAM = int(10.0 * 1024 ** 3)
+                    _mm.load_models_gpu([model])
+                    print(f"[H3 Extender] v1.92 fallback: 模型已全卸({_fb_loaded_gb:.1f}GB), 重新驻留后重跑")
                 except Exception:
                     pass
-                _mm.EXTRA_RESERVED_VRAM = int(10.0 * 1024 ** 3)
-                _mm.load_models_gpu([model])
-            except Exception:
-                pass
             _gc.collect()
             _torch.cuda.empty_cache()
             _r2_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
-            _r2_noise = comfy.sample.prepare_noise(_fb_samples, int(seed) + 1, None)
-            _r2_latent = _ff_const_add_noise(model, _r2_noise, _r2_sigmas, {"samples": _fb_samples}, _r_audio)
+            _r2_noise = comfy.sample.prepare_noise(_fb_use, int(seed) + 1, None)
+            _r2_latent = _ff_const_add_noise(model, _r2_noise, _r2_sigmas, {"samples": _fb_use}, _r_audio)
             _r2_sampler = comfy.samplers.sampler_object(str(sampler_name))
             _r2_guider = _BasicGuider(model)
             _r2_guider.set_conds(conditioning)
@@ -2631,8 +2655,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     seed=int(seed) + 1,
                 )
                 samples = _r2_samples.to(comfy.model_management.intermediate_device())
-                _fb_label = "原始备份" if _samples_pre_upscale is not None else "当前(放大后)"
-                print(f"[H3 Extender] Refine fallback (v1.43 {_fb_label}) 完成: clip={clip_index}")
+                _fb_label = "分块放大版" if _fb_use_tiles else ("原始备份" if _samples_pre_upscale is not None else "当前(放大后)")
+                print(f"[H3 Extender] Refine fallback (v1.92 {_fb_label}) 完成: clip={clip_index}")
             except torch.cuda.OutOfMemoryError as _oom2:
                 print(f"[H3 Extender] Refine fallback 仍 OOM: {_oom2}")
                 print(f"[H3 Extender] 已回退到一采结果; 建议手动把 refine_upscale_factor 改成 1.0 重新跑")
@@ -2642,6 +2666,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _sh_fb._prepare_sampling = _bsai_orig_prepare_fb
                 except Exception:
                     pass
+                # v1.92: 恢复 fallback 安装的分块包装器
+                if _fb_use_tiles and _r_restore_tiles is not None:
+                    try:
+                        _r_restore_tiles()
+                    except Exception:
+                        pass
         except Exception as _re:
             print(f"[H3 Extender] Refine 双采失败（回退主采样结果）: {_re}")
             import traceback
