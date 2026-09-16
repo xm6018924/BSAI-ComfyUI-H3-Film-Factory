@@ -4486,12 +4486,44 @@ class BSAIH3FilmFactory:
         prev_asset_refs_key = manifest.get("asset_refs_key", "")
         if asset_refs_key and prev_asset_refs_key and asset_refs_key != prev_asset_refs_key:
             print(f"[H3 Extender] Asset library refs changed, invalidating all cached clips")
-            manifest = _truncate_chain(data_path, manifest_path, manifest, 0)
+            # v1.95: 不再全清链——保留磁盘 latent 段作 motion context 前置。
+            # asset_refs_key 是全库路径 hash, 加/换一张图就变, 全清会导致
+            # 断点失效(选 CLIP3 必须从 CLIP1 补渲)。保留段 + 标 validated=True
+            # 后, 用户可任意挑选 clipN 重渲, 前置 context 用旧 latent(运动信息
+            # 有效, 画面内容以重渲采样为准)。
+            _segs95 = [dict(x) for x in manifest.get("segments", [])]
+            if _segs95:
+                _ch95 = False
+                for _s95 in _segs95:
+                    if not bool(_s95.get("validated", False)):
+                        _s95["validated"] = True
+                        _ch95 = True
+                if _ch95:
+                    manifest = dict(manifest)
+                    manifest["segments"] = _segs95
+                    manifest["build"] = BUILD
+                    manifest["updated_at"] = time.time()
+                    _write_json_atomic(manifest_path, manifest)
+                print(f"[H3 Extender] v1.95: 保留 {len(_segs95)} 段 latent 作前置 context（不再全清, 可挑选 clipN 重渲）")
             for cfg in clips:
                 cfg["validated"] = False
         elif asset_refs_key and not prev_asset_refs_key and manifest.get("segments"):
             print(f"[H3 Extender] Asset library refs newly connected, invalidating all cached clips")
-            manifest = _truncate_chain(data_path, manifest_path, manifest, 0)
+            # v1.95: 同上——首次连 asset 库也保留磁盘段作前置 context
+            _segs95b = [dict(x) for x in manifest.get("segments", [])]
+            if _segs95b:
+                _ch95b = False
+                for _s95b in _segs95b:
+                    if not bool(_s95b.get("validated", False)):
+                        _s95b["validated"] = True
+                        _ch95b = True
+                if _ch95b:
+                    manifest = dict(manifest)
+                    manifest["segments"] = _segs95b
+                    manifest["build"] = BUILD
+                    manifest["updated_at"] = time.time()
+                    _write_json_atomic(manifest_path, manifest)
+                print(f"[H3 Extender] v1.95: 首次连 asset 库, 保留 {len(_segs95b)} 段 latent 作前置 context")
             for cfg in clips:
                 cfg["validated"] = False
 
