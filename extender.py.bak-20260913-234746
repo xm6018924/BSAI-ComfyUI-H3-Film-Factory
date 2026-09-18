@@ -24,7 +24,6 @@ import math
 import os
 import re
 from pathlib import Path
-import contextlib
 import secrets
 import shutil
 import subprocess
@@ -72,7 +71,6 @@ from .motion_context_disk import (
     _decode_single_clip_to_blob,
     _load_segment_video,
     _load_segment_audio,
-    _backup_chain_before_truncate,
     _decode_single_audio,
     _find_ffmpeg,
     _copy_blob_to_file,
@@ -91,112 +89,8 @@ FPS = 24
 AUDIO_LATENT_FPS = 40
 
 
-def _comfyui_temp_dir():
-    """插件安装的 ComfyUI 根目录/temp——不依赖 folder_paths.get_temp_directory(),
-    避免被其它插件 set_temp_directory() 改到系统 Temp(如 latentsync_*), 保证每台
-    机器上预览/CLIP 临时文件都落在各自的 .\\ComfyUI\\temp。"""
-    try:
-        _root = Path(__file__).resolve().parents[2]
-        _d = _root / "temp"
-        _d.mkdir(parents=True, exist_ok=True)
-        return _d
-    except Exception:
-        try:
-            import folder_paths as _fp
-            return _comfyui_temp_dir()
-        except Exception:
-            import tempfile as _tf
-            return Path(_tf.gettempdir())
-
-
-def _clip_output_dir():
-    """v1.94: 正式 clip 成片(h3_clip_*.mp4)的持久目录——ComfyUI/output/bsai_clips/.
-    ComfyUI 启动会清空 temp, 重启后 Premiere Pro 时间线上的 clip 路径全部失效
-    (Video track V1 produced no output) 且无法挑选 clipN 复用. output 目录重启
-    保留, 与链缓存 bsai_h3_chain_cache 同级持久化. 预览 _clippv_* 仍走 temp
-    (v1.85 已支持从 manifest blob 重建)."""
-    try:
-        _root = Path(__file__).resolve().parents[2]
-        _d = _root / "output" / "bsai_clips"
-        _d.mkdir(parents=True, exist_ok=True)
-        return _d
-    except Exception:
-        return _comfyui_temp_dir()
-
-
-@contextlib.contextmanager
-def _aimdo_disabled():
-    """v1.78: H3 分块采样与 aimdo 内存图(malloc_graph)不兼容。
-    4090 ComfyUI 0.35 跑后期 clip 二采时显存不足, malloc_graph_push 报
-    'aimdo memory compile error' 断链。采样期间临时禁用 malloc_graph_begin/end,
-    采样后恢复, 不影响其它节点/工作流。"""
-    _mp = None
-    try:
-        import comfy.model_prefetch as _mp
-        _ob, _oe = _mp.malloc_graph_begin, _mp.malloc_graph_end
-        _mp.malloc_graph_begin = lambda device: None
-        _mp.malloc_graph_end = lambda: None
-    except Exception:
-        _mp = None
-    try:
-        yield
-    finally:
-        if _mp is not None:
-            try:
-                _mp.malloc_graph_begin, _mp.malloc_graph_end = _ob, _oe
-            except Exception:
-                pass
-
-
-def _release_dynamic_vram(tag=""):
-    """v1.81 (2026-09-15 fix #11): 4090 DynamicVRAM 二采前 staged 池残留致 CUDA abort。
-
-    现象: 4090 (ComfyUI 0.35 + DynamicVRAM 流式) 一采完成后, 模型权重仍留在
-    prefetch/vbar staged 池 (21833MB Staged), ComfyUI 标准 unload_all_models()
-    对 dynamic 模型返回 "0 models unloaded" 无效; 二采前 device_free 只剩
-    ~1GB, 分块采样触发 21.8GB 重载 + workspace 分配 -> CUDA 驱动级
-    "Fatal Python error: Aborted" (线程 dump 在 bsai_h3_spatial_tiles.py)。
-    修复: 调用 comfy.model_prefetch.cleanup_prefetch_queues() (vbar_unpin
-    释放 staged 权重) + cleanup_malloc_graph() + unload_all_models() +
-    empty_cache, 让二采前显存回到 20GB+。对非 DynamicVRAM (5090) 为 no-op。
-    """
-    import torch as _t81
-    try:
-        import comfy.model_prefetch as _mp81
-        for _fn81 in ("cleanup_prefetch_queues", "cleanup_malloc_graph"):
-            _f81 = getattr(_mp81, _fn81, None)
-            if _f81 is not None:
-                try:
-                    _f81()
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    try:
-        import comfy.model_management as _mm81
-        try:
-            _mm81.unload_all_models()
-        except Exception:
-            pass
-    except Exception:
-        pass
-    try:
-        _t81.cuda.empty_cache()
-        _t81.cuda.synchronize()
-    except Exception:
-        pass
-    try:
-        _f81, _t81b = _t81.cuda.mem_get_info()
-        print(f"[H3 Extender] v1.81 显存释放[{tag}]: "
-              f"free={_f81/1024**3:.2f}GB/{_t81b/1024**3:.2f}GB")
-    except Exception:
-        pass
-
-
-def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None, async_encode=False):
-    """Decode a single cached clip to MP4 and store as blob for frontend preview.
-    v1.70: async_encode=True 时 encode 段在后台线程执行, 返回
-    {"async": True, "done_event": threading.Event}."""
+def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None):
+    """Decode a single cached clip to MP4 and store as blob for frontend preview."""
     return _decode_single_clip_to_blob(
         owner_id=owner,
         clip_index=clip_index,
@@ -204,7 +98,6 @@ def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=N
         audio_vae=audio_vae,
         fps=fps,
         ffmpeg=ffmpeg,
-        async_encode=async_encode,
     )
 
 
@@ -217,35 +110,6 @@ def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=N
 # output ports.  This lets downstream upscale nodes (e.g. BSAI-H3-upscale-4K)
 # consume the film as soon as the run returns, without a second VAE decode.
 # ---------------------------------------------------------------------------
-
-
-def _read_frames_from_mp4(path, ffmpeg, total_frames, trim, width, height):
-    """v1.67: 从已编码 MP4 blob 读帧(preview decode 产物), 返回 [T,H,W,C] float 0-1
-    cpu tensor. 替代 _decode_clip_to_av 里重复的 VAE decode(2X 时每段省 ~30-60s).
-    MP4 已按 trim 裁剪, 帧数以实际 raw 数据为准(编码器可能微调)."""
-    import subprocess as _sp
-    import numpy as _np
-    n = max(0, int(total_frames) - int(trim))
-    if n == 0:
-        return None
-    try:
-        _p = _sp.run(
-            [str(ffmpeg), "-y", "-i", str(path),
-             "-f", "rawvideo", "-pix_fmt", "rgb24",
-             "-s:v", f"{int(width)}x{int(height)}", "-"],
-            stdout=_sp.PIPE, stderr=_sp.DEVNULL, timeout=600,
-        )
-    except Exception as _e:
-        print(f"[H3 Extender] MP4 读帧失败: {_e}")
-        return None
-    raw = _p.stdout
-    one = int(width) * int(height) * 3
-    actual = len(raw) // one
-    if actual == 0:
-        return None
-    arr = _np.frombuffer(raw[:actual * one], dtype=_np.uint8).reshape(
-        actual, int(height), int(width), 3)
-    return torch.from_numpy(arr.copy()).float().div_(255.0)
 
 
 def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
@@ -297,44 +161,6 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
         print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
     except Exception as _e:
         print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
-
-    # v1.67: 优先从 preview decode 已产出的 MP4 blob 读帧(预览画质), 省一次
-    # 2X VAE decode(~30-60s/段). 音频仍走音频 VAE(秒级). blob 缺失/失败回退 VAE.
-    _blob = curr.get("decoded_mp4_blob")
-    if _blob is not None:
-        try:
-            _root = _ensure_cache_root()
-            _tmp = _root / f"_avread_{uuid.uuid4().hex[:8]}.mp4"
-            _copy_blob_to_file(data_path, _blob, _tmp)
-            _imgs = _read_frames_from_mp4(
-                str(_tmp), _find_ffmpeg(),
-                int(curr.get("frames", 0)), int(curr.get("trim_frames", 0)) if i > 0 else 0,
-                int(curr.get("width", 1920)), int(curr.get("height", 1080)),
-            )
-            try:
-                _tmp.unlink()
-            except Exception:
-                pass
-            if _imgs is not None and int(_imgs.shape[0]) > 0:
-                images = _imgs
-                audio = None
-                try:
-                    if audio_vae is not None:
-                        audio = _decode_single_audio(data_path, curr, audio_vae, float(fps))
-                        if audio is not None and int(curr.get("trim_frames", 0)) > 0:
-                            sr = int(audio["sample_rate"])
-                            trim_samples = int(round(float(int(curr.get("trim_frames", 0))) / float(fps) * sr))
-                            wave = audio["waveform"]
-                            if trim_samples > 0 and trim_samples < int(wave.shape[-1]):
-                                audio = dict(audio)
-                                audio["waveform"] = wave[..., trim_samples:]
-                except Exception as _e:
-                    print(f"[H3 Extender] _decode_clip_to_av audio decode failed clip={i}: {_e}")
-                    audio = None
-                print(f"[H3 Extender] _decode_clip_to_av: clip={i} 复用 MP4 blob ({images.shape[0]} 帧, 跳过 VAE decode)")
-                return images, audio
-        except Exception as _mp4err:
-            print(f"[H3 Extender] _decode_clip_to_av MP4 读帧失败, 回退 VAE decode: {_mp4err}")
 
     # Video latent -> pixels [T,C,H,W] in [0,1]
     try:
@@ -1206,22 +1032,6 @@ def _select_resolution_guide(refs):
     return None, None
 
 
-def _clip_asset_fp(paths):
-    """v1.99: per-clip 资产指纹——依赖图路径 + 文件 mtime + size。
-    路径或文件内容(替换同名图)变化 -> 指纹变 -> 仅该 clip 重渲。"""
-    paths = list(paths or [])
-    if not paths:
-        return ""
-    parts = []
-    for _p in paths:
-        try:
-            _st = os.stat(_p)
-            parts.append("{}|{}|{}".format(_p, int(_st.st_mtime), int(_st.st_size)))
-        except Exception:
-            parts.append(str(_p))
-    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
-
-
 def _resolve_generation_resolution(resolution_mode, megapixels, width, height, refs):
     manual_w, manual_h = _manual_effective_resolution(width, height)
     mode = str(resolution_mode or "auto_from_ref")
@@ -1659,24 +1469,6 @@ def _make_ref2va_conditioning(
             _torch2.cuda.ipc_collect()
         except Exception:
             pass
-        # v1.53: ComfyUI 的 unload 只把权重移回 CPU RAM（current_loaded_models 保留引用，
-        # 物理内存不释放）。TE 15GB + DiT 21.8GB + VAE 驻留会把系统物理内存顶满，
-        # cudaHostRegister 锁页注册失败 → "Pin error." 刷屏 + offload 换页拖慢。
-        # 配合 bat --cache-none（禁用节点结果缓存，消除 CLIPLoader 输出对 clip 的跨轮持有），
-        # 此处把 TE 从 current_loaded_models 摘除，函数返回后 clip 引用归零，gc 真正释放 ~15GB RAM。
-        try:
-            import gc as _gc53
-            import comfy.model_management as _cmm53
-            _te_patcher53 = getattr(clip, "patcher", None)
-            for _lm53 in list(_cmm53.current_loaded_models):
-                try:
-                    if _lm53.model is _te_patcher53:
-                        _cmm53.current_loaded_models.remove(_lm53)
-                except Exception:
-                    pass
-            _gc53.collect()
-        except Exception:
-            pass
         try:
             import torch as _torch
             _torch.cuda.synchronize()
@@ -1696,9 +1488,41 @@ class _BasicGuider(comfy.samplers.CFGGuider):
     def set_conds(self, positive):
         self.inner_set_conds({"positive": positive})
 
-    # v1.52: 不再覆写 outer_sample. force_full_load=True 把 21.8GB 全拉满会在
-    # process_conds 阶段 OOM (23.86GB 物理上限). 改由 EXTRA_RESERVED_VRAM 抬到 ~5.5GB,
-    # 让 ComfyUI 自动把权重驻留预算压到 ~16GB, 尾部 ~5.8GB offload, 留 ~6GB 给 conds/workspace.
+    def outer_sample(self, noise, latent_image, sampler, sigmas, denoise_mask=None, callback=None, disable_pbar=False, seed=None, latent_shapes=None):
+        # v1.51: CFGGuider.outer_sample 调 prepare_sampling 时 force_full_load=False 默认值,
+        # ComfyUI 在采样开头重算 lowvram 预算, 把刚全驻留的 21.8GB DiT 又 partial_unload
+        # (log: "Unloaded partially: 21835.01 MB freed" -> 流式 87s/it). 这里 force_full_load=True,
+        # 跳过 model_management L1007 低显存重算, 模型全程驻留采样. 其余逻辑与基类一致.
+        self.inner_model, self.conds, self.loaded_models = comfy.sampler_helpers.prepare_sampling(
+            self.model_patcher, noise.shape, self.conds, self.model_options, force_full_load=True)
+        device = self.model_patcher.load_device
+        multigpu_patchers = comfy.sampler_helpers.prepare_model_patcher_multigpu_clones(
+            self.model_patcher, self.loaded_models, self.model_options)
+        if multigpu_patchers:
+            extra_devices = [p.load_device for p in multigpu_patchers]
+            all_devices = [device] + extra_devices
+            self.model_options["multigpu_thread_pool"] = comfy.multigpu.MultiGPUThreadPool(all_devices)
+        with comfy.model_management.cuda_device_context(device):
+            try:
+                noise = noise.to(device=device, dtype=torch.float32)
+                latent_image = latent_image.to(device=device, dtype=torch.float32)
+                sigmas = sigmas.to(device)
+                comfy.samplers.cast_to_load_options(self.model_options, device=device, dtype=self.model_patcher.model_dtype())
+                self.model_patcher.pre_run()
+                for multigpu_patcher in multigpu_patchers:
+                    multigpu_patcher.pre_run()
+                output = self.inner_sample(noise, latent_image, device, sampler, sigmas, denoise_mask, callback, disable_pbar, seed, latent_shapes=latent_shapes)
+            finally:
+                thread_pool = self.model_options.pop("multigpu_thread_pool", None)
+                if thread_pool is not None:
+                    thread_pool.shutdown()
+                self.model_patcher.cleanup()
+                for multigpu_patcher in multigpu_patchers:
+                    multigpu_patcher.cleanup()
+        comfy.sampler_helpers.cleanup_models(self.conds, self.loaded_models)
+        del self.inner_model
+        del self.loaded_models
+        return output
 
 
 def _sigmas(model, scheduler: str, steps: int, denoise: float):
@@ -1978,29 +1802,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 factors = [[1.0 if i == c else 0.0 for i in range(ch)] for c in range(min(3, ch))]
                 while len(factors) < 3:
                     factors.append([0.0] * ch)
-                # v1.75 (2026-09-15 fix #11): 兼容不同 ComfyUI 版本的 Latent2RGBPreviewer。
-                # 新版构造时 transpose(0,1) (linear 需要 (in,out)); 4090 pro_v36_lig 等旧版
-                # 不转置 (linear 直接 x@W 需 (in,out) 语义不同), 传 (3,24) 会每步刷
-                # "mat1 and mat2 shapes cannot be multiplied" 报错。
-                # 解法: 构造后用 2x2 探针实测 decode, 失败自动用转置 factors 重试,
-                # 再失败回退 None (走下方手动 RGB 预览, 不依赖 latent_preview 实现)。
-                previewer = None
-                _probe_ok = False
-                for _factors_try in (factors, [list(r) for r in zip(*factors)]):
-                    try:
-                        _pv_try = latent_preview.Latent2RGBPreviewer(_factors_try)
-                        _probe = _pv_try.decode_latent_to_preview(
-                            preview_x0_test[:, :, :2, :2]
-                            if preview_x0_test.ndim == 4 else preview_x0_test[:, :, 0, :2, :2])
-                        previewer = _pv_try
-                        _probe_ok = True
-                        break
-                    except Exception:
-                        continue
-                if _probe_ok:
-                    print(f"[H3 Extender] using fallback Latent2RGB previewer (channels={ch})")
-                else:
-                    print(f"[H3 Extender] fallback previewer 两种 factors 均失败, 用手动 RGB 预览")
+                previewer = latent_preview.Latent2RGBPreviewer(factors)
+                print(f"[H3 Extender] using fallback Latent2RGB previewer (channels={ch})")
             except Exception as _e2:
                 print(f"[H3 Extender] fallback previewer also failed: {_e2}")
                 previewer = None
@@ -2008,17 +1811,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     pbar = comfy.utils.ProgressBar(total_steps)
     _last_sent_step = {"v": -1}
 
-    _cb_t0 = {"t": None}
     def _latent_preview_callback(step, x0, x, total_steps_arg):
-        # v1.55: 每步耗时诊断——定位第 4 步固定 ~430s 的瓶颈(计算/IO/卸载)
-        try:
-            import time as _t55
-            _now55 = _t55.time()
-            if _cb_t0["t"] is not None:
-                print(f"[H3 Extender] step耗时诊断: step={step}/{total_steps_arg} 距上步 {_now55-_cb_t0['t']:.1f}s")
-            _cb_t0["t"] = _now55
-        except Exception:
-            pass
         pbar.update_absolute(step + 1, total_steps_arg)
         if owner_id is not None:
             # Only send every 2nd step to reduce bandwidth
@@ -2066,63 +1859,28 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
 
     callback = _latent_preview_callback if owner_id is not None else None
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
-    # v1.52: force_full_load=True 把 21.8GB 全拉满 -> process_conds OOM (物理 23.86GB).
-    # 改走 ComfyUI 自带预算: 把 EXTRA_RESERVED_VRAM 从 CLI 的 0 抬到 5.5GB, 让
-    # minimum_inference_memory = 0.8+5.5 = 6.3GB; lowvram_model_memory = free - minimum_inference
-    # ≈ 22 - 6.3 = 15.7GB 权重驻留, 尾部 ~6GB offload, 留 ~6GB 给 conds(cross_attn)+workspace.
-    # 不再 force_full_load, 也不覆写 outer_sample. ComfyUI 自己按预算装, process_conds 有地放.
+    # v1.50: TE 已真下卡. ComfyUI NORMAL_VRAM 保守预算会把 DiT 压成 partial 流式
+    # (log: "763MB usable, 0 loaded, 21835 offloaded"). 关键: load_models_gpu 默认
+    # force_full_load=False -> L1007 把 lowvram_model_memory 压成 free-inference 余额,
+    # 导致只驻留 sliver. 这里硬清缓存、读 OS 真实 free, 再 force_full_load=True 一次性
+    # 全驻留 (lowvram_model_memory=0 -> 1e32 -> 全权重上 GPU). OOM 则回退流式.
     try:
         import torch as _t1
         import comfy.model_management as _mm1
-        # v1.84: 根治量化权重低显存流转的无声闪退。用户启动参数 --async-offload
-        # 使 NUM_STREAMS>=1, int8量化权重(comfy_quant)在 CPU<->GPU 异步搬运时
-        # 与 forward 复用存在竞态, 导致 step2/8 后进程无声消失(无traceback/驱动事件)。
-        # 这里强制 NUM_STREAMS=0 (等价 --disable-async-offload), 搬运同步化。
-        try:
-            if getattr(_mm1, "NUM_STREAMS", 0) != 0:
-                _mm1.NUM_STREAMS = 0
-                print("[H3 Extender] 已禁用异步 offload (NUM_STREAMS=0, 同步搬运防量化权重竞态闪退)", flush=True)
-        except Exception:
-            pass
-        # v1.81: 一采前也释放 DynamicVRAM staged, 保证一采起始显存充足 (4090 保险)。
-        try:
-            _release_dynamic_vram("pass1")
-        except Exception:
-            pass
         _t1.cuda.empty_cache()
         try: _t1.cuda.ipc_collect()
         except Exception: pass
         _free_os, _tot_os = _t1.cuda.mem_get_info()
         _free_os /= 1024 ** 3; _tot_os /= 1024 ** 3
-        # v1.84: reserve 5.5->4.0GB（实测: 2.0全量驻留->free=0 process_conds OOM;
-        # 3.0->free=0.22GB 仍OOM; 5.5->驻留16.2+offload3.7 流转崩; 4.0->驻留~17.5GB
-        # +offload~2GB, free~2.5GB, 流转量减半）。量化权重低显存流转在
-        # cudaMallocAsync+async-offload 下会无声硬崩(step2/8 后进程消失),
-        # 配合启动参数去掉 --async-offload 根治。
-        try: _mm1.EXTRA_RESERVED_VRAM = int(4.0 * 1024 ** 3)
-        except Exception: pass
-        print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB), reserve->4.0GB")
-        # v1.91: 一采前同样解除 16GB fraction 限制(与二采一致), 避免
-        # staged 15.25GB + workspace 临界超限. 全链路可用物理 23.86GB.
-        try:
-            _cur_frac91b = _t1.cuda.get_per_process_memory_fraction()
-            if _cur_frac91b < 1.0:
-                _t1.cuda.set_per_process_memory_fraction(1.0)
-                print(f"[H3 Extender] v1.91 一采前解除 fraction 限制: {_cur_frac91b:.3f} -> 1.0")
-        except Exception as _e91b:
-            print(f"[H3 Extender] v1.91 一采前 fraction reset 失败: {_e91b}")
-        if _free_os >= 18.0:
-            _mm1.load_models_gpu([model])   # reserve 4.0 预算: 驻留 ~17.5GB, 尾部 ~2GB offload
+        print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB)")
+        if _free_os >= 20.0:
+            _mm1.load_models_gpu([model], force_full_load=True)
             _t1.cuda.synchronize()
-            try:
-                _res = model.loaded_size() / 1024 ** 3
-                _tot = model.model_size() / 1024 ** 3
-                print(f"[H3 Extender] 一采前 DiT 驻留: resident={_res:.1f}GB / total={_tot:.1f}GB (offload ~{_tot-_res:.1f}GB)")
-            except Exception: pass
+            print(f"[H3 Extender] 一采前主动全驻留 DiT (force_full_load=True): free={_free_os:.1f}GB -> 期望模型行 21835MB loaded / 0 offloaded")
         else:
-            print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
+            print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 20GB, 不强制全驻留, 走 ComfyUI 按需流式")
     except Exception as _lp1:
-        print(f"[H3 Extender] 一采前驻留预算设置失败(走按需流式): {_lp1}")
+        print(f"[H3 Extender] 一采前全驻留失败(走按需流式): {_lp1}")
     samples = guider.sample(
         noise,
         latent_image,
@@ -2202,13 +1960,6 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             except Exception as _ve:
                 print(f"[H3 Extender] Refine 二采前显存清理失败(可忽略): {_ve}")
 
-            # v1.81: 二采前强制释放 DynamicVRAM staged 池 (4090 CUDA abort 修复),
-            # 必须在显存预算检查之前, 让预算看到释放后的真实可用显存。
-            try:
-                _release_dynamic_vram("refine")
-            except Exception as _rv81:
-                print(f"[H3 Extender] v1.81 二采前显存释放异常(可忽略): {_rv81}")
-
             # v1.47 (2026-09-13 fix #6 二采卡死根治)
             # 问题(实锤, 与 BSAI-H3-MotionFix v2.9 记录的卡死同根因):
             #   DynamicVRAM 开启时 H3 int8 模型(21.8GB)以流式加载, 一采后
@@ -2260,51 +2011,19 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 #    实测校准: 11:05 x1.5 成功(起点 loaded 9.19GB, ws 2.6GB);
                 #    19:13 x2.0 OOM(起点 loaded 10.34GB, ws 4.5GB, free 0).
                 #    0.6 系数: x2.0 必拦, x1.5 放行(与 11:05 成功经验一致).
-                # v1.65 (2026-09-14 fix #9 二采 x2.0 OOM 根治):
-                # 实测 19:34 二采 x2.0: 旧预算(0.6 系数)算出需求 15.1GB<18.1GB
-                # 放行, 但 load_models_gpu 全量驻留 21.72GB, Sol-Attn kernel
-                # 连 603MB workspace 都分不出 → kernel failed×3 → fallback 到
-                # 普通注意力 workspace 9.23GB 更大 → 二次 OOM → 回退一采.
-                # 新预算: 驻留目标 = min(free,total) - workspace - 3GB 余量,
-                # 驻留 <10GB 视为换页过重 → 逐级降 factor(在放大前拦截).
+                if _alloc_gb2 >= 4.0:
+                    _mreq2 = max(0.0, _model_gb2 - _alloc_gb2) * 0.6
+                else:
+                    _mreq2 = _model_gb2 * 0.35
                 _chosen2 = None
                 for _f2 in _cands:
                     _ws2 = _ws_tbl.get(round(_f2, 1), 2.6)
-                    _resident_target2 = min(_gpu_free_gb2, _gpu_total_gb2) - _ws2 - 3.0
-                    if _resident_target2 >= 10.0:
+                    if _mreq2 + _ws2 <= _gpu_free_gb2 - 1.5:
                         _chosen2 = _f2
                         break
-                print(f"[H3 Extender] Refine 显存预算(v1.65): 模型~{_model_gb2:.1f}GB "
+                print(f"[H3 Extender] Refine 显存预算(v1.47): 模型~{_model_gb2:.1f}GB "
                       f"驻留alloc={_alloc_gb2:.1f}GB 可用显存={_gpu_free_gb2:.1f}GB/"
-                      f"{_gpu_total_gb2:.0f}GB 驻留目标~{min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tbl.get(round(_orig_f, 1), 2.6) - 3.0:.1f}GB")
-                # v1.74 (2026-09-15 fix #10): 链几何一致性 —— 链上已有段时禁止 per-clip 降级。
-                # 实测: 全量链渲染到 clip=7 时显存预算波动, 自动降级 2.0->1.5,
-                # 二采 latent 从 120x68 变成 90x50, 与前段几何不一致,
-                # Disk Join 报 "latent geometry changed" 中断整链 (4.5h 白跑).
-                # 第一段(链空)允许降级(全局一致); 链上已有段时保持原 factor,
-                # 若 OOM 由 v1.74b 把 fallback 输出 bilinear 对齐到链上几何。
-                try:
-                    _cp74, _cmp74 = _chain_paths(f"extender_{_safe_name(str(owner_id))}")
-                    _cm74 = _load_manifest_from_paths(_cp74, _cmp74)
-                    _cg74 = _cm74.get("geometry") if _cm74 is not None else None
-                    if _cg74 is not None:
-                        _chh74 = int(_cg74.get("video_h", 0))
-                        _chw74 = int(_cg74.get("video_w", 0))
-                        if _chh74 > 0 and _chw74 > 0 and _chosen2 is not None \
-                                and _chosen2 < _orig_f - 1e-6:
-                            _snap74 = max(1, _r_align // 16)
-                            _m74a, _w74a = _ff_extract_members(samples)
-                            _cur_h74, _cur_w74 = _m74a[0].shape[-2:]
-                            _dg_h74 = _ff_snap_to_multiple(round(_cur_h74 * _chosen2), _snap74)
-                            _dg_w74 = _ff_snap_to_multiple(round(_cur_w74 * _chosen2), _snap74)
-                            if (_dg_h74, _dg_w74) != (_chh74, _chw74):
-                                print(f"[H3 Extender] v1.74: 链上已有 {_chw74}x{_chh74} 段, "
-                                      f"降级 x{_orig_f}->x{_chosen2} 会变几何 "
-                                      f"({_dg_w74}x{_dg_h74}), 禁止 per-clip 降级(避免断链), "
-                                      f"保持 x{_orig_f}")
-                                _chosen2 = _orig_f
-                except Exception as _ga74:
-                    print(f"[H3 Extender] v1.74 链几何检查失败(可忽略): {_ga74}")
+                      f"{_gpu_total_gb2:.0f}GB 需求~{_mreq2 + _ws_tbl.get(round(_orig_f, 1), 2.6):.1f}GB")
                 if _chosen2 is not None and _chosen2 < _orig_f - 1e-6:
                     _r_factor = _chosen2
                     print(f"[H3 Extender] Refine 放大倍率已自动降级: x{_orig_f} -> x{_chosen2} "
@@ -2390,88 +2109,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             try:
                 import torch as _torch3
                 import comfy.model_management as _mm3
-                # v1.54: 一采后 allocated≈3.7GB(显存碎片/cache) 不代表模型驻留——原判断
-                # `allocated<1.0` 会漏判(3.75>1.0 跳过加载), 二采 0 驻留全流式,
-                # 每步 21.8GB 换页 → 实测 209s/it. 改以 model.loaded_size() 判断
-                # 实际权重驻留, <12GB 即主动重驻留(reserve 5.5GB 预算: 驻留 ~11-16GB,
-                # 尾部 offload, 比全流式少换一半以上权重).
-                _res_gb = 0.0
-                try:
-                    _res_gb = model.loaded_size() / 1024 ** 3
-                except Exception:
-                    pass
-                if _res_gb < 12.0:
-                    # v1.89: DynamicVRAM 模式检测——模型 is_dynamic() 时 load_models_gpu
-                    # 只重新 staged(不真正驻留), 且 staged ~20GB 分配占满显存, 分块
-                    # 初始化死等 staged 完成 -> 死锁(4090 实测: resident=0.0GB,
-                    # 卡 0/6 Model Initializing)。dynamic 模式跳过手动重驻留,
-                    # 交 DynamicVRAM 自身调度(一采同路径实测正常)。
-                    # v1.89b: is_dynamic() 是 ModelPatcher 方法(model_patcher.py L403),
-                    # 直接调 model.is_dynamic(), 不要取 model.model(v1.89 误写导致检测失效)。
-                    try:
-                        _is_dyn = bool(model.is_dynamic())
-                    except Exception:
-                        _is_dyn = False
-                    if _is_dyn:
-                        print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
-                    else:
-                        # v1.87: 分块二采也走重驻留。v1.68 曾对 tile_count>1 跳过重载
-                        # 导致二采 0 loaded + 20GB 全流式换页(实测 313s/it, 极速-VDN
-                        # 二采 3步x4tile ≈ 60min)。实测 reserve 8.0 预算下 19.5GB 基座
-                        # 可驻留 ~13.6GB + offload ~6GB, 换页量减少 2/3, 分块采样提速
-                        # 2-3 倍。prepare(CONST加噪)在 load 之前已完成, 不会被卸。
-                        # v1.65: 二采前驻留控制——先卸载再按 reserve 重载, 让加载器按
-                        # reserve 预算重新平衡驻留量, 给 Sol-Attn workspace 让位.
-                        # 实测 19:34 x2.0: 直接 load_models_gpu 全量驻留 21.72GB,
-                        # Sol-Attn kernel 603MB workspace 分不出 → OOM.
-                        # reserve = 模型 - (total - ws - 3GB 余量 - 1.5GB conds):
-                        #   x2.0(ws4.5): ~6.8GB -> 驻留 ~15GB
-                        #   x1.5(ws2.6): ~4.9GB -> 驻留 ~17GB
-                        #   x1.0(ws1.5): ~4.2GB -> 驻留 ~17.5GB
-                        try:
-                            _ws_need2 = _ws_tbl.get(round(_r_factor, 1), 2.6)
-                            _r_reserve_gb = _model_gb2 - (_gpu_total_gb2 - _ws_need2 - 3.0 - 1.5)
-                            _r_reserve_gb = max(3.0, min(8.0, _r_reserve_gb))
-                            # v1.88: 分块二采时 ComfyUI 按全幅估算 workspace(ws_need2)并判断
-                            # free < ws+2GB 就卸载驻留模型(实测: reserve5.0->驻留16.3GB free5.2GB
-                            # <6.5GB -> Unloaded到0 loaded -> 分块forward死锁0/3)。
-                            # 分块时提高 reserve 下限至 7.5GB: 驻留~14.3GB + offload~5.2GB +
-                            # free~7.2GB > ws6.5GB, ComfyUI 不再卸载, 分块forward正常换页。
-                            if tiled_refine:
-                                _r_reserve_gb = max(_r_reserve_gb, 7.5)
-                            try:
-                                _mm3.unload_model(model)  # 先卸载, 重载时才按新 reserve 预算
-                            except Exception:
-                                pass
-                            _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
-                        except Exception:
-                            _r_reserve_gb = 8.0 if tiled_refine else 5.5
-                            try:
-                                _mm3.unload_model(model)
-                            except Exception:
-                                pass
-                            _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
-                        print(f"[H3 Extender] Refine 二采前 DiT 驻留 {_res_gb:.1f}GB < 12GB, 重新驻留到 VRAM (reserve->{_r_reserve_gb:.1f}GB) ...")
-                        _mm3.load_models_gpu([model])
-                        _torch3.cuda.synchronize()
-                        try:
-                            _res2 = model.loaded_size() / 1024 ** 3
-                            print(f"[H3 Extender] Refine 二采前 DiT 驻留: resident={_res2:.1f}GB / total={model.model_size()/1024**3:.1f}GB")
-                        except Exception:
-                            pass
-                        # v1.65: 验证 Sol-Attn workspace 空间, 不足时醒目提示(采样走
-                        # lowvram 换页兜底, 不会静默 OOM; 下次跑会在预算区提前降级).
-                        try:
-                            import torch as _torch65
-                            _f65, _t65 = _torch65.cuda.mem_get_info()
-                            _free65 = _f65 / 1024 ** 3
-                            _ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)
-                            if _free65 < _ws65 + 2.0:
-                                print(f"[H3 Extender] Refine 警告: 二采 workspace 空间不足 "
-                                      f"(free={_free65:.1f}GB < ws {_ws65:.1f}GB+2GB), "
-                                      f"采样将靠 lowvram 换页兜底, 建议下次降低 refine_upscale_factor")
-                        except Exception:
-                            pass
+                if _torch3.cuda.memory_allocated() / 1024 ** 3 < 1.0:
+                    print("[H3 Extender] Refine 二采前模型不在显存, 主动加载到 VRAM ...")
+                    _mm3.load_models_gpu([model], force_full_load=True)  # v1.50: 二采前强制全驻留, 防 sample 内 load_models_gpu 把 11GB 又卸了
+                    _torch3.cuda.synchronize()
+                    print(f"[H3 Extender] Refine 模型驻留完成: "
+                          f"allocated={_torch3.cuda.memory_allocated() / 1024 ** 3:.1f}GB")
             except Exception as _lg2:
                 print(f"[H3 Extender] Refine 主动加载模型失败, 走 DynamicVRAM 按需流式: {_lg2}")
             _r_sampler = comfy.samplers.sampler_object(str(sampler_name))
@@ -2492,101 +2135,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 except Exception as _te_t:
                     print(f"[H3 Extender] Refine 分块包装失败(回退全帧): {_te_t}")
                     _r_restore_tiles = None
-            # v1.56: 二采挂耗时诊断 callback——一采 callback 是外层函数局部变量,
-            # 二采取不到, 且二采 callback=None 无法定位第 4 步固定 ~420s 的瓶颈.
-            _r_cb_t0 = {"t": None}
-            def _r_step_cb(step, x0, x, total):
-                try:
-                    import time as _t56
-                    _now56 = _t56.time()
-                    if _r_cb_t0["t"] is not None:
-                        print(f"[H3 Extender] refine耗时诊断: step={step+1}/{total} 距上步 {_now56-_r_cb_t0['t']:.1f}s")
-                    _r_cb_t0["t"] = _now56
-                except Exception:
-                    pass
-                # v1.62: Sol-Attn sigma 门修复(工作流 end_percent 0.9->1.0)已验证:
-                # step4 428s -> 134s. 原 sol_attn 计数诊断因模块以 spec 方式加载
-                # 无法共享 _stats, 移除, 保留耗时诊断即可.
             _r_guider = _BasicGuider(model)
             _r_guider.set_conds(conditioning)
-            # v1.64: 恢复 v1.59 驻留补丁(v1.61 改诊断时误删)——二采采样前
-            # 跳过 sampler_helpers._prepare_sampling 的 load_models_gpu/free_memory,
-            # 防止 prepare 按全幅 latent 估算把刚驻留的模型全卸(0.00 MB remains,
-            # 全流式换页 21.8GB/步). v1.63 已修分块+refs mismatch, 分块重新启用.
-            # 驻留量由 reserve(分块 8GB/非分块 5.5GB) 决定, 换页只限 offload 尾部.
-            import comfy.sampler_helpers as _sh59
-            _bsai_orig_prepare = _sh59._prepare_sampling
-            def _bsai_refine_prepare(model, noise_shape, conds, model_options=None, force_full_load=False, force_offload=False):
-                try:
-                    # 模型已驻留, 跳过 load_models_gpu 防 free_memory 全卸
-                    return model.model, conds, []
-                except Exception as _pe59:
-                    print(f"[H3 Extender] v1.64 跳过prepare-load失败, 回退原路径: {_pe59}")
-                    return _bsai_orig_prepare(model, noise_shape, conds, model_options=model_options,
-                                              force_full_load=force_full_load, force_offload=force_offload)
-            if not (tile_count and int(tile_count) > 1):
-                # v1.65: 仅非分块安装驻留补丁. 分块时 DynamicVRAM 会在
-                # 12.9GB 驻留基础上把模型全量加载到 21.7GB -> sol_attn
-                # workspace OOM(v1.64 实测). 分块走原生 prepare 全流式
-                # (0 驻留逐 block 换页, 313s/it 稳).
-                _sh59._prepare_sampling = _bsai_refine_prepare
-            # v1.91: 解除 torch allocator 人为 16GB fraction 限制——运行中
-            # 某库调用过 set_per_process_memory_fraction, 使 torch 可用上限
-            # 仅 16GB, 二采全帧 staged 15.25GB + 4K workspace 3.05GB = 18.3GB
-            # 被判 OOM 回退一采. reset 1.0 后 torch 用满物理 23.86GB,
-            # 全帧二采不再 OOM. LLM 全在 CPU, 无其他显存用户, reset 安全.
-            # v1.93 (2026-09-16): 释放 aimdo VRAMBuffer(cast buffer, 一采加载期
-            # 累积至 ~8.5GB 后常驻不释放). 主二采全程 _aimdo_disabled(), 该缓冲
-            # 在二采阶段纯占显存——释放后 factor 2.0 全帧二采账本:
-            # staged 15.4GB + workspace 3.08GB = 18.5GB < 23.86GB, 不再 OOM.
             try:
-                import comfy.model_management as _mm93
-                _released93 = 0
-                for _k93 in list(_mm93.STREAM_AIMDO_CAST_BUFFERS):
-                    try:
-                        _buf93 = _mm93.STREAM_AIMDO_CAST_BUFFERS.pop(_k93)
-                        del _buf93
-                        _released93 += 1
-                    except Exception:
-                        pass
-                if _released93:
-                    import gc as _gc93
-                    import torch as _torch93
-                    _gc93.collect()
-                    _torch93.cuda.synchronize()
-                    _torch93.cuda.empty_cache()
-                    print(f"[H3 Extender] v1.93 已释放 aimdo cast buffer x{_released93} (~8GB VRAM 回归可用)")
-                else:
-                    print(f"[H3 Extender] v1.93 无 aimdo cast buffer 需释放")
-            except Exception as _e93:
-                print(f"[H3 Extender] v1.93 释放 aimdo cast buffer 失败: {_e93}")
-            try:
-                import torch as _t91
-                _cur_frac91 = _t91.cuda.get_per_process_memory_fraction()
-                _t91.cuda.set_per_process_memory_fraction(1.0)
-                if _cur_frac91 < 1.0:
-                    print(f"[H3 Extender] v1.91 解除 fraction 限制: {_cur_frac91:.3f} -> 1.0 (二采可用 23.86GB)")
-                else:
-                    print(f"[H3 Extender] v1.91 fraction 已是 1.0, 无需解除")
-            except Exception as _e91:
-                print(f"[H3 Extender] v1.91 fraction reset 失败: {_e91}")
-            try:
-                with _aimdo_disabled():
-                    _r_samples = _r_guider.sample(
+                _r_samples = _r_guider.sample(
                     comfy.sample.prepare_empty_noise(samples),
                     _r_latent["samples"],
                     _r_sampler,
                     _r_sigmas,
                     denoise_mask=_r_latent.get("noise_mask"),
-                    callback=_r_step_cb,
+                    callback=None,
                     disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
                     seed=int(seed) + 1,
                 )
             finally:
-                try:
-                    _sh59._prepare_sampling = _bsai_orig_prepare
-                except Exception:
-                    pass
                 if _r_restore_tiles is not None:
                     try:
                         _r_restore_tiles()
@@ -2639,96 +2201,40 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 尝试用当前 (放大后) samples 重跑 (3D upscaler 已清,
             # 可能腾出足够 VRAM).
             _fb_samples = _samples_pre_upscale if _samples_pre_upscale is not None else samples
-            # v1.92 (2026-09-16): 主二采全帧 OOM 时, 不再无条件卸载重载——
-            # DynamicVRAM 下卸载重载实测把模型 staged 到 21.36GB, 再加
-            # 2.24GB workspace 二次 OOM(5090 v1.91 实测: 15.40+3.08 后
-            # fallback 21.36+2.24 仍 OOM). 策略改为:
-            #   1. 保持当前 staged 状态(驻留>2GB 时绝不卸载);
-            #   2. 若主二采是全帧(v1.90 极速-VDN 强制关分块), 降级安装
-            #      分块包装器重跑放大版——x2.0 画质完整, 分块 workspace
-            #      ~1.1GB + staged ~15.4GB < 24GB 可跑(4090 实测 374s/步);
-            #   3. 仅当模型已被全卸(<2GB)或分块包装失败时, 才用原始尺寸
-            #      (x1.0) 兜底, 绝不再回退到一采无增强结果.
-            _fb_use_tiles = False
+            # v1.48: fallback 前强制加载 diffusion(lowvram 分块驻留 ~10GB),
+            # 避免 x2.0 OOM 后 ComfyUI 将模型全卸(0 loaded), fallback 从零
+            # 流式重载时二次 OOM(19:13 实测: 重载到 allocated 15.42GB 后
+            # 再请求 9.02GB 撞 Device limit; 先驻留 10GB 则 60x34 ws~1.5GB
+            # 总峰值 ~12GB < 23.86, 即 11:05 x1.5 成功同款路径)
             try:
-                if not (tile_count and int(tile_count) > 1):
-                    import os as _os_t2, importlib.util as _ilu_t2
-                    _tiles_path2 = _os_t2.path.join(_os_t2.path.dirname(_os_t2.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
-                    _tiles_spec2 = _ilu_t2.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path2)
-                    _tiles_mod2 = _ilu_t2.module_from_spec(_tiles_spec2)
-                    _tiles_spec2.loader.exec_module(_tiles_mod2)
-                    _r_restore_tiles = _tiles_mod2.wrap_sampler_spatial_tiles(
-                        _r_sampler, n_tiles=int(tile_count) if tile_count else 4, overlap_pixels=int(tile_overlap))
-                    _fb_use_tiles = True
-                    print(f"[H3 Extender] v1.92 fallback: 降级分块重跑放大版 n_tiles={tile_count if tile_count else 4}")
-            except Exception as _te2:
-                _fb_use_tiles = False
-                print(f"[H3 Extender] v1.92 fallback 分块包装失败, 用原始尺寸兜底: {_te2}")
-            _fb_use = samples if _fb_use_tiles else _fb_samples
-            # v1.92: 仅当模型已被 ComfyUI 全卸(<2GB)时才卸载重载; 否则保持
-            # 当前 staged 状态(DynamicVRAM 下卸载重载会 staged 21.36GB 二次 OOM).
-            try:
-                _fb_loaded_gb = model.loaded_size() / 1024 ** 3
+                _mm.load_models_gpu([model], force_full_load=True)  # v1.50
             except Exception:
-                _fb_loaded_gb = 0.0
-            if _fb_loaded_gb < 2.0:
-                try:
-                    try:
-                        _mm.unload_model(model)
-                    except Exception:
-                        pass
-                    _mm.EXTRA_RESERVED_VRAM = int(10.0 * 1024 ** 3)
-                    _mm.load_models_gpu([model])
-                    print(f"[H3 Extender] v1.92 fallback: 模型已全卸({_fb_loaded_gb:.1f}GB), 重新驻留后重跑")
-                except Exception:
-                    pass
+                pass
             _gc.collect()
             _torch.cuda.empty_cache()
             _r2_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
-            _r2_noise = comfy.sample.prepare_noise(_fb_use, int(seed) + 1, None)
-            _r2_latent = _ff_const_add_noise(model, _r2_noise, _r2_sigmas, {"samples": _fb_use}, _r_audio)
+            _r2_noise = comfy.sample.prepare_noise(_fb_samples, int(seed) + 1, None)
+            _r2_latent = _ff_const_add_noise(model, _r2_noise, _r2_sigmas, {"samples": _fb_samples}, _r_audio)
             _r2_sampler = comfy.samplers.sampler_object(str(sampler_name))
             _r2_guider = _BasicGuider(model)
             _r2_guider.set_conds(conditioning)
-            import comfy.sampler_helpers as _sh_fb
-            _bsai_orig_prepare_fb = _sh_fb._prepare_sampling
-            def _bsai_fb_prepare(model, noise_shape, conds, model_options=None, force_full_load=False, force_offload=False):
-                try:
-                    return model.model, conds, []
-                except Exception:
-                    return _bsai_orig_prepare_fb(model, noise_shape, conds, model_options=model_options,
-                                                  force_full_load=force_full_load, force_offload=force_offload)
-            _sh_fb._prepare_sampling = _bsai_fb_prepare
             try:
-                with _aimdo_disabled():
-                    _r2_samples = _r2_guider.sample(
+                _r2_samples = _r2_guider.sample(
                     _r2_noise,
                     _r2_latent["samples"],
                     _r2_sampler,
                     _r2_sigmas,
                     denoise_mask=_r2_latent.get("noise_mask"),
-                    callback=_r_step_cb,
+                    callback=None,
                     disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
                     seed=int(seed) + 1,
                 )
                 samples = _r2_samples.to(comfy.model_management.intermediate_device())
-                _fb_label = "分块放大版" if _fb_use_tiles else ("原始备份" if _samples_pre_upscale is not None else "当前(放大后)")
-                print(f"[H3 Extender] Refine fallback (v1.92 {_fb_label}) 完成: clip={clip_index}")
+                _fb_label = "原始备份" if _samples_pre_upscale is not None else "当前(放大后)"
+                print(f"[H3 Extender] Refine fallback (v1.43 {_fb_label}) 完成: clip={clip_index}")
             except torch.cuda.OutOfMemoryError as _oom2:
                 print(f"[H3 Extender] Refine fallback 仍 OOM: {_oom2}")
                 print(f"[H3 Extender] 已回退到一采结果; 建议手动把 refine_upscale_factor 改成 1.0 重新跑")
-            finally:
-                # v1.65: 恢复 prepare_sampling, 防污染后续采样(下一 clip / 其它工作流)
-                try:
-                    _sh_fb._prepare_sampling = _bsai_orig_prepare_fb
-                except Exception:
-                    pass
-                # v1.92: 恢复 fallback 安装的分块包装器
-                if _fb_use_tiles and _r_restore_tiles is not None:
-                    try:
-                        _r_restore_tiles()
-                    except Exception:
-                        pass
         except Exception as _re:
             print(f"[H3 Extender] Refine 双采失败（回退主采样结果）: {_re}")
             import traceback
@@ -2775,32 +2281,6 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                       f"device_free={_f / 1024 ** 3:.2f}GB/{_t / 1024 ** 3:.2f}GB")
             except Exception as _ve2:
                 print(f"[H3 Extender] Refine 失败后兜底释放失败(可忽略): {_ve2}")
-
-    # v1.74b (2026-09-15 fix #10): 链几何对齐 —— 若链上已有段且本次 latent 几何不同
-    # (per-clip 降级被拦截后仍可能 OOM fallback 到一采尺寸 / 异常路径),
-    # bilinear 放大到链上几何, 保证 Disk Join 不断链。
-    try:
-        _cp74b, _cmp74b = _chain_paths(f"extender_{_safe_name(str(owner_id))}")
-        _cm74b = _load_manifest_from_paths(_cp74b, _cmp74b)
-        _cg74b = _cm74b.get("geometry") if _cm74b is not None else None
-        if _cg74b is not None:
-            _chh74b = int(_cg74b.get("video_h", 0))
-            _chw74b = int(_cg74b.get("video_w", 0))
-            if _chh74b > 0 and _chw74b > 0:
-                _m74, _w74 = _ff_extract_members(samples)
-                _v74 = _m74[0]
-                _old_h74, _old_w74 = int(_v74.shape[-2]), int(_v74.shape[-1])
-                if _old_h74 != _chh74b or _old_w74 != _chw74b:
-                    import torch as _torch74
-                    _v74 = _torch74.nn.functional.interpolate(
-                        _v74, size=(int(_v74.shape[2]), _chh74b, _chw74b),
-                        mode="trilinear", align_corners=False)
-                    _m74[0] = _v74
-                    samples = _ff_wrap_members(_m74, _w74)
-                    print(f"[H3 Extender] v1.74b: latent 几何对齐到链上 "
-                          f"{_chw74b}x{_chh74b} (原 {_old_w74}x{_old_h74})")
-    except Exception as _ga74b:
-        print(f"[H3 Extender] v1.74b 几何对齐失败(可忽略): {_ga74b}")
 
     out = latent_out.copy()
     out.pop("downscale_ratio_spacial", None)
@@ -3513,16 +2993,6 @@ def _replace_cache_transaction(owner_id, new_data=None, new_manifest=None, new_p
     # The video-only preview prefix is a derived v14.42 sidecar. It is not
     # required in .ext archives, but it MUST be cleared on project replacement
     # so a previous project's prefix can never be reused accidentally.
-    # v1.100: 导入/替换前持久备份保护。v1.97 的 preclear 备份只覆盖 truncate 路径,
-    # 项目导入路径(_replace_cache_transaction)在"导入空包"(new_data=None)或误导入时,
-    # 旧链先被移到临时备份、随后随事务成功被删除——整链静默丢失。
-    # 事务前对"旧链非空"做持久备份(preclear 风格, 留 3 份), 事务成败都不删。
-    try:
-        if target_data.exists() and target_data.stat().st_size > 0 and target_manifest.exists():
-            _backup_chain_before_truncate(target_data, target_manifest, reason="project-import")
-    except Exception as _be:
-        print(f"[H3 Extender] v1.100 导入前备份失败(忽略, 继续导入): {_be}")
-
     targets = [target_data, target_manifest, target_preview, target_preview_video]
     backups = []
     token = uuid.uuid4().hex[:10]
@@ -3987,16 +3457,6 @@ class BSAIH3FilmFactory:
                 "INT",
                 {"default": 128, "min": 0, "max": 512, "step": 16, "tooltip": "相邻块重叠像素(raised-cosine 融合)。Director 演示 128。仅 tiled_refine 开启时生效。"},
             ),
-            # v1.83: 速度预设 - 落地 B站 MiniMax急速工作流(comfyu-Selflift)技术:
-            # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
-            # 24G 跑 15s 208wpx(1920x1088) 极速模式预计 ~10-12 分钟/clip.
-            "speed_preset": (
-                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"],
-                {
-                    "default": "均衡",
-                    "tooltip": "v1.86 速度预设。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(旧默认, ~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流(UNETLoader+ApplyVDNH3)使用：一采固定 VDN 8 步(蒸馏最优,质量≈dense 50 步)，二采 3/4/6 步。custom=按下方各widget显式值。",
-                },
-            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -4086,8 +3546,6 @@ class BSAIH3FilmFactory:
         import re
         resolved_image_paths = []
         resolved_audio_paths = []
-        # v1.99: 每个 clip 依赖的资产图路径（per-clip 失效用）
-        clip_asset_paths = [[] for _ in clips]
 
         def _find_asset_by_index(items, tag_num):
             """Find an asset by its 'index' field, falling back to positional."""
@@ -4117,8 +3575,6 @@ class BSAIH3FilmFactory:
                     return m.group(0)
                 if img_path not in resolved_image_paths:
                     resolved_image_paths.append(img_path)
-                if img_path not in clip_asset_paths[clip_idx]:
-                    clip_asset_paths[clip_idx].append(img_path)
                 ref_num = resolved_image_paths.index(img_path) + 1
                 return f"<Picture {ref_num}>"
             prompt = re.sub(r'@图(\d+)', _replace_image_tag, prompt)
@@ -4152,7 +3608,7 @@ class BSAIH3FilmFactory:
         for i, p in enumerate(resolved_image_paths):
             print(f"[H3 Extender]   resolved_img[{i}]: {p}")
 
-        return clips, resolved_image_paths, resolved_audio_paths, clip_asset_paths
+        return clips, resolved_image_paths, resolved_audio_paths
 
     def extend(self, model, clip, vae, **kwargs):
         # v1.21: keys are pure English now, direct kwargs.get()
@@ -4195,38 +3651,6 @@ class BSAIH3FilmFactory:
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
         tile_overlap = int(kwargs.get("tile_overlap", 128))
-        # v1.83: 速度预设覆盖 (先于 REFINE-PARAMS 打印, 保证日志反映实际生效参数)
-        speed_preset = str(kwargs.get("speed_preset", "均衡"))
-        _sp_old = (steps, refine_steps, tile_count, refine_denoise)
-        if speed_preset == "极速":
-            # v1.85: 二采 2->3 步 + denoise 0.55->0.5. 写实动态(打斗)场景 2 步二采
-            # 在 55% 重噪下收敛不足导致画面发糊, 3 步收敛更好保留高频细节.
-            # 耗时 ~20min/clip(原~15min), 仍比均衡(6+4, ~28min)省 ~28%.
-            steps, refine_steps, tile_count, refine_denoise = 4, 3, 4, 0.5
-        elif speed_preset == "均衡":
-            steps, refine_steps, tile_count, refine_denoise = 6, 4, 4, 0.55
-        elif speed_preset == "精细":
-            steps, refine_steps, tile_count, refine_denoise = 8, 6, 4, 0.55
-        elif speed_preset == "极速-VDN":
-            # v1.86: VDN 档 (搭配 VDN 版工作流). 一采固定 8 步(VDN DMD 蒸馏最优步数,
-            # 质量≈dense 50 步, 且线性注意力长链更稳), 二采 3 步快速收敛.
-            # 需用 VDN 工作流提供 model(UNETLoader+ApplyVDNH3, 跳过 FastH3 LoRA/Sol-Attn).
-            # v1.90: 极速档强制关分块——实测 DynamicVRAM 下分块二采 900s/步
-            # (0驻留全staged × 4 tile 序列 + overlap 重复计算), 全帧 1 次连续
-            # staged 预计 ~400-500s/步. 画质档(均衡/精细/均衡-VDN/精细-VDN)
-            # 保留分块防 4K 全幅 OOM. 24GB 卡全帧 DynamicVRAM staged 有兜底.
-            steps, refine_steps, tile_count, refine_denoise = 8, 3, 4, 0.5
-            if tiled_refine:
-                tiled_refine = False
-                print(f"[H3 Extender] v1.90 极速-VDN: 强制关分块(全帧二采), 原 tiled_refine=True 已覆盖")
-        elif speed_preset == "均衡-VDN":
-            # 一采 VDN 8 步 + 二采 4 步: 推荐档, 质量接近精细(FastH3 8+6), 时间省 ~25%.
-            steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.55
-        elif speed_preset == "精细-VDN":
-            # 一采 VDN 8 步 + 二采 6 步: 与 FastH3 精细同画质, 一采更快更稳.
-            steps, refine_steps, tile_count, refine_denoise = 8, 6, 4, 0.55
-        if speed_preset != "custom":
-            print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
         unique_id = kwargs.get("unique_id", None)
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
@@ -4253,19 +3677,6 @@ class BSAIH3FilmFactory:
                 global_prompt = str(prompt_source)[:sb_match.start()].strip()
             else:
                 global_prompt = str(prompt_source).strip()
-        else:
-            # v1.100: prompt_source 未连接时, 从 clips_json 的 state.global_prompt 读取
-            # (前端 gpTextarea 输入)。刷新/另存后 clips_json 随 workflow 自动恢复,
-            # 资产链接(@图N)不再需要重新输入全局提示词重建。
-            try:
-                _st_gp = json.loads(clips_json or "{}")
-                if isinstance(_st_gp, dict):
-                    _gp_text = str(_st_gp.get("global_prompt") or "").strip()
-                    if _gp_text:
-                        global_prompt = _gp_text
-                        print(f"[H3 Extender] v1.100 从 clips_json 读取全局提示词(len={len(_gp_text)}): '{_gp_text[:80]}'")
-            except Exception:
-                pass
 
         # Resolve @图N/@视频N/@音频N from connected Asset Library.
         # Include the global prompt as a pseudo-clip so its @图N tags are
@@ -4273,18 +3684,15 @@ class BSAIH3FilmFactory:
         if global_prompt:
             print(f"[H3 Extender] global_prompt received (len={len(str(global_prompt))}): '{str(global_prompt)[:80]}'")
             gp_clip = {"prompt": str(global_prompt)}
-            resolved_all, resolved_img_paths, resolved_aud_paths, _all_asset_paths = self._resolve_asset_library_refs(
+            resolved_all, resolved_img_paths, resolved_aud_paths = self._resolve_asset_library_refs(
                 [gp_clip] + clips, asset_library
             )
             global_prompt = resolved_all[0]["prompt"]
             clips = resolved_all[1:]
-            global_asset_paths = _all_asset_paths[0] if _all_asset_paths else []
-            clip_asset_paths = _all_asset_paths[1:] if len(_all_asset_paths) > 1 else []
             print(f"[H3 Extender] global_prompt after resolution: '{str(global_prompt)[:80]}'")
         else:
             print("[H3 Extender] no global_prompt connected")
-            clips, resolved_img_paths, resolved_aud_paths, clip_asset_paths = self._resolve_asset_library_refs(clips, asset_library)
-            global_asset_paths = []
+            clips, resolved_img_paths, resolved_aud_paths = self._resolve_asset_library_refs(clips, asset_library)
         external_prompt_pack = _normalize_external_prompt_pack(prompt_pack)
         clips, active_prompt_pack_signature, prompt_pack_imported, _prompt_pack_count_changed = (
             _sync_clips_from_prompt_pack(
@@ -4318,10 +3726,8 @@ class BSAIH3FilmFactory:
 
         # If cards were removed, trim the physical cache immediately.
         if len(manifest.get("segments", [])) > len(clips):
-            print(f"[H3 Extender] v1.97 卡片数减少({len(manifest.get('segments', []))} -> {len(clips)}), 修剪尾部缓存段")
             manifest = _truncate_chain(
-                data_path, manifest_path, manifest, len(clips),
-                reason=f"cards_removed {len(manifest.get('segments', []))}->{len(clips)}",
+                data_path, manifest_path, manifest, len(clips)
             )
 
         # Clear stale tail latents before a full render pass.
@@ -4480,20 +3886,6 @@ class BSAIH3FilmFactory:
         resolved_width = int(resolution["width"])
         resolved_height = int(resolution["height"])
 
-        # v1.98: 渲染前分辨率诊断——断点被清时先看这里, 一眼定位清空原因
-        _diag_geom = manifest.get("geometry")
-        _diag_cache = cache_resolution or {}
-        print(
-            f"[H3 Extender] v1.98 分辨率诊断: mode={resolution_mode} mp={megapixels} "
-            f"manual=({width}x{height}) guide_idx={requested_resolution.get('guide_ref')} "
-            f"guide_dim=({requested_resolution.get('guide_src_width')}x{requested_resolution.get('guide_src_height')}) "
-            f"guide_fallback={requested_resolution.get('fallback')} "
-            f"requested={resolved_width}x{resolved_height} "
-            f"cache_segments={len(segments)} cache_geom={_diag_geom} "
-            f"cache_res={int(_diag_cache.get('width', 0) or 0)}x{int(_diag_cache.get('height', 0) or 0)} "
-            f"cache_has_segments={cache_has_segments}"
-        )
-
         requested_mismatch = bool(
             cache_has_segments
             and (
@@ -4506,15 +3898,7 @@ class BSAIH3FilmFactory:
         if requested_mismatch:
             # Resolution is the one unavoidable global invalidation: latent
             # geometry cannot be mixed inside one sequential disk chain.
-            _old_r = cache_resolution or {}
-            print(
-                f"[H3 Extender] v1.97 分辨率变化, 链已清空(旧 {int(_old_r.get('width',0))}x{int(_old_r.get('height',0))} "
-                f"-> 新 {resolved_width}x{resolved_height}); 若这是误操作请恢复参数后从备份恢复链"
-            )
-            manifest = _truncate_chain(
-                data_path, manifest_path, manifest, 0,
-                reason=f"resolution {int(_old_r.get('width',0))}x{int(_old_r.get('height',0))}->{resolved_width}x{resolved_height}",
-            )
+            manifest = _truncate_chain(data_path, manifest_path, manifest, 0)
             segments = []
             cache_resolution = None
             cache_has_segments = False
@@ -4537,11 +3921,15 @@ class BSAIH3FilmFactory:
                 external_prompt_pack.get("source") or "External prompt pack",
             )
 
-        # v1.99: per-clip 资产指纹失效——只重渲引用变化图的 clip。
-        # asset_refs_key 是全库路径 hash(顺序敏感), 用户改一张图/加一张图就变;
-        # 全库失效 = 改一个角色/场景就全重跑, 不可接受。改为: 每个 clip 记录其
-        # 依赖图的(路径+mtime+size)指纹, 只有指纹变化的 clip 标未验证, 其余
-        # 完全保留缓存; 全局参考图变化则全部 clip 标未验证(整体风格变了)。
+        # References are intentionally user-controlled. The Extender never
+        # associates a Ref number with a clip number and never decides which clip
+        # becomes obsolete after a reference edit. Keep this fingerprint as
+        # informational project/cache metadata, never as an invalidation key.
+        #
+        # Exception: when @图N asset library refs are used, the refs list is
+        # replaced with asset tensors. If the cache was built with different
+        # refs (e.g. UI refs or no refs), the cached clips must be invalidated
+        # so they re-render with the asset library characters.
         asset_refs_key = ""
         if resolved_img_paths:
             asset_refs_key = hashlib.sha256(
@@ -4550,48 +3938,19 @@ class BSAIH3FilmFactory:
 
         manifest = _load_manifest_from_paths(data_path, manifest_path) or manifest
         manifest = dict(manifest)
-        prev_clip_fps = manifest.get("clip_asset_fps") or []
-        prev_global_fp = manifest.get("global_asset_fp", "")
-        clip_asset_fps = [_clip_asset_fp(ps) for ps in clip_asset_paths]
-        global_asset_fp = _clip_asset_fp(global_asset_paths)
-
-        # prompt pack 导入/内容变化 -> 提示词已变, 指纹基准可能错位, 全部标未验证
-        if prompt_pack_imported:
-            print("[H3 Extender] v1.99 prompt pack 导入/内容变化 -> 全部 clip 标未验证(提示词已变)")
+        prev_asset_refs_key = manifest.get("asset_refs_key", "")
+        if asset_refs_key and prev_asset_refs_key and asset_refs_key != prev_asset_refs_key:
+            print(f"[H3 Extender] Asset library refs changed, invalidating all cached clips")
+            manifest = _truncate_chain(data_path, manifest_path, manifest, 0)
+            for cfg in clips:
+                cfg["validated"] = False
+        elif asset_refs_key and not prev_asset_refs_key and manifest.get("segments"):
+            print(f"[H3 Extender] Asset library refs newly connected, invalidating all cached clips")
+            manifest = _truncate_chain(data_path, manifest_path, manifest, 0)
             for cfg in clips:
                 cfg["validated"] = False
 
-        # 旧版本链无指纹基准时不触发失效(升级不打扰); 基准在渲染完成后写入
-        if prev_clip_fps and clip_asset_fps:
-            _chg_global = bool(global_asset_fp) and bool(prev_global_fp) and global_asset_fp != prev_global_fp
-            if _chg_global:
-                print(f"[H3 Extender] v1.99 全局参考图变化 -> 全部 clip 标未验证(整体风格变了)")
-                for cfg in clips:
-                    cfg["validated"] = False
-            else:
-                _chg_clips = [
-                    i for i, fp in enumerate(clip_asset_fps)
-                    if fp and (i >= len(prev_clip_fps) or prev_clip_fps[i] != fp)
-                ]
-                if _chg_clips:
-                    print(f"[H3 Extender] v1.99 资产变化: {len(_chg_clips)} 个 clip 引用的图变了 -> 仅重渲 clip {[i + 1 for i in _chg_clips]}")
-                    for i in _chg_clips:
-                        clips[i]["validated"] = False
-                        print(f"   clip {i + 1} 当前依赖图: {clip_asset_paths[i]}")
-                else:
-                    print(f"[H3 Extender] v1.99 资产指纹稳定: {len(clips)} 个 clip 全部保留缓存")
-        elif clip_asset_fps:
-            print(f"[H3 Extender] v1.99 首次建立 per-clip 资产指纹基准({len(clip_asset_fps)} 个 clip)")
-
         manifest["asset_refs_key"] = asset_refs_key
-        # v1.100: 持久化 per-clip/global 资产路径与全局提示词——刷新/另存后
-        # 前端可从 cache_state 恢复资产链接显示, 无需重新输入全局提示词。
-        try:
-            manifest["clip_asset_paths"] = [list(ps) for ps in clip_asset_paths]
-            manifest["global_asset_paths"] = list(global_asset_paths)
-            manifest["global_prompt"] = str(global_prompt or "")
-        except Exception:
-            pass
         manifest["extender_refs_signature"] = refs_signature
         manifest["extender_ref_ids"] = [
             ref.get("id") if isinstance(ref, dict) else None for ref in refs
@@ -4867,21 +4226,9 @@ class BSAIH3FilmFactory:
         elif any_replace and first_sel > 0:
             _need_pre = first_sel
         if _need_pre is not None:
-            try:
-                _pre_m = _load_manifest_from_paths(data_path, manifest_path)
-                _pre_n = len(_pre_m.get("segments", [])) if _pre_m else 0
-            except Exception:
-                _pre_m = None
-                _pre_n = 0
+            _pre_m = _load_manifest_from_paths(data_path, manifest_path)
+            _pre_n = len(_pre_m.get("segments", [])) if _pre_m else 0
             if _pre_n < _need_pre:
-                try:
-                    import os as _os
-                    _jz = _os.path.getsize(manifest_path) if _os.path.exists(manifest_path) else None
-                    _bz = _os.path.getsize(str(manifest_path) + ".bak") if _os.path.exists(str(manifest_path) + ".bak") else None
-                    _dz = _os.path.getsize(data_path) if _os.path.exists(data_path) else None
-                    print(f"[H3 Extender] v1.80 cache诊断: json={_jz}字节 bak={_bz}字节 h3cache={_dz}字节")
-                except Exception:
-                    pass
                 _from = max(0, _pre_n)
                 if select_override is not None:
                     select_override = set(range(_from, len(clips)))
@@ -4944,7 +4291,6 @@ class BSAIH3FilmFactory:
         out_audios = []
         _av_decoded = set()
         paused_break = False  # v1.13: 用户暂停/停止后禁止自动合并
-        _pending_enc = []  # v1.70: async encode 队列 [(done_event, clip_index)]
 
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
@@ -5172,23 +4518,15 @@ class BSAIH3FilmFactory:
                         f"Decoding preview for clip {i + 1}/{len(clips)}",
                     )
                     _ff = _find_ffmpeg()
-                    # v1.73: 重渲染(single_clip_replace)时 disk 链是局部链(segments 从
-                    # first_sel 开始, segments[0]=clip[first_sel]), decode/AV 输出必须用
-                    # 局部索引 i-first_sel, 否则 clip_index 越界导致 preview 解码失败.
-                    _seg_off = first_sel if (single_clip_replace and first_sel is not None and first_sel > 0) else 0
-                    _seg_idx = (i - _seg_off) if i >= _seg_off else i
-                    print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'} seg_idx={_seg_idx} seg_off={_seg_off}")
-                    _dec_res = _decode_single_clip_preview(
+                    print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'}")
+                    _decode_single_clip_preview(
                         owner=owner,
-                        clip_index=_seg_idx,
+                        clip_index=i,
                         vae=vae,
                         audio_vae=audio_vae,
                         fps=float(FPS),
                         ffmpeg=_ff,
-                        async_encode=True,
                     )
-                    if isinstance(_dec_res, dict) and _dec_res.get("async"):
-                        _pending_enc.append((_dec_res["done_event"], _seg_idx))
                 except Exception as _pv_err:
                     # Preview decode failure should never abort the main render loop.
                     _preview_error = str(_pv_err)
@@ -5208,21 +4546,13 @@ class BSAIH3FilmFactory:
             # Each CLIP is decoded to IMAGE+AUDIO as soon as it finishes and
             # emitted before the next clip starts (streaming output).
             # v1.21: 单 clip 重渲染也执行 per-clip AV 解码，推送 WebSocket 给 BSAI Premiere Pro。
-            # v1.70: AV 输出延后处理——encode 在后台线程, blob 落盘后输出才可读.
-            # encode ~55s << 一采+二采 ~29min, 队列首项已完成的先输出(FIFO 保持
-            # clip 序); 本段刚启动未完成的留到下段处理. 暂停停止时跳过输出.
-            print(f"[H3 Extender] DEBUG AV decode clip={i} cond={not paused_break and int(output_image_audio)} pending={len(_pending_enc)}")
-            # v1.73b: 消费端防御性重算 seg 偏移(避免 decode 异常路径下 _seg_off 未定义)
-            _seg_off_cur = first_sel if (single_clip_replace and first_sel is not None and first_sel > 0) else 0
-            while _pending_enc and _pending_enc[0][0].is_set():
-                _ev_done, _j = _pending_enc.pop(0)
-                if not (not paused_break and int(output_image_audio)):
-                    continue
+            print(f"[H3 Extender] DEBUG AV decode clip={i} cond={not paused_break and int(output_image_audio)}")
+            if not paused_break and int(output_image_audio):
                 try:
-                    cimg, caud = _decode_clip_to_av(owner, _j, vae, audio_vae, float(FPS))
+                    cimg, caud = _decode_clip_to_av(owner, i, vae, audio_vae, float(FPS))
                     if cimg is not None and int(cimg.shape[0]) > 0:
                         out_images.append(cimg)
-                        _av_decoded.add(_j)
+                        _av_decoded.add(i)
                     if caud is not None:
                         out_audios.append(caud)
 
@@ -5230,28 +4560,28 @@ class BSAIH3FilmFactory:
                     # the path over WebSocket so BSAI Premiere Pro can
                     # auto-import the clip immediately (per-clip streaming).
                     _clip_video_path = None
-                    _clip_name = clips[_j + _seg_off_cur].get("name", f"CLIP{_j + _seg_off_cur + 1}") if (_j + _seg_off_cur) < len(clips) else f"CLIP{_j + _seg_off_cur + 1}"
+                    _clip_name = clips[i].get("name", f"CLIP{i+1}") if i < len(clips) else f"CLIP{i+1}"
                     try:
                         _m = _load_manifest_from_paths(data_path, manifest_path)
                         if _m and _m.get("segments"):
                             _segs = [dict(x) for x in _m["segments"]]
-                            if _j < len(_segs):
-                                _blob = _segs[_j].get("decoded_mp4_blob")
+                            if i < len(_segs):
+                                _blob = _segs[i].get("decoded_mp4_blob")
                                 if _blob is not None:
                                     import folder_paths as _fp
-                                    _temp_dir = _clip_output_dir()
-                                    _out_name = f"h3_clip_{owner}_{_j + _seg_off_cur + 1}_{int(time.time())}.mp4"
+                                    _temp_dir = Path(_fp.get_temp_directory())
+                                    _out_name = f"h3_clip_{owner}_{i+1}_{int(time.time())}.mp4"
                                     _out_path = _temp_dir / _out_name
                                     _copy_blob_to_file(data_path, _blob, _out_path)
                                     _clip_video_path = str(_out_path)
-                                    print(f"[H3 Extender] per-clip video ready: clip {_j+1} -> {_out_path}")
+                                    print(f"[H3 Extender] per-clip video ready: clip {i+1} -> {_out_path}")
                     except Exception as _ve:
-                        print(f"[H3 Extender] per-clip video extract failed clip={_j}: {_ve}")
+                        print(f"[H3 Extender] per-clip video extract failed clip={i}: {_ve}")
 
-                    _send_clip_av_output(owner, _j, len(clips), cimg, caud,
+                    _send_clip_av_output(owner, i, len(clips), cimg, caud,
                                           video_path=_clip_video_path, clip_name=_clip_name)
                 except Exception as _av_err:
-                    print(f"[H3 Extender] per-clip AV output failed clip={_j}: {_av_err}")
+                    print(f"[H3 Extender] per-clip AV output failed clip={i}: {_av_err}")
 
 
         # All clips rendered; the last handle is the active cached prefix
@@ -5319,27 +4649,6 @@ class BSAIH3FilmFactory:
             print("[H3 Extender] per-clip replace complete → chain rendered continuously to end (no auto-merge)")
 
         final_manifest = _load_manifest_from_paths(data_path, manifest_path)
-        # v1.99: 更新实际渲染过的 clip 的资产指纹基准——仅渲染过的更新,
-        # 未渲染的保留旧指纹, 下次该 clip 引用的图变化仍能正确触发重渲。
-        if final_manifest is not None and clip_asset_fps:
-            try:
-                _new_fps = list(final_manifest.get("clip_asset_fps") or [])
-                while len(_new_fps) < len(clip_asset_fps):
-                    _new_fps.append("")
-                _fp_changed = False
-                for _gi in generated:
-                    if _gi < len(clip_asset_fps) and clip_asset_fps[_gi] and _new_fps[_gi] != clip_asset_fps[_gi]:
-                        _new_fps[_gi] = clip_asset_fps[_gi]
-                        _fp_changed = True
-                if _fp_changed:
-                    final_manifest = dict(final_manifest)
-                    final_manifest["clip_asset_fps"] = _new_fps
-                    if global_asset_fp:
-                        final_manifest["global_asset_fp"] = global_asset_fp
-                    final_manifest["updated_at"] = time.time()
-                    _write_json_atomic(manifest_path, final_manifest)
-            except Exception as _fp_err:
-                print(f"[H3 Extender] v1.99 指纹基准写入失败: {_fp_err}")
         # Color grading is montage metadata only. Keep it attached to each cached
         # decoded segment without invalidating latents or validation state.
         if final_manifest is not None:
@@ -5607,7 +4916,7 @@ class BSAIH3FilmFactory:
                     segments = [dict(x) for x in final_manifest["segments"]]
                     root = _ensure_cache_root()
                     import folder_paths as _fp
-                    temp_dir = _clip_output_dir()
+                    temp_dir = Path(_fp.get_temp_directory())
                     clips_info = []
                     for si, seg in enumerate(segments):
                         blob = seg.get("decoded_mp4_blob")
@@ -5647,14 +4956,6 @@ class BSAIH3FilmFactory:
                 traceback.print_exc()
 
         # Decode any validated (cached, not re-generated) clips so the
-        # v1.70: 等待所有 async encode 完成(blob 落盘), final AV 输出才能读全.
-        for _ev_done, _j in _pending_enc:
-            try:
-                _ev_done.wait(timeout=600)
-            except Exception:
-                pass
-        _pending_enc = []
-
         # IMAGE/AUDIO outputs always carry the complete film.
         # v1.18: render_partial 静默，跳过 AV 汇总解码。
         if int(output_image_audio) and not suppress_auto_merge:
@@ -5809,12 +5110,11 @@ if getattr(PromptServer, "instance", None) is not None:
     async def h3_extender_cache_open(request):
         """v1.16: 打开 latent 缓存目录 / CLIP 视频输出目录，并返回路径+文件列表。
         kind=latent -> cache/（chain_extender_*.h3cache 等）
-        kind=clips  -> ComfyUI output/bsai_clips/（v1.94 持久化 h3_clip_*.mp4，
-        重启不清空，Premiere Pro 时间线路径重启后仍有效）"""
+        kind=clips  -> ComfyUI temp/（h3_clip_*.mp4，即 BSAI Premiere Pro 接收端口读取的文件目录）"""
         kind = str(request.query.get("kind", "latent")).strip().lower()
         try:
             if kind == "clips":
-                d = _clip_output_dir()
+                d = Path(folder_paths.get_temp_directory())
             else:
                 d = _ensure_cache_root()
             d = d.resolve()

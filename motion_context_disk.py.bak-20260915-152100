@@ -188,13 +188,7 @@ CACHE_TYPE = "H3_MOTION_DISK_CACHE"
 _LOG = logging.getLogger("minimax_h3_tail_from_latent.motion_context_disk")
 
 _NODE_DIR = Path(__file__).resolve().parent
-# v1.82 (2026-09-15 fix #12): 链缓存目录迁移到 ComfyUI 根下独立目录。
-# 4090 重启后 custom_nodes\...\cache 被外部(启动脚本/Gigabyte 备份软件等)
-# 整个清空重建, 443MB h3cache 链缓存丢失只能从头渲染。新目录
-# bsai_h3_chain_cache 位于 ComfyUI 根下, 与 custom_nodes 和系统 Temp 隔离,
-# 避开常见清空源。旧目录数据由 _ensure_cache_root() 首次使用时自动迁移。
-_CACHE_ROOT = (_NODE_DIR.parents[1] / "bsai_h3_chain_cache")
-_SAFE_NAME_RE = re.compile(r"[A-Za-z0-9_\-]+\.mp4")
+_CACHE_ROOT = _NODE_DIR / "cache"
 _DATA_MAGIC = b"H3MCACHE12\x00"
 _DATA_START = len(_DATA_MAGIC)
 
@@ -245,49 +239,6 @@ def _comfyui_temp_dir():
 
 def _ensure_cache_root():
     _CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    # v1.82: 首次使用新目录时, 若旧 cache 目录有链缓存(h3cache/json/ref2va),
-    # 自动复制迁移, 避免升级后旧链丢失。只迁移 >1KB 的持久文件, 不迁临时垃圾。
-    _flag = _CACHE_ROOT / ".migrated_v182"
-    if not _flag.exists():
-        try:
-            _legacy = _NODE_DIR / "cache"
-            _has_legacy = False
-            _any_fail = False
-            if _legacy.exists() and _legacy != _CACHE_ROOT:
-                import shutil as _sh82
-                _moved = False
-                for _p in _legacy.iterdir():
-                    _has_legacy = True
-                    try:
-                        if _p.is_dir():
-                            _dst = _CACHE_ROOT / _p.name
-                            if not _dst.exists():
-                                _sh82.copytree(_p, _dst)
-                                _moved = True
-                        elif _p.suffix in (".json", ".h3cache", ".bak", ".pt", ".mp4") \
-                                and _p.stat().st_size > 1024:
-                            _dst = _CACHE_ROOT / _p.name
-                            if not _dst.exists():
-                                _sh82.copy2(_p, _dst)
-                                # v1.84: 复制后校验大小, 防止 772MB h3cache 静默失败丢链
-                                if _dst.stat().st_size != _p.stat().st_size:
-                                    raise RuntimeError("copy size mismatch")
-                                _moved = True
-                    except Exception as _e84:
-                        _any_fail = True
-                        print(f"[H3 Extender] v1.82 迁移跳过 {_p.name}: {_e84}")
-                if _moved:
-                    if not _any_fail:
-                        _flag.touch()
-                        print("[H3 Extender] v1.82 链缓存已迁移: "
-                              "custom_nodes/.../cache -> ComfyUI/bsai_h3_chain_cache")
-                    else:
-                        # 部分失败: 不标记, 下次启动自动重试补齐
-                        print("[H3 Extender] v1.82 迁移部分完成, 未标记, 下次启动重试")
-            if not _has_legacy:
-                _flag.touch()
-        except Exception as _m82:
-            print(f"[H3 Extender] v1.82 缓存迁移异常(下次重试): {_m82}")
     return _CACHE_ROOT
 
 
@@ -602,41 +553,13 @@ def _append_segment(data_path, latent, index, trim_frames, validated, manifest):
     }, _geometry(video, audio)
 
 
-def _backup_chain_before_truncate(data_path, manifest_path, reason):
-    """v1.97: truncate 前自动备份链(数据+manifest), 误清可恢复。
-    备份到同目录 chain_<name>.<ts>.preclear.h3cache/.json, 保留最近 3 份。"""
-    try:
-        import time as _t, shutil as _sh
-        stem = Path(manifest_path).name
-        name = stem[:-5] if stem.endswith(".json") else stem
-        ts = _t.strftime("%Y%m%d_%H%M%S")
-        if Path(data_path).exists() and Path(data_path).stat().st_size > 0:
-            _sh.copy2(data_path, Path(data_path).with_name(f"{name}.{ts}.preclear.h3cache"))
-        if Path(manifest_path).exists():
-            _sh.copy2(manifest_path, Path(manifest_path).with_name(f"{name}.{ts}.preclear.json"))
-        print(f"[H3 Extender] v1.97 清链前备份: {name}.{ts}.preclear.* (reason={reason})")
-        # 只保留最近 3 份备份
-        try:
-            backups = sorted(Path(manifest_path).parent.glob(f"{name}.*.preclear.json"))
-            for old in backups[:-3]:
-                old.unlink(missing_ok=True)
-                Path(str(old).replace(".preclear.json", ".preclear.h3cache")).unlink(missing_ok=True)
-        except Exception:
-            pass
-    except Exception as _bk:
-        print(f"[H3 Extender] v1.97 备份失败: {_bk}")
-
-
-def _truncate_chain(data_path, manifest_path, manifest, index, reason=""):
+def _truncate_chain(data_path, manifest_path, manifest, index):
     """
     Keep clips [0:index), discard index and everything after it.
     Manifest prefix is committed first, so an interruption can only roll back.
     """
     index = max(0, int(index))
     old = [dict(x) for x in manifest.get("segments", [])]
-    if index == 0 and old:
-        # v1.97: 全清(truncate 0)前自动备份, 并在日志里写明触发原因
-        _backup_chain_before_truncate(data_path, manifest_path, reason or "truncate0")
     prefix = old[:index]
     truncate_at = _DATA_START if not prefix else _segment_end(prefix[-1])
 
@@ -3508,10 +3431,6 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
                 "frame_count": int(manifest.get("final_frame_count", 0)),
                 "resolved_width": int(resolved_width),
                 "resolved_height": int(resolved_height),
-                # v1.100: 返回持久化的资产链接信息, 前端刷新后无需重新输入全局提示词
-                "global_prompt": str(manifest.get("global_prompt") or ""),
-                "clip_asset_paths": manifest.get("clip_asset_paths") or [],
-                "global_asset_paths": manifest.get("global_asset_paths") or [],
             })
         except Exception as exc:
             _LOG.warning("H3 restore Extender cache state failed: %s", exc)
@@ -3670,43 +3589,6 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
         except Exception as exc:
             _LOG.exception("H3 clip preview failed")
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
-
-    @PromptServer.instance.routes.get("/h3_extender/clip_preview/file")
-    async def h3_extender_clip_preview_file(request):
-        """v1.84: 插件自服务预览 MP4, 绕开 ComfyUI /view?type=temp 的
-        folder_paths.get_temp_directory() 解析不一致 (4090 的 temp 被其它插件
-        set_temp_directory() 改到系统 Temp 后, /view 读不到 ComfyUI\temp 里的
-        文件 → 404 无法播放). 本路由直接从 _comfyui_temp_dir() 读, 写读同源."""
-        name = str(request.query.get("name", "")).strip()
-        if not name or not _SAFE_NAME_RE.fullmatch(name):
-            return web.Response(status=400, text="Invalid preview file name")
-        path = _comfyui_temp_dir() / name
-        if not path.exists() or not path.is_file():
-            # v1.85: 文件缺失(重启清空 temp/外部清理)时, 从链 manifest blob 重建,
-            # 任何机器重启后预览自动恢复. 文件名格式: _clippv_{owner}_{idx}_{hex}.mp4
-            _m85 = re.match(r"^_clippv_([A-Za-z0-9_\-]+)_(\d+)_[A-Fa-f0-9]+\.mp4$", name)
-            if _m85:
-                _o85, _i85 = _m85.group(1), int(_m85.group(2))
-                try:
-                    _dp85, _mp85 = _chain_paths(f"extender_{_safe_name(_o85)}")
-                    _mf85 = _load_manifest_from_paths(_dp85, _mp85)
-                    _segs85 = [dict(x) for x in _mf85.get("segments", [])] if _mf85 else []
-                    if 0 <= _i85 < len(_segs85):
-                        _blob85 = _segs85[_i85].get("decoded_mp4_blob")
-                        if _blob85:
-                            path.parent.mkdir(parents=True, exist_ok=True)
-                            _copy_blob_to_file(_dp85, _blob85, path)
-                except Exception as _e85:
-                    _LOG.warning("H3 preview rebuild failed for %s: %s", name, _e85)
-        if not path.exists() or not path.is_file():
-            return web.Response(status=404, text="Preview file not found")
-        return web.FileResponse(
-            path,
-            headers={
-                "Content-Type": "video/mp4",
-                "Cache-Control": "no-store",
-            },
-        )
 
 
 class MiniMaxH3MotionContextDiskFinalDecode:

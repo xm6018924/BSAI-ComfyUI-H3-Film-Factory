@@ -182,16 +182,6 @@ function renderPreviewPanel(panel, clip, index, node, runtime) {
         video.preload = "metadata";
         video.style.cssText = videoStyle;
         video.src = clip._previewVideoUrl;
-        // v1.85: 残留 URL 的文件可能已被清空(temp 清理/外部删除), 播放失败时
-        // 清除残留并重新渲染面板 -> 重新 fetch(blob 重建或"未渲染"提示), 不再黑屏.
-        video.onerror = () => {
-            if (clip._previewRebuilding) return;
-            clip._previewRebuilding = true;
-            clip._previewVideoUrl = null;
-            clip._previewLoaded = false;
-            renderPreviewPanel(panel, clip, index, node, runtime);
-            requestAnimationFrame(() => { clip._previewRebuilding = false; syncDomHeight(node, runtime, false); });
-        };
         contentWrap.appendChild(video);
         panel.appendChild(contentWrap);
         return;
@@ -538,15 +528,6 @@ async function restoreCacheState(node, runtime) {
             return;
         }
 
-        // v1.100: 刷新/另存后从缓存恢复全局提示词(若前端 state 丢失), 资产链接
-        // (@图N)自动恢复, 无需重新输入全局提示词。
-        if (payload?.global_prompt && !runtime.state?.global_prompt) {
-            runtime.state.global_prompt = String(payload.global_prompt);
-            if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== String(payload.global_prompt)) {
-                runtime.globalPromptTextarea.value = String(payload.global_prompt);
-                autoResizeTextarea(runtime.globalPromptTextarea);
-            }
-        }
         runtime.cachedCount = Number(payload.cached_count || 0);
         for (let i = 0; i < runtime.cachedCount && i < runtime.state.clips.length; i++) {
             const c = runtime.state.clips[i];
