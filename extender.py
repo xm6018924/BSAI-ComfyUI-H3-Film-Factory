@@ -1205,6 +1205,22 @@ def _select_resolution_guide(refs):
     return None, None
 
 
+def _clip_asset_fp(paths):
+    """v1.99: per-clip 资产指纹——依赖图路径 + 文件 mtime + size。
+    路径或文件内容(替换同名图)变化 -> 指纹变 -> 仅该 clip 重渲。"""
+    paths = list(paths or [])
+    if not paths:
+        return ""
+    parts = []
+    for _p in paths:
+        try:
+            _st = os.stat(_p)
+            parts.append("{}|{}|{}".format(_p, int(_st.st_mtime), int(_st.st_size)))
+        except Exception:
+            parts.append(str(_p))
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
 def _resolve_generation_resolution(resolution_mode, megapixels, width, height, refs):
     manual_w, manual_h = _manual_effective_resolution(width, height)
     mode = str(resolution_mode or "auto_from_ref")
@@ -4059,6 +4075,8 @@ class BSAIH3FilmFactory:
         import re
         resolved_image_paths = []
         resolved_audio_paths = []
+        # v1.99: 每个 clip 依赖的资产图路径（per-clip 失效用）
+        clip_asset_paths = [[] for _ in clips]
 
         def _find_asset_by_index(items, tag_num):
             """Find an asset by its 'index' field, falling back to positional."""
@@ -4088,6 +4106,8 @@ class BSAIH3FilmFactory:
                     return m.group(0)
                 if img_path not in resolved_image_paths:
                     resolved_image_paths.append(img_path)
+                if img_path not in clip_asset_paths[clip_idx]:
+                    clip_asset_paths[clip_idx].append(img_path)
                 ref_num = resolved_image_paths.index(img_path) + 1
                 return f"<Picture {ref_num}>"
             prompt = re.sub(r'@图(\d+)', _replace_image_tag, prompt)
@@ -4121,7 +4141,7 @@ class BSAIH3FilmFactory:
         for i, p in enumerate(resolved_image_paths):
             print(f"[H3 Extender]   resolved_img[{i}]: {p}")
 
-        return clips, resolved_image_paths, resolved_audio_paths
+        return clips, resolved_image_paths, resolved_audio_paths, clip_asset_paths
 
     def extend(self, model, clip, vae, **kwargs):
         # v1.21: keys are pure English now, direct kwargs.get()
@@ -4229,15 +4249,18 @@ class BSAIH3FilmFactory:
         if global_prompt:
             print(f"[H3 Extender] global_prompt received (len={len(str(global_prompt))}): '{str(global_prompt)[:80]}'")
             gp_clip = {"prompt": str(global_prompt)}
-            resolved_all, resolved_img_paths, resolved_aud_paths = self._resolve_asset_library_refs(
+            resolved_all, resolved_img_paths, resolved_aud_paths, _all_asset_paths = self._resolve_asset_library_refs(
                 [gp_clip] + clips, asset_library
             )
             global_prompt = resolved_all[0]["prompt"]
             clips = resolved_all[1:]
+            global_asset_paths = _all_asset_paths[0] if _all_asset_paths else []
+            clip_asset_paths = _all_asset_paths[1:] if len(_all_asset_paths) > 1 else []
             print(f"[H3 Extender] global_prompt after resolution: '{str(global_prompt)[:80]}'")
         else:
             print("[H3 Extender] no global_prompt connected")
-            clips, resolved_img_paths, resolved_aud_paths = self._resolve_asset_library_refs(clips, asset_library)
+            clips, resolved_img_paths, resolved_aud_paths, clip_asset_paths = self._resolve_asset_library_refs(clips, asset_library)
+            global_asset_paths = []
         external_prompt_pack = _normalize_external_prompt_pack(prompt_pack)
         clips, active_prompt_pack_signature, prompt_pack_imported, _prompt_pack_count_changed = (
             _sync_clips_from_prompt_pack(
@@ -4490,15 +4513,11 @@ class BSAIH3FilmFactory:
                 external_prompt_pack.get("source") or "External prompt pack",
             )
 
-        # References are intentionally user-controlled. The Extender never
-        # associates a Ref number with a clip number and never decides which clip
-        # becomes obsolete after a reference edit. Keep this fingerprint as
-        # informational project/cache metadata, never as an invalidation key.
-        #
-        # Exception: when @图N asset library refs are used, the refs list is
-        # replaced with asset tensors. If the cache was built with different
-        # refs (e.g. UI refs or no refs), the cached clips must be invalidated
-        # so they re-render with the asset library characters.
+        # v1.99: per-clip 资产指纹失效——只重渲引用变化图的 clip。
+        # asset_refs_key 是全库路径 hash(顺序敏感), 用户改一张图/加一张图就变;
+        # 全库失效 = 改一个角色/场景就全重跑, 不可接受。改为: 每个 clip 记录其
+        # 依赖图的(路径+mtime+size)指纹, 只有指纹变化的 clip 标未验证, 其余
+        # 完全保留缓存; 全局参考图变化则全部 clip 标未验证(整体风格变了)。
         asset_refs_key = ""
         if resolved_img_paths:
             asset_refs_key = hashlib.sha256(
@@ -4507,50 +4526,38 @@ class BSAIH3FilmFactory:
 
         manifest = _load_manifest_from_paths(data_path, manifest_path) or manifest
         manifest = dict(manifest)
-        prev_asset_refs_key = manifest.get("asset_refs_key", "")
-        if asset_refs_key and prev_asset_refs_key and asset_refs_key != prev_asset_refs_key:
-            print(f"[H3 Extender] Asset library refs changed, invalidating all cached clips")
-            print(f"[H3 Extender] v1.97 asset key对比: prev={prev_asset_refs_key[:8]}... new={asset_refs_key[:8]}... (磁盘段数={len(manifest.get('segments', []))})")
-            # v1.95: 不再全清链——保留磁盘 latent 段作 motion context 前置。
-            # asset_refs_key 是全库路径 hash, 加/换一张图就变, 全清会导致
-            # 断点失效(选 CLIP3 必须从 CLIP1 补渲)。保留段 + 标 validated=True
-            # 后, 用户可任意挑选 clipN 重渲, 前置 context 用旧 latent(运动信息
-            # 有效, 画面内容以重渲采样为准)。
-            _segs95 = [dict(x) for x in manifest.get("segments", [])]
-            if _segs95:
-                _ch95 = False
-                for _s95 in _segs95:
-                    if not bool(_s95.get("validated", False)):
-                        _s95["validated"] = True
-                        _ch95 = True
-                if _ch95:
-                    manifest = dict(manifest)
-                    manifest["segments"] = _segs95
-                    manifest["build"] = BUILD
-                    manifest["updated_at"] = time.time()
-                    _write_json_atomic(manifest_path, manifest)
-                print(f"[H3 Extender] v1.95: 保留 {len(_segs95)} 段 latent 作前置 context（不再全清, 可挑选 clipN 重渲）")
+        prev_clip_fps = manifest.get("clip_asset_fps") or []
+        prev_global_fp = manifest.get("global_asset_fp", "")
+        clip_asset_fps = [_clip_asset_fp(ps) for ps in clip_asset_paths]
+        global_asset_fp = _clip_asset_fp(global_asset_paths)
+
+        # prompt pack 导入/内容变化 -> 提示词已变, 指纹基准可能错位, 全部标未验证
+        if prompt_pack_imported:
+            print("[H3 Extender] v1.99 prompt pack 导入/内容变化 -> 全部 clip 标未验证(提示词已变)")
             for cfg in clips:
                 cfg["validated"] = False
-        elif asset_refs_key and not prev_asset_refs_key and manifest.get("segments"):
-            print(f"[H3 Extender] Asset library refs newly connected, invalidating all cached clips")
-            # v1.95: 同上——首次连 asset 库也保留磁盘段作前置 context
-            _segs95b = [dict(x) for x in manifest.get("segments", [])]
-            if _segs95b:
-                _ch95b = False
-                for _s95b in _segs95b:
-                    if not bool(_s95b.get("validated", False)):
-                        _s95b["validated"] = True
-                        _ch95b = True
-                if _ch95b:
-                    manifest = dict(manifest)
-                    manifest["segments"] = _segs95b
-                    manifest["build"] = BUILD
-                    manifest["updated_at"] = time.time()
-                    _write_json_atomic(manifest_path, manifest)
-                print(f"[H3 Extender] v1.95: 首次连 asset 库, 保留 {len(_segs95b)} 段 latent 作前置 context")
-            for cfg in clips:
-                cfg["validated"] = False
+
+        # 旧版本链无指纹基准时不触发失效(升级不打扰); 基准在渲染完成后写入
+        if prev_clip_fps and clip_asset_fps:
+            _chg_global = bool(global_asset_fp) and bool(prev_global_fp) and global_asset_fp != prev_global_fp
+            if _chg_global:
+                print(f"[H3 Extender] v1.99 全局参考图变化 -> 全部 clip 标未验证(整体风格变了)")
+                for cfg in clips:
+                    cfg["validated"] = False
+            else:
+                _chg_clips = [
+                    i for i, fp in enumerate(clip_asset_fps)
+                    if fp and (i >= len(prev_clip_fps) or prev_clip_fps[i] != fp)
+                ]
+                if _chg_clips:
+                    print(f"[H3 Extender] v1.99 资产变化: {len(_chg_clips)} 个 clip 引用的图变了 -> 仅重渲 clip {[i + 1 for i in _chg_clips]}")
+                    for i in _chg_clips:
+                        clips[i]["validated"] = False
+                        print(f"   clip {i + 1} 当前依赖图: {clip_asset_paths[i]}")
+                else:
+                    print(f"[H3 Extender] v1.99 资产指纹稳定: {len(clips)} 个 clip 全部保留缓存")
+        elif clip_asset_fps:
+            print(f"[H3 Extender] v1.99 首次建立 per-clip 资产指纹基准({len(clip_asset_fps)} 个 clip)")
 
         manifest["asset_refs_key"] = asset_refs_key
         manifest["extender_refs_signature"] = refs_signature
@@ -5280,6 +5287,27 @@ class BSAIH3FilmFactory:
             print("[H3 Extender] per-clip replace complete → chain rendered continuously to end (no auto-merge)")
 
         final_manifest = _load_manifest_from_paths(data_path, manifest_path)
+        # v1.99: 更新实际渲染过的 clip 的资产指纹基准——仅渲染过的更新,
+        # 未渲染的保留旧指纹, 下次该 clip 引用的图变化仍能正确触发重渲。
+        if final_manifest is not None and clip_asset_fps:
+            try:
+                _new_fps = list(final_manifest.get("clip_asset_fps") or [])
+                while len(_new_fps) < len(clip_asset_fps):
+                    _new_fps.append("")
+                _fp_changed = False
+                for _gi in generated:
+                    if _gi < len(clip_asset_fps) and clip_asset_fps[_gi] and _new_fps[_gi] != clip_asset_fps[_gi]:
+                        _new_fps[_gi] = clip_asset_fps[_gi]
+                        _fp_changed = True
+                if _fp_changed:
+                    final_manifest = dict(final_manifest)
+                    final_manifest["clip_asset_fps"] = _new_fps
+                    if global_asset_fp:
+                        final_manifest["global_asset_fp"] = global_asset_fp
+                    final_manifest["updated_at"] = time.time()
+                    _write_json_atomic(manifest_path, final_manifest)
+            except Exception as _fp_err:
+                print(f"[H3 Extender] v1.99 指纹基准写入失败: {_fp_err}")
         # Color grading is montage metadata only. Keep it attached to each cached
         # decoded segment without invalidating latents or validation state.
         if final_manifest is not None:
