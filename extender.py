@@ -2389,6 +2389,42 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
                           f"{_old_hw[1]}x{_old_hw[0]} -> {_up_video.shape[-1]}x{_up_video.shape[-2]} (x{_r_factor})")
 
+            # v2.00 (2026-09-18 fix): 二采 target 潜空间放大 x2 后, motion-context
+            # keyframe 的 "latent" 块仍停留在一采空间分辨率(如 34x60). PackedLayout 对
+            # keyframe 用 target 的 frame_rows(model.py:380 n=vt*frame_rows),
+            # 二采 frame_rows=(68/2)*(120/2)=2040, 但对旧 34x60 块 patchify 只得
+            # 510 -> all_video_rows[~img_update]=cond_video_rows 广播失败
+            # (value[12312,96] vs indexing[30672,96]). 把每个 keyframe 块空间维 trilinear
+            # 放大到新 target 分辨率, 与放大后的 target 对齐(与 motion_context_ram 自身缩放同法).
+            if _r_factor > 1.0:
+                try:
+                    import torch as _t_kc
+                    _new_h_kc = int(_up_video.shape[-2]); _new_w_kc = int(_up_video.shape[-1])
+                    _cond_kc = conditioning[0][1] if isinstance(conditioning, list) else conditioning
+                    _kfs_kc = _cond_kc.get("minimax_keyframes") if isinstance(_cond_kc, dict) else None
+                    _nkc = 0
+                    if _kfs_kc:
+                        for _kf in _kfs_kc:
+                            if not isinstance(_kf, dict):
+                                continue
+                            _lt = _kf.get("latent")
+                            if _lt is None or not hasattr(_lt, "ndim") or _lt.ndim != 5:
+                                continue
+                            _oh = int(_lt.shape[3]); _ow = int(_lt.shape[4])
+                            if _oh == _new_h_kc and _ow == _new_w_kc:
+                                continue
+                            if _oh > _new_h_kc or _ow > _new_w_kc:
+                                continue
+                            _lt_up = _t_kc.nn.functional.interpolate(
+                                _lt, size=(int(_lt.shape[2]), _new_h_kc, _new_w_kc),
+                                mode="trilinear", align_corners=False)
+                            _kf["latent"] = _lt_up.contiguous()
+                            _nkc += 1
+                    if _nkc:
+                        print(f"[H3 Extender] v2.00 keyframe 对齐: {_nkc} 个 motion-context 块空间放大到 {_new_w_kc}x{_new_h_kc} (二采 {_r_factor}x)")
+                except Exception as _ekc:
+                    print(f"[H3 Extender] v2.00 keyframe 对齐失败(可忽略): {_ekc}")
+
             # v1.43: 3D upscaler 用完后立即清缓存, 释放 VRAM 给二采 diffusion.
             # MODEL_CACHE 不受 ComfyUI model_management 管理 (不在
             # current_loaded_models 里), ComfyUI 无法自动让位, 必须手动清.
