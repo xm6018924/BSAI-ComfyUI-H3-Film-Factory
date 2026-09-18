@@ -1928,6 +1928,47 @@ def _upscale_latent_spatial(samples, factor):
     return up.reshape(B, C, T, nH, nW)
 
 
+def _drop_mismatched_adaln_patches(model):
+    """Shape-aware drop of lora adaln patches whose delta does not match the base adaln weight.
+
+    pruned base adaln_proj.linear.weight=[96768,8], but full-width loras (e.g. cinematic lora)
+    carry adaln delta=[96768,2688]. The rgthree stack applies AFTER SolH3 without SolH3's
+    _shape_filter, so calculate_weight fails to reshape every block every step (spam+slow).
+    We compare each patch expected shape against model_state_dict real shape and drop only the
+    mismatched entries; attn/mlp detail enhancement stays. Full-width bases keep matching adaln.
+    """
+    try:
+        model_sd = model.model_state_dict()
+    except Exception:
+        return 0
+    dropped = 0
+    for k in list(getattr(model, "patches", {}).keys()):
+        if "adaln_proj.linear" not in k:
+            continue
+        if k not in model_sd:
+            continue
+        mw_shape = tuple(model_sd[k].shape)
+        kept = []
+        for entry in model.patches[k]:
+            try:
+                patch_obj = entry[1]
+                mat1 = patch_obj.weights[0]
+                mat2 = patch_obj.weights[1]
+                exp = (tuple(mat1.shape)[0], tuple(mat2.shape)[1])
+            except Exception:
+                kept.append(entry)
+                continue
+            if tuple(exp) == tuple(mw_shape):
+                kept.append(entry)
+            else:
+                dropped += 1
+        if kept:
+            model.patches[k] = kept
+        else:
+            del model.patches[k]
+    return dropped
+
+
 def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, scheduler: str, steps: int, denoise: float,
                owner_id=None, clip_index=-1,
                refine_enable=False, refine_denoise=0.55, refine_steps=4, refine_upscale_factor=1.5,
@@ -1935,6 +1976,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                tiled_refine=False, tile_count=4, tile_overlap=128):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
+
+    _n_dropped = _drop_mismatched_adaln_patches(model)
+    if _n_dropped:
+        print(f"[H3 Extender] shape-aware dropped {_n_dropped} adaln lora patches mismatched with base (pruned/full auto, attn/mlp kept)", flush=True)
 
     guider = _BasicGuider(model)
     guider.set_conds(conditioning)
