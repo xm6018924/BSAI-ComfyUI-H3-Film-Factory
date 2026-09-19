@@ -2466,11 +2466,12 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
     hdr.appendChild(refreshBtn);
     leftPanel.appendChild(hdr);
 
-    // Parse @图N/@视频N/@音频N and <Picture N> from THIS CLIP's own prompt
-    // only. Global-prompt refs are intentionally NOT shown here: each CLIP
-    // card's left panel must list just the assets its own prompt references,
-    // so cards without refs stay compact instead of mirroring every asset.
-    const refs = parseAssetRefs(clip.prompt || "");
+    // v2.02 (2026-09-19 fix): 同时解析 CLIP prompt 和全局 prompt.
+    // 重启/刷新后全局 prompt 里的 @图N 会自动显示, 无需重新输入全局提示词.
+    // CLIP prompt 里的 @图N 是从全局 prompt 同步来的, 重启后同步流程不自动触发,
+    // 导致 CLIP prompt 里没有 @图N -> "已引用资产" 显示"暂未引用".
+    // 直接同时解析两个, 全局资产引用立即显示.
+    const refs = parseAssetRefs((clip.prompt || "") + "\n" + (runtime.state?.global_prompt || ""));
 
     if (refs.length === 0) {
         const empty = document.createElement("div");
