@@ -5456,7 +5456,15 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         },
     });
     runtime.domWidget = domWidget;
-    node.__h3Extender = runtime;
+    // v2.06 (2026-09-19 fix): 用 Object.defineProperty 定义为非可枚举属性,
+    // 这样 ComfyUI 前端另存工作流时序列化会忽略 __h3Extender,
+    // 避免 structuredClone 错误 (runtime 里包含 DOM 元素如 globalPromptTextarea).
+    Object.defineProperty(node, '__h3Extender', {
+        value: runtime,
+        enumerable: false,
+        writable: true,
+        configurable: true
+    });
 
     // Runaway-height recovery: workflows saved while the node was mid-growth
     // serialize an absurd size. Reset to the computed minimum so the DOM-widget
