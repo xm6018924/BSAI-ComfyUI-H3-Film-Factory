@@ -41,7 +41,7 @@ const COLLAPSED_CLIP_HEIGHT = 38;
 const BASE_PADDING = BOTTOM_PAD + 20;
 const COLLAPSED_MIN_HEIGHT = 160;
 const PREVIEW_PANEL_WIDTH = 130;
-const MAX_AUTO_NODE_HEIGHT = 2000;
+const MAX_AUTO_NODE_HEIGHT = 8000;  // v2.03 (2026-09-19): 从 2000 提升到 8000, 解决 CLIP>12 个时节点高度被截断只剩 4 个卡片的问题. CLIP 列表容器已有 overflow-y:auto, 超出部分可内部滚动.
 const MAX_CARDS_VISIBLE_HEIGHT = 3 * (CARD_MIN_HEIGHT + 9) + CARD_SCROLLBAR_SPACE;
 
 function calculateMinHeight(runtime) {
