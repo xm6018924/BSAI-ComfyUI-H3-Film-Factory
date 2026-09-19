@@ -2466,196 +2466,97 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
     hdr.appendChild(refreshBtn);
     leftPanel.appendChild(hdr);
 
-    // v2.04 (2026-09-19 fix): 分开解析 CLIP prompt 和全局 prompt.
-    // CLIP 自己的引用正常显示 (缩略图 + badge).
-    // 全局引用折叠显示 (默认收起成一个按钮, 点击展开), 不占界面空间.
-    const clipRefs = parseAssetRefs(clip.prompt || "");
-    const globalRefs = parseAssetRefs(runtime.state?.global_prompt || "");
-    const totalRefs = clipRefs.length + globalRefs.length;
+    // Parse @图N/@视频N/@音频N and <Picture N> from THIS CLIP's own prompt
+    // only. Global-prompt refs are intentionally NOT shown here: each CLIP
+    // card's left panel must list just the assets its own prompt references,
+    // so cards without refs stay compact instead of mirroring every asset.
+    const refs = parseAssetRefs(clip.prompt || "");
 
-    if (totalRefs === 0) {
+    if (refs.length === 0) {
         const empty = document.createElement("div");
         empty.style.cssText = "color:#555;font-size:11px;text-align:center;padding:8px;";
         empty.textContent = "暂无引用";
         leftPanel.appendChild(empty);
     } else {
         const assetList = runtime._h3_assetCache;
+        // Group identical assets: show ONE thumbnail per asset with a usage
+        // count badge in its bottom-right corner. Duplicates no longer stack
+        // rows, so the card height stays compact.
+        const groups = new Map();
+        for (const ref of refs) {
+            const key = ref.type + ":" + ref.index;
+            const g = groups.get(key) || { ref: ref, count: 0 };
+            g.count += 1;
+            groups.set(key, g);
+        }
+        Array.from(groups.values()).forEach(function(g) {
+            const ref = g.ref;
+            const count = g.count;
+            const assetItem = document.createElement("div");
+            assetItem.style.cssText = "display:flex;align-items:center;gap:4px;margin-bottom:3px;font-size:11px;";
 
-        // Helper: render a list of refs as thumbnail rows
-        function renderRefRows(refsList, removeFromPrompt) {
-            const groups = new Map();
-            for (const ref of refsList) {
-                const key = ref.type + ":" + ref.index;
-                const g = groups.get(key) || { ref: ref, count: 0 };
-                g.count += 1;
-                groups.set(key, g);
-            }
-            Array.from(groups.values()).forEach(function(g) {
-                const ref = g.ref;
-                const count = g.count;
-                const assetItem = document.createElement("div");
-                assetItem.style.cssText = "display:flex;align-items:center;gap:4px;margin-bottom:3px;font-size:11px;";
-
-                const thumb = document.createElement("div");
-                thumb.style.cssText = "position:relative;width:40px;height:40px;border:1px solid #333;border-radius:3px;overflow:hidden;flex-shrink:0;background:#1a1a1a;";
-                if (ref.type !== "audios") {
-                    const img = document.createElement("img");
-                    img.style.cssText = "width:100%;height:100%;object-fit:cover;";
-                    img.loading = "lazy";
-                    if (assetList) {
-                        const items = assetList[ref.type] || [];
-                        const item = items.find(i => i.index === ref.index);
-                        if (item) {
-                            if (ref.type === "videos") {
-                                img.src = "/bsai/video_frame?filename=" + encodeURIComponent(item.name);
-                            } else {
-                                img.src = "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(item.name);
-                            }
+            const thumb = document.createElement("div");
+            thumb.style.cssText = "position:relative;width:40px;height:40px;border:1px solid #333;border-radius:3px;overflow:hidden;flex-shrink:0;background:#1a1a1a;";
+            if (ref.type !== "audios") {
+                const img = document.createElement("img");
+                img.style.cssText = "width:100%;height:100%;object-fit:cover;";
+                img.loading = "lazy";
+                // Find the asset filename from the fetched asset list
+                if (assetList) {
+                    const items = assetList[ref.type] || [];
+                    const item = items.find(i => i.index === ref.index);
+                    if (item) {
+                        if (ref.type === "videos") {
+                            img.src = "/bsai/video_frame?filename=" + encodeURIComponent(item.name);
+                        } else {
+                            img.src = "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(item.name);
                         }
                     }
-                    img.onerror = function() {
-                        img.style.display = "none";
-                        thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#555;font-size:9px;">IMG</div>';
-                    };
-                    thumb.appendChild(img);
-                } else {
-                    thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;">♪</div>';
                 }
-                if (count > 1) {
-                    const badge = document.createElement("div");
-                    badge.textContent = "×" + count;
-                    badge.style.cssText = "position:absolute;right:1px;bottom:1px;background:rgba(190,30,30,.92);color:#fff;font-size:9px;line-height:1.2;padding:1px 3px;border-radius:3px;pointer-events:none;";
-                    thumb.appendChild(badge);
-                }
-                assetItem.appendChild(thumb);
-
-                const label = document.createElement("span");
-                label.textContent = ref.tag;
-                label.style.cssText = "color:#aaa;flex:1;";
-                assetItem.appendChild(label);
-
-                if (removeFromPrompt) {
-                    const removeBtn = document.createElement("button");
-                    removeBtn.textContent = "✕";
-                    removeBtn.style.cssText = "background:none;border:none;color:#a44;cursor:pointer;font-size:12px;padding:0 2px;";
-                    removeBtn.addEventListener("click", function(e) {
-                        e.stopPropagation();
-                        e.preventDefault();
-                        let p = clip.prompt;
-                        p = p.replace(ref.tag, "").replace(/\s+/g, " ").trim();
-                        clip.prompt = p;
-                        textarea.value = p;
-                        updateHidden(node, runtime);
-                        renderAssetPanel(leftPanel, clip, node, runtime, textarea);
-                    });
-                    assetItem.appendChild(removeBtn);
-                }
-
-                leftPanel.appendChild(assetItem);
-            });
-        }
-
-        // 1. CLIP 自己的引用 (正常显示, 可删除)
-        if (clipRefs.length > 0) {
-            renderRefRows(clipRefs, true);
-        }
-
-        // 2. 全局引用 (折叠显示, 默认收起)
-        if (globalRefs.length > 0) {
-            // 统计全局引用去重后的数量
-            const globalGroups = new Map();
-            for (const ref of globalRefs) {
-                const key = ref.type + ":" + ref.index;
-                globalGroups.set(key, ref);
+                img.onerror = function() {
+                    img.style.display = "none";
+                    thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#555;font-size:9px;">IMG</div>';
+                };
+                thumb.appendChild(img);
+            } else {
+                thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;">♪</div>';
             }
-            const globalCount = globalGroups.size;
-
-            const foldBtn = document.createElement("div");
-            foldBtn.style.cssText = "display:flex;align-items:center;gap:4px;margin:6px 0 3px;padding:4px 8px;background:#2a2a2a;border:1px solid #3a3a3a;border-radius:3px;cursor:pointer;font-size:11px;color:#888;user-select:none;";
-            foldBtn.textContent = "▸ 全局资产引用 (" + globalCount + ")";
-
-            const foldContent = document.createElement("div");
-            foldContent.style.cssText = "display:none;margin-bottom:3px;padding-left:8px;border-left:2px solid #333;";
-
-            foldBtn.addEventListener("click", function() {
-                if (foldContent.style.display === "none") {
-                    foldContent.style.display = "block";
-                    foldBtn.textContent = "▾ 全局资产引用 (" + globalCount + ")";
-                } else {
-                    foldContent.style.display = "none";
-                    foldBtn.textContent = "▸ 全局资产引用 (" + globalCount + ")";
-                }
-            });
-
-            leftPanel.appendChild(foldBtn);
-            leftPanel.appendChild(foldContent);
-
-            // 把全局引用渲染到 foldContent 里 (不显示删除按钮, 因为是全局的)
-            // 临时把 leftPanel 指向 foldContent, 渲染完再恢复
-            const originalLeftPanel = leftPanel;
-            // 用一个临时容器渲染, 再 append 到 foldContent
-            const tempContainer = document.createElement("div");
-            // 把 renderRefRows 的 leftPanel 替换成 tempContainer
-            // 简化: 直接把 globalRefs 渲染到 tempContainer
-            const tempGroups = new Map();
-            for (const ref of globalRefs) {
-                const key = ref.type + ":" + ref.index;
-                const g = tempGroups.get(key) || { ref: ref, count: 0 };
-                g.count += 1;
-                tempGroups.set(key, g);
+            // Usage count badge (only when the same asset is referenced more
+            // than once in this CLIP's prompt)
+            if (count > 1) {
+                const badge = document.createElement("div");
+                badge.textContent = "×" + count;
+                badge.style.cssText = "position:absolute;right:1px;bottom:1px;background:rgba(190,30,30,.92);color:#fff;font-size:9px;line-height:1.2;padding:1px 3px;border-radius:3px;pointer-events:none;";
+                thumb.appendChild(badge);
             }
-            Array.from(tempGroups.values()).forEach(function(g) {
-                const ref = g.ref;
-                const count = g.count;
-                const assetItem = document.createElement("div");
-                assetItem.style.cssText = "display:flex;align-items:center;gap:4px;margin-bottom:3px;font-size:11px;";
+            assetItem.appendChild(thumb);
 
-                const thumb = document.createElement("div");
-                thumb.style.cssText = "position:relative;width:40px;height:40px;border:1px solid #333;border-radius:3px;overflow:hidden;flex-shrink:0;background:#1a1a1a;opacity:.7;";
-                if (ref.type !== "audios") {
-                    const img = document.createElement("img");
-                    img.style.cssText = "width:100%;height:100%;object-fit:cover;";
-                    img.loading = "lazy";
-                    if (assetList) {
-                        const items = assetList[ref.type] || [];
-                        const item = items.find(i => i.index === ref.index);
-                        if (item) {
-                            if (ref.type === "videos") {
-                                img.src = "/bsai/video_frame?filename=" + encodeURIComponent(item.name);
-                            } else {
-                                img.src = "/bsai/asset_file?type=" + ref.type + "&filename=" + encodeURIComponent(item.name);
-                            }
-                        }
-                    }
-                    img.onerror = function() {
-                        img.style.display = "none";
-                        thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#555;font-size:9px;">IMG</div>';
-                    };
-                    thumb.appendChild(img);
-                } else {
-                    thumb.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;width:100%;height:100%;color:#666;">♪</div>';
-                }
-                if (count > 1) {
-                    const badge = document.createElement("div");
-                    badge.textContent = "×" + count;
-                    badge.style.cssText = "position:absolute;right:1px;bottom:1px;background:rgba(120,120,120,.92);color:#fff;font-size:9px;line-height:1.2;padding:1px 3px;border-radius:3px;pointer-events:none;";
-                    thumb.appendChild(badge);
-                }
-                assetItem.appendChild(thumb);
+            const label = document.createElement("span");
+            label.textContent = ref.tag;
+            label.style.cssText = "color:#aaa;flex:1;";
+            assetItem.appendChild(label);
 
-                const label = document.createElement("span");
-                label.textContent = ref.tag;
-                label.style.cssText = "color:#888;flex:1;";
-                assetItem.appendChild(label);
-
-                tempContainer.appendChild(assetItem);
+            const removeBtn = document.createElement("button");
+            removeBtn.textContent = "✕";
+            removeBtn.style.cssText = "background:none;border:none;color:#a44;cursor:pointer;font-size:12px;padding:0 2px;";
+            removeBtn.addEventListener("click", function(e) {
+                e.stopPropagation();
+                e.preventDefault();
+                // Remove the @图N tag from prompt
+                let p = clip.prompt;
+                p = p.replace(ref.tag, "").replace(/\s+/g, " ").trim();
+                clip.prompt = p;
+                textarea.value = p;
+                updateHidden(node, runtime);
+                renderAssetPanel(leftPanel, clip, node, runtime, textarea);
             });
+            assetItem.appendChild(removeBtn);
 
-            foldContent.appendChild(tempContainer);
-        }
+            leftPanel.appendChild(assetItem);
+        });
     }
 
-    // If asset cache not loaded yet, fetch and re-render
+        // If asset cache not loaded yet, fetch and re-render
     if (!runtime._h3_assetCache) {
         h3FetchAssets().then(() => {
             renderAssetPanel(leftPanel, clip, node, runtime, textarea);
