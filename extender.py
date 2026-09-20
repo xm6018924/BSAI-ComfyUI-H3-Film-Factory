@@ -2410,21 +2410,18 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
                           f"{_old_hw[1]}x{_old_hw[0]} -> {_up_video.shape[-1]}x{_up_video.shape[-2]} (x{_r_factor})")
 
-            # v2.55 (2026-09-20 fix): 二采 refine 只保留最后 1 个 keyframe（衔接下一 clip），
-            # 清空前面的 keyframe（这些是导致开头 39 帧重影模糊的元凶）。
-            # 这样既保留了跨 clip 连贯性，又不会让模糊 keyframe 影响开头画质。
+            # v2.55b (2026-09-20 fix): 二采 refine 完全清空 minimax_keyframes，避免模糊 keyframe 影响画质。
+            # 跨 clip 连贯性由一采保证，二采只提升分辨率不改变内容。
             if _r_factor > 1.0:
                 try:
                     _cond_kc = conditioning[0][1] if isinstance(conditioning, list) else conditioning
                     if isinstance(_cond_kc, dict) and "minimax_keyframes" in _cond_kc:
-                        _kfs = _cond_kc.get("minimax_keyframes") or []
-                        _nkc = len(_kfs)
-                        if _nkc > 1:
-                            # 只保留最后 1 个 keyframe（衔接下一 clip 用），清空前面的
-                            _cond_kc["minimax_keyframes"] = [_kfs[-1]]
-                            print(f"[H3 Extender] v2.55 二采 keyframe 优化: {_nkc} 个 -> 1 个 (保留最后衔接帧, 清空前面防开头重影)")
+                        _nkc = len(_cond_kc.get("minimax_keyframes") or [])
+                        if _nkc:
+                            _cond_kc["minimax_keyframes"] = []
+                            print(f"[H3 Extender] v2.55b 二采清空 {_nkc} 个 motion-context keyframe (避免模糊 keyframe 影响画质)")
                 except Exception as _ekc:
-                    print(f"[H3 Extender] v2.55 keyframe 优化失败(可忽略): {_ekc}")
+                    print(f"[H3 Extender] v2.55b keyframe 清空失败(可忽略): {_ekc}")
 
             # v1.43: 3D upscaler 用完后立即清缓存, 释放 VRAM 给二采 diffusion.
             # MODEL_CACHE 不受 ComfyUI model_management 管理 (不在
