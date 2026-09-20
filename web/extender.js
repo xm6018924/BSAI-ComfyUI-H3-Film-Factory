@@ -5650,13 +5650,16 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         }
     }
 
-    // v1.22: keep per-CLIP sockets glued to their prompt-window anchors.
-    if (!runtime._portTimer) {
-        runtime._portTimer = setInterval(() => {
-            try { positionClipPorts(node, runtime); } catch (err) {}
-            try { syncExternalPrompts(node, runtime); } catch (err) {}
-        }, 500);
-    }
+    // v2.30 (2026-09-20 perf fix): 去掉节点级定时器 _portTimer.
+    // 全局定时器 window.__h3GlobalSyncPoll 已经在每 500ms 遍历所有节点调用
+    // positionClipPorts + syncExternalPrompts, 节点级定时器会导致每个节点
+    // 每 500ms 被调用两次, 拖动画布卡顿. 现在只保留全局定时器.
+    // if (!runtime._portTimer) {
+    //     runtime._portTimer = setInterval(() => {
+    //         try { positionClipPorts(node, runtime); } catch (err) {}
+    //         try { syncExternalPrompts(node, runtime); } catch (err) {}
+    //     }, 500);
+    // }
 
     installInvalidationHooks(node, runtime);
     wrapResolutionWidgetCallbacks(node, runtime);
