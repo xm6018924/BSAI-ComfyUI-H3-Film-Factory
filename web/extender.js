@@ -3363,6 +3363,8 @@ function render(node, runtime) {
                 tabAsset.style.color = "#ccc";
                 tabTemplate.style.background = "#2a2a3a";
                 tabTemplate.style.color = "#999";
+                // v2.51: 清缓存, 强制重新渲染资产面板 (否则模板面板内容挡住了)
+                clip._assetPanelRefsKey = null;
                 renderAssetPanel(tabContent, clip, node, runtime, prompt);
             } else {
                 tabTemplate.style.background = "#4a4a6a";
