@@ -3038,16 +3038,21 @@ function syncGlobalPromptFromInput(node, runtime) {
                 }
             }
 
-            if (globalText && runtime.state.global_prompt !== globalText) {
-                runtime.state.global_prompt = globalText;
+            // v2.53: 区分两种情况
+            // - 外部源文本完全空了: 内部全局提示词也跟着清空
+            // - 外部源文本非空, 但没有全局提示词部分: 保留内部的 (不覆盖手动输入)
+            const sourceCompletelyEmpty = !fullText || !fullText.trim();
+            
+            if (sourceCompletelyEmpty || (globalText && runtime.state.global_prompt !== globalText)) {
+                runtime.state.global_prompt = sourceCompletelyEmpty ? "" : globalText;
                 updateHidden(node, runtime);
             }
-            // Mirror the state guard: never blank an auto-referenced /
-            // manually-entered global prompt when the storyboard has no
-            // archive section (empty globalText but non-empty source).
-            if (globalText && runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== globalText) {
-                runtime.globalPromptTextarea.value = globalText;
-                autoResizeTextarea(runtime.globalPromptTextarea);
+            if (runtime.globalPromptTextarea) {
+                const targetVal = sourceCompletelyEmpty ? "" : globalText;
+                if (sourceCompletelyEmpty || (globalText && runtime.globalPromptTextarea.value !== targetVal)) {
+                    runtime.globalPromptTextarea.value = targetVal;
+                    autoResizeTextarea(runtime.globalPromptTextarea);
+                }
             }
             if (typeof runtime.renderGlobalAssetPanel === "function") {
                 runtime.renderGlobalAssetPanel();
