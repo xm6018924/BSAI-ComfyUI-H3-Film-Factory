@@ -80,7 +80,50 @@
 
 ---
 
-#### 🐛 三、重要 Bug 修复 / Critical Bug Fixes
+#### 🧠 三、时间分块 + 语义桥 / Temporal Chunking + Semantic Bridge
+
+**两大核心技术升级：长片段防 OOM + 提示词更听话！**
+**Two major technical upgrades: long clip OOM protection + better prompt adherence!**
+
+##### ⏱️ 时间分块（v2.02）/ Temporal Chunking
+
+**长片段二采防 OOM：沿时间轴（T 轴）切分二采 latent，逐段采样，峰值显存大幅降低。**
+**Long clip OOM protection: split refine latent along the temporal axis (T), sample segment by segment, drastically reduces peak VRAM.**
+
+- **区别于空间分块**: 空间分块沿 H/W（宽高）切，时间分块沿 T（时间）切
+- **Different from spatial tiling**: spatial tiles along H/W (width/height), temporal chunks along T (time)
+- **重叠区平滑接管**: 相邻段重叠区冻结 + smoothstep 接管，避免接缝
+- **Smooth overlap**: frozen overlap region + smoothstep blending, no visible seams
+- **参数说明 / Parameters**:
+  - `temporal_chunk_tokens`: 时间分块长度（沿 T 轴切的 token 数）
+  - `temporal_overlap_tokens`: 相邻段重叠 token 数（越大越稳越慢，一般 8~12）
+- **使用建议 / Usage Tips**:
+  - 0 = 关闭（默认整段二采）
+  - T~107（约 4 秒）时建议 40~60
+  - 长片段（15 秒+）二采必开，否则容易 OOM
+
+##### 🌉 语义桥（v2.19）/ Semantic Bridge
+
+**让 H3 更听话：用一个约 11MB 的小 MLP 对文本编码器 token 做残差混合，显著提升构图/空间/计数等提示词遵循度。**
+**Better prompt adherence: a ~11MB small MLP does residual mixing on text encoder tokens, significantly improves adherence to composition / spatial / counting prompts.**
+
+- **原理 / How it works**:
+  - 原版蒸馏于 FL2VA 模型，本插件做了 Ref2VA 强制兼容
+  - Original model distilled for FL2VA; this plugin adds Ref2VA compatibility
+  - 公式：`C = H + α * (S - H)`，其中 H 是原始 token，S 是桥接 token，α 是强度
+  - Formula: `C = H + α * (S - H)`, where H is original token, S is bridge token, α is strength
+- **参数说明 / Parameters**:
+  - `semantic_bridge_enable`: 开关（默认关，不影响旧工作流）
+  - `semantic_bridge_adapter`: 权重文件选择（放 `ComfyUI/models/semantic_bridge/`）
+  - `semantic_bridge_alpha`: 桥接强度（默认 0.15，越大越听话，太大会崩）
+  - `semantic_bridge_magnitude_match`: 模长对齐（原版默认开，保持即可）
+- **推荐权重 / Recommended Weights**:
+  - `speach1sdef178/MiniMax-H3-Semantic-Bridge` — 原版通用
+  - `JOKER141/BUNNY_H3_Conditioning_Bridge` — 偏动作/多人场景
+
+---
+
+#### 🐛 四、重要 Bug 修复 / Critical Bug Fixes
 
 1. **刷新页面后缓存误清空 / Cache Cleared on Refresh**:
    - 修复：分辨率未稳定时校验，误判不匹配清空缓存
