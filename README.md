@@ -149,6 +149,60 @@
    - 初始高度 200px，可任意拉高
    - Initial 200px height, resizable to any height
 
+5. **另存工作流报错 / Save Workflow Error**:
+   - 修复：另存工作流时报 `structuredClone` 错误（`__h3Extender` 不可枚举属性导致）
+   - Fixed: `structuredClone` error when saving workflow (non-enumerable `__h3Extender` property)
+   - 现在另存工作流完全正常
+   - Now saving workflows works perfectly
+
+6. **二采开头 39 帧重影模糊 / Refine First 39 Frames Ghosting**:
+   - 修复：二采 refine 时 motion-context keyframe 未清空，导致开头重影错位模糊
+   - Fixed: motion-context keyframe not cleared in refine pass, causing ghosting/blurry first 39 frames
+   - 现在二采开头画面干净清晰
+   - Now refine start frames are clean and sharp
+
+7. **导入空包误删旧链备份 / Empty Import Deletes Old Chain**:
+   - 修复：导入空包时静默删除旧链备份，v1.97 防误清机制没覆盖导入路径
+   - Fixed: empty import silently deleted old chain backup, v1.97 protection missed the import path
+   - 现在导入前自动备份，不会误删整链
+   - Now auto-backup before import, no more accidental chain loss
+
+---
+
+#### 🎛️ 五、其他重要优化 / Other Important Improvements
+
+1. **全局资产引用折叠显示 / Global Asset Refs Folded Display**:
+   - 之前：全局引用太多时，所有引用的资产全部展示，占满界面
+   - Before: when too many global refs, all referenced assets displayed, taking too much space
+   - 现在：每个 CLIP 只显示自己引用的资产，同一资产引用次数用数字角标表示
+   - Now: each CLIP only shows its own referenced assets, reference count shown as number badge
+   - 界面更清爽，占用更少
+   - Cleaner UI, less space usage
+
+2. **CLIP 节点高度自动扩展 / Node Height Auto-Expand**:
+   - 之前：CLIP 超过 12 个时，节点高度被截断，只剩 4 个卡片能看到
+   - Before: when more than 12 clips, node height was truncated, only 4 cards visible
+   - 现在：节点高度自动扩展到 8000px，再多 CLIP 也能完整显示
+   - Now: node height auto-expands to 8000px, even more clips fully visible
+   - 底部黑色背景自动跟随 CLIP 数量伸缩
+   - Bottom black background auto-resizes with CLIP count
+
+3. **重启后资产链接自动恢复 / Asset Refs Auto-Restore on Restart**:
+   - 之前：重启 ComfyUI 或刷新工作流后，所有 CLIP 的资产 @引用 全部丢失
+   - Before: after restarting ComfyUI or refreshing workflow, all CLIP asset @refs were lost
+   - 现在：已引用资产面板同时解析 CLIP prompt + 全局 prompt，重启后自动恢复
+   - Now: asset panel parses both CLIP prompt + global prompt, auto-restores after restart
+   - 不需要重新输入全局提示词来重新链接资产库
+   - No need to re-enter global prompt to re-link asset library
+
+4. **剧本输入自动建 CLIP / Auto-Create CLIP from Script**:
+   - 输入外部全局提示词（剧本）后，自动按 `[分镜N]` 数量创建对应数量的 CLIP 卡片
+   - After entering external global prompt (script), auto-create CLIP cards based on `[Shot N]` count
+   - 节点自动撑高到对应 CLIP 数量，不需要手动拉
+   - Node auto-expands to match CLIP count, no manual resizing needed
+   - 实时解析，输入完立即生效
+   - Real-time parsing, takes effect immediately after input
+
 ---
 
 ### v1.86 (2026-09-15) — VDN-H3 极速档 + Bullet Time Lora 集成 / VDN-H3 Presets + Bullet Time LoRA
