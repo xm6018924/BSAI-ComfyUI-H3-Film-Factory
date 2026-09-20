@@ -3333,6 +3333,14 @@ function render(node, runtime) {
         cardBody.style.position = "relative";
         if (clip.collapsed) cardBody.style.display = "none";
 
+        // v2.52 perf: 折叠的 CLIP 不渲染内部内容 (资产面板/提示词/预览),
+        // 大幅减少 DOM 节点数量, 拖动画布更流畅.
+        if (clip.collapsed) {
+            card.appendChild(cardBody);
+            cards.appendChild(card);
+            return; // 跳过后面所有内容创建
+        }
+
         // Left panel: referenced assets (v2.40: 加 tab 切换: 资产 / 模板)
         const leftPanel = document.createElement("div");
         leftPanel.style.cssText = "width:160px;min-width:160px;flex-shrink:0;border-right:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.15);padding:6px;display:flex;flex-direction:column;overflow-y:auto;";
@@ -4526,8 +4534,8 @@ async function syncFromHistory() {
 // captured a stale reference.
 function ensureGlobalSyncPoll() {
     if (window.__h3GlobalSyncPoll) return;
-    // v2.32 (2026-09-20 perf fix): 全局定时器从 500ms 改成 2000ms,
-    // 减少遍历所有节点的频率, 拖动画布更流畅.
+    // v2.52 (2026-09-20 perf fix): 全局定时器从 2000ms 改成 4000ms,
+    // 进一步减少遍历所有节点的频率, 拖动画布更流畅.
     window.__h3GlobalSyncPoll = setInterval(() => {
         try {
             const appObj = window.comfyAPI?.app?.app;
@@ -4567,7 +4575,7 @@ function ensureGlobalSyncPoll() {
                 } catch (e) {}
             }
         } catch (e) {}
-    }, 2000);
+    }, 4000);
 }
 
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
