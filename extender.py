@@ -1558,6 +1558,7 @@ def _make_ref2va_conditioning(
     ref_items,
     ref_blocks,
     active_picture_slots,
+    semantic_bridge_pack=None,
 ):
     latent = _empty_av_latent(width, height, frame_count)
     resolved_prompt = _remap_picture_tags(prompt, active_picture_slots)
@@ -1689,6 +1690,25 @@ def _make_ref2va_conditioning(
         print(f"[H3 Extender]   conditioning set with {len(ref_blocks)} minimax_refs blocks")
     else:
         print("[H3 Extender]   WARNING: no ref_blocks, conditioning has NO minimax_refs!")
+    # v2.19 Semantic-Bridge: 可开可关(默认关). 对 cond[0][0] token 张量做小 MLP 残差混合.
+    if isinstance(semantic_bridge_pack, dict) and semantic_bridge_pack.get("enabled"):
+        try:
+            import os as _os_sb, importlib.util as _ilu_sb
+            _sb_path = _os_sb.path.join(_os_sb.path.dirname(_os_sb.path.abspath(__file__)),
+                                        "bsai_h3_semantic_bridge.py")
+            _sb_spec = _ilu_sb.spec_from_file_location("bsai_h3_semantic_bridge", _sb_path)
+            _sb = _ilu_sb.module_from_spec(_sb_spec)
+            _sb_spec.loader.exec_module(_sb)
+            cond, _sb_note = _sb.apply(
+                cond,
+                semantic_bridge_pack.get("adapter", ""),
+                float(semantic_bridge_pack.get("alpha", 0.15)),
+                bool(semantic_bridge_pack.get("magnitude_match", True)),
+            )
+            if _sb_note:
+                print(f"[H3 Extender]   {_sb_note}")
+        except Exception as _sb_err:
+            print(f"[H3 Extender]   Semantic Bridge 加载失败(忽略, 按无桥继续): {_sb_err}")
     return cond, latent
 
 
@@ -2688,7 +2708,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_ki, _amask))
                         with _aimdo_disabled():
                             _chunk_out = _r_guider.sample(
-                                comfy.sample.prepare_empty_noise(_chunk_latent),
+                                comfy.sample.prepare_empty_noise(_chunk_latent["samples"]),
                                 _chunk_latent["samples"],
                                 _r_sampler,
                                 _r_sigmas,
@@ -3905,6 +3925,20 @@ def _import_project_archive(owner_id, archive_path):
 
 
 
+def _bsai_list_semantic_bridge_adapters():
+    """INPUT_TYPES 用: 列 models/semantic_bridge/ 下的语义桥权重, 至少返回占位项."""
+    try:
+        import os as _os_sb3, importlib.util as _ilu_sb3
+        _sb_path = _os_sb3.path.join(_os_sb3.path.dirname(_os_sb3.path.abspath(__file__)),
+                                     "bsai_h3_semantic_bridge.py")
+        _sb_spec = _ilu_sb3.spec_from_file_location("bsai_h3_semantic_bridge", _sb_path)
+        _sb = _ilu_sb3.module_from_spec(_sb_spec)
+        _sb_spec.loader.exec_module(_sb)
+        return _sb.list_adapters()
+    except Exception:
+        return ["(关闭: 无权重)"]
+
+
 class BSAIH3FilmFactory:
     @classmethod
     def INPUT_TYPES(cls):
@@ -4137,6 +4171,23 @@ class BSAIH3FilmFactory:
                 "INT",
                 {"default": 8, "min": 0, "max": 40, "step": 1, "tooltip": "相邻时间段重叠 token 数。越大越稳但越慢; 一般 8~12。仅 temporal_chunk_tokens>0 时生效。"},
             ),
+            # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 权重放 models/semantic_bridge/.
+            "semantic_bridge_enable": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "Semantic-Bridge 语义桥开关。开启后用一个约11MB的小MLP对文本编码器token做残差混合, 让H3更听话(构图/空间/计数等)。原版蒸馏于FL2VA; 本插件Ref2VA为强制兼容。默认关, 不影响旧工作流。"},
+            ),
+            "semantic_bridge_adapter": (
+                _bsai_list_semantic_bridge_adapters(),
+                {"tooltip": "语义桥权重文件(约11MB), 放到 ComfyUI/models/semantic_bridge/。下载: speach1sdef178/MiniMax-H3-Semantic-Bridge 或 JOKER141/BUNNY_H3_Conditioning_Bridge(偏动作/多人)。选(关闭)则不启用。"},
+            ),
+            "semantic_bridge_alpha": (
+                "FLOAT",
+                {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "残差混合强度 C=H+alpha*(S'-H)。原版默认0.15; 越大越贴桥, 过大会漂。"},
+            ),
+            "semantic_bridge_magnitude_match": (
+                "BOOLEAN",
+                {"default": True, "tooltip": "把小MLP输出的向量模长对齐到原hidden。原版默认开。"},
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -4339,6 +4390,17 @@ class BSAIH3FilmFactory:
         # chunk_tokens<=0 关闭(默认), 整段一次性二采; >0 时沿 T 切块逐段走已有(空间分块)采样器。
         temporal_chunk_tokens = int(kwargs.get("temporal_chunk_tokens", 0))
         temporal_overlap_tokens = int(kwargs.get("temporal_overlap_tokens", 8))
+        # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 小 MLP 残差混合 cond token.
+        _sb_enable = bool(kwargs.get("semantic_bridge_enable", False))
+        _sb_adapter = str(kwargs.get("semantic_bridge_adapter", ""))
+        _sb_alpha = float(kwargs.get("semantic_bridge_alpha", 0.15))
+        _sb_mag = bool(kwargs.get("semantic_bridge_magnitude_match", True))
+        sb_pack = {
+            "enabled": _sb_enable and bool(_sb_adapter) and not _sb_adapter.startswith("("),
+            "adapter": _sb_adapter,
+            "alpha": _sb_alpha,
+            "magnitude_match": _sb_mag,
+        }
         # v1.83: 速度预设覆盖 (先于 REFINE-PARAMS 打印, 保证日志反映实际生效参数)
         speed_preset = str(kwargs.get("speed_preset", "均衡"))
         _sp_old = (steps, refine_steps, tile_count, refine_denoise)
@@ -5218,6 +5280,7 @@ class BSAIH3FilmFactory:
                 ref_items,
                 ref_blocks,
                 active_picture_slots,
+                semantic_bridge_pack=sb_pack,
             )
 
             trim_frames = None

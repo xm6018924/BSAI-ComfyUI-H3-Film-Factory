@@ -64,9 +64,9 @@ const COLLAPSED_MIN_HEIGHT = 160;
 const PREVIEW_PANEL_WIDTH = 130;
 const MAX_AUTO_NODE_HEIGHT = 8000;  // v2.03 (2026-09-19): 从 2000 提升到 8000, 解决 CLIP>12 个时节点高度被截断只剩 4 个卡片的问题. CLIP 列表容器已有 overflow-y:auto, 超出部分可内部滚动.
 const MAX_CARDS_VISIBLE_HEIGHT = 3 * (CARD_MIN_HEIGHT + 9) + CARD_SCROLLBAR_SPACE;
-// v2.09 (2026-09-19 fix): 节点高度范围:
-//   最小值 = 1 个 CLIP 的高度 (用户可以拉小到只显示 1 个)
-//   最大值 = 20 个 CLIP 的高度 (超出用滚动条显示)
+// v2.21 (2026-09-20 fix): 节点高度逻辑:
+//   没输入外部提示词: 默认只显示 CLIP1 (最小值 = 1 个 CLIP)
+//   输入外部提示词后: autoGrowNodeToFitAllClips 自动撑大到显示全部 CLIP
 const DEFAULT_MAX_VISIBLE_CLIPS = 20;
 const DEFAULT_MIN_VISIBLE_CLIPS = 1;
 
@@ -76,8 +76,8 @@ function calculateMinHeight(runtime) {
     }
     let height = NON_CARD_FIXED;
     let cardsHeight = 0;
-    // v2.09: 最小值 = 1 个 CLIP 的高度, 这样用户可以拉小到只显示 1 个.
-    // 最大值由滚动条控制, 不需要在这里限制.
+    // 最小值 = 1 个 CLIP 的高度, 没输入外部提示词时默认只显示 CLIP1.
+    // 输入外部提示词后 autoGrowNodeToFitAllClips 会自动撑大到显示全部 CLIP.
     const clipsToCount = Math.min(runtime.state.clips.length, DEFAULT_MIN_VISIBLE_CLIPS);
     for (let i = 0; i < clipsToCount; i++) {
         const clip = runtime.state.clips[i];
@@ -99,49 +99,60 @@ function calculateMinHeight(runtime) {
 //        500ms 后再校验一次, 若高度被压回则重设, 防止时序竞争.
 function autoGrowNodeToFitAllClips(node, runtime) {
     try {
-        const cards = runtime.cards;
-        if (!cards) return;
-        // v2.16: 用"在途"标记防抖, 不占用"卡片还没渲染好"的空跑.
-        // onConfigure 的多个定时器(100/500/1200/2500/4000ms)里, 100ms 那次卡片还没排好会空跑,
-        // 不能让它挡住后面真正能量到卡片的几次.
+        if (!runtime?.state?.clips) return;
+        // v2.29 (2026-09-20 fix): 不测量 DOM (cards.scrollHeight 会形成循环:
+        // 节点高度大 → cards 高度被强制撑大 → 测到很大值 → 节点撑得更大).
+        // 直接根据 CLIP 数量计算高度:
+        // - 输入外部提示词后 CLIP 变多 → 自动撑大到显示全部 CLIP
+        // - 删除外部提示词后 CLIP 变少 → 自动缩小, 不留黑色空白
         if (runtime._growInFlight) return;
         runtime._growInFlight = true;
         const applyGrow = () => {
             try {
-                const totalCards = Math.max(0, cards.scrollHeight || 0);
-                if (totalCards < 30) {
-                    // 卡片还没排好: 不算成功撑高, 放开在途标记让下次调用继续.
+                const clips = runtime.state.clips;
+                if (!clips || clips.length === 0) {
+                    // 没有 CLIP: 用最小高度
+                    const y = Number(runtime.domWidget && runtime.domWidget.last_y) || 0;
+                    const target = y + COLLAPSED_MIN_HEIGHT + BOTTOM_PAD;
+                    const w = Math.max(NODE_MIN_WIDTH, Number(node.size && node.size[0]) || NODE_MIN_WIDTH);
+                    const cur = Number(node.size && node.size[1]) || 0;
+                    runtime._userResize = true;
+                    if (Math.abs(target - cur) > 4) {
+                        node.setSize([w, target]);
+                    }
+                    runtime.state.nodeHeight = target;
                     return;
                 }
+                // 根据每个 CLIP 的实际 card_height 计算总高度
+                let totalCardH = 0;
+                for (let i = 0; i < clips.length; i++) {
+                    const clip = clips[i];
+                    if (clip.collapsed) {
+                        totalCardH += COLLAPSED_CLIP_HEIGHT;
+                    } else if (clip.card_height > 0) {
+                        totalCardH += Math.max(CARD_MIN_HEIGHT, clip.card_height);
+                    } else {
+                        totalCardH += CARD_MIN_HEIGHT + CARD_SCROLLBAR_SPACE;
+                    }
+                }
                 const y = Number(runtime.domWidget && runtime.domWidget.last_y) || 0;
-                const needed = y + NON_CARD_FIXED + totalCards + BASE_PADDING;
+                const needed = y + NON_CARD_FIXED + totalCardH + BASE_PADDING;
                 const target = Math.min(40000, needed);
                 const w = Math.max(NODE_MIN_WIDTH, Number(node.size && node.size[0]) || NODE_MIN_WIDTH);
                 const cur = Number(node.size && node.size[1]) || 0;
-                const preGrowH = cur; // 记录撑高前高度, 用于区分'被系统压回' vs '用户手动拖小'
                 runtime._userResize = true; // 防止 poisoned-height 守卫把新高度弹回
-                if (target > cur + 4) node.setSize([w, target]);
+                if (Math.abs(target - cur) > 4) {
+                    node.setSize([w, target]);
+                }
                 runtime.state.nodeHeight = target;
                 try { updateHidden(node, runtime); } catch (e) {}
-                // 500ms 后复查: 仅当节点被系统完全压回撑高前的小高度(<preGrowH+200)时才重设;
-                // 用户手动拖到中间态不干预.
-                setTimeout(() => {
-                    try {
-                        const nowH = Number(node.size && node.size[1]) || 0;
-                        if (nowH < preGrowH + 200) {
-                            runtime._userResize = true;
-                            node.setSize([w, target]);
-                            runtime.state.nodeHeight = target;
-                        }
-                    } catch (e) {}
-                }, 500);
             } catch (e) {}
         };
-        // 等卡片 DOM + 展开 textarea 自动撑高完成再量; 跑完放开在途标记
+        // 等 CLIP 卡片 DOM 更新完后再计算; 跑完放开在途标记
         requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => {
             try { applyGrow(); } catch (e) {}
             runtime._growInFlight = false;
-        }, 120)));
+        }, 200)));
     } catch (e) {}
 }
 
@@ -700,6 +711,18 @@ const BSAI_BILINGUAL_LABELS = {
     "refine_steps": "二次采样步数",
     "refine_upscale_factor": "潜空间放大倍数（1.0=不放大）",
     "speed_preset": "速度预设（极速4+2步 / 均衡6+4步 / 精细8+6步 / custom）",
+    "temporal_chunk_tokens": "时间分块长度（沿T轴切二采防OOM；0=关闭，T~107建议40~60）",
+    "temporal_overlap_tokens": "时间分块重叠（相邻段重叠token，越大越稳越慢，一般8~12）",
+    "refine_upscaler_model": "二采放大模型（3D语义放大/默认bilinear插值）",
+    "refine_align_to": "二采对齐步长（默认32，分辨率自动取整防边缘色条）",
+    "refine_audio_denoise": "二采音频重绘（0=锁音频不变，推荐；0.5~1.0会改声音）",
+    "tiled_refine": "分块二采开关（显存不够时开，沿H/W切，默认关）",
+    "tile_count": "空间分块数（越大越省显存越慢，默认4）",
+    "tile_overlap": "分块重叠像素（相邻块融合，默认128）",
+    "semantic_bridge_enable": "语义桥开关（Semantic-Bridge，默认关）",
+    "semantic_bridge_adapter": "语义桥权重（放models/semantic_bridge，约11MB）",
+    "semantic_bridge_alpha": "语义桥强度（C=H+α*(S-H)，默认0.15）",
+    "semantic_bridge_magnitude_match": "语义桥模长对齐（原版默认开）",
 };
 function bsaiApplyBilingualLabels(node) {
     if (!node || !node.widgets) return;
@@ -4016,6 +4039,10 @@ function render(node, runtime) {
     requestAnimationFrame(() => syncDomHeight(node, runtime, false));
     requestAnimationFrame(() => positionClipPorts(node, runtime));
     requestAnimationFrame(() => syncExternalPrompts(node, runtime));
+    // v2.24 (2026-09-20 fix): 去掉了每次 render 后自动调用 autoGrowNodeToFitAllClips,
+    // 因为会形成循环: render → 撑大 → 又触发 render → 又撑大...
+    // 导致外部提示词没输入时黑色面板自己慢慢在撑大.
+    // 只在输入/删除外部提示词后才调整高度 (见统一刷新按钮逻辑).
 }
 
 function positionClipPorts(node, runtime) {
@@ -4151,7 +4178,7 @@ function hookUpstreamWidgetCallback(node, runtime) {
                     });
                     // Rebuild card DOM so the change is visible immediately.
                     touched.forEach((h3n) => {
-                        try { render(h3n, h3n.__h3Extender); autoGrowNodeToFitAllClips(h3n, h3n.__h3Extender); } catch (e2) {}
+                        try { render(h3n, h3n.__h3Extender); /* v2.25: 去掉 autoGrowNodeToFitAllClips, 防止每 500ms 自动撑大 */ } catch (e2) {}
                     });
                 } catch (e) {}
             };
@@ -4238,8 +4265,11 @@ function syncExternalPrompts(node, runtime) {
     if (changed) {
         try { updateHidden(node, runtime); } catch (e) {}
         try { render(node, runtime); } catch (e) {}
-        // v2.15: 这里不再 autoGrow —— 每 500ms 轮询触发会和 ComfyUI 布局打架导致底部跳.
-        // CLIP 数量变化由 _sourceClipsDirty 路径统一撑高.
+        // v2.26 (2026-09-20 fix): 外部提示词真正变化时才自动调整节点高度:
+        // - 输入外部提示词 → CLIP 变多 → 自动撑大显示全部 CLIP
+        // - 删除外部提示词 → CLIP 变少 → 自动缩小, 不留黑色空白
+        // 只有 changed=true 才调用, 不会每 500ms 都撑大.
+        try { autoGrowNodeToFitAllClips(node, runtime); } catch (e) {}
     }
 }
 
@@ -4380,7 +4410,7 @@ function ensureGlobalSyncPoll() {
                     if (rtD && rtD._sourceClipsDirty) {
                         rtD._sourceClipsDirty = false;
                         render(n, rtD);
-                        autoGrowNodeToFitAllClips(n, rtD);
+                        /* v2.25: 去掉 autoGrowNodeToFitAllClips, 防止自动撑大 */
                     }
                 } catch (e) {}
                 // Persist the user-adjusted node height so a page refresh or
@@ -4427,15 +4457,10 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
     // feedback loop that created the infinite-height nodes.
     if (mode === "nodes2") {
         const dynMinH = calculateMinHeight(runtime);
-        // If the user last resized the node, keep that exact body height as
-        // the intrinsic minimum so refresh / restart restores the same card
-        // layout instead of collapsing back to the content minimum.
-        const savedNodeH = Number(runtime.state?.nodeHeight || 0);
-        const bodyMinH = (
-            Number.isFinite(savedNodeH) && savedNodeH > 0
-        )
-            ? Math.max(dynMinH, savedNodeH)
-            : dynMinH;
+        // v2.28 (2026-09-20 fix): bodyMinH 直接用当前 CLIP 数量计算的高度,
+        // 不用旧的 savedNodeH (Math.max 会导致 CLIP 变少后节点高度永远缩不回去).
+        // 自动调整: 输入外部提示词后 CLIP 变多 → 自动撑大; 删除后 CLIP 变少 → 自动缩小.
+        const bodyMinH = dynMinH;
         const currentH = Number(node.size?.[1] || 0);
         const y = Number(runtime.domWidget.last_y);
         const fallbackH = Number.isFinite(y) && y > 0
@@ -4541,10 +4566,25 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
             // version serialized an absurd height (baseline: real content
             // minimum, not the possibly-poisoned y-derived minNodeH).
             // v2.10: 用户手动拉大节点(afterResize)时不弹回, 保留拉大看更多 CLIP.
-            h = minNodeH;
+            // v2.18: calculateMinHeight 只算 DEFAULT_MIN_VISIBLE_CLIPS 个卡片,
+            // 导致 30 个 CLIP 撑出来的合法高高度被误判中毒弹回 CLIP1.
+            // legacyNodeHeight 是 syncDomHeight 自己在 _userResize 路径存下的
+            // (autoGrow 或用户拖出), 存了就代表已接受; 当前高度和它接近就保留.
+            const remembered = Number(runtime.legacyNodeHeight);
+            if (Number.isFinite(remembered) && remembered > 0 &&
+                Math.abs(h - remembered) < Math.max(200, remembered * 0.1)) {
+                // keep h
+            } else {
+                h = minNodeH;
+            }
         } else if (forceMin && h < minNodeH) {
             h = minNodeH;
         }
+        // v2.22 (2026-09-20 fix): 去掉了之前加的"自动缩小"逻辑,
+        // 因为它会把 autoGrowNodeToFitAllClips 刚撑大的节点又缩小回去,
+        // 导致输入外部提示词后节点不自动撑大.
+        // 删除外部提示词后节点不自动缩小的问题, 由 autoGrowNodeToFitAllClips
+        // 在下次 render 时重新量 scrollHeight 来解决.
 
         if (w !== Number(node.size?.[0]) || h !== Number(node.size?.[1])) {
             node.setSize([w, h]);
