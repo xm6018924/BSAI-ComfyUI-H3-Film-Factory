@@ -3,6 +3,27 @@
 All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
+## v2.50 (2026-09-20) — Built-in Cinematic Prompt Templates ｜ 内置电影提示词模板
+- **38 built-in cinematic templates** ｜ **38 个内置电影模板**:
+  - 🎥 Camera Movement (12): Push In / Pull Back / Tracking / Orbit / Handheld / Steadicam... ｜ 🎥 电影运镜（12 个）：缓推 / 拉远 / 跟拍 / 环绕 / 手持 / 斯坦尼康...
+  - 🎨 Color Grading (10): Warm / Cool / Teal & Orange / Noir / Morandi / Neon... ｜ 🎨 电影调色（10 个）：暖调 / 冷调 / 青橙对比 / 黑白电影 / 莫兰迪 / 霓虹赛博...
+  - 🎬 Aspect & Composition (6): Widescreen / Letterbox / Rule of Thirds / Frame-in-Frame... ｜ 🎬 画面分割（6 个）：宽屏电影感 / 上下黑边 / 三分构图 / 框中框...
+  - ✨ Cinematic Feel (10): Cinematic Quality / Dramatic Light / Golden Hour / Rainy Night / Tense / Epic... ｜ ✨ 电影感（10 个）：电影级画质 / 戏剧化光影 / 黄金时刻 / 雨夜氛围 / 紧张悬疑 / 史诗宏大...
+- **Global Apply mode** ｜ **全局应用模式**: Top toolbar "✨ 模板" button, one-click apply to ALL clips + global prompt. ｜ 节点顶部工具栏紫色 "✨ 模板" 按钮，一键应用到所有 CLIP + 全局提示词。
+- **Per-Clip Apply mode** ｜ **单 CLIP 应用模式**: Left panel "模板" tab, apply to current clip only, other clips unaffected. ｜ 每个 CLIP 左侧面板新增 "模板" tab，独立应用到当前 CLIP，其他 CLIP 不受影响。
+- **Two merge options** ｜ **两种合并方式**:
+  - Confirm = Merge: Keep global template + add per-clip template ｜ 确定 = 合并：保留全局模板，再加单 CLIP 模板
+  - Cancel = Overwrite: Remove global template, use only per-clip template ｜ 取消 = 覆盖：移除全局模板，只保留单 CLIP 模板
+- **Template tags** ｜ **模板标记**: `[电影风格-全局]...[/电影风格-全局]` for global, `[电影风格-单CLIP]...[/电影风格-单CLIP]` for per-clip. ｜ 全局用 `[电影风格-全局]...[/电影风格-全局]`，单 CLIP 用 `[电影风格-单CLIP]...[/电影风格-单CLIP]`。
+- **Performance optimizations** ｜ **性能优化**:
+  - Asset panel cache: skip re-render when refs unchanged (no more 150+ img reloads) ｜ 资产面板缓存：refs 没变不重新渲染，避免 150+ 个 img 重复加载
+  - Global poll rate reduced from 500ms to 2000ms ｜ 全局定时器从 500ms 降到 2000ms
+  - Removed duplicate node-level timer ｜ 去掉重复的节点级定时器
+- **UI improvements** ｜ **UI 优化**:
+  - CLIP prompt box initial height 200px, bottom-right resize handle ｜ CLIP 提示词框初始 200px 高，右下角可拖拽拉高度
+  - Left panel tabs: "资产" / "模板" ｜ 左侧面板新增 tab 切换："资产" / "模板"
+
+---
 ## v1.86 (2026-09-15) — VDN-H3 Presets + Bullet Time LoRA ｜ VDN-H3 速度档 + 子弹时间 Lora
 - **VDN-H3 speed presets** ｜ **VDN-H3 速度档**: speed_preset adds 极速-VDN / 均衡-VDN / 精细-VDN. Pass-1 fixed at 8 VDN steps (DMD-distilled optimum, quality ≈ dense-50, linear attention keeps long clips stable); refine 3/4/6 steps. Requires the VDN workflow (workflows/电影工厂工作流-VDN版-均衡VDN8+4（tile_overlap128）.json) whose BSAIVDNH3Loader replaces the Sol-H3 chain (FastH3 LoRA & Sol-Attn skipped). ｜ speed_preset 新增三档 VDN 预设：一采固定 VDN 8 步（蒸馏最优、质量≈dense 50 步、长链线性注意力更稳），二采 3/4/6 步；需搭配 VDN 版工作流（BSAIVDNH3Loader（基座+linear_branch 一体化）替换 Sol-H3 链路，跳过 FastH3 LoRA/Sol-Attn）。
 - **Bullet Time LoRA in workflows** ｜ **工作流集成子弹时间 Lora**: both FastH3 and VDN workflows mount BulletTime-MMH3.safetensors @ 0.5 in the LoRA stack. Pair with the bullet-time trigger words added in BSAI-MiniMAX-H3-Prompt templates. ｜ FastH3 版与 VDN 版工作流均挂载 BulletTime-MMH3 @ 0.5，配合模板子弹时间触发词使用。
