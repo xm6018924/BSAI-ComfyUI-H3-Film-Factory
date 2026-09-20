@@ -1,4 +1,4 @@
-﻿"""
+"""
 MiniMax H3 Extender
 ===================
 
@@ -1973,7 +1973,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                owner_id=None, clip_index=-1,
                refine_enable=False, refine_denoise=0.55, refine_steps=4, refine_upscale_factor=1.5,
                refine_upscaler_model="", refine_align_to=32, refine_audio_denoise=0.0,
-               tiled_refine=False, tile_count=4, tile_overlap=128):
+               tiled_refine=False, tile_count=4, tile_overlap=128,
+               temporal_chunk_tokens=0, temporal_overlap_tokens=8):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -2442,8 +2443,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             #   画面"糊成一片+像素化故障风". 官方 Sol-H3 DualSample 工作流二采正是用
             #   DisableNoise(Noise_EmptyNoise -> prepare_empty_noise 全零噪声) 走同一入口,
             #   此处完全对齐.
-            _r_noise = comfy.sample.prepare_noise(samples, int(seed) + 1, None)
-            _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
+            _use_temporal = bool(temporal_chunk_tokens) and int(temporal_chunk_tokens) > 0
+            if not _use_temporal:
+                _r_noise = comfy.sample.prepare_noise(samples, int(seed) + 1, None)
+                _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
+            else:
+                _r_noise = None
+                _r_latent = None
 
             # 3) DisableNoise 二采：从 CONST 加噪 latent 完整去噪（不再 prepare_noise 覆盖）
             # v1.47: 采样前主动确保 diffusion 模型驻留显存. DynamicVRAM
@@ -2634,17 +2640,80 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             except Exception as _e91:
                 print(f"[H3 Extender] v1.91 fraction reset 失败: {_e91}")
             try:
-                with _aimdo_disabled():
-                    _r_samples = _r_guider.sample(
-                    comfy.sample.prepare_empty_noise(samples),
-                    _r_latent["samples"],
-                    _r_sampler,
-                    _r_sigmas,
-                    denoise_mask=_r_latent.get("noise_mask"),
-                    callback=_r_step_cb,
-                    disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
-                    seed=int(seed) + 1,
-                )
+                if _use_temporal:
+                    # v2.02 时间分块二采: 沿 T 切段, 逐段走已有(空间分块)采样器,
+                    # 重叠区 denoise_mask 冻结 + smoothstep 接管. 见 bsai_h3_temporal_chunks.py
+                    import os as _os_tc, importlib.util as _ilu_tc
+                    _tc_path = _os_tc.path.join(_os_tc.path.dirname(_os_tc.path.abspath(__file__)), "bsai_h3_temporal_chunks.py")
+                    _tc_spec = _ilu_tc.spec_from_file_location("bsai_h3_temporal_chunks", _tc_path)
+                    _tc = _ilu_tc.module_from_spec(_tc_spec)
+                    _tc_spec.loader.exec_module(_tc)
+                    _mem_full, _was_nested_tc = _ff_extract_members(samples)
+                    _vid_full = _mem_full[0]
+                    _aud_full = _mem_full[1]
+                    _T_full = int(_vid_full.shape[2])
+                    _segs = _tc.plan_temporal_segments(_T_full, int(temporal_chunk_tokens), int(temporal_overlap_tokens))
+                    if len(_segs) <= 1:
+                        print(f"[H3 Extender] v2.02 时间分块: T={_T_full} <= chunk, 退化为整段二采")
+                    else:
+                        print(f"[H3 Extender] v2.02 时间分块二采: T={_T_full} chunk={temporal_chunk_tokens} "
+                              f"overlap={temporal_overlap_tokens} -> {len(_segs)} 段 {_segs}", flush=True)
+                    _acc_v = None
+                    for _ki, (_st, _et) in enumerate(_segs):
+                        _cv, _ca = _tc.slice_nested_temporal(_mem_full, _st, _et)
+                        _ov_here = 0
+                        _mask_ki = None
+                        if _acc_v is not None:
+                            _ov_here = max(0, int(_acc_v.shape[2]) - _st)
+                            _ov_here = min(_ov_here, int(_cv.shape[2]))
+                        if _ov_here > 0:
+                            _cv = _cv.clone()
+                            _cv[:, :, :_ov_here] = _acc_v[:, :, _st:_st + _ov_here]
+                            _mask_ki, _lock_n, _ = _tc.build_temporal_mask(
+                                int(_cv.shape[2]), _ov_here, dtype=_cv.dtype, device=_cv.device)
+                        else:
+                            _lock_n = 0
+                        _chunk_base = comfy.nested_tensor.NestedTensor((_cv, _ca))
+                        _chunk_noise = comfy.sample.prepare_noise(_chunk_base, int(seed) + 1 + _ki, None)
+                        _chunk_latent = _ff_const_add_noise(model, _chunk_noise, _r_sigmas,
+                                                            {"samples": _chunk_base}, _r_audio)
+                        # 加噪后把锁区重填为上一段干净结果(mask=0 时采样器保持该值, 不能保留加噪值)
+                        if _lock_n > 0:
+                            _cl_members, _ = _ff_extract_members(_chunk_latent["samples"])
+                            _cl_members[0][:, :, :_lock_n] = _acc_v[:, :, _st:_st + _lock_n]
+                            _chunk_latent["samples"] = _ff_wrap_members(_cl_members, _was_nested_tc)
+                            _a_part = _chunk_latent["samples"].tensors[1]
+                            _amask = torch.ones((1, 1, 1, int(_a_part.shape[-1])),
+                                                dtype=_mask_ki.dtype, device=_a_part.device)
+                            _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_ki, _amask))
+                        with _aimdo_disabled():
+                            _chunk_out = _r_guider.sample(
+                                comfy.sample.prepare_empty_noise(_chunk_latent),
+                                _chunk_latent["samples"],
+                                _r_sampler,
+                                _r_sigmas,
+                                denoise_mask=_chunk_latent.get("noise_mask"),
+                                callback=_r_step_cb,
+                                disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+                                seed=int(seed) + 1 + _ki,
+                            )
+                        _out_v, _ = _ff_extract_members(_chunk_out)
+                        _acc_v = _tc.merge_guarded(_acc_v, _out_v, _st, _lock_n)
+                        print(f"[H3 Extender] v2.02 时间分块: 段 {_ki+1}/{len(_segs)} "
+                              f"[{_st},{_et}) 完成, 累计 T={_acc_v.shape[2]}", flush=True)
+                    _r_samples = _ff_wrap_members([_acc_v, _aud_full], _was_nested_tc)
+                else:
+                    with _aimdo_disabled():
+                        _r_samples = _r_guider.sample(
+                        comfy.sample.prepare_empty_noise(samples),
+                        _r_latent["samples"],
+                        _r_sampler,
+                        _r_sigmas,
+                        denoise_mask=_r_latent.get("noise_mask"),
+                        callback=_r_step_cb,
+                        disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+                        seed=int(seed) + 1,
+                    )
             finally:
                 try:
                     _sh59._prepare_sampling = _bsai_orig_prepare
@@ -4060,6 +4129,14 @@ class BSAIH3FilmFactory:
                     "tooltip": "v1.86 速度预设。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(旧默认, ~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流(UNETLoader+ApplyVDNH3)使用：一采固定 VDN 8 步(蒸馏最优,质量≈dense 50 步)，二采 3/4/6 步。custom=按下方各widget显式值。",
                 },
             ),
+            "temporal_chunk_tokens": (
+                "INT",
+                {"default": 0, "min": 0, "max": 200, "step": 1, "tooltip": "v2.02 时间分块(沿 T 轴, 区别于 tile_count 沿 H/W)。0=关闭(默认整段二采); >0 时把二采 latent 沿 T 切成该长度 token 段, 段间重叠, 逐段走已有(空间分块)采样器, 重叠区冻结+smoothstep接管。降 attention/激活峰值防 OOM。T~107 时建议 40~60。"},
+            ),
+            "temporal_overlap_tokens": (
+                "INT",
+                {"default": 8, "min": 0, "max": 40, "step": 1, "tooltip": "相邻时间段重叠 token 数。越大越稳但越慢; 一般 8~12。仅 temporal_chunk_tokens>0 时生效。"},
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -4258,6 +4335,10 @@ class BSAIH3FilmFactory:
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
         tile_overlap = int(kwargs.get("tile_overlap", 128))
+        # v2.02 (2026-09-19): 时间分块(沿 T 轴)二采, 区别于上面的空间分块(沿 H/W)。
+        # chunk_tokens<=0 关闭(默认), 整段一次性二采; >0 时沿 T 切块逐段走已有(空间分块)采样器。
+        temporal_chunk_tokens = int(kwargs.get("temporal_chunk_tokens", 0))
+        temporal_overlap_tokens = int(kwargs.get("temporal_overlap_tokens", 8))
         # v1.83: 速度预设覆盖 (先于 REFINE-PARAMS 打印, 保证日志反映实际生效参数)
         speed_preset = str(kwargs.get("speed_preset", "均衡"))
         _sp_old = (steps, refine_steps, tile_count, refine_denoise)
@@ -5181,6 +5262,8 @@ class BSAIH3FilmFactory:
                     tiled_refine=bool(tiled_refine),
                     tile_count=int(tile_count),
                     tile_overlap=int(tile_overlap),
+                    temporal_chunk_tokens=int(temporal_chunk_tokens),
+                    temporal_overlap_tokens=int(temporal_overlap_tokens),
                 )
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(

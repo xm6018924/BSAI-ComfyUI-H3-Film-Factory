@@ -2,6 +2,27 @@
 // extender.js v2.4.0 — cache-bust marker (2026-08-22-clean-break-from-original)
 import { api } from "../../scripts/api.js";
 
+// v2.07 (2026-09-19 fix): 全局 patch structuredClone,
+// 如果克隆失败 (比如 properties 里有函数/DOM 节点),
+// 自动降级到 JSON 深拷贝, 避免另存工作流时报错.
+(function() {
+    if (!window.structuredClone) return;
+    const original = window.structuredClone;
+    window.structuredClone = function(value) {
+        try {
+            return original.call(window, value);
+        } catch (e) {
+            console.warn("[BSAI] structuredClone failed, fallback to JSON:", e.message);
+            try {
+                return JSON.parse(JSON.stringify(value));
+            } catch (e2) {
+                console.error("[BSAI] JSON fallback also failed:", e2.message);
+                return value;
+            }
+        }
+    };
+})();
+
 const TARGET = "BSAIH3FilmFactory";
 const ALL_TARGETS = new Set([TARGET, "BSAIMiniMaxH3Extender"]);
 const FINAL_TARGET = "MiniMaxH3MotionContextDiskFinalDecode";
@@ -43,6 +64,11 @@ const COLLAPSED_MIN_HEIGHT = 160;
 const PREVIEW_PANEL_WIDTH = 130;
 const MAX_AUTO_NODE_HEIGHT = 8000;  // v2.03 (2026-09-19): 从 2000 提升到 8000, 解决 CLIP>12 个时节点高度被截断只剩 4 个卡片的问题. CLIP 列表容器已有 overflow-y:auto, 超出部分可内部滚动.
 const MAX_CARDS_VISIBLE_HEIGHT = 3 * (CARD_MIN_HEIGHT + 9) + CARD_SCROLLBAR_SPACE;
+// v2.09 (2026-09-19 fix): 节点高度范围:
+//   最小值 = 1 个 CLIP 的高度 (用户可以拉小到只显示 1 个)
+//   最大值 = 20 个 CLIP 的高度 (超出用滚动条显示)
+const DEFAULT_MAX_VISIBLE_CLIPS = 20;
+const DEFAULT_MIN_VISIBLE_CLIPS = 1;
 
 function calculateMinHeight(runtime) {
     if (!runtime?.state?.clips?.length) {
@@ -50,7 +76,11 @@ function calculateMinHeight(runtime) {
     }
     let height = NON_CARD_FIXED;
     let cardsHeight = 0;
-    for (const clip of runtime.state.clips) {
+    // v2.09: 最小值 = 1 个 CLIP 的高度, 这样用户可以拉小到只显示 1 个.
+    // 最大值由滚动条控制, 不需要在这里限制.
+    const clipsToCount = Math.min(runtime.state.clips.length, DEFAULT_MIN_VISIBLE_CLIPS);
+    for (let i = 0; i < clipsToCount; i++) {
+        const clip = runtime.state.clips[i];
         if (clip.collapsed) {
             cardsHeight += COLLAPSED_CLIP_HEIGHT;
         } else {
@@ -60,7 +90,59 @@ function calculateMinHeight(runtime) {
         }
     }
     height += cardsHeight;
-    return Math.max(COLLAPSED_MIN_HEIGHT, Math.min(height + BASE_PADDING, MAX_AUTO_NODE_HEIGHT));
+    return Math.max(COLLAPSED_MIN_HEIGHT, height + BASE_PADDING);
+}
+
+// v2.12: 按剧本分镜自动建完 CLIP 后, 把节点自动撑高能显示全部 CLIP 卡片.
+// 只撑大不缩小, 不破坏用户手动拉大; 用 _userResize 标记防止 poisoned 守卫弹回.
+// v2.13: 双 rAF + 小延迟等展开卡片 textarea 真正排完再量; 不手动调 syncDomHeight(setSize 会触发 afterResize);
+//        500ms 后再校验一次, 若高度被压回则重设, 防止时序竞争.
+function autoGrowNodeToFitAllClips(node, runtime) {
+    try {
+        const cards = runtime.cards;
+        if (!cards) return;
+        // v2.16: 用"在途"标记防抖, 不占用"卡片还没渲染好"的空跑.
+        // onConfigure 的多个定时器(100/500/1200/2500/4000ms)里, 100ms 那次卡片还没排好会空跑,
+        // 不能让它挡住后面真正能量到卡片的几次.
+        if (runtime._growInFlight) return;
+        runtime._growInFlight = true;
+        const applyGrow = () => {
+            try {
+                const totalCards = Math.max(0, cards.scrollHeight || 0);
+                if (totalCards < 30) {
+                    // 卡片还没排好: 不算成功撑高, 放开在途标记让下次调用继续.
+                    return;
+                }
+                const y = Number(runtime.domWidget && runtime.domWidget.last_y) || 0;
+                const needed = y + NON_CARD_FIXED + totalCards + BASE_PADDING;
+                const target = Math.min(40000, needed);
+                const w = Math.max(NODE_MIN_WIDTH, Number(node.size && node.size[0]) || NODE_MIN_WIDTH);
+                const cur = Number(node.size && node.size[1]) || 0;
+                const preGrowH = cur; // 记录撑高前高度, 用于区分'被系统压回' vs '用户手动拖小'
+                runtime._userResize = true; // 防止 poisoned-height 守卫把新高度弹回
+                if (target > cur + 4) node.setSize([w, target]);
+                runtime.state.nodeHeight = target;
+                try { updateHidden(node, runtime); } catch (e) {}
+                // 500ms 后复查: 仅当节点被系统完全压回撑高前的小高度(<preGrowH+200)时才重设;
+                // 用户手动拖到中间态不干预.
+                setTimeout(() => {
+                    try {
+                        const nowH = Number(node.size && node.size[1]) || 0;
+                        if (nowH < preGrowH + 200) {
+                            runtime._userResize = true;
+                            node.setSize([w, target]);
+                            runtime.state.nodeHeight = target;
+                        }
+                    } catch (e) {}
+                }, 500);
+            } catch (e) {}
+        };
+        // 等卡片 DOM + 展开 textarea 自动撑高完成再量; 跑完放开在途标记
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => {
+            try { applyGrow(); } catch (e) {}
+            runtime._growInFlight = false;
+        }, 120)));
+    } catch (e) {}
 }
 
 async function fetchClipPreview(node, clipIndex) {
@@ -2822,6 +2904,30 @@ function syncGlobalPromptFromInput(node, runtime) {
             const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
             const sbMatch = fullText.match(sbMarkerRe);
             const globalText = sbMatch ? fullText.slice(0, sbMatch.index).trim() : fullText.trim();
+            const storyboardText = sbMatch ? fullText.slice(sbMatch.index).trim() : "";
+
+            // v2.14: 源文本变化时实时解析 [分镜N], 自动建/改/删 CLIP (等同点"统一刷新"),
+            // 由 poller 在外层做 render+autoGrow, 这里只改 state 并打脏标记, 避免 render 递归.
+            if (fullText !== runtime._lastPromptSourceText) {
+                runtime._lastPromptSourceText = fullText;
+                if (storyboardText) {
+                    const segments = parseStoryboard(storyboardText);
+                    for (let i = 0; i < segments.length; i++) {
+                        while (runtime.state.clips.length <= i) {
+                            runtime.state.clips.push(newClip(runtime.state.clips.length));
+                        }
+                        runtime.state.clips[i].prompt = segments[i].prompt;
+                        runtime.state.clips[i]._storyboardFilled = true;
+                        delete runtime.state.clips[i].external_prompt;
+                        runtime.state.clips[i].duration = String(segments[i].duration);
+                    }
+                    if (runtime.state.clips.length > segments.length) {
+                        runtime.state.clips.splice(segments.length);
+                    }
+                    runtime._sourceClipsDirty = true;
+                }
+            }
+
             if (globalText && runtime.state.global_prompt !== globalText) {
                 runtime.state.global_prompt = globalText;
                 updateHidden(node, runtime);
@@ -4044,7 +4150,9 @@ function hookUpstreamWidgetCallback(node, runtime) {
                         if (changed) touched.push(h3n);
                     });
                     // Rebuild card DOM so the change is visible immediately.
-                    touched.forEach((h3n) => { try { render(h3n, h3n.__h3Extender); } catch (e2) {} });
+                    touched.forEach((h3n) => {
+                        try { render(h3n, h3n.__h3Extender); autoGrowNodeToFitAllClips(h3n, h3n.__h3Extender); } catch (e2) {}
+                    });
                 } catch (e) {}
             };
             break;
@@ -4127,7 +4235,12 @@ function syncExternalPrompts(node, runtime) {
     // writes are not reliably visible on every render path; rebuilding the
     // card list is what makes the new text appear (same as the Sync All
     // button). Only happens when a value actually changed.
-    if (changed) { try { updateHidden(node, runtime); } catch (e) {} try { render(node, runtime); } catch (e) {} }
+    if (changed) {
+        try { updateHidden(node, runtime); } catch (e) {}
+        try { render(node, runtime); } catch (e) {}
+        // v2.15: 这里不再 autoGrow —— 每 500ms 轮询触发会和 ComfyUI 布局打架导致底部跳.
+        // CLIP 数量变化由 _sourceClipsDirty 路径统一撑高.
+    }
 }
 
 // Apply an external prompt value onto a CLIP card (shared by all sync paths).
@@ -4261,6 +4374,15 @@ function ensureGlobalSyncPoll() {
                 try { positionClipPorts(n, n.__h3Extender); } catch (e) {}
                 try { syncExternalPrompts(n, n.__h3Extender); } catch (e) {}
                 try { syncGlobalPromptFromInput(n, n.__h3Extender); } catch (e) {}
+                // v2.14: 源剧本实时变化导致 CLIP 重建后, render + 自动撑高
+                try {
+                    const rtD = n.__h3Extender;
+                    if (rtD && rtD._sourceClipsDirty) {
+                        rtD._sourceClipsDirty = false;
+                        render(n, rtD);
+                        autoGrowNodeToFitAllClips(n, rtD);
+                    }
+                } catch (e) {}
                 // Persist the user-adjusted node height so a page refresh or
                 // ComfyUI restart restores the exact last layout, including
                 // every CLIP card's share of the node body. Sampling is cheap
@@ -4276,6 +4398,9 @@ function ensureGlobalSyncPoll() {
                                 updateHidden(n, rt);
                                 // Re-apply the saved body height immediately so a
                                 // later refresh / restart has a real value to restore.
+                                // v2.11: 这里检测到的高度变化是用户拖出来的, 标记一下, 否则下面
+                                // syncDomHeight 会被 poisoned-height 守卫弹回旧最小高度.
+                                rt._userResize = true;
                                 try { syncDomHeight(n, rt); } catch (e) {}
                             }
                         }
@@ -4411,10 +4536,11 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
             )
                 ? Math.max(minNodeH, rememberedLegacyH)
                 : minNodeH;
-        } else if (obviouslyPoisonedHeight(h, legacyMinH)) {
+        } else if (obviouslyPoisonedHeight(h, legacyMinH) && !runtime._userResize) {
             // Heal workflows that were opened directly in Legacy after an older
             // version serialized an absurd height (baseline: real content
             // minimum, not the possibly-poisoned y-derived minNodeH).
+            // v2.10: 用户手动拉大节点(afterResize)时不弹回, 保留拉大看更多 CLIP.
             h = minNodeH;
         } else if (forceMin && h < minNodeH) {
             h = minNodeH;
@@ -4433,13 +4559,14 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         runtime.cards.style.minHeight = "";
         runtime.cards.style.maxHeight = "none";
         runtime.domHeight = available;
-        if (!obviouslyPoisonedHeight(actualH, minNodeH)) {
+        if (runtime._userResize || !obviouslyPoisonedHeight(actualH, minNodeH)) {
             runtime.legacyNodeHeight = actualH;
         }
         runtime.lastRenderMode = "legacy";
         node.graph?.setDirtyCanvas(true, true);
     } finally {
         runtime.syncingDomHeight = false;
+        runtime._userResize = false;
     }
 }
 
@@ -4638,6 +4765,7 @@ const mergeOutputBtn = document.createElement("button");
             updateHidden(node, runtime);
             if (typeof runtime.renderGlobalAssetPanel === "function") runtime.renderGlobalAssetPanel();
             render(node, runtime);
+            autoGrowNodeToFitAllClips(node, runtime);
             runtime.statusText = "已同步 / Synced";
             status.textContent = runtime.statusText;
         } catch(err) {
@@ -5432,6 +5560,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
         getMinHeight: () => calculateMinHeight(runtime),
         getHeight: () => runtime.domHeight,
         afterResize: (resizedNode) => {
+            runtime._userResize = true; // 用户拖边框: 尊重新高度
             const mode = domWidgetRenderMode(root);
             if (mode === "nodes2") {
                 // Re-assert only intrinsic CSS. Never derive anything from
@@ -5622,7 +5751,12 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                         const text = _readPromptSourceText(this);
                         if (text == null) return;
                         const newText = String(text);
-                        if (newText === runtime._lastPromptSourceText) return;
+                        if (newText === runtime._lastPromptSourceText) {
+                            // v2.17: 文本没变也要 render + autoGrow —— 全新加载时卡片 DOM 还没排完,
+                            // 不能因为"文本和保存值一样"就跳过撑高, 否则 30 clip 节点永远停在小高度.
+                            try { render(this, runtime); autoGrowNodeToFitAllClips(this, runtime); } catch(e2) {}
+                            return;
+                        }
                         runtime._lastPromptSourceText = newText;
                         const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
                         const sbMatch = newText.match(sbMarkerRe);
@@ -5654,6 +5788,7 @@ toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInpu
                         }
                         updateHidden(this, runtime);
                         render(this, runtime);
+                        autoGrowNodeToFitAllClips(this, runtime);
                     } catch(e) { /* source not ready yet */ }
                 }, delay);
             });
