@@ -2554,6 +2554,16 @@ function cleanStaleAssetRefs(text, assetList) {
 }
 
 function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
+    // v2.31 (2026-09-20 perf fix): 加缓存 - refs 没变就不重新渲染 DOM,
+    // 避免每次 render 都清空再重新创建所有缩略图 (30 个 CLIP × 5 个缩略图 = 150 个 img, 每次都重新加载非常慢).
+    const refs = parseAssetRefs(clip.prompt || "");
+    const refsKey = refs.map(r => r.type + ":" + r.index).join(",");
+    if (clip._assetPanelRefsKey === refsKey && leftPanel.childNodes.length > 0) {
+        // refs 没变, DOM 已经存在, 直接返回, 不重新渲染
+        return;
+    }
+    clip._assetPanelRefsKey = refsKey;
+
     leftPanel.innerHTML = "";
 
     // Title row
@@ -2567,7 +2577,7 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
     refreshBtn.textContent = "↻";
     refreshBtn.style.cssText = "background:#333;color:#aaa;border:1px solid #444;border-radius:2px;cursor:pointer;font-size:12px;padding:0 4px;";
     refreshBtn.title = "刷新资产库";
-    refreshBtn.addEventListener("click", () => { h3FetchAssets(); renderAssetPanel(leftPanel, clip, node, runtime, textarea); });
+    refreshBtn.addEventListener("click", () => { h3FetchAssets(); clip._assetPanelRefsKey = null; renderAssetPanel(leftPanel, clip, node, runtime, textarea); });
     hdr.appendChild(refreshBtn);
     leftPanel.appendChild(hdr);
 
@@ -2575,7 +2585,6 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
     // only. Global-prompt refs are intentionally NOT shown here: each CLIP
     // card's left panel must list just the assets its own prompt references,
     // so cards without refs stay compact instead of mirroring every asset.
-    const refs = parseAssetRefs(clip.prompt || "");
 
     if (refs.length === 0) {
         const empty = document.createElement("div");
@@ -4394,6 +4403,8 @@ async function syncFromHistory() {
 // captured a stale reference.
 function ensureGlobalSyncPoll() {
     if (window.__h3GlobalSyncPoll) return;
+    // v2.32 (2026-09-20 perf fix): 全局定时器从 500ms 改成 2000ms,
+    // 减少遍历所有节点的频率, 拖动画布更流畅.
     window.__h3GlobalSyncPoll = setInterval(() => {
         try {
             const appObj = window.comfyAPI?.app?.app;
@@ -4415,8 +4426,7 @@ function ensureGlobalSyncPoll() {
                 } catch (e) {}
                 // Persist the user-adjusted node height so a page refresh or
                 // ComfyUI restart restores the exact last layout, including
-                // every CLIP card's share of the node body. Sampling is cheap
-                // (500ms) and only writes the widget when the value changed.
+                // every CLIP card's share of the node body.
                 try {
                     const rt = n.__h3Extender;
                     if (rt && rt.state) {
@@ -4426,10 +4436,6 @@ function ensureGlobalSyncPoll() {
                             if (Number(rt.state.nodeHeight || 0) !== h) {
                                 rt.state.nodeHeight = h;
                                 updateHidden(n, rt);
-                                // Re-apply the saved body height immediately so a
-                                // later refresh / restart has a real value to restore.
-                                // v2.11: 这里检测到的高度变化是用户拖出来的, 标记一下, 否则下面
-                                // syncDomHeight 会被 poisoned-height 守卫弹回旧最小高度.
                                 rt._userResize = true;
                                 try { syncDomHeight(n, rt); } catch (e) {}
                             }
@@ -4438,7 +4444,7 @@ function ensureGlobalSyncPoll() {
                 } catch (e) {}
             }
         } catch (e) {}
-    }, 500);
+    }, 2000);
 }
 
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
