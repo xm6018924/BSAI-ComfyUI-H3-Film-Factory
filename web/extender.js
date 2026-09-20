@@ -3035,6 +3035,12 @@ function syncGlobalPromptFromInput(node, runtime) {
                         runtime.state.clips.splice(segments.length);
                     }
                     runtime._sourceClipsDirty = true;
+                } else if (!fullText || !fullText.trim()) {
+                    // v2.53: 外部提示词完全清空时, 把所有 CLIP 也清空
+                    if (runtime.state.clips.length > 0) {
+                        runtime.state.clips.splice(0);
+                        runtime._sourceClipsDirty = true;
+                    }
                 }
             }
 
