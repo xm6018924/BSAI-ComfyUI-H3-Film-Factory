@@ -743,7 +743,10 @@ async function restoreCacheState(node, runtime) {
         runtime.statusText =
             `Restored cache${resolutionText} | cached ${runtime.cachedCount}/${runtime.state.clips.length} | ` +
             `validated ${runtime.validatedCount}`;
-        syncResolutionAndInvalidate(node, runtime);
+        // v2.54: 延迟执行分辨率校验, 避免初始化时 widget 分辨率还没稳定, 导致缓存被误清空
+        setTimeout(() => {
+            try { syncResolutionAndInvalidate(node, runtime); } catch(e) {}
+        }, 2000);
         render(node, runtime);
         node.graph?.setDirtyCanvas(true, true);
     } catch (_) {
