@@ -9,6 +9,34 @@
 
 ## 🚀 最新更新 / Latest Updates
 
+### v2.50 (2026-09-20) — 内置电影提示词模板 / Built-in Cinematic Prompt Templates
+
+**38 个内置电影模板，一键应用到所有分镜或单个 CLIP，快速统一运镜、调色、画面与氛围。**
+**38 built-in cinematic templates for one-click application across all shots or individual clips, to unify camera movement, color grading, aspect ratio and mood instantly.**
+
+| 分类 / Category | 数量 / Count | 示例 / Examples |
+|---------------|-------------|-----------------|
+| 🎥 电影运镜 / Camera Movement | 12 | 缓推 Push In, 拉远 Pull Back, 跟拍 Tracking, 环绕 Orbit... |
+| 🎨 电影调色 / Color Grading | 10 | 暖调 Warm, 冷调 Cool, 青橙 Teal & Orange, 莫兰迪 Morandi... |
+| 🎬 画面分割 / Aspect / Composition | 6 | 宽屏 Widescreen, 三分 Rule of Thirds, 框中框 Frame-in-Frame... |
+| ✨ 电影感 / Cinematic Feel | 10 | 戏剧光影 Dramatic Light, 黄金时刻 Golden Hour, 雨夜 Rainy Night... |
+
+**两种使用模式 / Two Usage Modes**:
+1. **全局应用 / Global Apply**: 节点顶部 `✨ 模板` 按钮，一键应用到所有 CLIP + 全局提示词
+   Top toolbar "✨ 模板" button, one-click apply to ALL clips + global prompt.
+2. **单 CLIP 应用 / Per-Clip Apply**: 每个 CLIP 左侧面板 `模板` tab，独立应用，其他 CLIP 不受影响
+   Left panel "模板" tab, apply to current clip only, other clips unaffected.
+
+**合并选项 / Merge Options**:
+- 【确定】= 合并 / Merge: 保留全局模板，再加单 CLIP 模板
+- 【取消】= 覆盖 / Overwrite: 移除全局模板，只保留单 CLIP 模板
+
+**性能优化 / Performance**:
+- 资产面板缓存 / Asset panel cache: refs 没变不重新渲染，减少 150+ 个 img 重绘
+- 全局定时器降频 / Poll rate reduced: 从 500ms 降到 2000ms，拖动画布更流畅
+
+---
+
 ### v1.86 (2026-09-15) — VDN-H3 极速档 + Bullet Time Lora 集成 / VDN-H3 Presets + Bullet Time LoRA
 - **VDN-H3 速度档 / VDN-H3 speed presets**: speed_preset 新增 **极速-VDN / Turbo-VDN**、**均衡-VDN / Balanced-VDN**、**精细-VDN / Fine-VDN** 三档。VDN 模式一采固定 8 步（Video DeltaNet DMD 蒸馏最优，质量≈dense 50 步、长链线性注意力更稳），二采 3/4/6 步。需搭配 **VDN 版工作流**（workflows/电影工厂工作流-VDN版-均衡VDN8+4（tile_overlap128）.json）——BSAIVDNH3Loader（基座+linear_branch+LoRA 一体化）替换 Sol-H3 链路，自动跳过 FastH3 LoRA/Sol-Attn。／Three new presets for the ComfyUI-VDN-H3 pipeline: pass-1 fixed at 8 VDN steps (≈dense-50 quality), refine at 3/4/6 steps. Use the VDN workflow (BSAIVDNH3Loader replaces the Sol-H3 chain).
 - **Bullet Time LoRA 集成 / Bullet Time LoRA**: 两个工作流（FastH3 版 & VDN 版）均在 Lora Stack 挂载 **BulletTime-MMH3.safetensors @ 0.5**，配合 BSAI-MiniMAX-H3-Prompt 的子弹时间模板触发词（ullet time + time-slow 强化句）使用。／Both workflows mount **BulletTime-MMH3.safetensors @ 0.5** in the LoRA stack, paired with the bullet-time trigger words in the prompt templates.
