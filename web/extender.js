@@ -3007,7 +3007,8 @@ function _readPromptSourceText(node) {
 function syncGlobalPromptFromInput(node, runtime) {
     try {
         const text = _readPromptSourceText(node);
-        if (text != null && String(text).trim()) {
+        // v2.53: 外部提示词清空时也要同步, 不能只判断非空
+        if (text != null) {
             const fullText = String(text);
             // Split at first [分镜N] marker: before → global prompt
             const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
