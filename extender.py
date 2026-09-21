@@ -4383,8 +4383,16 @@ class BSAIH3FilmFactory:
         tile_overlap = int(kwargs.get("tile_overlap", 128))
         # v2.02 (2026-09-19): 时间分块(沿 T 轴)二采, 区别于上面的空间分块(沿 H/W)。
         # chunk_tokens<=0 关闭(默认), 整段一次性二采; >0 时沿 T 切块逐段走已有(空间分块)采样器。
-        temporal_chunk_tokens = int(kwargs.get("temporal_chunk_tokens", 0))
-        temporal_overlap_tokens = int(kwargs.get("temporal_overlap_tokens", 8))
+        # v2.56 (2026-09-21): 兼容旧工作流，新增参数空值容错
+        def _safe_int(val, default=0):
+            if val is None or val == "":
+                return default
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return default
+        temporal_chunk_tokens = _safe_int(kwargs.get("temporal_chunk_tokens"), 0)
+        temporal_overlap_tokens = _safe_int(kwargs.get("temporal_overlap_tokens"), 8)
         # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 小 MLP 残差混合 cond token.
         _sb_enable = bool(kwargs.get("semantic_bridge_enable", False))
         _sb_adapter = str(kwargs.get("semantic_bridge_adapter", ""))
