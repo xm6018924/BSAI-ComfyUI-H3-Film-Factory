@@ -3308,7 +3308,7 @@ async def render_control(request):
 
 @PromptServer.instance.routes.post("/h3_extender/restore_cache")
 async def restore_cache(request):
-    """v2.60: 恢复最近一次渲染的所有缓存和CLIP成品。"""
+    """v2.60: 恢复最近一次渲染的所有缓存、CLIP成品和预览文件。"""
     try:
         data = await request.json()
     except Exception:
@@ -3318,6 +3318,7 @@ async def restore_cache(request):
     # 备份目录
     backup_dir = Path(__file__).resolve().parents[2] / "backup" / "chain_cache_2026-09-21"
     chain_cache_dir = Path(__file__).resolve().parents[2] / "bsai_h3_chain_cache"
+    temp_dir = _comfyui_temp_dir()
     
     # 恢复链缓存
     restored = 0
@@ -3332,6 +3333,19 @@ async def restore_cache(request):
         print(f"[H3 Extender] 恢复链缓存失败: {e}")
         return web.json_response({"ok": False, "error": f"恢复链缓存失败: {e}"})
     
+    # 恢复预览文件
+    restored_previews = 0
+    try:
+        preview_backup_dir = backup_dir / "temp"
+        if preview_backup_dir.exists():
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            for f in preview_backup_dir.glob("_clippv_*.mp4"):
+                shutil.copy2(f, temp_dir / f.name)
+                restored_previews += 1
+            print(f"[H3 Extender] 恢复预览文件完成: {restored_previews} 个")
+    except Exception as e:
+        print(f"[H3 Extender] 恢复预览文件失败: {e}")
+    
     # 统计已渲染的 CLIP 数量
     clips_dir = _clip_output_dir()
     clip_count = len(list(clips_dir.glob(f"h3_clip_{node_id}_*.mp4"))) if clips_dir.exists() else 0
@@ -3339,7 +3353,8 @@ async def restore_cache(request):
     return web.json_response({
         "ok": True,
         "clips_restored": clip_count,
-        "message": f"恢复完成，共 {clip_count} 个 CLIP"
+        "previews_restored": restored_previews,
+        "message": f"恢复完成：{clip_count} 个 CLIP，{restored_previews} 个预览"
     })
 
 
