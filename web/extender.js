@@ -5074,28 +5074,29 @@ pauseBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 resumeBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("resume"); });
 stopAfterBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("stop_after"); });
 abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("abort"); });
-	// v2.59: 收起所有CLIP按钮，点一下收起来，其他CLIP用滚动条查看
+	// v2.59: 收起CLIP按钮，点一下收起到只显示5个CLIP高度，其他用滚动条观看
 	const collapseAllBtn = document.createElement("button");
 	collapseAllBtn.textContent = "📦 收起CLIP";
-	collapseAllBtn.title = "点一下把所有CLIP都收起来，只显示CLIP1，其他CLIP用滚动条查看。再点一下展开所有CLIP。";
+	collapseAllBtn.title = "点一下收起到只显示5个CLIP高度，其他CLIP用滚动条观看。再点一下展开全部。";
 	collapseAllBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a5a3a;border:1px solid #3a7a4a;border-radius:4px;color:#dfd;cursor:pointer;font-weight:bold;";
-	let clipsAllCollapsed = false;
+	let clipsCollapsed = false;
+	let savedNodeHeight = 0;
 	collapseAllBtn.addEventListener("click", (e) => {
 		e.preventDefault();
-		clipsAllCollapsed = !clipsAllCollapsed;
-		for (const clip of state.clips) {
-			clip.collapsed = clipsAllCollapsed;
-			// 更新每个CLIP的展开/收起图标和显示
-			const cardEl = cardEls.get(clip.id);
-			if (cardEl) {
-				const toggle = cardEl.querySelector(".clip-toggle");
-				if (toggle) toggle.textContent = clipsAllCollapsed ? "▶" : "▼";
-				const cardBody = cardEl.querySelector(".clip-card-body");
-				if (cardBody) cardBody.style.display = clipsAllCollapsed ? "none" : "";
-			}
+		clipsCollapsed = !clipsCollapsed;
+		const w = Math.max(NODE_MIN_WIDTH, Number(node.size && node.size[0]) || NODE_MIN_WIDTH);
+		if (clipsCollapsed) {
+			// 收起：保存当前高度，然后设置成只显示5个CLIP的高度
+			savedNodeHeight = Number(node.size && node.size[1]) || 0;
+			// 5个CLIP的高度：每个CLIP大概200px，加上头部和全局提示词大概300px，总共大概1300px
+			const targetH = 300 + 5 * 200;
+			node.setSize([w, targetH]);
+			collapseAllBtn.textContent = "📂 展开CLIP";
+		} else {
+			// 展开：恢复原来的高度
+			node.setSize([w, savedNodeHeight]);
+			collapseAllBtn.textContent = "📦 收起CLIP";
 		}
-		collapseAllBtn.textContent = clipsAllCollapsed ? "📂 展开CLIP" : "📦 收起CLIP";
-		syncDomHeight();
 	});
 
 	pauseBar.append(pauseBtn, resumeBtn, stopAfterBtn, abortBtn, collapseAllBtn);
