@@ -3961,7 +3961,7 @@ class BSAIH3FilmFactory:
                     "tooltip": "Manual resolution height, also used as Auto fallback when no internal image reference is loaded.",
                 },
             ),
-            "ref_image_size": (["match", "max"], {"default": "match"}),
+            "ref_image_size": (["match", "max"], {"default": "max"}),
             "steps": ("INT", {"default": 8, "min": 1, "max": 10000, "step": 1}),
             "sampler_name": (sampler_names, {"default": default_sampler}),
             "scheduler": (scheduler_names, {"default": default_scheduler}),
