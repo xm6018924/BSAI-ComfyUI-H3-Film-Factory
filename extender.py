@@ -4620,8 +4620,7 @@ class BSAIH3FilmFactory:
                 clip_ref_plans = []
                 for _ci, _clip in enumerate(clips):
                     _clip_nums = _collect_pic_nums(_clip.get("prompt", ""))
-                    # v2.57: 每个 clip 最多用 3 个参考图，避免参考图太多模型直接复制参考图内容
-                    _ordered = _clip_nums[:3]
+                    _ordered = _clip_nums[:MAX_IMAGE_REFS]
                     _o2n = {_old: _idx + 1 for _idx, _old in enumerate(_ordered)}
                     _slot_refs = [None] * MAX_IMAGE_REFS
                     for _idx, _old in enumerate(_ordered):
