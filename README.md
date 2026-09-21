@@ -1,4 +1,4 @@
-# BSAI ComfyUI H3 Film Factory ｜ BSAI ComfyUI H3 Film Factory
+﻿# BSAI ComfyUI H3 Film Factory ｜ BSAI ComfyUI H3 Film Factory
 
 **MiniMax H3 电影工厂** — 多 Clip 分镜逐帧生成 + 单 Clip 重渲染 + 参考图资产库 + 二次采样画质修复 + per-Clip 实时预览解码
 **A complete film production toolkit for MiniMax H3** — multi-Clip storyboard generation, single-Clip re-render, asset library, dual-sample quality refinement, per-Clip live preview
@@ -8,6 +8,78 @@
 ---
 
 ## 🚀 最新更新 / Latest Updates
+
+### v2.60b (2026-09-21) — 收起CLIP + 恢复缓存 + 关机续渲染 / Collapse CLIP + Restore Cache + Resume After Reboot
+
+**两大实用功能：一键收起CLIP节省空间，一键恢复缓存关机续渲染！**
+**Two handy features: collapse CLIPs to save space, restore cache to resume after reboot!**
+
+---
+
+#### 📦 一、收起CLIP按钮 / Collapse CLIP Button
+
+**工具栏新增"📦 收起CLIP"按钮，点一下收起到只显示5个CLIP高度，其他CLIP用滚动条查看。**
+**New "📦 Collapse CLIP" button in toolbar: click to collapse to show only 5 clips height, scroll for the rest.**
+
+- **按钮位置 / Button Location**: 暂停按钮后面（绿色按钮）/ After pause button (green button)
+- **收起后 / After Collapse**: 只显示5个CLIP高度，其他CLIP用滚动条上下滑动
+  Only show 5 clips height, scroll up/down for other clips
+- **再点一下 / Click Again**: 恢复全部展开
+  Restore to fully expanded
+
+---
+
+#### ♻️ 二、恢复缓存按钮 / Restore Cache Button
+
+**工具栏新增"♻️ 恢复缓存"按钮，点一下恢复最近一次渲染的所有缓存、CLIP成品、预览文件，不用从CLIP1重新渲染！**
+**New "♻️ Restore Cache" button in toolbar: click to restore all cache, clips, and previews from last render — no need to restart from CLIP1!**
+
+**恢复内容 / What Gets Restored**:
+1. **链缓存（h3cache）**: 恢复到 `bsai_h3_chain_cache/` 目录
+   Chain cache restored to `bsai_h3_chain_cache/`
+2. **CLIP 成品（mp4）**: 恢复到 `output/bsai_clips/` 目录
+   Final clips restored to `output/bsai_clips/`
+3. **预览文件（_clippv_*.mp4）**: 恢复到 `temp/` 目录，每个CLIP预览窗口都能随时打开预览
+   Preview files restored to `temp/`, every clip preview can be opened anytime
+
+---
+
+#### ⚡ 三、关机开机续渲染技巧 / How to Resume After Reboot
+
+**渲染到一半要关机？不用怕，这样操作就能从上次结束的地方继续！**
+**Need to reboot mid-render? No problem — follow these steps to resume where you left off!**
+
+##### ✅ 正确操作步骤 / Correct Steps:
+
+1. **等当前CLIP渲染完**（不要中途关机）
+   Wait for current clip to finish rendering (don't reboot mid-clip)
+
+2. **直接关机就行**（不用点暂停）
+   Just shut down directly (no need to click pause)
+
+3. **晚上开机后 / After Reboot**:
+   - 打开工作流 / Open your workflow
+   - 点一下 **"♻️ 恢复缓存"** 按钮 / Click the **"♻️ Restore Cache"** button
+   - 直接点渲染 / Click render
+   - 就会从上次结束的CLIP继续渲染 / It will resume from the last completed clip
+
+##### ❌ 错误操作（不要这样做）/ Wrong Steps (Don't Do This):
+
+- 点暂停 → 直接关机 → 开机后点继续
+  Click pause → shut down directly → click resume after reboot
+  - **为什么不行 / Why It Doesn't Work**: 暂停状态存在内存里，关机后就没了
+  Pause state is in memory, it's gone after reboot
+
+##### 📊 为什么这样行 / Why This Works:
+
+| 状态 / State | 保存位置 / Saved In | 关机后还在吗 / Survives Reboot? |
+|-------------|---------------------|-------------------------------|
+| 暂停按钮状态 / Pause State | 内存 / Memory | ❌ 没了 / Gone |
+| 链缓存（h3cache）/ Chain Cache | 硬盘 / Disk | ✅ 还在 / Survives |
+| 已渲染的CLIP / Rendered Clips | 硬盘 / Disk | ✅ 还在 / Survives |
+| 预览文件 / Preview Files | 硬盘备份 / Disk Backup | ✅ 恢复后还在 / Restored |
+
+---
 
 ### v2.54 (2026-09-20) — 电影模板 + 性能优化 + Bug 修复 / Cinematic Templates + Performance + Bug Fixes
 
