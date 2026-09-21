@@ -4346,6 +4346,11 @@ class BSAIH3FilmFactory:
         width = kwargs.get("width")
         height = kwargs.get("height")
         ref_image_size = kwargs.get("ref_image_size")
+        # v2.58b: 强制把 match 改成 max，避免参考图太大模型直接复制参考图内容
+        # (match 模式参考图和输出一样大，模型会直接复制参考图，不听提示词)
+        if ref_image_size == "match":
+            ref_image_size = "max"
+            print("[H3 Extender] v2.58b: 强制 ref_image_size 从 match 改成 max (避免参考图太大污染提示词)")
         steps = kwargs.get("steps")
         sampler_name = kwargs.get("sampler_name")
         scheduler = kwargs.get("scheduler")
