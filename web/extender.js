@@ -5101,7 +5101,32 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
 	pauseBar.append(pauseBtn, resumeBtn, stopAfterBtn, abortBtn, collapseAllBtn);
 
-toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, filmTemplateBtn, openCacheBtn, openClipsBtn, pauseBar, status, projectFileInput);
+	// v2.60: 恢复缓存按钮
+	const restoreCacheBtn = document.createElement("button");
+	restoreCacheBtn.textContent = "♻️ 恢复缓存";
+	restoreCacheBtn.title = "点一下恢复最近一次渲染的所有缓存和CLIP成品，不用重新从CLIP1渲染";
+	restoreCacheBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#6a3a6a;border:1px solid #8a5a8a;border-radius:4px;color:#fdf;cursor:pointer;margin-left:6px;font-weight:bold;";
+	restoreCacheBtn.addEventListener("click", (e) => {
+		e.preventDefault();
+		if (!confirm("确定要恢复最近一次渲染的所有缓存吗？\n\n会恢复：\n- 链缓存（h3cache）\n- 已渲染完成的 CLIP 成品\n\n恢复后可以直接继续渲染后面的 CLIP，不用从 CLIP1 重新开始。")) return;
+		fetch(api.apiURL("/h3_extender/restore_cache"), {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ node: String(node.id) }),
+		})
+			.then((r) => r.json())
+			.then((res) => {
+				if (res && res.ok) {
+					alert("恢复成功！\n\n已恢复：" + res.clips_restored + " 个 CLIP\n\n刷新页面后即可继续渲染。");
+					location.reload();
+				} else {
+					alert("恢复失败：" + (res && res.error ? res.error : "未知错误"));
+				}
+			})
+			.catch((err) => alert("恢复失败：" + err.message));
+	});
+
+	toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, filmTemplateBtn, openCacheBtn, openClipsBtn, restoreCacheBtn, pauseBar, status, projectFileInput);
 
     // Store merge output button reference for later updates
 

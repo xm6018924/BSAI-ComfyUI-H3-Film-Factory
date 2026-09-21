@@ -3306,6 +3306,43 @@ async def render_control(request):
         return web.json_response({"ok": True, "state": ctl["state"]})
 
 
+@PromptServer.instance.routes.post("/h3_extender/restore_cache")
+async def restore_cache(request):
+    """v2.60: 恢复最近一次渲染的所有缓存和CLIP成品。"""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    node_id = str(data.get("node") or "")
+    
+    # 备份目录
+    backup_dir = Path(__file__).resolve().parents[2] / "backup" / "chain_cache_2026-09-21"
+    chain_cache_dir = Path(__file__).resolve().parents[2] / "bsai_h3_chain_cache"
+    
+    # 恢复链缓存
+    restored = 0
+    try:
+        if backup_dir.exists():
+            chain_cache_dir.mkdir(parents=True, exist_ok=True)
+            for f in backup_dir.glob("*.h3cache"):
+                shutil.copy2(f, chain_cache_dir / f.name)
+                restored += 1
+            print(f"[H3 Extender] 恢复链缓存完成: {restored} 个文件")
+    except Exception as e:
+        print(f"[H3 Extender] 恢复链缓存失败: {e}")
+        return web.json_response({"ok": False, "error": f"恢复链缓存失败: {e}"})
+    
+    # 统计已渲染的 CLIP 数量
+    clips_dir = _clip_output_dir()
+    clip_count = len(list(clips_dir.glob(f"h3_clip_{node_id}_*.mp4"))) if clips_dir.exists() else 0
+    
+    return web.json_response({
+        "ok": True,
+        "clips_restored": clip_count,
+        "message": f"恢复完成，共 {clip_count} 个 CLIP"
+    })
+
+
 def _register_render_ctl(node_id):
     """开始渲染前注册控制条目（总是重置为运行态）。"""
     with _render_ctl_lock:
