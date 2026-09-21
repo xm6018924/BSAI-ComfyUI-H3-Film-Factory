@@ -4463,18 +4463,10 @@ class BSAIH3FilmFactory:
             else:
                 global_prompt = str(prompt_source).strip()
         else:
-            # v1.100: prompt_source 未连接时, 从 clips_json 的 state.global_prompt 读取
-            # (前端 gpTextarea 输入)。刷新/另存后 clips_json 随 workflow 自动恢复,
-            # 资产链接(@图N)不再需要重新输入全局提示词重建。
-            try:
-                _st_gp = json.loads(clips_json or "{}")
-                if isinstance(_st_gp, dict):
-                    _gp_text = str(_st_gp.get("global_prompt") or "").strip()
-                    if _gp_text:
-                        global_prompt = _gp_text
-                        print(f"[H3 Extender] v1.100 从 clips_json 读取全局提示词(len={len(_gp_text)}): '{_gp_text[:80]}'")
-            except Exception:
-                pass
+            # v2.57 (2026-09-21 fix): 全局提示词为空时强制清空，避免旧缓存污染新脚本。
+            # 之前 v1.100 会从 clips_json 读旧全局提示词，导致换脚本后画面还是旧内容。
+            global_prompt = None
+            print("[H3 Extender] v2.57: 外部全局提示词为空，强制不使用旧全局提示词缓存")
 
         # Resolve @图N/@视频N/@音频N from connected Asset Library.
         # Include the global prompt as a pseudo-clip so its @图N tags are
@@ -4628,7 +4620,8 @@ class BSAIH3FilmFactory:
                 clip_ref_plans = []
                 for _ci, _clip in enumerate(clips):
                     _clip_nums = _collect_pic_nums(_clip.get("prompt", ""))
-                    _ordered = _clip_nums[:MAX_IMAGE_REFS]
+                    # v2.57: 每个 clip 最多用 3 个参考图，避免参考图太多模型直接复制参考图内容
+                    _ordered = _clip_nums[:3]
                     _o2n = {_old: _idx + 1 for _idx, _old in enumerate(_ordered)}
                     _slot_refs = [None] * MAX_IMAGE_REFS
                     for _idx, _old in enumerate(_ordered):
