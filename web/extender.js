@@ -5074,7 +5074,31 @@ pauseBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 resumeBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("resume"); });
 stopAfterBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("stop_after"); });
 abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("abort"); });
-pauseBar.append(pauseBtn, resumeBtn, stopAfterBtn, abortBtn);
+	// v2.59: 收起所有CLIP按钮，点一下收起来，其他CLIP用滚动条查看
+	const collapseAllBtn = document.createElement("button");
+	collapseAllBtn.textContent = "📦 收起CLIP";
+	collapseAllBtn.title = "点一下把所有CLIP都收起来，只显示CLIP1，其他CLIP用滚动条查看。再点一下展开所有CLIP。";
+	collapseAllBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a5a3a;border:1px solid #3a7a4a;border-radius:4px;color:#dfd;cursor:pointer;font-weight:bold;";
+	let clipsAllCollapsed = false;
+	collapseAllBtn.addEventListener("click", (e) => {
+		e.preventDefault();
+		clipsAllCollapsed = !clipsAllCollapsed;
+		for (const clip of state.clips) {
+			clip.collapsed = clipsAllCollapsed;
+			// 更新每个CLIP的展开/收起图标和显示
+			const cardEl = cardEls.get(clip.id);
+			if (cardEl) {
+				const toggle = cardEl.querySelector(".clip-toggle");
+				if (toggle) toggle.textContent = clipsAllCollapsed ? "▶" : "▼";
+				const cardBody = cardEl.querySelector(".clip-card-body");
+				if (cardBody) cardBody.style.display = clipsAllCollapsed ? "none" : "";
+			}
+		}
+		collapseAllBtn.textContent = clipsAllCollapsed ? "📂 展开CLIP" : "📦 收起CLIP";
+		syncDomHeight();
+	});
+
+	pauseBar.append(pauseBtn, resumeBtn, stopAfterBtn, abortBtn, collapseAllBtn);
 
 toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, filmTemplateBtn, openCacheBtn, openClipsBtn, pauseBar, status, projectFileInput);
 
