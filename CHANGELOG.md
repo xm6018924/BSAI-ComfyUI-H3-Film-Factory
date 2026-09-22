@@ -3,6 +3,14 @@
 All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
+## v2.61 (2026-09-22) — ♻️ 恢复缓存 体验修复 ｜ ♻️ Restore Cache UX Fix
+- **刷新弹窗修复** ｜ **Refresh-prompt fix**: 「♻️ 恢复缓存」按钮恢复成功后, 默认改为"留在当前页面", 把已恢复 N 个 CLIP 的数量写到节点状态栏 (紫色文字). 用户想刷新可手动 Ctrl+R. 修复了因 ComfyUI 注册的 beforeunload 监听器弹出 "是否离开网站? 你所做的更改可能未保存" 让用户以为缓存丢失的问题.
+  Default behavior of "♻️ Restore Cache" changed from forced page-reload to "stay on current page, show restored count in status bar". Manually refresh (Ctrl+R) when needed. Fixes the false impression that "restore failed because of beforeunload prompt" caused by ComfyUI's own beforeunload listener.
+- **渲染循环自动读盘** ｜ **Auto-read fresh chain cache**: 留在当前页面后, 再次 Queue Prompt 时 `_load_tail_latents_from_disk` 会自动读取刚被恢复的 `.h3cache` 目录, 跳过已渲染完成的 CLIP, 直接从断点继续.
+  When the user queues another prompt from the same page, the renderer auto-loads the freshly restored `.h3cache` from disk and continues from the break-point, skipping the already-rendered CLIPs.
+- **新增 mp4 预览路由** ｜ **New clip_preview routes**: 后端补充 `/h3_extender/clip_preview` 和 `/h3_extender/clip_preview/file` 两个路由, 让前端能从 `output/bsai_clips/h3_clip_<owner>_<idx>_<ts>.mp4` 取最新 mp4 当 `<video>` 源. 修复"恢复缓存后右侧预览面板仍空白"问题.
+  Added two backend routes `/h3_extender/clip_preview` and `/h3_extender/clip_preview/file` for the frontend to fetch the newest mp4 per clip from `output/bsai_clips/`; fixes the empty preview panel after cache restore.
+---
 ## v2.50 (2026-09-20) — Built-in Cinematic Prompt Templates ｜ 内置电影提示词模板
 - **38 built-in cinematic templates** ｜ **38 个内置电影模板**:
   - 🎥 Camera Movement (12): Push In / Pull Back / Tracking / Orbit / Handheld / Steadicam... ｜ 🎥 电影运镜（12 个）：缓推 / 拉远 / 跟拍 / 环绕 / 手持 / 斯坦尼康...

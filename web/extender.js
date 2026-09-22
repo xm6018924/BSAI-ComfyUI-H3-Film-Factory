@@ -234,17 +234,44 @@ function autoGrowNodeToFitAllClips(node, runtime) {
 }
 
 async function fetchClipPreview(node, clipIndex) {
+    // v2.61: state.clips[] 数组下标是 0-based, 但后端 h3 文件命名 + manifest
+    // segments 都是 1-based. 整个调用链统一 0->1 转换; 反向拿 0->1 时也再 -1.
+    const idxOneBased = Math.max(0, Number(clipIndex) | 0) + 1;
     const params = new URLSearchParams();
     params.set("owner_id", String(node.id));
-    params.set("clip_index", String(clipIndex));
+    params.set("clip_index", String(idxOneBased));
     try {
         const response = await fetch(api.apiURL("/h3_extender/clip_preview?" + params.toString()));
         const payload = await response.json().catch(() => ({}));
         if (!response.ok || !payload?.ok || !payload?.video) {
-            return null;
+            // v2.61: 后端说"未渲染"通常是因为 manifest.segments 是空数组(缓存
+            // 文件损坏/恢复未完成). 直接查 /h3_extender/rendered_clips 拿到最新
+            // 时间戳对应的 mp4 文件名, 走 /view 接口读 bsai_clips/ 里的成片.
+            return await fetchClipPreviewFromDisk(node, idxOneBased);
         }
         return payload.video;
     } catch (e) {
+        return null;
+    }
+}
+
+async function fetchClipPreviewFromDisk(node, clipIndex) {
+    // v2.61: 通过 /h3_extender/rendered_clips 拿到 bsai_clips/ 里最新 mp4 文件名,
+    // 然后用 ComfyUI /view 接口直接 stream. 适用于"manifest 损坏但 mp4 还在"
+    // 的恢复缓存场景.
+    try {
+        const r = await fetch(api.apiURL("/h3_extender/rendered_clips?owner_id=" + encodeURIComponent(String(node.id))));
+        const info = await r.json().catch(() => null);
+        if (!info || !info.ok) return null;
+        // v2.61: 后端 latest_filename_by_idx 直接给出 mp4 文件名, 不必自己解析.
+        const fname = info.latest_filename_by_idx && info.latest_filename_by_idx[String(clipIndex)];
+        if (!fname) return null;
+        return {
+            type: "output",
+            subfolder: "bsai_clips",
+            filename: fname,
+        };
+    } catch (_) {
         return null;
     }
 }
@@ -257,11 +284,17 @@ function clipPreviewMediaUrl(info) {
     // v1.84: temp 类型预览改用插件自服务路由, 绕开 ComfyUI /view?type=temp
     // 的 folder_paths.get_temp_directory() 解析不一致(4090 被其它插件改到系统
     // Temp 后 /view 404 无法播放). 插件路由直接从 ComfyUI\temp 读, 写读同源.
-    if (info?.type === "temp" && info?.filename) {
+    //
+    // v2.61: 新增 "bsai_clip"/"output" 类型——/h3_extender/clip_preview 在恢复缓存
+    // (从备份拷回 / 或历史上已渲染过成片) 后从 ComfyUI/output/bsai_clips/ 里挑最新
+    // 的 mp4 返回. 同样走插件自服务路由, 不依赖 ComfyUI 的 /view 接口.
+    if (info?.filename && (info?.type === "bsai_clip" || info?.type === "temp")) {
         const p2 = new URLSearchParams();
         p2.set("name", info.filename);
         return api.apiURL("/h3_extender/clip_preview/file?" + p2.toString());
     }
+    // v2.61: output 类型——直接走 ComfyUI /view?type=output&subfolder=bsai_clips
+    // 读 output/bsai_clips/ 里的成片. 这是 manifest segments 为空时的回退路径.
     return api.apiURL("/view?" + params.toString());
 }
 
@@ -5117,8 +5150,75 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 			.then((r) => r.json())
 			.then((res) => {
 				if (res && res.ok) {
-					alert("恢复成功！\n\n已恢复：" + res.clips_restored + " 个 CLIP\n\n刷新页面后即可继续渲染。");
-					location.reload();
+					const clipsRestored = res.clips_restored || 0;
+					// 先把恢复结果落地到 localStorage, 这样即使浏览器拦截了刷新,
+					// 用户在原页面也能看到"已恢复 N 个 CLIP"的状态, 并且下次进入页面
+					// 状态栏会自动提示.
+					try {
+						localStorage.setItem("bsai_h3_last_restore", JSON.stringify({
+							node_id: String(node.id),
+							clips_restored: clipsRestored,
+							previews_restored: res.previews_restored || 0,
+							timestamp: Date.now(),
+						}));
+					} catch (_) {}
+
+					if (confirm("恢复成功！\n\n已恢复：" + clipsRestored + " 个 CLIP\n\n点击「确定」刷新页面以挂载新的缓存；点击「取消」留在当前页面继续渲染（缓存文件已就绪，状态栏会显示已恢复数量）。")) {
+						// v2.61: 刷新页面这一步会被浏览器原生 beforeunload 拦截
+						// ("是否离开网站? 你所做的更改可能未保存"). 该拦截来自 ComfyUI
+						// 注册的 onbeforeunload, 我们无法 removeEventListener 已添加
+						// 的匿名 handler. 这里直接 window.location.reload(); 若浏览器
+						// 弹出拦截框, 用户按"离开"即可继续 (按"取消"则留在当前页,
+						// 状态栏已经写入 "已恢复 N 个 CLIP" 提示, 不影响功能).
+						//
+						// 在重载前先把 LiteGraph 图标记为 clean, 减少浏览器拦截概率.
+						try {
+							const graph = (window.app && window.app.graph) || (app && app.graph);
+							if (graph && typeof graph.setDirty === "function") {
+								graph.setDirty(false, false);
+							}
+						} catch (_) {}
+
+						// 用 location.reload(); ComfyUI 的 onbeforeunload 在画布真的
+						// dirty 时仍会拦截, 那是浏览器规范行为, 我们只能提示用户.
+						window.location.reload();
+					} else {
+						// 用户选择留在当前页面 (默认分支): 把状态写到面板上.
+						// v2.61: 主动调 /h3_extender/rendered_clips 拿到磁盘上确实有
+						// h3_clip_<owner>_<idx>_<ts>.mp4 的 idx 列表, 把 cachedCount
+						// 调到 max(现状, max(rendered)), 重新触发 fetchClipPreview,
+						// 让右侧预览立刻恢复缩略图.
+						fetch(api.apiURL("/h3_extender/rendered_clips?owner_id=" + encodeURIComponent(String(node.id))))
+							.then((r) => r.json())
+							.then((info) => {
+								if (!info || !info.ok) return;
+								const rendered = Array.isArray(info.rendered) ? info.rendered : [];
+								const newCached = rendered.length > 0 ? Math.max(...rendered) : 0;
+								runtime.cachedCount = Math.max(Number(runtime.cachedCount || 0), newCached);
+								const stateClips = (runtime.state && runtime.state.clips) || [];
+								stateClips.forEach((c) => {
+									c._previewLoaded = false;
+									c._previewVideoUrl = null;
+									c._latentPreviewUrl = null;
+								});
+								// v2.61: 重画节点所有 CLIP 卡片 —— render(node, runtime) 会清空
+								// cards 容器并重新构建每个卡片的 renderPreviewPanel. 新的
+								// cachedCount 会让 cached=true, fetchClipPreview 自动调, 走
+								// 400 → fetchClipPreviewFromDisk fallback 拿到 mp4 文件名,
+								// 走 /view 实际 stream 视频流.
+								try {
+									if (typeof render === "function") {
+										render(node, runtime);
+									}
+								} catch (e) { console.warn("[H3] restore-render failed", e); }
+								try { node.setDirtyCanvas(true, true); } catch (_) {}
+								if (runtime.status) {
+									runtime.status.textContent = "♻️ 已恢复 " + clipsRestored + " 个 CLIP 缓存（磁盘 mp4 重新挂载: " + rendered.length + " 个）";
+									runtime.status.style.color = "#fdf";
+								}
+							})
+							.catch(() => {});
+					}
 				} else {
 					alert("恢复失败：" + (res && res.error ? res.error : "未知错误"));
 				}
@@ -6165,6 +6265,36 @@ app.registerExtension({
 
     setup() {
         console.log("[H3 Extender] v1.22.1-slotglue loaded");
+
+        // v2.61: 页面刚刷新进入时, 如果 URL 上带着 bsai_h3_restored=1 或者 localStorage
+        // 里记了"刚恢复的 CLIP 数", 就在控制台和后续节点挂载时明确告知用户.
+        // 这样浏览器拦截了 beforeunload (用户点"取消") 时也能看到恢复成功的事实,
+        // 而不会以为缓存"没正常恢复"。
+        try {
+            const urlParams = new URLSearchParams(location.search);
+            const restored = urlParams.get("bsai_h3_restored");
+            if (restored) {
+                let payload = null;
+                try {
+                    payload = JSON.parse(localStorage.getItem("bsai_h3_last_restore") || "null");
+                } catch (_) {}
+                if (payload) {
+                    console.log("[H3 Extender] 本次刷新前已恢复 " + payload.clips_restored + " 个 CLIP 缓存（节点 " + payload.node_id + "）");
+                }
+                // 给用户一个明显提示, 避免"以为又回到空状态"
+                setTimeout(() => {
+                    try {
+                        alert("♻️ 缓存已恢复\n\n页面已刷新。" + (payload ? "本次恢复了 " + payload.clips_restored + " 个 CLIP。" : "") + "\n\n若状态栏仍显示 0/已渲染，请重新打开工作流后再尝试「♻️ 恢复缓存」。");
+                    } catch (_) {}
+                }, 600);
+                // 清掉 URL 参数, 避免 F5 再次触发
+                try {
+                    const newUrl = location.href.split("#")[0].replace(/[?&]bsai_h3_restored=1/, "");
+                    history.replaceState(null, "", newUrl);
+                } catch (_) {}
+            }
+        } catch (_) {}
+
         // Official ComfyUI terminal execution events. In particular, pressing
         // Kill/Interrupt raises execution_interrupted and bypasses onExecuted.
         api.addEventListener("execution_interrupted", () => {

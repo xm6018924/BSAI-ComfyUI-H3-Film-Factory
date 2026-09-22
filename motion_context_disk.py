@@ -3708,6 +3708,50 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
             },
         )
 
+    @PromptServer.instance.routes.get("/h3_extender/rendered_clips")
+    async def h3_extender_rendered_clips(request):
+        """v2.61: 扫描 ComfyUI/output/bsai_clips/ 列出该 owner 真正渲染过的
+        clip_index, 让前端恢复缓存后立刻知道哪些 CLIP 该出预览.
+
+        manifest segments 数组为空时(典型场景是缓存文件损坏/丢失), bsai_clips/
+        里的 h3_clip_<owner>_<idx>_<ts>.mp4 仍是真凭实据. 该路由扫描这些 mp4
+        把 idx 去重, 时间戳最大的视为最新."""
+        owner = str(request.query.get("owner_id") or "").strip()
+        if not owner or not re.fullmatch(r"\d+", owner):
+            return web.json_response({"ok": False, "error": "invalid owner_id"}, status=400)
+        try:
+            _root = Path(__file__).resolve().parents[2]
+            clips_dir = _root / "output" / "bsai_clips"
+        except Exception as e:
+            return web.json_response({"ok": False, "error": f"resolve failed: {e}"})
+        if not clips_dir.exists():
+            return web.json_response({"ok": True, "rendered": [], "latest_ts_by_idx": {}})
+        by_idx = {}
+        pattern = f"h3_clip_{owner}_"
+        for p in clips_dir.glob(f"{pattern}*.mp4"):
+            stem = p.stem  # h3_clip_250_1_<ts>
+            parts = stem.split("_")
+            # parts[0]='h3', parts[1]='clip', parts[2]='250', parts[3]=idx, parts[4]=ts
+            if len(parts) < 5:
+                continue
+            try:
+                idx = int(parts[3])
+                ts = int(parts[4])
+            except Exception:
+                continue
+            prev = by_idx.get(idx)
+            if prev is None or ts > prev[1]:
+                by_idx[idx] = (p.name, ts)
+        rendered = sorted(by_idx.keys())
+        latest_ts_by_idx = {str(idx): by_idx[idx][1] for idx in rendered}
+        latest_filename_by_idx = {str(idx): by_idx[idx][0] for idx in rendered}
+        return web.json_response({
+            "ok": True,
+            "rendered": rendered,
+            "latest_ts_by_idx": latest_ts_by_idx,
+            "latest_filename_by_idx": latest_filename_by_idx,
+        })
+
 
 class MiniMaxH3MotionContextDiskFinalDecode:
     @classmethod

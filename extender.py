@@ -3345,11 +3345,11 @@ async def restore_cache(request):
             print(f"[H3 Extender] 恢复预览文件完成: {restored_previews} 个")
     except Exception as e:
         print(f"[H3 Extender] 恢复预览文件失败: {e}")
-    
+
     # 统计已渲染的 CLIP 数量
     clips_dir = _clip_output_dir()
     clip_count = len(list(clips_dir.glob(f"h3_clip_{node_id}_*.mp4"))) if clips_dir.exists() else 0
-    
+
     return web.json_response({
         "ok": True,
         "clips_restored": clip_count,
