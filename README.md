@@ -9,6 +9,93 @@
 
 ## 🚀 最新更新 / Latest Updates
 
+### v2.62 (2026-09-22) — CLIP 选择渲染增强 + 链完整性修复 / Clip Select Enhancements + Chain Integrity Fixes
+
+**核心：CLIP 选择（clip_select）现在支持任意多选、范围与组合，未选中的 CLIP 保留缓存不重新生成！**
+**Now `clip_select` supports arbitrary multi-select, ranges and combinations — unselected clips keep their cache and are not re-rendered!**
+
+---
+
+#### 🎯 一、CLIP 选择渲染 / Clip Select Rendering
+
+**在节点上勾选「CLIP选择开关」后，在「CLIP选择」框输入：**
+**Enable the "Clip Select" toggle on the node, then type in the "Clip Select" box:**
+
+| 输入 / Input | 效果 / Effect |
+|---|---|
+| `all` | 渲染全部 CLIP / Render all clips |
+| `1,3` | 仅渲染 CLIP 1 和 3 / Render only clips 1 and 3 |
+| `2-5` | 渲染 CLIP 2 到 5 / Render clips 2 through 5 |
+| `7-10` | 渲染 CLIP 7 到 10 / Render clips 7 through 10 |
+| `3,5,7` | 仅渲染 CLIP 3、5、7 / Render only clips 3, 5, 7 |
+| `3，5，7` | 兼容中文标点（全角逗号/顿号/分号、全角连字符）|
+| | Chinese full-width punctuation supported (`，`、`、`、`；`, `－`) |
+| `2`（单选）/ single | 从 CLIP 2 连续渲染到末尾（续渲染语义）/ From clip 2 continuously to the end (resume semantics) |
+
+- **未选中的 CLIP 保留磁盘缓存、不重新生成**（适合改完个别分镜后局部重渲染）
+  Unselected clips keep their disk cache and are **not re-rendered** (ideal for re-rendering only edited shots)
+- **输入无法解析时输出 WARNING 提示**，不再静默渲染全部
+  Invalid input prints a WARNING instead of silently rendering everything
+
+#### 🔗 二、链完整性自动补齐 / Automatic Chain-Integrity Fill
+
+**H3 链式运动上下文要求 latent 连续。选择跨度内被跳过且磁盘无缓存的 CLIP 会自动补渲染，并明确打印日志。**
+**H3 chain motion-context requires contiguous latents. Skipped clips inside the selected span that have no disk cache are auto-filled with a clear log message.**
+
+- 前置缺失段自动补渲染建立完整链 / Missing prefix segments auto-rendered to build the chain
+- 中段缺口（如缓存有 1-2、选 3,5,7 时 CLIP4/6）自动补渲染 / Middle gaps (e.g. clips 4/6 when cache has 1-2 and you select 3,5,7) auto-filled
+- 补渲染范围收窄到**选中段跨度内**，末尾未选中的 CLIP 保留缓存，不再一路补到片尾
+  Fill scope narrowed to the selected span; unselected trailing clips keep cache and are not filled to the end
+
+#### ♻️ 三、恢复缓存改进 / Restore Cache Improvements
+
+- **多源 fallback 搜索链快照**：自动在插件目录、ComfyUI 根目录、主项目根、用户主目录逐级查找链快照，修复 v2.61 硬编码 backup 目录导致备份找不到的问题
+  Multi-source fallback search for chain snapshots (plugin root → ComfyUI root → project root → user home), fixing v2.61's hardcoded backup dir
+- **损坏链重建保护**：manifest 声称有段但磁盘只有 magic header（空文件）时，自动识别并触发重建，修复 `clip_select` 部分渲染时 `invalid chain index 0/0` 报错
+  Corrupted-chain rebuild protection: detects manifest/disk mismatch (empty magic-header file) and triggers a clean rebuild, fixing `invalid chain index 0/0` on partial renders
+
+#### 🖥️ 四、Windows 稳定性修复 / Windows Stability Fix
+
+- 新增 `prestartup.py`：修复 Windows + Python 3.13 + aiohttp 下静态文件请求死锁（浏览器能开页面但 JS/CSS 永远加载不出来）。默认线程池升级到 256 worker + 静态路径同步解析
+  New `prestartup.py` fixes the Windows aiohttp static-file deadlock (page loads but JS/CSS hang at "0 bytes received"): default executor upgraded to 256 workers + synchronous static path resolution
+
+#### 📦 五、其他 / Other
+
+- **新增示例工作流**：`example_workflows/百声电影工厂（H3全自动电影短片生成）v1.json`
+  New example workflow: fully automatic film short generator
+- **修复演示工作流** `BSAI_H3_ClipSelect_Pause.json`：控件顺序错位导致 `clip_select` 收到错误值（120.0）的问题已对齐
+  Fixed demo workflow widget-order drift that made `clip_select` receive a wrong value (120.0)
+
+---
+
+### v2.61 (2026-09-22) — ♻️ 恢复缓存 体验修复 / Restore Cache UX Fixes
+
+**恢复缓存按钮体验全面优化，关机续渲染更顺畅！**
+**Restore Cache button UX polished — resume after reboot is now seamless!**
+
+---
+
+#### 1. 刷新弹窗修复 / Refresh-Prompt Fix
+
+**「♻️ 恢复缓存」恢复成功后，默认改为"留在当前页面"，把已恢复 N 个 CLIP 的数量写到节点状态栏（紫色文字）。**
+**After "♻️ Restore Cache" succeeds, the default is now "stay on current page" — the restored clip count is shown in the node status bar (purple text).**
+
+- 不再强制刷新页面，避免 ComfyUI 的 `beforeunload` 拦截弹"是否离开网站"让用户误以为缓存丢失
+  No more forced page reload, avoiding the misleading "leave site?" prompt caused by ComfyUI's own `beforeunload` listener
+- 需要时手动 Ctrl+R 刷新即可 / Manually refresh (Ctrl+R) when needed
+
+#### 2. 渲染循环自动读盘 / Auto-Read Fresh Chain Cache
+
+**留在当前页面后，再次 Queue Prompt 时自动读取刚被恢复的 `.h3cache`，跳过已渲染完成的 CLIP，直接从断点继续。**
+**When you queue another prompt, the renderer auto-loads the freshly restored `.h3cache` and continues from the break-point, skipping already-rendered clips.**
+
+#### 3. 新增 mp4 预览路由 / New Clip Preview Routes
+
+**后端新增 `/h3_extender/clip_preview` 与 `/h3_extender/clip_preview/file` 两个路由，修复"恢复缓存后右侧预览面板仍空白"问题。**
+**Two new backend routes serve the newest per-clip mp4 from `output/bsai_clips/`, fixing the empty preview panel after cache restore.**
+
+---
+
 ### v2.60b (2026-09-21) — 收起CLIP + 恢复缓存 + 关机续渲染 / Collapse CLIP + Restore Cache + Resume After Reboot
 
 **两大实用功能：一键收起CLIP节省空间，一键恢复缓存关机续渲染！**
