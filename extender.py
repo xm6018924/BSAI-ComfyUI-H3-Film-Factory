@@ -3073,13 +3073,19 @@ def _prompt_pack_signature_from_state(value):
 def _parse_clip_select(value, total_clips):
     """Parse clip_select string into a set of 0-indexed clip indices.
 
-    Accepts: "all", "2", "2,3", "2-5", "1,3-5"
+    Accepts: "all", "2", "2,3", "2-5", "1,3-5", "3,5,7", "7-10"
+    Also tolerates Chinese full-width punctuation: "3，5，7", "2－5".
     Returns None for "all" (meaning: render every clip normally).
     Returns a set of 0-indexed ints for specific clips.
     """
     raw = str(value or "all").strip().lower()
     if not raw or raw == "all":
         return None
+    # v2.62: 兼容中文标点（全角逗号/顿号/分号）与空格
+    raw = raw.replace("，", ",").replace("、", ",").replace("；", ";").replace(";", ",")
+    raw = raw.replace(" ", "")
+    # 全角连字符/波浪号归一化为半角连字符（如 2－5 / 2～5）
+    raw = raw.replace("－", "-").replace("—", "-").replace("～", "-").replace("~", "-")
 
     indices = set()
     for part in raw.split(","):
@@ -3308,43 +3314,126 @@ async def render_control(request):
 
 @PromptServer.instance.routes.post("/h3_extender/restore_cache")
 async def restore_cache(request):
-    """v2.60: 恢复最近一次渲染的所有缓存、CLIP成品和预览文件。"""
+    """v2.60/v2.62: 恢复最近一次渲染的所有缓存、CLIP成品和预览文件。
+
+    v2.62 改动: 多源 fallback 搜索链快照 (修复 v2.61 硬编码 backup 目录导致
+    99% 用户备份找不到的问题). 候选目录按优先级:
+      1. <plugin_root>/backup/chain_cache_2026-09-21/  (v2.60 默认)
+      2. <plugin_root>/../  (ComfyUI 根)
+      3. <plugin_root>/../../  (ComfyUI-BSAI_pro_v36_lig 主项目根, 用户手动放的快照)
+      4. 用户主目录下 BSAI_H3_* 快照
+    找到 chain_extender_*.h3cache 或 *_chain_snapshot_backup.h3cache 后,
+    重命名为符合 _chain_paths() 规范的 chain_{safe_name(node_id)}.h3cache,
+    拷贝到 bsai_h3_chain_cache/. 后续 v1.17 前置 latent 链检查会通过,
+    clip_select 单选可以从该 CLIP 连续渲染到末尾.
+    """
     try:
         data = await request.json()
     except Exception:
         data = {}
     node_id = str(data.get("node") or "")
-    
-    # 备份目录
-    backup_dir = Path(__file__).resolve().parents[2] / "backup" / "chain_cache_2026-09-21"
-    chain_cache_dir = Path(__file__).resolve().parents[2] / "bsai_h3_chain_cache"
+
+    plugin_root = Path(__file__).resolve().parents[1]
+    comfyui_root = Path(__file__).resolve().parents[2]
+    project_root = Path(__file__).resolve().parents[3]
+    user_home = Path.home()
+
+    # v2.62: 多源 fallback 搜索链快照备份
+    candidate_dirs = [
+        plugin_root / "backup" / "chain_cache_2026-09-21",   # v2.60 默认
+        comfyui_root,                                          # ComfyUI 根
+        project_root,                                          # 主项目根 (用户放 BSAI_H3_chain_snapshot_backup.* 的地方)
+        user_home,                                             # 用户主目录
+    ]
+
+    chain_cache_dir = comfyui_root / "bsai_h3_chain_cache"
     temp_dir = _comfyui_temp_dir()
-    
+
+    # v2.62: 重命名映射 — 把任意命名的快照重命名为符合 _chain_paths() 规范的 chain_{safe_name(node_id)}.*
+    safe_node = re.sub(r"[^A-Za-z0-9._-]+", "_", node_id).strip("._") or "h3_chain"
+    target_stem = f"chain_extender_{safe_node}"
+
+    def _find_chain_snapshot():
+        """在候选目录里找链快照 .h3cache (按候选优先级). 返回 (h3cache_path, json_path_or_None)."""
+        for d in candidate_dirs:
+            try:
+                if not d.exists():
+                    continue
+                # 优先: 已规范命名的 chain_extender_*.h3cache
+                hits = list(d.glob("chain_extender_*.h3cache"))
+                if hits:
+                    h3 = max(hits, key=lambda p: p.stat().st_mtime)
+                    jp = h3.with_suffix(".json")
+                    return h3, (jp if jp.exists() else None), str(d)
+                # 其次: 用户快照 BSAI_H3_chain_snapshot_backup.h3cache
+                hits = list(d.glob("*chain_snapshot_backup.h3cache"))
+                if hits:
+                    h3 = max(hits, key=lambda p: p.stat().st_mtime)
+                    jp = h3.with_suffix(".json")
+                    return h3, (jp if jp.exists() else None), str(d)
+                # 最后: 任意 chain_*.h3cache
+                hits = list(d.glob("chain_*.h3cache"))
+                if hits:
+                    h3 = max(hits, key=lambda p: p.stat().st_mtime)
+                    jp = h3.with_suffix(".json")
+                    return h3, (jp if jp.exists() else None), str(d)
+            except Exception as _e:
+                print(f"[H3 Extender] v2.62 扫描 {d} 出错: {_e}")
+        return None, None, None
+
     # 恢复链缓存
     restored = 0
+    snapshot_used = None
     try:
-        if backup_dir.exists():
+        h3_src, json_src, found_dir = _find_chain_snapshot()
+        if h3_src is not None and h3_src.exists():
             chain_cache_dir.mkdir(parents=True, exist_ok=True)
-            for f in backup_dir.glob("*.h3cache"):
-                shutil.copy2(f, chain_cache_dir / f.name)
-                restored += 1
-            print(f"[H3 Extender] 恢复链缓存完成: {restored} 个文件")
+            dst_h3 = chain_cache_dir / f"{target_stem}.h3cache"
+            shutil.copy2(h3_src, dst_h3)
+            restored += 1
+            snapshot_used = str(h3_src)
+            # 同步拷贝 .json (若有)
+            if json_src is not None and json_src.exists():
+                dst_json = chain_cache_dir / f"{target_stem}.json"
+                shutil.copy2(json_src, dst_json)
+            print(f"[H3 Extender] v2.62 恢复链缓存: {h3_src.name} ({h3_src.stat().st_size // (1024*1024)} MB) "
+                  f"-> {dst_h3.name} (来自 {found_dir}, node={node_id})")
+        else:
+            tried = [str(d) for d in candidate_dirs if d.exists()]
+            print(f"[H3 Extender] v2.62 恢复链缓存: 未找到任何 .h3cache 快照. "
+                  f"已扫描: {tried}. 请把 chain_extender_*.h3cache 或 "
+                  f"BSAI_H3_chain_snapshot_backup.h3cache 放到 ComfyUI 根目录后重试.")
     except Exception as e:
-        print(f"[H3 Extender] 恢复链缓存失败: {e}")
+        print(f"[H3 Extender] v2.62 恢复链缓存失败: {e}")
         return web.json_response({"ok": False, "error": f"恢复链缓存失败: {e}"})
-    
-    # 恢复预览文件
+
+    # 恢复预览文件: 多源 fallback (同时找 _clippv_*.mp4)
     restored_previews = 0
+    preview_used_dir = None
     try:
-        preview_backup_dir = backup_dir / "temp"
-        if preview_backup_dir.exists():
-            temp_dir.mkdir(parents=True, exist_ok=True)
-            for f in preview_backup_dir.glob("_clippv_*.mp4"):
-                shutil.copy2(f, temp_dir / f.name)
-                restored_previews += 1
-            print(f"[H3 Extender] 恢复预览文件完成: {restored_previews} 个")
+        for d in candidate_dirs:
+            if not d.exists():
+                continue
+            # 优先查 <d>/temp/_clippv_*.mp4
+            cand = d / "temp"
+            search_roots = [cand] if cand.exists() else []
+            # 也允许直接放在 d 下的 _clippv_*.mp4
+            search_roots.append(d)
+            for root in search_roots:
+                hits = list(root.glob("_clippv_*.mp4"))
+                if hits:
+                    temp_dir.mkdir(parents=True, exist_ok=True)
+                    for f in hits:
+                        shutil.copy2(f, temp_dir / f.name)
+                        restored_previews += 1
+                    preview_used_dir = str(root)
+                    break
+            if restored_previews > 0:
+                break
+        if restored_previews > 0:
+            print(f"[H3 Extender] v2.62 恢复预览文件完成: {restored_previews} 个 (来自 {preview_used_dir})")
     except Exception as e:
-        print(f"[H3 Extender] 恢复预览文件失败: {e}")
+        print(f"[H3 Extender] v2.62 恢复预览文件失败: {e}")
 
     # 统计已渲染的 CLIP 数量
     clips_dir = _clip_output_dir()
@@ -3354,7 +3443,12 @@ async def restore_cache(request):
         "ok": True,
         "clips_restored": clip_count,
         "previews_restored": restored_previews,
-        "message": f"恢复完成：{clip_count} 个 CLIP，{restored_previews} 个预览"
+        "chain_cache_restored": restored,
+        "chain_cache_source": snapshot_used,
+        "node_id": node_id,
+        "target_filename": f"{target_stem}.h3cache",
+        "message": (f"恢复完成：{clip_count} 个 CLIP, {restored_previews} 个预览, "
+                    f"{restored} 个链缓存文件" + (f" (来自 {snapshot_used})" if snapshot_used else " (未找到链快照)"))
     })
 
 
@@ -4121,7 +4215,7 @@ class BSAIH3FilmFactory:
                 {
                     "default": "all",
                     "multiline": False,
-                    "tooltip": "要渲染的 CLIP（1 起）：all=全部；单个如 1；多选如 1,3；范围如 2-5；混合如 1,3-5。仅 clip_select_enable 开启时生效。",
+                    "tooltip": "要渲染的 CLIP（1 起）：all=全部；单个如 1；多选如 1,3 / 3,5,7；范围如 2-5 / 7-10；混合如 1,3-5。仅 clip_select_enable 开启时生效。",
                 },
             ),
             "pause_enable": (
@@ -4559,6 +4653,9 @@ class BSAIH3FilmFactory:
         select_override = None
         if int(clip_select_enable):
             select_override = _parse_clip_select(clip_select, len(clips))
+            # v2.62: 输入无法解析时明确告警（避免误以为已选择却静默渲染全部）
+            if select_override is None and str(clip_select or "").strip().lower() not in ("", "all"):
+                print(f"[H3 Extender] WARNING: clip_select='{clip_select}' 无法解析（支持 all / 1,3 / 2-5 / 3,5,7 / 7-10），已回退为渲染全部 CLIP")
             if select_override is not None and len(select_override) == 1:
                 _sel_start = min(select_override)
                 select_override = set(range(_sel_start, len(clips)))
@@ -5142,11 +5239,16 @@ class BSAIH3FilmFactory:
                     pass
                 _from = max(0, _pre_n)
                 if select_override is not None:
-                    select_override = set(range(_from, len(clips)))
+                    # v2.62: 补渲染范围收窄到「选中段跨度内」，保持仅渲染指定段语义，
+                    # 不再从缺口一路补到末尾（末尾未选中的 CLIP 保留缓存/不重新生成）。
+                    _sel_max = max(select_override)
+                    _old_sel = set(select_override)
+                    select_override = set(range(_from, _sel_max + 1)) | _old_sel
+                    _added = sorted(select_override - _old_sel)
                     print(
-                        f"[H3 Extender] v1.17 前置 latent 链缺失（磁盘仅 {_pre_n} 段，"
-                        f"不足所选 CLIP{_need_pre + 1} 所需的 {_need_pre} 段）：自动从 "
-                        f"CLIP{_from + 1} 补渲染建立完整链，随后从所选 CLIP 连续生成到结束。"
+                        f"[H3 Extender] v2.62 前置 latent 链缺失（磁盘仅 {_pre_n} 段，"
+                        f"不足所选 CLIP{_need_pre + 1} 所需的 {_need_pre} 段）：自动补渲染 "
+                        f"CLIP {','.join(str(_p + 1) for _p in _added)} 建立完整链，随后仅渲染选中段。"
                     )
                 else:
                     first_sel = _from
@@ -5155,6 +5257,25 @@ class BSAIH3FilmFactory:
                         f"不足重渲染 CLIP{_need_pre + 1} 所需的 {_need_pre} 段）：自动从 "
                         f"CLIP{_from + 1} 补渲染建立完整链，随后连续生成到结束。"
                     )
+
+        # v2.62: 中段缺口补齐 —— 选中段跨度内被跳过且磁盘无缓存的 CLIP 必须补渲染，
+        # 否则 H3 链式运动上下文断链（后续段会拿错前置 latent）。
+        # 典型场景：已有 CLIP1-2 缓存时输入 3,5,7，CLIP4/6 无缓存 → 自动补渲染 CLIP4/6。
+        if select_override is not None:
+            try:
+                _gap_m = _load_manifest_from_paths(data_path, manifest_path)
+                _gap_have = len(_gap_m.get("segments", [])) if _gap_m else 0
+            except Exception:
+                _gap_have = 0
+            _sel_max = max(select_override)
+            _gap_fill = set()
+            for _p in range(_sel_max + 1):
+                if _p not in select_override and _p >= _gap_have:
+                    _gap_fill.add(_p)
+            if _gap_fill:
+                _gap_list = ",".join(str(_p + 1) for _p in sorted(_gap_fill))
+                select_override = select_override | _gap_fill
+                print(f"[H3 Extender] v2.62 中段缺口补渲染: CLIP {_gap_list} 被跳过但磁盘无缓存，为维持 H3 链式运动上下文自动补渲染。")
 
         # v1.21: 单 clip 重渲染时，如果前置 latent 链缺失（first_sel < 第一个选中 clip），
         # 强制渲染前置 clip（忽略前端 render_enabled=False），建立完整 latent 链。

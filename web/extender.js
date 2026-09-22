@@ -816,7 +816,7 @@ const BSAI_BILINGUAL_LABELS = {
     "ref_cache": "参考图缓存（Ref2VA编码，调参重跑提速）",
     "cache_dit": "DiT步间缓存（CacheDiT加速，需插件）",
     "clip_select_enable": "CLIP选择开关（仅渲染指定CLIP）",
-    "clip_select": "CLIP选择（all全部 / 1,3 / 2-5）",
+    "clip_select": "CLIP选择（all全部 / 1,3 / 2-5 / 3,5,7 / 7-10）",
     "pause_enable": "暂停开关（每CLIP生成完可暂停）",
     "pause_timeout": "暂停超时（秒，无干预自动继续）",
     "refine_enable": "二次采样开关（画质修复去模糊）",

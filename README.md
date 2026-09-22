@@ -531,7 +531,7 @@ python -m pip install -r requirements.txt
 | 参数 | 中文说明 | 默认 | 说明 |
 |---|---|---|---|
 | `clip_select_enable` | CLIP 选择开关 | `false` | 启用后仅渲染指定 clip |
-| `clip_select` | CLIP 选择 | `all` | `all` / `1,3` / `2-5` |
+| `clip_select` | CLIP 选择 | `all` | `all` 全部 / `1,3` 多选 / `2-5` 范围 / `3,5,7` 混合多选 / `7-10` 范围；支持中文逗号 `3，5，7` |
 | `pause_enable` | 每 clip 生成完暂停 | `false` | 等待用户操作 |
 | `pause_timeout` | 暂停超时（秒）| `120` | 超时自动继续 |
 
@@ -599,7 +599,7 @@ Each CLIP card has per-card controls; left border color shows status. Card butto
 1. **全量渲染（默认）/ Full render**: 所有 CLIP 依次生成，完成自动合并输出。
 2. **单 CLIP 独立渲染（▶）/ Single-clip render**: 只渲染该 clip，其余不动，适合精修某个镜头。
 3. **单 CLIP 重新生成（↻）/ Re-render**: 仅重出此 clip（换资产后重出某段）；选中时自动清除「合并输出」待定状态。
-4. **CLIP 选择渲染（`clip_select`）**: `all` 全部；`2` 从第 2 个连续渲染到结束；`1,3`/`2-5` 仅指定段。
+4. **CLIP 选择渲染（`clip_select`）**: `all` 全部；`2` 从第 2 个连续渲染到结束；`1,3`/`2-5`/`3,5,7`/`7-10` 仅渲染指定段（未选中的保留缓存不重新生成；磁盘缓存不足时自动补齐前置/中段缺口以维持 H3 运动链）。
 5. **暂停/继续/仅当前/中止（⏸）**: 当前 clip 生成完暂停 → ▶ 继续 / ⏹ 仅保留当前并停止 / ✖ 中止；`pause_enable` 自动暂停，`pause_timeout` 超时自动继续。
 6. **合并输出（工具栏）**: 把已生成 clip 合成完整视频；有「重新生成」状态 clip 时先弹窗确认。
 7. **render_enabled（✓/✗）**: 关闭后该 clip 不参与本轮生成。

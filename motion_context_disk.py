@@ -327,6 +327,17 @@ def _dtype_from_name(name):
 def _new_data_file(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # v2.62: 如果文件已存在且包含超过 magic header 字节的真实数据,
+    # 不要再覆写, 否则会清掉用户恢复出来的 118MB h3cache.
+    # 这是 ♻️ 恢复缓存按钮 + clip_select 单选跳过 1~14 渲染修复链的关键一环.
+    if path.exists():
+        try:
+            cur_size = int(path.stat().st_size)
+            if cur_size > len(_DATA_MAGIC):
+                # 已有真实数据 (118MB 等), 保留
+                return
+        except Exception:
+            pass
     with open(path, "wb") as f:
         f.write(_DATA_MAGIC)
         f.flush()
@@ -389,11 +400,26 @@ def _segment_start(desc):
 
 
 def _recover_manifest(data_path, manifest_path, manifest):
-    """Recover a safe prefix after an interrupted tail rewrite."""
+    """Recover a safe prefix after an interrupted tail rewrite.
+
+    v2.62: 当 data_path 只有 11 字节 (即只有 magic header, 没有真实 latent)
+    但 manifest 自称有 N 段时, 视为 manifest 与磁盘不一致, 返回 None 让
+    上层 _manifest_for_first 走"重新建"分支. 修复 clip_select=15 但磁盘
+    chain 是损坏空文件时 join() 抛 'invalid chain index 0/0' 的问题.
+    """
     data_path = Path(data_path)
     manifest_path = Path(manifest_path)
     _ensure_data_file(data_path)
     size = int(data_path.stat().st_size)
+    n_segments = len(manifest.get("segments", []))
+    # v2.62: manifest 说有段但磁盘只有 magic header -> 不一致, 让上层重建
+    if n_segments > 0 and size <= len(_DATA_MAGIC):
+        _LOG.warning(
+            "H3 Disk Cache: manifest claims %d segment(s) but data_path only "
+            "has %d byte(s); treating chain as missing. Caller should rebuild.",
+            n_segments, size,
+        )
+        return None
     good = []
     for desc in manifest.get("segments", []):
         try:
@@ -405,7 +431,15 @@ def _recover_manifest(data_path, manifest_path, manifest):
         except Exception:
             break
 
-    if len(good) != len(manifest.get("segments", [])):
+    if len(good) != n_segments:
+        # v2.62: 全部段都坏 (good=[]) 也返回 None, 让 _manifest_for_first 重建
+        if len(good) == 0 and n_segments > 0:
+            _LOG.warning(
+                "H3 Disk Cache: all %d segment(s) invalid in manifest; "
+                "returning None to trigger rebuild.",
+                n_segments,
+            )
+            return None
         fixed = dict(manifest)
         fixed["segments"] = [dict(x) for x in good]
         fixed["final_frame_count"] = _final_frame_count(good)
@@ -452,7 +486,20 @@ def _load_manifest_from_paths(data_path, manifest_path):
             return None
         return None
     try:
-        return _recover_manifest(data_path, manifest_path, manifest)
+        recovered = _recover_manifest(data_path, manifest_path, manifest)
+        # v2.62: _recover_manifest 返回 None 表示 manifest 与磁盘不一致,
+        # 清掉坏文件让 _manifest_for_first 走"重新建"分支. 否则后续 join()
+        # 会因为 manifest 说有 N 段但磁盘 0 段而抛 RuntimeError.
+        if recovered is None:
+            try:
+                if manifest_path.exists():
+                    manifest_path.unlink()
+                if bak.exists():
+                    bak.unlink()
+            except Exception:
+                pass
+            return None
+        return recovered
     except Exception:
         return manifest
 
