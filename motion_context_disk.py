@@ -674,6 +674,101 @@ def _backup_chain_before_truncate(data_path, manifest_path, reason):
         print(f"[H3 Extender] v1.97 备份失败: {_bk}")
 
 
+def _snapshot_chain(data_path, manifest_path, reason):
+    """v1.98: 渲染完成后自动快照整条链（data+manifest）。
+    命名 chain_<name>.<ts>.snapshot.h3cache/.json，保留最近 5 份。
+    与 preclear（截断前）备份互补：snapshot 是「渲染成果」的最新状态。"""
+    try:
+        import time as _t, shutil as _sh
+        stem = Path(manifest_path).name
+        name = stem[:-5] if stem.endswith(".json") else stem
+        ts = _t.strftime("%Y%m%d_%H%M%S")
+        if Path(data_path).exists() and Path(data_path).stat().st_size > 0:
+            _sh.copy2(data_path, Path(data_path).with_name(f"{name}.{ts}.snapshot.h3cache"))
+        if Path(manifest_path).exists():
+            _sh.copy2(manifest_path, Path(manifest_path).with_name(f"{name}.{ts}.snapshot.json"))
+        print(f"[H3 Disk Cache] 渲染完成自动快照: {name}.{ts}.snapshot.* (reason={reason})")
+        _prune_snapshots(Path(manifest_path).parent, name, keep=5)
+        return True
+    except Exception as _e:
+        print(f"[H3 Disk Cache] 快照失败: {_e}")
+        return False
+
+
+def _prune_snapshots(directory, name, keep=5):
+    try:
+        snaps = sorted(directory.glob(f"{name}.*.snapshot.json"))
+        for old in snaps[:-keep]:
+            old.unlink(missing_ok=True)
+            Path(str(old).replace(".snapshot.json", ".snapshot.h3cache")).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _list_snapshot_backups(data_path, manifest_path):
+    """列出可用的 snapshot 备份（最新在前），供恢复入口使用。"""
+    try:
+        stem = Path(manifest_path).name
+        name = stem[:-5] if stem.endswith(".json") else stem
+        snaps = sorted(Path(manifest_path).parent.glob(f"{name}.*.snapshot.json"))
+        out = []
+        for s in snaps:
+            h3 = Path(str(s).replace(".snapshot.json", ".snapshot.h3cache"))
+            if h3.exists():
+                _parts = Path(s).stem.split(".")
+                _ts = _parts[-2] if len(_parts) >= 2 else ""
+                out.append({"manifest": str(s), "data": str(h3), "ts": _ts})
+        return list(reversed(out))
+    except Exception:
+        return []
+
+
+def _restore_latest_backup(data_path, manifest_path, source="auto"):
+    """v1.98: 从最近一次自动快照（或截断前备份）恢复主链。
+    返回 (ok, segments_count, kind, ts)。恢复前先把当前主链备份为 preclear，
+    保证误恢复也可回滚。"""
+    try:
+        import shutil as _sh
+        src_manifest = None
+        if source == "auto":
+            snaps = _list_snapshot_backups(data_path, manifest_path)
+            if snaps:
+                src_manifest = snaps[0]["manifest"]
+        if src_manifest is None:
+            stem = Path(manifest_path).name
+            name = stem[:-5] if stem.endswith(".json") else stem
+            precs = sorted(Path(manifest_path).parent.glob(f"{name}.*.preclear.json"))
+            if precs:
+                src_manifest = str(precs[-1])
+        if not src_manifest:
+            print("[H3 Disk Cache] 恢复缓存: 未找到任何快照/备份，无法恢复")
+            return (False, 0, "none", "")
+        src_data = str(src_manifest)
+        src_data = src_data.replace(".snapshot.json", ".snapshot.h3cache").replace(".preclear.json", ".preclear.h3cache")
+        if not Path(src_data).exists():
+            print(f"[H3 Disk Cache] 恢复缓存: 备份数据文件缺失 {src_data}")
+            return (False, 0, "none", "")
+        # 当前主链先备份（可回滚）
+        _backup_chain_before_truncate(data_path, manifest_path, reason="before-restore")
+        # 复制回主路径
+        _sh.copy2(src_data, data_path)
+        _sh.copy2(src_manifest, manifest_path)
+        try:
+            _m = _load_manifest_from_paths(data_path, manifest_path) or {}
+            seg_count = len(_m.get("segments", []))
+        except Exception:
+            seg_count = 0
+        _parts = Path(src_manifest).stem.split(".")
+        _ts = _parts[-2] if len(_parts) >= 2 else ""
+        kind = "snapshot" if ".snapshot." in src_manifest else "preclear"
+        print(f"[H3 Disk Cache] 恢复缓存成功: 从 {Path(src_manifest).name} 恢复 {seg_count} 段"
+              f" ({kind} {_ts})，主链已回滚，仅需渲染新增 CLIP")
+        return (True, seg_count, kind, _ts)
+    except Exception as _e:
+        print(f"[H3 Disk Cache] 恢复缓存失败: {_e}")
+        return (False, 0, "none", "")
+
+
 def _truncate_chain(data_path, manifest_path, manifest, index, reason=""):
     """
     Keep clips [0:index), discard index and everything after it.
@@ -681,9 +776,10 @@ def _truncate_chain(data_path, manifest_path, manifest, index, reason=""):
     """
     index = max(0, int(index))
     old = [dict(x) for x in manifest.get("segments", [])]
-    if index == 0 and old:
-        # v1.97: 全清(truncate 0)前自动备份, 并在日志里写明触发原因
-        _backup_chain_before_truncate(data_path, manifest_path, reason or "truncate0")
+    if old:
+        # v1.98: 任何截断（含部分截断）前都无条件自动备份，保护已渲染缓存；
+        # 恢复入口可一键回滚，避免从 clip1 重新渲染补链。
+        _backup_chain_before_truncate(data_path, manifest_path, reason or f"truncate{index}")
     prefix = old[:index]
     truncate_at = _DATA_START if not prefix else _segment_end(prefix[-1])
 

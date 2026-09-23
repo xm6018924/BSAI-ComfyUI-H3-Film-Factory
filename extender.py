@@ -84,6 +84,8 @@ from .motion_context_disk import (
     _load_tail_latents_from_disk,
     _delete_tail_latents_from_disk,
     _has_tail_latents_on_disk,
+    _snapshot_chain,
+    _restore_latest_backup,
 )
 
 BUILD = "minimax-h3-extender-v14.74-compact-prompt-bridge"
@@ -3339,7 +3341,9 @@ async def restore_cache(request):
     user_home = Path.home()
 
     # v2.62: 多源 fallback 搜索链快照备份
+    # v1.98: 最高优先级 = 主链目录本身（渲染完成自动快照 *.snapshot.* / 截断前备份 *.preclear.*）
     candidate_dirs = [
+        _ensure_cache_root(),                                   # v1.98 主链目录（自动快照/截断备份所在）
         plugin_root / "backup" / "chain_cache_2026-09-21",   # v2.60 默认
         comfyui_root,                                          # ComfyUI 根
         project_root,                                          # 主项目根 (用户放 BSAI_H3_chain_snapshot_backup.* 的地方)
@@ -3353,26 +3357,37 @@ async def restore_cache(request):
     safe_node = re.sub(r"[^A-Za-z0-9._-]+", "_", node_id).strip("._") or "h3_chain"
     target_stem = f"chain_extender_{safe_node}"
 
+    def _is_readable(path):
+        """占用中的文件（如活跃主链被 mmap）不可读时返回 False，跳过该候选。"""
+        try:
+            with open(path, "rb") as _f:
+                _f.read(1)
+            return True
+        except Exception:
+            return False
+
     def _find_chain_snapshot():
         """在候选目录里找链快照 .h3cache (按候选优先级). 返回 (h3cache_path, json_path_or_None)."""
         for d in candidate_dirs:
             try:
                 if not d.exists():
                     continue
-                # 优先: 已规范命名的 chain_extender_*.h3cache
-                hits = list(d.glob("chain_extender_*.h3cache"))
-                if hits:
-                    h3 = max(hits, key=lambda p: p.stat().st_mtime)
-                    jp = h3.with_suffix(".json")
-                    return h3, (jp if jp.exists() else None), str(d)
+                # v1.98 修复: 优先明确的自动备份文件（*.snapshot.* / *.preclear.*），
+                # 排除活跃主链 chain_extender_<node>.h3cache（正被 mmap 占用，复制会 WinError 32）。
+                for pat, pair in (("*.snapshot.h3cache", "snapshot"), ("*.preclear.h3cache", "preclear")):
+                    hits = [p for p in d.glob(pat) if p.name != f"{target_stem}.h3cache" and _is_readable(p)]
+                    if hits:
+                        h3 = max(hits, key=lambda p: p.stat().st_mtime)
+                        jp = Path(str(h3).replace(f".{pair}.h3cache", f".{pair}.json"))
+                        return h3, (jp if jp.exists() else None), str(d)
                 # 其次: 用户快照 BSAI_H3_chain_snapshot_backup.h3cache
-                hits = list(d.glob("*chain_snapshot_backup.h3cache"))
+                hits = [p for p in d.glob("*chain_snapshot_backup.h3cache") if p.name != f"{target_stem}.h3cache" and _is_readable(p)]
                 if hits:
                     h3 = max(hits, key=lambda p: p.stat().st_mtime)
                     jp = h3.with_suffix(".json")
                     return h3, (jp if jp.exists() else None), str(d)
-                # 最后: 任意 chain_*.h3cache
-                hits = list(d.glob("chain_*.h3cache"))
+                # 最后: 任意 chain_*.h3cache（排除活跃主链自身）
+                hits = [p for p in d.glob("chain_*.h3cache") if p.name != f"{target_stem}.h3cache" and _is_readable(p)]
                 if hits:
                     h3 = max(hits, key=lambda p: p.stat().st_mtime)
                     jp = h3.with_suffix(".json")
@@ -4345,6 +4360,14 @@ class BSAIH3FilmFactory:
                 },
             ),
             "asset_library": ("ASSET_LIBRARY", {"forceInput": True, "tooltip": "Connect BSAI_AssetLibraryInput to resolve @图N/@视频N/@音频N references in clip prompts."}),
+            # v1.98: 恢复缓存（追加在末尾，不改动旧参数顺序，保证旧工作流兼容）
+            "restore_cache": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "tooltip": "恢复缓存：从最近一次自动快照恢复已渲染 CLIP 的主链缓存（缓存被误删/清空后使用）。恢复后无需从 clip1 重新渲染补链，仅渲染新增 CLIP。执行完成后自动复位。",
+                },
+            ),
         }
 
         # v1.22: per-clip external prompt input ports (clip_prompt_1..clip_prompt_12).
@@ -4520,6 +4543,7 @@ class BSAIH3FilmFactory:
         cache_dit = kwargs.get("cache_dit", False)
         clip_select_enable = kwargs.get("clip_select_enable", False)
         clip_select = kwargs.get("clip_select", "all")
+        restore_cache = kwargs.get("restore_cache", False)
         pause_enable = kwargs.get("pause_enable", False)
         pause_timeout = kwargs.get("pause_timeout", 120.0)
         refine_enable = kwargs.get("refine_enable", False)
@@ -4670,6 +4694,49 @@ class BSAIH3FilmFactory:
         if external_prompt_pack is None:
             active_prompt_pack_signature = ""
         data_path, manifest_path, manifest = _manifest_for_extender(owner, FPS)
+
+        # v1.98: 一键恢复缓存——从最近一次自动快照恢复主链，
+        # 已渲染的 CLIP 无需从 clip1 重新渲染补链；执行完成后前端自动复位开关。
+        restore_cache_done = False
+        if int(restore_cache):
+            _rc_ok, _rc_count, _rc_kind, _rc_ts = _restore_latest_backup(data_path, manifest_path)
+            if _rc_ok:
+                _restored_manifest = _load_manifest_from_paths(data_path, manifest_path) or manifest
+                # v1.98d: 恢复后立即分辨率预检——latent 链不能跨分辨率复用。
+                # 备份分辨率 ≠ 当前渲染设置时回滚恢复并给出明确指引，
+                # 避免"恢复成功 → 又被分辨率清链 → 从 clip1 补渲染"。
+                _res_ok = True
+                try:
+                    _bk_res = _resolution_from_manifest(_restored_manifest)
+                    if _bk_res is not None:
+                        if str(resolution_mode or "") == "manual":
+                            _tgt_w, _tgt_h = _manual_effective_resolution(width, height)
+                            _tgt_res = {"width": _tgt_w, "height": _tgt_h}
+                        else:
+                            _tgt_res = _resolve_generation_resolution(
+                                resolution_mode, megapixels, width, height, kwargs.get("refs") or []
+                            )
+                        if int(_bk_res["width"]) != int(_tgt_res["width"]) or int(_bk_res["height"]) != int(_tgt_res["height"]):
+                            _res_ok = False
+                            _rb_ok, _rb_count, _rb_kind, _rb_ts = _restore_latest_backup(data_path, manifest_path)
+                            print(f"[H3 Extender] v1.98d 恢复缓存已取消: 备份分辨率 {_bk_res['width']}x{_bk_res['height']} "
+                                  f"≠ 当前渲染设置 {_tgt_res['width']}x{_tgt_res['height']}，"
+                                  f"分辨率不同无法复用 latent 链。"
+                                  f"请把分辨率参数改为 {_bk_res['width']}x{_bk_res['height']}（与备份一致）后重新运行；"
+                                  f"或确认使用新分辨率后正常渲染（将重新生成全部缓存）。"
+                                  f"{'已回滚恢复前状态' if _rb_ok else '回滚失败，请手动检查主链缓存'}")
+                except Exception as _e:
+                    print(f"[H3 Extender] v1.98d 恢复缓存分辨率预检跳过: {_e}")
+                if _res_ok:
+                    manifest = _restored_manifest
+                    for _i, _cfg in enumerate(clips):
+                        if _i < _rc_count:
+                            _cfg["validated"] = True
+                    restore_cache_done = True
+                    print(f"[H3 Extender] v1.98 恢复缓存: {_rc_count} 段已恢复({_rc_kind} {_rc_ts})，"
+                          f"已标记为已渲染，不再从 clip1 补链，仅渲染新增 CLIP")
+            else:
+                print("[H3 Extender] v1.98 恢复缓存: 无可用备份，本次按正常流程渲染")
 
         # If cards were removed, trim the physical cache immediately.
         if len(manifest.get("segments", [])) > len(clips):
@@ -5137,6 +5204,10 @@ class BSAIH3FilmFactory:
                         except Exception:
                             pass
 
+            try:
+                _snapshot_chain(data_path, manifest_path, reason="merge-output")
+            except Exception:
+                pass
             return {
                 "ui": {
                     "videos": output_ui_videos,
@@ -5150,6 +5221,7 @@ class BSAIH3FilmFactory:
                         "resolved_width": resolved_width,
                         "resolved_height": resolved_height,
                         "build": BUILD,
+                        "restore_cache_done": bool(restore_cache_done),
                     }],
                 },
                 "result": (
@@ -5966,6 +6038,7 @@ class BSAIH3FilmFactory:
             "asset_library_connected": bool(asset_library),
             "asset_image_count": len(resolved_img_paths) if 'resolved_img_paths' in locals() else 0,
             "build": BUILD,
+            "restore_cache_done": bool(restore_cache_done),
         }
 
         ui_payload = {"h3_extender_state": [ui_state]}
@@ -6060,6 +6133,12 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] AV outputs: {int(out_images_t.shape[0])} frames, "
                   f"audio {int(out_audios_t['waveform'].shape[-1])} samples @ "
                   f"{int(out_audios_t['sample_rate'])}Hz")
+
+        # v1.98: 渲染完成自动快照，保护本次渲染成果（可一键恢复）
+        try:
+            _snapshot_chain(data_path, manifest_path, reason="render-complete")
+        except Exception:
+            pass
 
         return {
             "ui": ui_payload,

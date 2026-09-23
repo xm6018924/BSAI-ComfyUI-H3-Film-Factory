@@ -817,6 +817,7 @@ const BSAI_BILINGUAL_LABELS = {
     "cache_dit": "DiT步间缓存（CacheDiT加速，需插件）",
     "clip_select_enable": "CLIP选择开关（仅渲染指定CLIP）",
     "clip_select": "CLIP选择（all全部 / 1,3 / 2-5 / 3,5,7 / 7-10）",
+    "restore_cache": "恢复缓存（从最近备份恢复已渲染CLIP，无需重渲染）",
     "pause_enable": "暂停开关（每CLIP生成完可暂停）",
     "pause_timeout": "暂停超时（秒，无干预自动继续）",
     "refine_enable": "二次采样开关（画质修复去模糊）",
@@ -6602,6 +6603,14 @@ app.registerExtension({
             }
             // Safety: clear replace_mode, merge_output, and restore render_enabled after execution
             runtime.state.merge_output = false;
+            // v1.98: 恢复缓存完成后自动复位开关（一次性动作）
+            if (info.restore_cache_done) {
+                const rcWidget = node.widgets && node.widgets.find((w) => w.name === "restore_cache");
+                if (rcWidget) {
+                    rcWidget.value = false;
+                    if (typeof rcWidget.callback === "function") { try { rcWidget.callback(); } catch (_e) {} }
+                }
+            }
             if (runtime.state.clips) {
                 runtime.state.clips.forEach((c) => {
                     c.replace_mode = false;

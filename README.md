@@ -9,6 +9,59 @@
 
 ## 🚀 最新更新 / Latest Updates
 
+### v1.98 (2026-09-23) — 缓存永不自动删 + 渲染自动快照 + 一键恢复不补链 / Cache Protection + Auto-Snapshot + One-Click Restore Without Re-Rendering
+
+**核心：只要渲染过，缓存就受保护、自动备份、可一键恢复，恢复后绝不从 CLIP1 重新渲染补链！**
+**Once rendered, your cache is protected, auto-backed-up and one-click restorable — restored clips are never re-rendered from CLIP1!**
+
+---
+
+#### 🛡️ 一、缓存保护：渲染过永不自动删 / Cache Protection
+
+- **任何截断（卡片减少、分辨率变化、工程导入等）前都无条件自动备份主链**，先备份再截断；缓存只可能被用户主动操作删除
+  Before ANY chain truncation (card removal, resolution change, project import, etc.) the main chain is unconditionally backed up first; cache can only be removed by explicit user action
+- 系统自动流程不再静默丢弃任何已渲染成果
+  No automatic system path silently discards rendered work anymore
+
+#### 📸 二、渲染完成自动快照 / Auto-Snapshot After Render
+
+- 每次**渲染完成 / 合并输出**后自动快照整条链（数据 + 清单），保留最近 **5 份**，滚动清理
+  After every **render completion / merge output**, the full chain (data + manifest) is auto-snapshotted; latest **5** kept with rolling cleanup
+- 快照文件：`chain_extender_<id>.<时间戳>.snapshot.h3cache/.json`
+  Snapshot files: `chain_extender_<id>.<timestamp>.snapshot.h3cache/.json`
+
+#### ♻️ 三、一键恢复缓存（两个入口）/ One-Click Restore (Two Entries)
+
+**入口 1 — 节点「恢复缓存」开关（参数列表末尾，执行后自动复位）**
+**Entry 1 — Node "Restore Cache" toggle (at the END of the parameter list, auto-resets after execution)**
+- 打开 → 运行 → 从最近自动快照恢复主链 → 恢复的 CLIP 标记为已渲染 → **只渲染新增 CLIP，不补链**
+  Enable → Run → main chain restored from latest snapshot → restored clips marked as already-rendered → **only new clips render, no chain-fill**
+- 执行完成前端自动把开关复位为关
+  The toggle auto-resets to off after execution
+
+**入口 2 — 前端工具栏「♻️ 恢复缓存」按钮**
+**Entry 2 — Frontend toolbar "♻️ Restore Cache" button**
+- 搜索源最高优先级 = 主链目录本身（自动快照/截断备份所在），可直接恢复自动快照
+  Highest-priority search source = the main chain directory itself (where auto-snapshots / truncate backups live)
+
+#### 🚫 四、恢复后不补链 / No Re-Rendering After Restore
+
+- 恢复后主链 = 完整备份链 → 前置 latent 链检查直接通过 → **不会触发"从 clip1 自动补渲染"**
+  After restore the main chain is complete → prefix latent-chain check passes directly → **no "auto-fill from clip1"**
+- 恢复的 CLIP 全部标记 `validated=True` → 主循环跳过（秒级），只渲染真正新增的片段
+  Restored clips are all marked `validated=True` → skipped by the main loop (seconds), only genuinely new clips render
+
+#### 🐛 五、关键修复 / Key Fixes
+
+- **WinError 32（文件占用）修复**：恢复源优先匹配 `*.snapshot.*` / `*.preclear.*` 明确备份，排除活跃主链（正被 mmap 占用），占用/损坏候选自动跳过
+  WinError 32 (file-in-use) fixed: restore sources prefer explicit `*.snapshot.*` / `*.preclear.*` backups, exclude the live main chain (mmap-held), and skip busy/corrupt candidates
+- **恢复分辨率校验**：备份链分辨率 ≠ 当前渲染设置时**回滚恢复并给出明确指引**，不再"恢复成功 → 又被分辨率清链 → 从 CLIP1 补渲染"（latent 链不能跨分辨率复用）
+  Restore resolution guard: if backup chain resolution ≠ current render settings the restore is **rolled back with clear guidance**, no more "restore OK → cleared by resolution change → re-render from CLIP1" (latent chains cannot be reused across resolutions)
+- **参数兼容**：`restore_cache` 追加在参数列表**末尾**，原有参数顺序完全不变，旧工作流不报错
+  Workflow compatibility: `restore_cache` appended at the END of the parameter list; existing parameter order unchanged, old workflows unaffected
+
+---
+
 ### v2.62 (2026-09-22) — CLIP 选择渲染增强 + 链完整性修复 / Clip Select Enhancements + Chain Integrity Fixes
 
 **核心：CLIP 选择（clip_select）现在支持任意多选、范围与组合，未选中的 CLIP 保留缓存不重新生成！**
