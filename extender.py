@@ -5285,6 +5285,14 @@ class BSAIH3FilmFactory:
             _sel_list = ",".join(str(s + 1) for s in sorted(selected_set))
             print(f"[H3 Extender] single clip replace: selected_set={sorted(selected_set)} loop_end={loop_end} will re-render clip(s) {_sel_list}, then pause for user action")
 
+        # v2.64: per-clip 独立渲染优先 —— 用户点击卡片「▶ 独立渲染」设置 replace_mode 时，
+        # clip_select 范围选择不再生效。否则残留的 clip_select_enable=True 会让循环条件
+        # `i not in select_override` 跳过用户指定渲染的 clip（如选 11-30 时点 clip9 ▶ 无效），
+        # 且 v2.63 强制启用选择集内所有 clip，导致实际渲染的是选择集而不是用户点的 clip。
+        if any_replace and select_override is not None:
+            print("[H3 Extender] v2.64: 检测到 per-clip 独立渲染(replace_mode)，忽略 clip_select 范围选择，仅按卡片生成开关渲染。")
+            select_override = None
+
         # v1.17: 前置 latent 链完整性检查 —— 部分选择 / 重渲染时，若磁盘 latent 链
         # 不足以支撑所选段的前置段，自动补渲染缺失段建立完整链（H3 必须依赖前置
         # latent 做 motion context），并明确打印提示，让用户知情而非报错/静默。
@@ -5323,11 +5331,13 @@ class BSAIH3FilmFactory:
                         f"CLIP {','.join(str(_p + 1) for _p in _added)} 建立完整链，随后仅渲染选中段。"
                     )
                 else:
-                    first_sel = _from
+                    # v2.65: per-clip 独立渲染绝不自动补渲染其他 CLIP。
+                    # 前置链不足时只警告，CLIP{N} 直接接续现有链末尾渲染（用户明确要求：
+                    # 单点 CLIPN 只渲染 CLIPN，不渲染 CLIP1..N-1）。如需完整前置链请先「♻️ 恢复缓存」。
                     print(
-                        f"[H3 Extender] v1.17 前置 latent 链缺失（磁盘仅 {_pre_n} 段，"
-                        f"不足重渲染 CLIP{_need_pre + 1} 所需的 {_need_pre} 段）：自动从 "
-                        f"CLIP{_from + 1} 补渲染建立完整链，随后连续生成到结束。"
+                        f"[H3 Extender] v2.65 per-clip 独立渲染前置链不足（磁盘仅 {_pre_n} 段，"
+                        f"CLIP{_need_pre + 1} 需 {_need_pre} 段）：按用户要求不补渲染其他 CLIP，"
+                        f"CLIP{_need_pre + 1} 将接续现有链末尾渲染；如需完整前置链请先点「♻️ 恢复缓存」。"
                     )
 
         # v2.62: 中段缺口补齐 —— 选中段跨度内被跳过且磁盘无缓存的 CLIP 必须补渲染，
@@ -5360,6 +5370,26 @@ class BSAIH3FilmFactory:
                         clips[_pre_i]["render_enabled"] = True
                         clips[_pre_i]["validated"] = False
                         print(f"[H3 Extender] v1.21: force render前置 clip {_pre_i + 1} (latent chain missing, first_sel={first_sel})")
+
+        # v2.63: clip_select 权威选择修复 —— 选中集合（含 v2.62 自动补渲染的前置段/中段缺口）
+        # 必须真正进入渲染循环。若残留 render_enabled=False（例如此前点「独立渲染▶」/「↻」
+        # 留下的旧状态），循环的 `not render_enabled` 条件会静默跳过选中段：前置链补不出来、
+        # 选中段不渲染、首个被渲染的 clip 被错放到链索引 0，导致 preview 越界与 Final Decode
+        # 错位（典型症状：选了 11-30 却只渲染了 1 个 clip、轨道无输出）。
+        # 与 v1.21「强制渲染前置 clip（忽略前端 render_enabled=False）」同一原则：
+        # clip_select 显式选择时，选择集内的 render_enabled 一律强制为 True。
+        if select_override is not None:
+            _sel_force = [
+                i for i in select_override
+                if i < len(clips) and not clips[i].get("render_enabled", True)
+            ]
+            if _sel_force:
+                for _fi in _sel_force:
+                    clips[_fi]["render_enabled"] = True
+                print(
+                    f"[H3 Extender] v2.63 clip_select 权威选择: 选中集内 {len(_sel_force)} 个 clip 的"
+                    f"生成开关处于关闭状态，已强制启用（CLIP {','.join(str(_f + 1) for _f in sorted(_sel_force))}）"
+                )
 
         # Build the accelerated sampling model once for the whole pass.
         sampling_model = model
@@ -5403,7 +5433,8 @@ class BSAIH3FilmFactory:
             # Clips with render_enabled=False are skipped entirely: they keep
             # their cached latent (if any) and are not re-rendered.  This lets
             # the user turn off generation for specific clips without removing
-            # them from the sequence. CLIP 选择生成时，未选中的同样跳过（保留缓存）。
+            # them from the sequence. CLIP 选择生成时，未选中的同样跳过（保留缓存）；
+            # 选中集已在循环前（v2.63）强制 render_enabled=True，不受此条件影响。
             if not cfg.get("render_enabled", True) or (
                 select_override is not None and i not in select_override
             ):

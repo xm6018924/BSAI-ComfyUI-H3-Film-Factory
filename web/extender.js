@@ -3339,8 +3339,9 @@ function render(node, runtime) {
             clip.replace_mode = true;
             clip.render_enabled = true;
             runtime.state.clips.forEach((c, ci) => {
-                if (ci !== index) c.render_enabled = false;
+                if (ci !== index) { c.render_enabled = false; c.replace_mode = false; }
             });
+
             updateHidden(node, runtime);
             runtime.statusText = `渲染 CLIP ${index + 1} / Rendering CLIP ${index + 1}`;
             if (runtime.counter) runtime.counter.textContent = `${runtime.state.clips.length} clips • ${refCount(runtime)} refs`;
@@ -5108,10 +5109,10 @@ pauseBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 resumeBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("resume"); });
 stopAfterBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("stop_after"); });
 abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("abort"); });
-	// v2.59: 收起CLIP按钮，点一下收起到只显示5个CLIP高度，其他用滚动条观看
+	// v2.59: 收起CLIP按钮，点一下收起到只显示6个CLIP高度，其他用滚动条观看
 	const collapseAllBtn = document.createElement("button");
 	collapseAllBtn.textContent = "📦 收起CLIP";
-	collapseAllBtn.title = "点一下收起到只显示5个CLIP高度，其他CLIP用滚动条观看。再点一下展开全部。";
+	collapseAllBtn.title = "点一下收起到只显示6个CLIP高度，其他CLIP用滚动条观看。再点一下展开全部。";
 	collapseAllBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a5a3a;border:1px solid #3a7a4a;border-radius:4px;color:#dfd;cursor:pointer;font-weight:bold;";
 	let clipsCollapsed = false;
 	let savedNodeHeight = 0;
@@ -5120,10 +5121,10 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 		clipsCollapsed = !clipsCollapsed;
 		const w = Math.max(NODE_MIN_WIDTH, Number(node.size && node.size[0]) || NODE_MIN_WIDTH);
 		if (clipsCollapsed) {
-			// 收起：保存当前高度，然后设置成只显示5个CLIP的高度
+			// 收起：保存当前高度，然后设置成只显示6个CLIP的高度
 			savedNodeHeight = Number(node.size && node.size[1]) || 0;
-			// 5个CLIP的高度：每个CLIP大概200px，加上头部和全局提示词大概300px，总共大概1300px
-			const targetH = 300 + 5 * 200;
+			// 6个CLIP的高度：每个CLIP大概200px，加上头部和全局提示词大概300px，总共大概1500px
+			const targetH = 300 + 6 * 200;
 			node.setSize([w, targetH]);
 			collapseAllBtn.textContent = "📂 展开CLIP";
 		} else {
@@ -5133,7 +5134,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 		}
 	});
 
-	pauseBar.append(pauseBtn, resumeBtn, stopAfterBtn, abortBtn, collapseAllBtn);
+	pauseBar.append(pauseBtn, resumeBtn, stopAfterBtn, abortBtn);
 
 	// v2.60: 恢复缓存按钮
 	const restoreCacheBtn = document.createElement("button");
@@ -5227,7 +5228,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 			.catch((err) => alert("恢复失败：" + err.message));
 	});
 
-	toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, filmTemplateBtn, openCacheBtn, openClipsBtn, restoreCacheBtn, pauseBar, status, projectFileInput);
+	toolbar.append(saveProjectButton, loadProjectButton, batchDurLabel, batchDurInput, batchDurBtn, batchCtxLabel, batchCtxBtn, counter, mergeOutputBtn, syncAllClipsBtn, filmTemplateBtn, openCacheBtn, openClipsBtn, restoreCacheBtn, collapseAllBtn, pauseBar, status, projectFileInput);
 
     // Store merge output button reference for later updates
 
