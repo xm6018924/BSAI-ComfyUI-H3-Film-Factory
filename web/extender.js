@@ -1,4 +1,4 @@
-﻿import { app } from "../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 // extender.js v2.4.0 — cache-bust marker (2026-08-22-clean-break-from-original)
 import { api } from "../../scripts/api.js";
 
@@ -4394,6 +4394,15 @@ function syncExternalPrompts(node, runtime) {
     if (!node || !node.inputs || !runtime?.state) return;
     const graph = node.graph;
     if (!graph) return;
+    // v2.68 perf: fast-path — no connected clip_prompt_N ports, skip all work.
+    let hasConnected = false;
+    for (const inp of node.inputs) {
+        if (/^clip_prompt_\d+$/.test(inp.name || "") && inp.link != null) { hasConnected = true; break; }
+    }
+    if (!hasConnected) {
+        positionClipPorts(node, runtime);
+        return;
+    }
     hookUpstreamWidgetCallback(node, runtime);
     let changed = false;
     node.inputs.forEach((inp) => {
@@ -4633,7 +4642,7 @@ function ensureGlobalSyncPoll() {
                 } catch (e) {}
             }
         } catch (e) {}
-    }, 4000);
+    }, 8000);
 }
 
 function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
@@ -5904,7 +5913,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 render(node, runtime);
             }
         } catch (e) { /* ignore */ }
-    }, 800);
+    }, 1500);
 
     refFileInput.addEventListener("change", async () => {
         const file = refFileInput.files?.[0];
@@ -6111,18 +6120,16 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             restoreCacheState(this, runtime);
             syncResolutionMirror(this, runtime);
             syncDomHeight(this, runtime, true);
-            // Aggressive initial sync: try multiple times to catch source node loading
-            // 激进的初始同步：多次尝试以捕获源节点加载完成
-            [100, 500, 1200, 2500, 4000].forEach(delay => {
+            // v2.68 perf: 初始同步从 5 次减到 2 次, 文本没只 autoGrow 不全量 render.
+            [200, 1500].forEach(delay => {
                 setTimeout(() => {
                     try {
                         const text = _readPromptSourceText(this);
                         if (text == null) return;
                         const newText = String(text);
                         if (newText === runtime._lastPromptSourceText) {
-                            // v2.17: 文本没变也要 render + autoGrow —— 全新加载时卡片 DOM 还没排完,
-                            // 不能因为"文本和保存值一样"就跳过撑高, 否则 30 clip 节点永远停在小高度.
-                            try { render(this, runtime); autoGrowNodeToFitAllClips(this, runtime); } catch(e2) {}
+                            // v2.68: onConfigure rAF 已 render 过一次, 这里只 autoGrow 不重建 DOM.
+                            try { autoGrowNodeToFitAllClips(this, runtime); } catch(e2) {}
                             return;
                         }
                         runtime._lastPromptSourceText = newText;
