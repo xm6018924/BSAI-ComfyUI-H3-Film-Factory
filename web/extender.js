@@ -2346,9 +2346,13 @@ function makeNumberInput(value, min, max, step) {
 function renderReferences(node, runtime) {
     const row = runtime?.refsRow;
     if (!row) return;
-    row.replaceChildren();
 
+    // v2.68 perf: cache — refs 没变就不重建 9 个 slot 的 DOM.
     const refs = runtime.refsState?.refs || [];
+    const refsKey = refs.map((r, i) => r ? i + ":" + (r.original_name || "") + ":" + (r.width||0) + "x" + (r.height||0) : i + ":").join("|");
+    if (row._refsKey === refsKey && row.childNodes.length > 0) return;
+    row._refsKey = refsKey;
+    row.replaceChildren();
 
     for (let index = 0; index < MAX_IMAGE_REFS; index++) {
         const ref = refs[index] || null;
@@ -3105,7 +3109,11 @@ function syncGlobalPromptFromInput(node, runtime) {
                     autoResizeTextarea(runtime.globalPromptTextarea);
                 }
             }
-            if (typeof runtime.renderGlobalAssetPanel === "function") {
+            // v2.68 perf: only refresh asset panel when the global prompt text actually
+            // changed (every poll used to rebuild innerHTML with dozens of <img> thumbnails).
+            if (typeof runtime.renderGlobalAssetPanel === "function" &&
+                runtime._lastGpForAssetPanel !== (sourceCompletelyEmpty ? "" : globalText)) {
+                runtime._lastGpForAssetPanel = sourceCompletelyEmpty ? "" : globalText;
                 runtime.renderGlobalAssetPanel();
             }
         }
@@ -5467,6 +5475,12 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
     function renderGlobalOverlay() {
         const text = gpTextarea.value || "";
+        // v2.68 perf: skip innerHTML rebuild when text unchanged (was rebuilding dozens
+        // of <img> thumbnails every poll / every render()).
+        const refsKey = parseAssetRefs(text).map(r => r.type + ":" + r.index).join(",");
+        if (gpOverlay._lastText === text && gpOverlay._lastRefsKey === refsKey) return;
+        gpOverlay._lastText = text;
+        gpOverlay._lastRefsKey = refsKey;
         const refs = parseAssetRefs(text);
         if (refs.length === 0) { gpOverlay.textContent = text; return; }
         let html = "";
