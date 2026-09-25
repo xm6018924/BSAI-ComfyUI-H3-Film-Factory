@@ -9,6 +9,49 @@
 
 ## 🚀 最新更新 / Latest Updates
 
+### v2.67 (2026-09-25) — 前端画布卡顿修复 / Frontend Canvas Lag Fix
+
+**核心：打开工作流后画布逐渐卡死、一卡一卡的问题彻底修复。**
+**Core: fixed the canvas gradually freezing / stuttering after opening a workflow.**
+
+---
+
+- **修复 1（每帧 console.log）**：`onDrawForeground` 每帧画布重绘都跑双语标签函数，且每帧都 `console.log`（同步阻塞），还重复设置已设过的 label。现已加守卫——节点只处理一次，后续每帧直接 return。
+- Fix 1 (per-frame console.log): `onDrawForeground` ran the bilingual-label function on every frame and called `console.log` (synchronous blocking) every frame, re-setting labels already applied. Now guarded — each node processes labels once and returns immediately on later frames.
+- **修复 2（定时器泄漏）**：`buildUi()` 被 `onConfigure`/`onExecuted` 反复调用，每次都新建一个 800ms 轮询定时器但旧的从不 `clearInterval`——打开工作流后定时器越积越多直到 CPU 跑满卡死。现已在新建前先 clear 旧定时器，永远只保留一个。
+- Fix 2 (timer leak): `buildUi()` was called repeatedly by `onConfigure`/`onExecuted`, each time creating a new 800ms poll timer without clearing the old one — timers piled up after opening a workflow until the CPU maxed out. Now the old timer is cleared before creating a new one; exactly one timer is kept.
+
+---
+
+### v2.66 (2026-09-25) — latent 链保护三保险 + per-clip 独立渲染不补链 / Chain Protection Triple-Safety + Per-Clip Render Never Builds Prefix
+
+**核心：渲过的 latent 链每段自动快照、恢复时空壳备份不再覆盖好链、点独立渲染绝不回 CLIP1。**
+**Core: every committed segment is auto-snapshotted, empty backups can no longer overwrite a good chain, and per-clip render never falls back to CLIP1.**
+
+---
+
+#### 🛡️ 一、每段提交后自动滚动快照 / Per-Commit Rolling Snapshot
+
+- 每渲完一段 CLIP（`disk_join` 成功后）立即把整条链快照到固定文件 `chain_extender_<id>.latest.snapshot.h3cache/.json`，每次覆盖。崩溃/误删后**最多丢最后一段**，点「♻️ 恢复缓存」即可回到最近完好状态。
+- After every committed CLIP (right after `disk_join`), the whole chain is snapshotted to a fixed file `chain_extender_<id>.latest.snapshot.h3cache/.json` (overwritten each time). After a crash/accidental wipe you lose at most the last segment; click "♻️ Restore Cache" to return to the latest good state.
+- 与旧的时间戳快照（仅在全部渲完/合并输出时触发）互补：中途崩溃也有备份。
+- Complements the old timestamp snapshot (which only fired on full render-complete / merge-output): mid-run crashes are now covered too.
+
+#### 🚫 二、恢复缓存防空壳保护 / Restore Guards Against Empty Backups
+
+- 旧 bug：恢复时找不到快照会 fallback 到 preclear 备份，而 preclear 可能是 0 段空壳（仅 11 字节）——空壳被 copy 回主链，3.27GB 的 28 段链被空文件覆盖丢失。
+- Old bug: when no snapshot existed, restore fell back to a preclear backup that could be a 0-segment empty shell (11 bytes) — copying it overwrote a 3.27GB / 28-segment chain.
+- 现已：① 恢复时优先用 `latest.snapshot`；② 跳过段数=0 或数据 <1MB 的空壳备份；③ 当前主链非空且备份段数更少时**拒绝回退**，保护已渲染成果。
+- Now: ① `latest.snapshot` is preferred; ② backups with 0 segments or <1MB data are skipped; ③ when the live chain is non-empty and a candidate backup has fewer segments, the restore refuses to roll back.
+
+#### ▶️ 三、per-clip 独立渲染绝不回 CLIP1 / Per-Clip Render Never Falls Back to CLIP1
+
+- 点卡片「▶ 独立渲染」CLIP29 时，若磁盘链只有 CLIP1，旧逻辑会把 CLIP2–28 当成待渲段从 CLIP1 一路补渲。现在前置段磁盘无缓存时**直接跳过、不补渲、不 join**，选中 CLIP 从当前链末尾接续渲染，渲完出预览、不自动合并、等待用户新指令。
+- Clicking CLIP29 ▶ with only CLIP1 on disk used to treat CLIP2–28 as pending and re-render from CLIP1. Now missing prefix segments are **skipped — no re-render, no join**; the chosen CLIP renders right after the existing chain tail, emits its preview, and stops without auto-merging.
+
+---
+
+
 ### v2.65 (2026-09-25) — 独立渲染绝不自动补渲染其他 CLIP / Single Clip Render Never Auto-Builds Prefix
 
 **核心：点卡片「▶ 独立渲染」只渲染这一个 CLIP——前置 latent 链不足时不再自动从前面补渲染一大段。**
