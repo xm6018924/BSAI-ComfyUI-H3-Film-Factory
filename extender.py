@@ -85,6 +85,7 @@ from .motion_context_disk import (
     _delete_tail_latents_from_disk,
     _has_tail_latents_on_disk,
     _snapshot_chain,
+    _snapshot_latest,
     _restore_latest_backup,
 )
 
@@ -5461,19 +5462,24 @@ class BSAIH3FilmFactory:
             existing_count = len(current_manifest.get("segments", [])) if current_manifest else 0
             existing = i < existing_count
 
-            if cfg["validated"] and existing:
-                result = disk_join.join(
-                    samples=None,
-                    trim_frames=None,
-                    validated=True,
-                    run_mode=str(run_mode),
-                    fps=float(FPS),
-                    previous_cache=previous_handle,
-                    unique_id=f"extender_{owner}",
-                )
-                previous_handle = result[0]
-                previous_proxy = result[1]
-                statuses.append(result[4])
+            if cfg["validated"]:
+                if existing:
+                    result = disk_join.join(
+                        samples=None,
+                        trim_frames=None,
+                        validated=True,
+                        run_mode=str(run_mode),
+                        fps=float(FPS),
+                        previous_cache=previous_handle,
+                        unique_id=f"extender_{owner}",
+                    )
+                    previous_handle = result[0]
+                    previous_proxy = result[1]
+                    statuses.append(result[4])
+                elif single_clip_replace:
+                    # v2.66: per-clip 独立渲染——前置段磁盘无缓存时不补渲、不 join，
+                    # 直接跳过，让选中 clip 从当前链末尾接续渲染（绝不回 clip1）。
+                    print(f"[H3 Extender] v2.66 独立渲染跳过前置段 clip{i+1}: validated=True 但磁盘无缓存，不补渲，选中 clip 将接续现有链末尾")
                 continue
 
             # Any active clip is unvalidated. Make sure everything after it is
@@ -5625,6 +5631,13 @@ class BSAIH3FilmFactory:
             previous_proxy = result[1]
             statuses.append(result[4])
             generated.append(i)
+
+            # v2.66: 每段 commit 后滚动快照——崩溃/误删后最多丢最后一段，
+            # 用户点「♻️ 恢复缓存」即可从 latest.snapshot 恢复并续渲。
+            try:
+                _snapshot_latest(data_path, manifest_path, reason=f"clip-{i+1}-committed")
+            except Exception as _sl:
+                print(f"[H3 Extender] per-clip 快照异常(可忽略): {_sl}")
 
             # Drop full sampled/conditioning references before the next clip.
             del sampled, positive, latent
@@ -5798,10 +5811,12 @@ class BSAIH3FilmFactory:
         auto_merged = False
         if single_clip_replace:
             single_clip_replace = False
+            # v2.66: 只清 replace_mode 开关，不把未渲染的前置段误标 validated=True。
+            # 选中段已在上方标记 validated=True；其余段保持原状态，下次独立渲染 clipM
+            # 时由 v2.66 跳过逻辑正确接续现有链末尾。
             for cfg in clips:
-                cfg["validated"] = True
                 cfg["replace_mode"] = False
-            print("[H3 Extender] per-clip replace complete → chain rendered continuously to end (no auto-merge)")
+            print("[H3 Extender] per-clip replace complete → 仅渲染选中 clip，已出预览，等待用户新指令（无自动合并）")
 
         final_manifest = _load_manifest_from_paths(data_path, manifest_path)
         # v1.99: 更新实际渲染过的 clip 的资产指纹基准——仅渲染过的更新,

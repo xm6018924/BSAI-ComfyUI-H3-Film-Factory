@@ -840,9 +840,14 @@ const BSAI_BILINGUAL_LABELS = {
 };
 function bsaiApplyBilingualLabels(node) {
     if (!node || !node.widgets) return;
+    // v2.67 perf: onDrawForeground 每帧都调本函数。必须加守卫：
+    // 已标过 _bsaiBilingual 的 widget 直接跳过，且不再每帧 console.log
+    // （控制台日志是同步阻塞，是画布一卡一卡的主因）。
+    if (node.__bsaiBilingualDone) return;
     let applied = 0;
     for (const w of node.widgets) {
         if (!w) continue;
+        if (w._bsaiBilingual) continue;
         const label = BSAI_BILINGUAL_LABELS[w.name];
         if (label) {
             w.label = w.name + "  " + label;
@@ -850,7 +855,10 @@ function bsaiApplyBilingualLabels(node) {
             applied++;
         }
     }
-    if (applied > 0) console.log("[BSAI双语] 节点", node.id, "已应用", applied, "个双语标签(label模式)");
+    if (applied > 0) {
+        node.__bsaiBilingualDone = true;
+        console.log("[BSAI双语] 节点", node.id, "已应用", applied, "个双语标签");
+    }
 }
 
 function effectiveManualResolution(width, height) {
@@ -5757,6 +5765,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
     // Poll for unified prompt_source input changes every 800ms
     // 轮询统一外部提示词输入，自动拆分全局提示词和分镜内容
+    // v2.67 perf: buildUi() 会被 onConfigure/onExecuted 反复调用，旧 timer 不清会叠加泄漏
+    // —— 每调一次 buildUi 多一个 800ms 定时器，打开工作流后定时器越积越多直到卡死。
+    if (runtime._psPollTimer) { try { clearInterval(runtime._psPollTimer); } catch (e) {} }
     runtime._lastPromptSourceText = null;
     runtime._psPollTimer = setInterval(() => {
         try {

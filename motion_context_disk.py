@@ -705,6 +705,41 @@ def _prune_snapshots(directory, name, keep=5):
         pass
 
 
+# v2.66: per-clip 滚动快照——每段提交后覆盖同一份 latest.snapshot。
+# 与 _snapshot_chain（时间戳命名、保留 5 份、仅在 merge/render-complete 触发）互补：
+# latest.snapshot 永远是「上一段成功提交后」的完好链状态，崩溃/误删后最多丢最后一段。
+def _snapshot_latest(data_path, manifest_path, reason=""):
+    """每段 commit 后滚动快照，固定命名 latest.snapshot.*，每次覆盖。
+    只备份非空链（数据>1MB），空链不覆盖已有有效快照。"""
+    try:
+        import shutil as _sh
+        dp = Path(data_path)
+        mp = Path(manifest_path)
+        if not dp.exists() or dp.stat().st_size < (1024 * 1024):
+            return False
+        stem = mp.name
+        name = stem[:-5] if stem.endswith(".json") else stem
+        snap_data = dp.with_name(f"{name}.latest.snapshot.h3cache")
+        snap_man = mp.with_name(f"{name}.latest.snapshot.json")
+        _sh.copy2(dp, snap_data)
+        _sh.copy2(mp, snap_man)
+        print(f"[H3 Disk Cache] per-clip 快照: {snap_data.name} ({dp.stat().st_size // (1024*1024)} MB) reason={reason}")
+        return True
+    except Exception as _e:
+        print(f"[H3 Disk Cache] per-clip 快照失败(可忽略): {_e}")
+        return False
+
+
+def _backup_segment_count(manifest_path):
+    """读一个备份 manifest 的段数（容错，读不到返回 -1）。"""
+    try:
+        import json as _json
+        with open(manifest_path, encoding="utf-8") as _f:
+            return len(_json.load(_f).get("segments", []))
+    except Exception:
+        return -1
+
+
 def _list_snapshot_backups(data_path, manifest_path):
     """列出可用的 snapshot 备份（最新在前），供恢复入口使用。"""
     try:
@@ -724,31 +759,68 @@ def _list_snapshot_backups(data_path, manifest_path):
 
 
 def _restore_latest_backup(data_path, manifest_path, source="auto"):
-    """v1.98: 从最近一次自动快照（或截断前备份）恢复主链。
-    返回 (ok, segments_count, kind, ts)。恢复前先把当前主链备份为 preclear，
-    保证误恢复也可回滚。"""
+    """v2.66: 从最近一次有效备份恢复主链。
+    优先级: latest.snapshot(每段提交滚动快照) > 时间戳 snapshot > preclear。
+    安全网:
+      1) 跳过空壳备份(段数=0 或 h3cache<1MB)——防空壳覆盖非空主链;
+      2) 当前主链非空(段数>0)且备份段数更少时拒绝覆盖——保护已渲染成果;
+      3) 恢复前仍把当前主链备份为 preclear 可回滚。
+    返回 (ok, segments_count, kind, ts)。"""
     try:
         import shutil as _sh
-        src_manifest = None
+        stem = Path(manifest_path).name
+        name = stem[:-5] if stem.endswith(".json") else stem
+        parent = Path(manifest_path).parent
+
+        # 收集候选备份，按优先级排序: latest.snapshot > 历史 snapshot > preclear
+        candidates = []  # (priority, manifest_path_str, kind)
+        latest_man = parent / f"{name}.latest.snapshot.json"
+        if latest_man.exists():
+            candidates.append((0, str(latest_man), "latest"))
         if source == "auto":
-            snaps = _list_snapshot_backups(data_path, manifest_path)
-            if snaps:
-                src_manifest = snaps[0]["manifest"]
-        if src_manifest is None:
-            stem = Path(manifest_path).name
-            name = stem[:-5] if stem.endswith(".json") else stem
-            precs = sorted(Path(manifest_path).parent.glob(f"{name}.*.preclear.json"))
-            if precs:
-                src_manifest = str(precs[-1])
+            for s in _list_snapshot_backups(data_path, manifest_path):
+                candidates.append((1, s["manifest"], "snapshot"))
+        for p in sorted(parent.glob(f"{name}.*.preclear.json")):
+            candidates.append((2, str(p), "preclear"))
+
+        # 当前主链段数(用于保护非空主链)
+        try:
+            cur_m = _load_manifest_from_paths(data_path, manifest_path) or {}
+            cur_n = len(cur_m.get("segments", []))
+        except Exception:
+            cur_n = 0
+
+        src_manifest = None
+        src_kind = ""
+        skipped_empty = []
+        for prio, mp, kind in sorted(candidates, key=lambda x: x[0]):
+            dp = mp.replace(".snapshot.json", ".snapshot.h3cache").replace(".preclear.json", ".preclear.h3cache")
+            dp = dp.replace(".latest.", ".latest.")
+            if not Path(dp).exists():
+                continue
+            seg_n = _backup_segment_count(mp)
+            # 防空壳: 段数必须>0 且数据文件>1MB
+            if seg_n <= 0 or Path(dp).stat().st_size < (1024 * 1024):
+                skipped_empty.append((Path(mp).name, seg_n, Path(dp).stat().st_size))
+                continue
+            # 保护非空主链: 备份段数 < 当前主链段数 -> 不覆盖(避免用旧备份回退)
+            if cur_n > 0 and seg_n < cur_n:
+                print(f"[H3 Disk Cache] 恢复缓存跳过 {Path(mp).name}: 备份仅 {seg_n} 段 < 当前主链 {cur_n} 段，不回退")
+                continue
+            src_manifest = mp
+            src_kind = kind
+            break
+
+        if skipped_empty:
+            print(f"[H3 Disk Cache] 恢复缓存: 已跳过 {len(skipped_empty)} 个空壳备份(段数=0或数据<1MB): "
+                  f"{', '.join(n for n,_,_ in skipped_empty)}")
         if not src_manifest:
-            print("[H3 Disk Cache] 恢复缓存: 未找到任何快照/备份，无法恢复")
+            print("[H3 Disk Cache] 恢复缓存: 未找到任何有效(非空)快照/备份，无法恢复。"
+                  "若主链确已丢失，请确认是否有 latest.snapshot 或 .snapshot.* 文件")
             return (False, 0, "none", "")
-        src_data = str(src_manifest)
-        src_data = src_data.replace(".snapshot.json", ".snapshot.h3cache").replace(".preclear.json", ".preclear.h3cache")
-        if not Path(src_data).exists():
-            print(f"[H3 Disk Cache] 恢复缓存: 备份数据文件缺失 {src_data}")
-            return (False, 0, "none", "")
-        # 当前主链先备份（可回滚）
+
+        src_data = src_manifest.replace(".snapshot.json", ".snapshot.h3cache").replace(".preclear.json", ".preclear.h3cache")
+        # 当前主链先备份(可回滚)
         _backup_chain_before_truncate(data_path, manifest_path, reason="before-restore")
         # 复制回主路径
         _sh.copy2(src_data, data_path)
@@ -760,10 +832,9 @@ def _restore_latest_backup(data_path, manifest_path, source="auto"):
             seg_count = 0
         _parts = Path(src_manifest).stem.split(".")
         _ts = _parts[-2] if len(_parts) >= 2 else ""
-        kind = "snapshot" if ".snapshot." in src_manifest else "preclear"
         print(f"[H3 Disk Cache] 恢复缓存成功: 从 {Path(src_manifest).name} 恢复 {seg_count} 段"
-              f" ({kind} {_ts})，主链已回滚，仅需渲染新增 CLIP")
-        return (True, seg_count, kind, _ts)
+              f" ({src_kind} {_ts})，主链已回滚，仅需渲染新增 CLIP")
+        return (True, seg_count, src_kind, _ts)
     except Exception as _e:
         print(f"[H3 Disk Cache] 恢复缓存失败: {_e}")
         return (False, 0, "none", "")
