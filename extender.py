@@ -4717,13 +4717,37 @@ class BSAIH3FilmFactory:
                             _tgt_res = _resolve_generation_resolution(
                                 resolution_mode, megapixels, width, height, kwargs.get("refs") or []
                             )
-                        if int(_bk_res["width"]) != int(_tgt_res["width"]) or int(_bk_res["height"]) != int(_tgt_res["height"]):
+                        # v2.71 fix: 链存的是「放大后 latent」（一采 960x544 latent 60x34
+                        # 经 refine ×2.0 -> 120x68），备份"像素"不能用 geometry×16(=1920x1088)
+                        # 与当前一采设置直接比（旧逻辑在 960x544 一采下永远不匹配，
+                        # 恢复必被取消）。改为 latent 几何语义比较：
+                        #   备份 latent(w/h) vs 当前一采 latent(÷16) × refine 倍率。
+                        _bk_geom = _restored_manifest.get("geometry") if isinstance(_restored_manifest, dict) else None
+                        _bk_lw = int(_bk_geom.get("video_w", 0)) if isinstance(_bk_geom, dict) else 0
+                        _bk_lh = int(_bk_geom.get("video_h", 0)) if isinstance(_bk_geom, dict) else 0
+                        _res_mismatch = False
+                        if _bk_lw > 0 and _bk_lh > 0:
+                            _rfu_rc = float(refine_upscale_factor) if bool(refine_enable) else 1.0
+                            _tgt_lw = max(1, int(_tgt_res["width"] // 16))
+                            _tgt_lh = max(1, int(_tgt_res["height"] // 16))
+                            _res_mismatch = (
+                                int(_bk_lw) != int(round(_tgt_lw * _rfu_rc))
+                                or int(_bk_lh) != int(round(_tgt_lh * _rfu_rc))
+                            )
+                        else:
+                            _res_mismatch = (
+                                int(_bk_res["width"]) != int(_tgt_res["width"])
+                                or int(_bk_res["height"]) != int(_tgt_res["height"])
+                            )
+                        if _res_mismatch:
                             _res_ok = False
                             _rb_ok, _rb_count, _rb_kind, _rb_ts = _restore_latest_backup(data_path, manifest_path)
-                            print(f"[H3 Extender] v1.98d 恢复缓存已取消: 备份分辨率 {_bk_res['width']}x{_bk_res['height']} "
-                                  f"≠ 当前渲染设置 {_tgt_res['width']}x{_tgt_res['height']}，"
-                                  f"分辨率不同无法复用 latent 链。"
-                                  f"请把分辨率参数改为 {_bk_res['width']}x{_bk_res['height']}（与备份一致）后重新运行；"
+                            print(f"[H3 Extender] v1.98d 恢复缓存已取消: 备份 latent {_bk_lw}x{_bk_lh} "
+                                  f"≠ 当前设置 {_tgt_res['width']}x{_tgt_res['height']}（latent "
+                                  f"{_tgt_lw}x{_tgt_lh} × refine {_rfu_rc:.1f} = "
+                                  f"{int(round(_tgt_lw * _rfu_rc))}x{int(round(_tgt_lh * _rfu_rc))}），"
+                                  f"几何不同无法复用 latent 链。"
+                                  f"请把分辨率参数改回一采 {_bk_lw // 2 * 16}x{_bk_lh // 2 * 16}（latent 与备份一致）后重新运行；"
                                   f"或确认使用新分辨率后正常渲染（将重新生成全部缓存）。"
                                   f"{'已回滚恢复前状态' if _rb_ok else '回滚失败，请手动检查主链缓存'}")
                 except Exception as _e:
@@ -4917,11 +4941,24 @@ class BSAIH3FilmFactory:
             f"cache_has_segments={cache_has_segments}"
         )
 
+        # v2.70 fix: 双采工作流中链以「放大后 latent」为几何基准（一采 960x544
+        # latent 34x60 经 refine ×2.0 -> 68x120 入链），而 requested 是「一采
+        # 像素」。旧逻辑用 geometry×16(=1920x1088) 与 requested(960x544) 直接
+        # 比较，链上一有段就误判"分辨率变化"而清链。这里改用 latent 几何
+        # 对比：cache geometry(video_w/h) vs 一采 latent(÷16) × refine 倍率。
+        _rfu = float(refine_upscale_factor) if bool(refine_enable) else 1.0
+        _req_lw = max(1, int(resolved_width // 16))
+        _req_lh = max(1, int(resolved_height // 16))
+        _cg_geom = manifest.get("geometry") if isinstance(manifest, dict) else None
+        _cg_lw = int(_cg_geom.get("video_w", 0)) if isinstance(_cg_geom, dict) else 0
+        _cg_lh = int(_cg_geom.get("video_h", 0)) if isinstance(_cg_geom, dict) else 0
         requested_mismatch = bool(
             cache_has_segments
+            and _cg_lw > 0
+            and _cg_lh > 0
             and (
-                int(cache_resolution["width"]) != resolved_width
-                or int(cache_resolution["height"]) != resolved_height
+                int(_cg_lw) != int(round(_req_lw * _rfu))
+                or int(_cg_lh) != int(round(_req_lh * _rfu))
             )
         )
         previous_cache_resolution = dict(cache_resolution) if requested_mismatch else None
@@ -5428,9 +5465,54 @@ class BSAIH3FilmFactory:
         paused_break = False  # v1.13: 用户暂停/停止后禁止自动合并
         _pending_enc = []  # v1.70: async encode 队列 [(done_event, clip_index)]
 
+        # v2.68 fix: 异步预览队列消费提前——encode 完成后立即推送预览/落盘，
+        # 不再等下一个 CLIP 渲染完。原逻辑只在每个 CLIP 渲染完成的循环体末尾消费一次；
+        # NVENC 编码(约2s)完成时主线程已进入下一 CLIP 渲染，消费被推迟整整一个
+        # CLIP(~30min)，导致 per-clip 预览/MP4 延迟出现、用户以为"没生成"。
+        def _flush_pending_enc(_paused_break):
+            while _pending_enc and _pending_enc[0][0].is_set():
+                _ev_done, _j = _pending_enc.pop(0)
+                if not (not _paused_break and int(output_image_audio)):
+                    continue
+                try:
+                    _cimg, _caud = _decode_clip_to_av(owner, _j, vae, audio_vae, float(FPS))
+                    if _cimg is not None and int(_cimg.shape[0]) > 0:
+                        out_images.append(_cimg)
+                        _av_decoded.add(_j)
+                    if _caud is not None:
+                        out_audios.append(_caud)
+
+                    # 提取该 CLIP 的 MP4 blob 到持久目录(output/bsai_clips)，
+                    # 供 BSAI Premiere Pro / 前端直接引用。
+                    _cv_off = first_sel if (single_clip_replace and first_sel is not None and first_sel > 0) else 0
+                    _clip_video_path = None
+                    _clip_name = clips[_j + _cv_off].get("name", f"CLIP{_j + _cv_off + 1}") if (_j + _cv_off) < len(clips) else f"CLIP{_j + _cv_off + 1}"
+                    try:
+                        _m = _load_manifest_from_paths(data_path, manifest_path)
+                        if _m and _m.get("segments"):
+                            _segs = [dict(x) for x in _m["segments"]]
+                            if _j < len(_segs):
+                                _blob = _segs[_j].get("decoded_mp4_blob")
+                                if _blob is not None:
+                                    _temp_dir = _clip_output_dir()
+                                    _out_name = f"h3_clip_{owner}_{_j + _cv_off + 1}_{int(time.time())}.mp4"
+                                    _out_path = _temp_dir / _out_name
+                                    _copy_blob_to_file(data_path, _blob, _out_path)
+                                    _clip_video_path = str(_out_path)
+                                    print(f"[H3 Extender] per-clip video ready: clip {_j+1} -> {_out_path}")
+                    except Exception as _ve:
+                        print(f"[H3 Extender] per-clip video extract failed clip={_j}: {_ve}")
+
+                    _send_clip_av_output(owner, _j, len(clips), _cimg, _caud,
+                                          video_path=_clip_video_path, clip_name=_clip_name)
+                except Exception as _av_err:
+                    print(f"[H3 Extender] per-clip AV output failed clip={_j}: {_av_err}")
+
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
         for i, cfg in enumerate(clips[:loop_end]):
+            # v2.68 fix: 渲染本 CLIP 之前先消费已完成的 async encode（预览实时推送）。
+            _flush_pending_enc(paused_break)
             # Clips with render_enabled=False are skipped entirely: they keep
             # their cached latent (if any) and are not re-rendered.  This lets
             # the user turn off generation for specific clips without removing
@@ -5710,46 +5792,8 @@ class BSAIH3FilmFactory:
             # encode ~55s << 一采+二采 ~29min, 队列首项已完成的先输出(FIFO 保持
             # clip 序); 本段刚启动未完成的留到下段处理. 暂停停止时跳过输出.
             print(f"[H3 Extender] DEBUG AV decode clip={i} cond={not paused_break and int(output_image_audio)} pending={len(_pending_enc)}")
-            # v1.73b: 消费端防御性重算 seg 偏移(避免 decode 异常路径下 _seg_off 未定义)
-            _seg_off_cur = first_sel if (single_clip_replace and first_sel is not None and first_sel > 0) else 0
-            while _pending_enc and _pending_enc[0][0].is_set():
-                _ev_done, _j = _pending_enc.pop(0)
-                if not (not paused_break and int(output_image_audio)):
-                    continue
-                try:
-                    cimg, caud = _decode_clip_to_av(owner, _j, vae, audio_vae, float(FPS))
-                    if cimg is not None and int(cimg.shape[0]) > 0:
-                        out_images.append(cimg)
-                        _av_decoded.add(_j)
-                    if caud is not None:
-                        out_audios.append(caud)
-
-                    # Extract this clip's MP4 blob to a temp file and push
-                    # the path over WebSocket so BSAI Premiere Pro can
-                    # auto-import the clip immediately (per-clip streaming).
-                    _clip_video_path = None
-                    _clip_name = clips[_j + _seg_off_cur].get("name", f"CLIP{_j + _seg_off_cur + 1}") if (_j + _seg_off_cur) < len(clips) else f"CLIP{_j + _seg_off_cur + 1}"
-                    try:
-                        _m = _load_manifest_from_paths(data_path, manifest_path)
-                        if _m and _m.get("segments"):
-                            _segs = [dict(x) for x in _m["segments"]]
-                            if _j < len(_segs):
-                                _blob = _segs[_j].get("decoded_mp4_blob")
-                                if _blob is not None:
-                                    import folder_paths as _fp
-                                    _temp_dir = _clip_output_dir()
-                                    _out_name = f"h3_clip_{owner}_{_j + _seg_off_cur + 1}_{int(time.time())}.mp4"
-                                    _out_path = _temp_dir / _out_name
-                                    _copy_blob_to_file(data_path, _blob, _out_path)
-                                    _clip_video_path = str(_out_path)
-                                    print(f"[H3 Extender] per-clip video ready: clip {_j+1} -> {_out_path}")
-                    except Exception as _ve:
-                        print(f"[H3 Extender] per-clip video extract failed clip={_j}: {_ve}")
-
-                    _send_clip_av_output(owner, _j, len(clips), cimg, caud,
-                                          video_path=_clip_video_path, clip_name=_clip_name)
-                except Exception as _av_err:
-                    print(f"[H3 Extender] per-clip AV output failed clip={_j}: {_av_err}")
+            # v2.68 fix: 统一走 _flush_pending_enc（循环体末尾也消费一次，兜底）
+            _flush_pending_enc(paused_break)
 
 
         # All clips rendered; the last handle is the active cached prefix

@@ -3853,7 +3853,13 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
         if not owner_id or clip_index == "":
             return web.json_response({"ok": False, "error": "Missing owner_id or clip_index."}, status=400)
         try:
-            idx = int(clip_index)
+            # v2.69 fix: 前端 fetchClipPreview 传入的是 1-based clip_index
+            # (extender.js: idxOneBased = clipIndex + 1)，但 manifest segments 数组
+            # 是 0-based。此前直接 segments[idx] 导致每个卡片的预览整体错位一位：
+            # CLIP1 读到 segments[1](clip2 的 blob)、CLIP2 越界走磁盘 fallback，
+            # 用户看到 "Clip1/Clip2 预览都是 clip2 视频"。这里统一 -1 转 0-based；
+            # clip_index=0(非法) 会得到 -1 并被下方边界检查拦截(返回 400)。
+            idx = int(clip_index) - 1
             data_path, manifest_path = _chain_paths(f"extender_{_safe_name(owner_id)}")
             manifest = _load_manifest_from_paths(data_path, manifest_path)
             if manifest is None:

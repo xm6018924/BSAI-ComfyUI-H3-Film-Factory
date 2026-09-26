@@ -256,6 +256,33 @@ Each CLIP card has per-card controls; left border color shows status. Card butto
 
 ---
 
+## 断点续跑与补链说明 / Resume & Chain Recovery (v2.68+)
+
+### 分辨率体系 / Resolution model
+
+- **一采（第一遍采样）固定 960×544**，二采（Refine）用 3D latent upscaler **×2.0 放大到 1920×1088** 输出。/ Pass-1 sampling is **960×544**; pass-2 Refine upscales the latent **×2.0 → 1920×1088** final output.
+- **链缓存（`bsai_h3_chain_cache/chain_extender_<id>.h3cache`）存的是 latent**：一采 latent 60×34（=960×544），经 refine ×2.0 后以 **120×68** 入链。/ The chain cache stores latents: pass-1 latent 60×34 (=960×544) is committed as **120×68** after the ×2.0 refine.
+- 分辨率比较一律按 **latent 几何语义**（cache `video_w/h` vs 当前一采 latent × refine 倍率）判定，不再用像素×16 直接比——避免「链一有段就误判分辨率变化而清链」。（v2.70/v2.71）/ Resolution-change detection compares **latent geometry** (cache `video_w/h` vs current pass-1 latent × refine factor), not pixel×16 — this prevents the chain from being wiped whenever cached segments exist. (v2.70/v2.71)
+
+### 崩溃后断点续跑 / Resume after a crash
+
+渲染中途崩溃（如 TE 权重读盘 `hostbuf_file_reader_read failed` 等）后，已渲染的 CLIP 全部安全落盘（每段 commit 即自动快照 `chain_extender_<id>.latest.snapshot.h3cache`），**无需从 clip1 重渲**：
+
+1. 修复/确认**分辨率设置为一采 960×544**（ResolutionSelector 百万像素 = 0.5），与链一致；
+2. 重启 ComfyUI，重新加载工作流（已渲染的 clip 卡片 `validated` 保持勾选）；
+3. 点「Queue」——已渲染的 clip 段会以 `validated from disk` 秒过（metadata join，不重采样），从下一个未渲染 clip 接续渲染。
+
+- **恢复缓存按钮**：一键从最近快照恢复主链并把已渲染 CLIP 标记为 validated，适合快照存在但主链被误清的场景（v2.60+，分辨率预检 v2.71）。/ **Restore Cache button**: one-click restore of the main chain from the latest snapshot and mark rendered clips as validated (v2.60+, resolution pre-check v2.71).
+- **不要改动分辨率参数**（百万像素/scale），否则与链几何不匹配会触发清链重建。/ Do NOT change the resolution controls mid-chain — a geometry mismatch invalidates the chain.
+- 手动恢复：`bsai_h3_chain_cache/` 下的 `*.preclear.h3cache` / `*.snapshot.h3cache` 都是自动备份，可复制回主链 `chain_extender_<id>.h3cache` + `.json` 完成恢复。/ Manual restore: any `*.preclear.h3cache` / `*.snapshot.h3cache` in the cache dir is an auto-backup; copy it back to the main chain file pair.
+
+### 预览与成片 / Preview & output
+
+- **每 CLIP 渲染完即时出预览**：异步 MP4 编码在下一 CLIP 开始前强制消费，`output/bsai_clips/h3_clip_<id>_<n>_*.mp4` 实时落盘，前端卡片即时可播（v2.68 `_flush_pending_enc`）。/ Per-clip previews flush immediately: async MP4 encode is consumed before the next clip starts, files appear in `output/bsai_clips/` in real time (v2.68).
+- **CLIP 卡片预览错位修复**：前端传 1-based 卡片序号，后端 manifest 段为 0-based，`clip_preview` 统一 `-1` 转换（v2.69）。/ CLIP preview off-by-one fixed: frontend passes 1-based index, backend segments are 0-based, handler now subtracts 1 (v2.69).
+
+---
+
 ## 注意事项 / Notes & FAQ
 
 - **FastH3 蒸馏模型必须 `euler` + `simple` + 4 步**，其他配置画质严重下降。/ FastH3 distilled models REQUIRE euler + simple + 4 steps.
