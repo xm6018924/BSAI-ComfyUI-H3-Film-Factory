@@ -283,6 +283,15 @@ Each CLIP card has per-card controls; left border color shows status. Card butto
 
 ---
 
+
+### v2.72+ 补链与独立渲染说明 / Chain & Solo-Render Notes (v2.72+)
+
+- **崩溃续跑不丢链**：渲染中途崩溃（TE 权重读盘等）后已渲染 CLIP 全部安全落盘并自动快照；重启后恢复缓存（♻️）即可续跑，无需从头重渲（v2.72-v2.74 修复 `hostbuf_file_reader_read failed` 重载路径）。/ After a crash every rendered CLIP is on disk with an auto snapshot; restart, hit "♻️ Restore Cache", and resume — no full re-render (v2.72-v2.74 fixed the `hostbuf_file_reader_read failed` reload path).
+- **独立渲染渲谁是谁**：单独渲染 CLIP29 输出的一定是 CLIP29（preview/MP4 按全局 CLIP 索引提取，v2.75）。/ Solo-rendering CLIP29 outputs exactly CLIP29 (preview/MP4 extract by global CLIP index, v2.75).
+- **独立渲染后静默等待**：单独渲染完成只保留 latent 缓存 + 卡片预览，不自动合并、不输出任何文件；点「合并输出」或续跑才会出片（v2.76）。/ After a solo render only the latent cache + card preview are kept — no auto-merge, no output files; merge or continue explicitly (v2.76).
+- **节点底板跟随 CLIP 数量**：默认打开 4 卡视口 + 4 卡底板；「展开CLIP」全部显示、底板全高；收起态不会闪回 1 卡（v2.98-v2.105）。/ The node backdrop tracks CLIP count: default 4-card viewport + 4-card backdrop; "Expand CLIP" shows all with a full-height backdrop; collapsed state never flashes back to 1 card (v2.98-v2.105).
+
+---
 ## 注意事项 / Notes & FAQ
 
 - **FastH3 蒸馏模型必须 `euler` + `simple` + 4 步**，其他配置画质严重下降。/ FastH3 distilled models REQUIRE euler + simple + 4 steps.

@@ -5,6 +5,28 @@ All notable changes, bilingual. 所有重要版本双语说明。
 ---
 
 
+### v2.72 → v2.105 / v14.77 (2026-09-28) — 崩溃修复 + 独立渲染正确性 + 前端底板全高 / Crash Fixes + Per-Clip Render Correctness + Full-Height Backdrop
+
+**核心：崩溃后断点续跑不丢链；独立渲染"渲谁是谁"且渲染完静默等待；节点黑色底板跟随 CLIP 数量（默认 4 卡、展开全高）。**
+**Core: resume after crash without losing the chain; per-clip render outputs exactly the chosen clip and waits silently after finishing; the node's dark backdrop tracks the CLIP count (default 4 cards, full height when expanded).**
+
+---
+
+#### 🔧 后端 / Backend
+
+- **hostbuf 崩溃修复（v2.72-v2.74）**：TE 权重重载路径 `hostbuf_file_reader_read failed` 崩溃修复，长链续跑不再闪退。/ Crash fix for the `hostbuf_file_reader_read failed` TE reload path — long-chain resume no longer crashes.
+- **独渲"渲谁是谁"（v2.75）**：单独渲染 CLIP29 曾输出 CLIP1 内容（preview/MP4 按局部链索引取段）。现在 async encode 队列携带三元组（done_event、链内索引、全局 CLIP 索引），preview/MP4 提取/命名全部按全局索引——渲谁就是谁。/ Solo-rendering CLIP29 used to output CLIP1 (preview/MP4 indexed by local-chain index). The encode queue now carries (done_event, chain index, global CLIP index) and preview/MP4 extraction/naming use the global index — you get exactly the clip you chose.
+- **独立渲染后不自动合并（v2.76）**：单独渲染某 CLIP 完成后不再自动合并/输出全部 clip，只保留 latent 缓存 + 卡片预览，静默等待用户下一步指令（合并输出 / 续跑 / 渲别的 clip）。/ After a solo render the node no longer auto-merges or outputs everything — it keeps the latent cache + card preview and silently waits for your next command (merge / continue / another clip).
+- **收尾元组解包崩溃（v14.77）**：修复 `_pending_enc` 三元组在收尾遍历处的二元解包 `too many values to unpack`——渲染成果不受影响（缓存/预览先于崩溃已提交）。/ Fixed the binary unpack of the 3-tuple `_pending_enc` at the tail loop (`too many values to unpack`) — rendered results are unaffected (cache/preview commit before the crash point).
+
+#### 🎨 前端 / Frontend
+
+- **节点黑色底板跟随 CLIP 数量**：默认打开 = 4 卡视口 + 4 卡底板；点「展开CLIP」= 全部 CLIP 显示、底板撑到全高；收起态任何代码路径都无法把底板缩到 <4 卡（防止旧 nodeHeight/布局抖动闪回 1 卡）。/ The node backdrop tracks the CLIP count: default open = 4-card viewport with a 4-card backdrop; "Expand CLIP" shows every CLIP with a full-height backdrop; in collapsed mode no code path can shrink the backdrop below 4 cards (no more 1-card flashback from stale nodeHeight/layout jitter).
+- **拖拽画布不闪回**：移动画布/重布局瞬间节点不再闪回 1 卡再弹回。 / Dragging the canvas no longer flashes the node back to 1 card before recovering.
+- **展开态内容不溢出底板**：展开时 root/cards 恢复 auto 高度，31 卡内容全高撑起节点，不再溢出到黑色底板之外。 / Expanded state: root/cards revert to auto height so the full card stack fills the backdrop instead of overflowing it.
+
+---
+
 ### v2.67 (2026-09-25) — 前端画布卡顿修复 / Frontend Canvas Lag Fix
 
 **核心：打开工作流后画布逐渐卡死、一卡一卡的问题彻底修复。**

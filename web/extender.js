@@ -85,13 +85,30 @@ window.H3_FILM_TEMPLATES = {
 (function() {
     if (!window.structuredClone) return;
     const original = window.structuredClone;
+    // v2.77 (2026-09-27): 失败告警节流 — 节点上挂着含 DOM 的 runtime,
+    // ComfyUI 频繁克隆时每次都会失败, 原先每条都 console.warn 造成控制台
+    // 999+ 条刷屏, 拖慢前端。现在每分钟最多告警 3 条, fallback 行为不变。
+    let _cloneWarnCount = 0, _cloneWarnWindow = 0;
     window.structuredClone = function(value) {
         try {
             return original.call(window, value);
         } catch (e) {
-            console.warn("[BSAI] structuredClone failed, fallback to JSON:", e.message);
+            const now = Date.now();
+            if (now - _cloneWarnWindow > 60000) { _cloneWarnWindow = now; _cloneWarnCount = 0; }
+            if (_cloneWarnCount < 3) {
+                _cloneWarnCount++;
+                console.warn("[BSAI] structuredClone failed, fallback to JSON:", e.message);
+            }
             try {
-                return JSON.parse(JSON.stringify(value));
+                // v2.79 (2026-09-27): fallback 序列化用 replacer 跳过 __h3* runtime
+                // 字段和 DOM 节点, 大幅减少序列化体积与时间(原先会把含 DOM 的整个
+                // runtime 序列化成大对象, 频繁克隆时拖慢主线程), 并避免循环引用失败。
+                const _h3JsonReplacer = (k, v) => {
+                    if (k.startsWith("__h3")) return undefined;
+                    if (v && typeof v === "object" && typeof v.nodeType === "number") return undefined;
+                    return v;
+                };
+                return JSON.parse(JSON.stringify(value, _h3JsonReplacer));
             } catch (e2) {
                 console.error("[BSAI] JSON fallback also failed:", e2.message);
                 return value;
@@ -141,6 +158,10 @@ const COLLAPSED_MIN_HEIGHT = 160;
 const PREVIEW_PANEL_WIDTH = 130;
 const MAX_AUTO_NODE_HEIGHT = 8000;  // v2.03 (2026-09-19): 从 2000 提升到 8000, 解决 CLIP>12 个时节点高度被截断只剩 4 个卡片的问题. CLIP 列表容器已有 overflow-y:auto, 超出部分可内部滚动.
 const MAX_CARDS_VISIBLE_HEIGHT = 3 * (CARD_MIN_HEIGHT + 9) + CARD_SCROLLBAR_SPACE;
+// v2.101: 默认收起视口高度 = 4 张 CLIP 卡片(卡片实际撑高 ~457px,
+// 5 卡基准(355+9)=1820 ≈ 4 卡实际高 1828)。用户确认: 默认显示 4 个 clip,
+// 底板跟 4 卡; 不再用 1 卡(415px) 视口。
+const DEFAULT_COLLAPSED_VIEW_H = 5 * (CARD_MIN_HEIGHT + 9);
 // v2.21 (2026-09-20 fix): 节点高度逻辑:
 //   没输入外部提示词: 默认只显示 CLIP1 (最小值 = 1 个 CLIP)
 //   输入外部提示词后: autoGrowNodeToFitAllClips 自动撑大到显示全部 CLIP
@@ -177,6 +198,8 @@ function calculateMinHeight(runtime) {
 function autoGrowNodeToFitAllClips(node, runtime) {
     try {
         if (!runtime?.state?.clips) return;
+        // v2.84: 收起状态下不自动撑大(只显示 CLIP1 视口, 滚动条查看全部)
+        if (runtime._h3CollapsedAll) return;
         // v2.29 (2026-09-20 fix): 不测量 DOM (cards.scrollHeight 会形成循环:
         // 节点高度大 → cards 高度被强制撑大 → 测到很大值 → 节点撑得更大).
         // 直接根据 CLIP 数量计算高度:
@@ -202,7 +225,10 @@ function autoGrowNodeToFitAllClips(node, runtime) {
                 }
                 // 根据每个 CLIP 的实际 card_height 计算总高度
                 let totalCardH = 0;
-                for (let i = 0; i < clips.length; i++) {
+                // v2.83: 只按已渲染的 CLIP 数计算高度(收起=1, 展开=全部),
+                // 避免收起状态下 autoGrow 又把节点撑到全部 CLIP 高度。
+                const _growN = Math.min(clips.length, Number(runtime._renderedClips) || clips.length);
+                for (let i = 0; i < _growN; i++) {
                     const clip = clips[i];
                     if (clip.collapsed) {
                         totalCardH += COLLAPSED_CLIP_HEIGHT;
@@ -213,13 +239,30 @@ function autoGrowNodeToFitAllClips(node, runtime) {
                     }
                 }
                 const y = Number(runtime.domWidget && runtime.domWidget.last_y) || 0;
+                // v2.98c: 展开时用 DOM 实测内容高(卡片 textbox 实际撑高 ~457px/张)
+                // 放大估算值 - 只按 355px/张估算会把 node 撑得比实际内容矮,
+                // 31 卡内容溢出到底板外(v2.29 注释的循环场景是卡片被 flex 拉伸;
+                // 本实现卡片 flex 0 0 auto 高度独立于容器, scrollHeight 稳定不循环)。
+                if (!runtime._h3CollapsedAll && runtime.cards && runtime.cards.scrollHeight > 0) {
+                    totalCardH = Math.max(totalCardH, runtime.cards.scrollHeight);
+                }
                 const needed = y + NON_CARD_FIXED + totalCardH + BASE_PADDING;
                 const target = Math.min(40000, needed);
                 const w = Math.max(NODE_MIN_WIDTH, Number(node.size && node.size[0]) || NODE_MIN_WIDTH);
                 const cur = Number(node.size && node.size[1]) || 0;
                 runtime._userResize = true; // 防止 poisoned-height 守卫把新高度弹回
                 if (Math.abs(target - cur) > 4) {
-                    node.setSize([w, target]);
+                    // v2.98: 直接改 size 数组(不走 setSize) - setSize 触发 getHeight
+                    // 读 runtime.domHeight(旧收起值), 会把展开撑高覆盖回旧高度,
+                    // 导致"底板只有 1 卡高、卡片内容溢出显示"。展开/收起统一用
+                    // 直接写数组 + 同步 domHeight, 与 v2.97 收起固定同策略。
+                    node.size = [w, target];
+                    node.graph?.setDirtyCanvas(true, true);
+                    runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, target - NON_CARD_FIXED);
+                    // v2.98b: 直接写数组不会触发 afterResize/setSize, root/cards
+                    // 不会跟随 node.size 更新(残留收起 700px 视口)。这里手动同步
+                    // DOM 高度, 让展开后 root/cards 跟随撑高, 31 卡全部显示。
+                    syncDomHeight(node, runtime, false);
                 }
                 runtime.state.nodeHeight = target;
                 try { updateHidden(node, runtime); } catch (e) {}
@@ -230,6 +273,24 @@ function autoGrowNodeToFitAllClips(node, runtime) {
             try { applyGrow(); } catch (e) {}
             runtime._growInFlight = false;
         }, 200)));
+        // v2.98: 兜底 - 页面繁忙/节能时 rAF 链可能长时间不触发, _growInFlight
+        // 卡死导致后续 autoGrow 全部 return, 展开撑高永远失败。800ms 后若
+        // 仍未执行则强制同步执行一次并复位在途标记。
+        setTimeout(() => {
+            if (runtime._growInFlight) {
+                try { applyGrow(); } catch (e) {}
+                runtime._growInFlight = false;
+            }
+        }, 800);
+        // v2.98d: 二次校验 - 分片渲染 31 卡需要时间, 首次 applyGrow 时
+        // cards.scrollHeight 可能偏小(部分卡未渲染), 高度按估算算偏矮,
+        // 内容仍溢出底板。600ms 后卡片全渲染, 若仍为展开态用实测内容高重跑。
+        setTimeout(() => {
+            if (runtime._h3CollapsedAll) return;
+            runtime._growInFlight = true;
+            try { applyGrow(); } catch (e) {}
+            runtime._growInFlight = false;
+        }, 600);
     } catch (e) {}
 }
 
@@ -2475,7 +2536,7 @@ async function h3FetchAssets() {
                 // Auto-append asset-library references to the global prompt
                 // when it carries none, so connected assets are actually used.
                 if (autoRefAssetsToGlobal(n.__h3Extender)) {
-                    try { render(n, n.__h3Extender); } catch (e) {}
+                    try { render(n, n.__h3Extender, { chunked: true }); } catch (e) {}
                 }
             }
         });
@@ -3120,42 +3181,11 @@ function syncGlobalPromptFromInput(node, runtime) {
     } catch (e) { /* ignore */ }
 }
 
-function render(node, runtime) {
-    const { state, cards, counter, status } = runtime;
-    renderReferences(node, runtime);
-
-    // Sync global_prompt from connected external input
-    syncGlobalPromptFromInput(node, runtime);
-
-    cards.replaceChildren();
-
-    counter.textContent = `${state.clips.length} clip${state.clips.length > 1 ? "s" : ""} • ${refCount(runtime)} ref${refCount(runtime) === 1 ? "" : "s"}`;
-    status.textContent = runtime.statusText || "Ready";
-
-    // Update CLIPS total duration label at the bottom
-    if (runtime.clipsTotalLabel) {
-        const totalDur = state.clips.reduce((sum, c) => sum + (Number(c.duration) || 0), 0);
-        const n = state.clips.length;
-        runtime.clipsTotalLabel.textContent = `CLIPS | 总时长 ${totalDur}s (${n} clip${n > 1 ? "s" : ""})`;
-    }
-
-    // Highlight merge output button when a merge is pending
-    if (runtime.mergeOutputBtn) {
-        const pendingMerge = String(runtime.statusText || "").includes("pending merge");
-        if (pendingMerge) {
-            runtime.mergeOutputBtn.style.background = "#4a8a4a";
-            runtime.mergeOutputBtn.style.borderColor = "#5a9a5a";
-            runtime.mergeOutputBtn.style.boxShadow = "0 0 8px rgba(80,200,80,.4)";
-            runtime.mergeOutputBtn.textContent = "⚡ 合并输出 / Merge Output";
-        } else {
-            runtime.mergeOutputBtn.style.background = "#2a6a3a";
-            runtime.mergeOutputBtn.style.borderColor = "#3a7a4a";
-            runtime.mergeOutputBtn.style.boxShadow = "none";
-            runtime.mergeOutputBtn.textContent = "合并输出 / Merge Output";
-        }
-    }
-
-    state.clips.forEach((clip, index) => {
+// v2.82 (2026-09-27): 卡片构建提取为独立函数, 支持增量懒加载。
+// 打开工作流只渲染前 6 张(renderMoreClips 增量追加), 彻底避免大工作流
+// 一次性构建数千节点导致页面无响应; 内容完整可见(不再默认折叠)。
+function buildClipCard(node, runtime, clip, index) {
+    try {
         const card = document.createElement("div");
         card.className = "h3-extender-card";
         card.dataset.clipIndex = String(index);
@@ -3403,8 +3433,8 @@ function render(node, runtime) {
         // 大幅减少 DOM 节点数量, 拖动画布更流畅.
         if (clip.collapsed) {
             card.appendChild(cardBody);
-            cards.appendChild(card);
-            return; // 跳过后面所有内容创建
+            runtime.cards.appendChild(card);
+            return card; // v2.82: 折叠分支直接返回(只渲染头部)
         }
 
         // Left panel: referenced assets (v2.40: 加 tab 切换: 资产 / 模板)
@@ -4167,7 +4197,7 @@ function render(node, runtime) {
             }
             // A valid chain is necessarily a continuous validated prefix.
             let open = false;
-            for (const c of state.clips) {
+            for (const c of runtime.state.clips) {
                 if (open) c.validated = false;
                 else if (!c.validated) open = true;
             }
@@ -4239,8 +4269,180 @@ function render(node, runtime) {
                 card.style.height = "";
             }
         }
-        cards.appendChild(card);
-    });
+        runtime.cards.appendChild(card);
+        return card;
+    } catch (e) {
+        console.error("[H3] card render skipped (v2.82):", index, e);
+        return null;
+    }
+
+// v2.82 (2026-09-27): 增量懒加载 - 只构建新卡片, 不重建已渲染的。
+// 每次最多追加 count 张, 主线程每次只做少量 DOM 构建, 不会出现
+// 一次性构建数千节点导致页面无响应的长任务。
+function renderMoreClips(node, runtime, count) {
+    const clips = runtime.state?.clips;
+    if (!clips || !runtime.cards) return;
+    const start = Number(runtime._renderedClips) || 0;
+    if (start >= clips.length) return;
+    const end = Math.min(clips.length, start + Math.max(1, Number(count) || 6));
+    for (let i = start; i < end; i++) {
+        try { buildClipCard(node, runtime, clips[i], i); } catch (e) {
+            console.error("[H3] card render skipped (v2.82):", i, e);
+        }
+    }
+    runtime._renderedClips = end;
+    try {
+        // v2.88: 收起状态下保持固定高度(滚动条查看全部), 不按已构建卡片数
+        // setSize(否则每次追加都会把节点高度顶起来, 破坏收起视口)。
+        if (runtime._h3CollapsedAll) {
+            syncDomHeight(node, runtime, true);
+            return;
+        }
+        const w = Math.max(NODE_MIN_WIDTH, Number(node.size?.[0] || NODE_MIN_WIDTH));
+        let h = NON_CARD_FIXED;
+        for (let i = 0; i < end; i++) {
+            const c = clips[i];
+            h += c.collapsed ? COLLAPSED_CLIP_HEIGHT
+                : (c.card_height > 0 ? Math.max(CARD_MIN_HEIGHT, c.card_height) : CARD_MIN_HEIGHT + CARD_SCROLLBAR_SPACE);
+        }
+        h += BASE_PADDING;
+        if (Math.abs(Number(node.size?.[1] || 0) - h) > 4) node.setSize([w, h]);
+        runtime.state.nodeHeight = h;
+        syncDomHeight(node, runtime, true);
+    } catch (e) {}
+}
+
+}
+
+// v2.90: 内容指纹 - 工作流加载/连接建立/轮询会产生大量"状态未变"的
+// render 调用; 每次 replaceChildren 清空重建都会反复打断分片渲染链,
+// 导致 DOM 永远停在 6 张。状态未变时跳过重建(只更新状态栏/高度)。
+function buildRenderFingerprint(runtime, state) {
+    let fp = (runtime._h3CollapsedAll ? "c" : "e") + "|" + (runtime.activePhase || "idle") + "|" + (runtime.activeClipIndex ?? -1);
+    const c = state?.clips || [];
+    fp += "|n" + c.length;
+    for (let i = 0; i < c.length; i++) {
+        const cl = c[i] || {};
+        fp += "|" + i + ":" + (cl.collapsed ? 1 : 0) + ":" + (cl.prompt ? cl.prompt.length : 0)
+            + ":" + (cl.card_height || 0) + ":" + (cl._previewVideoUrl ? 1 : 0)
+            + ":" + (cl._latentStep || 0) + ":" + (cl._renderComplete ? 1 : 0);
+    }
+    return fp;
+}
+
+function render(node, runtime, opts) {
+    const { state, cards, counter, status } = runtime;
+    renderReferences(node, runtime);
+
+    // Sync global_prompt from connected external input
+    syncGlobalPromptFromInput(node, runtime);
+
+    // v2.90: 指纹去重 - 状态未变的重复 render 直接跳过, 不打断分片链。
+    const _fp = buildRenderFingerprint(runtime, state);
+    if (runtime._renderFingerprint === _fp) {
+        try {
+            status.textContent = runtime.statusText || "Ready";
+            if (runtime.clipsTotalLabel) {
+                const _td = state.clips.reduce((s2, c2) => s2 + (Number(c2.duration) || 0), 0);
+                runtime.clipsTotalLabel.textContent = `CLIPS | 总时长 ${_td}s (${state.clips.length} clip${state.clips.length > 1 ? "s" : ""})`;
+            }
+            syncDomHeight(node, runtime, true);
+        } catch (e) {}
+        return;
+    }
+    runtime._renderFingerprint = _fp;
+
+    cards.replaceChildren();
+
+    counter.textContent = `${state.clips.length} clip${state.clips.length > 1 ? "s" : ""} • ${refCount(runtime)} ref${refCount(runtime) === 1 ? "" : "s"}`;
+    status.textContent = runtime.statusText || "Ready";
+
+    // Update CLIPS total duration label at the bottom
+    if (runtime.clipsTotalLabel) {
+        const totalDur = state.clips.reduce((sum, c) => sum + (Number(c.duration) || 0), 0);
+        const n = state.clips.length;
+        runtime.clipsTotalLabel.textContent = `CLIPS | 总时长 ${totalDur}s (${n} clip${n > 1 ? "s" : ""})`;
+    }
+
+    // Highlight merge output button when a merge is pending
+    if (runtime.mergeOutputBtn) {
+        const pendingMerge = String(runtime.statusText || "").includes("pending merge");
+        if (pendingMerge) {
+            runtime.mergeOutputBtn.style.background = "#4a8a4a";
+            runtime.mergeOutputBtn.style.borderColor = "#5a9a5a";
+            runtime.mergeOutputBtn.style.boxShadow = "0 0 8px rgba(80,200,80,.4)";
+            runtime.mergeOutputBtn.textContent = "⚡ 合并输出 / Merge Output";
+        } else {
+            runtime.mergeOutputBtn.style.background = "#2a6a3a";
+            runtime.mergeOutputBtn.style.borderColor = "#3a7a4a";
+            runtime.mergeOutputBtn.style.boxShadow = "none";
+            runtime.mergeOutputBtn.textContent = "合并输出 / Merge Output";
+        }
+    }
+
+    // v2.76 (2026-09-27): 分片渲染加固。
+    // 1) runtime._renderSeq 递增: 每次 render 使旧分片链自动停止, 杜绝
+    //    onNodeCreated/onConfigure 两套链并发导致卡片缺失/重复。
+    // 2) 单卡片 try/catch: 某张卡片构建抛错只跳过该卡片, 不中断整批。
+    // 3) finally 保证下一批总是注册: 链不会因异常断掉, 最终必然补全全部卡片。
+    runtime._renderSeq = (runtime._renderSeq || 0) + 1;
+    const _renderSeq = runtime._renderSeq;
+    const _renderChunkSize = 6;
+    let _renderIdx = 0;
+    // v2.88: limit 明确时按 limit; 无 limit 时全量。runtime._renderedClips
+    // 始终表示"实际已构建卡片数"(每批构建后更新), 不再预设为目标数 -
+    // 否则 DOM 只构建 6 张后 renderMoreClips/兜底会因 start>=len 永久失效。
+    const _renderTotal = Math.min(state.clips.length, Number(opts?.limit) > 0 ? opts.limit : state.clips.length);
+    runtime._renderedClips = 0;
+    // v2.89: 防抖最终补全 - 每次 render 重置; 2 秒无新 render 后一次性补全
+    // 剩余卡片。无论被多少异步 render 反复打断(预览/资产/事件), 最终 DOM
+    // 都会完整 31 张, 滚动条可查看全部。
+    if (runtime._renderFinalTimer) clearTimeout(runtime._renderFinalTimer);
+    runtime._renderFinalTimer = setTimeout(() => {
+        try {
+            const _cur = runtime._renderedClips || 0;
+            const _allF = state.clips.length;
+            if (_cur < _allF) renderMoreClips(node, runtime, _allF - _cur);
+        } catch (e) {}
+    }, 2000);
+
+        const _buildChunk = () => {
+            if (runtime._renderSeq !== _renderSeq) return;
+            const _end = Math.min(_renderIdx + _renderChunkSize, _renderTotal);
+            try {
+                for (; _renderIdx < _end; _renderIdx++) {
+                    try {
+                        buildClipCard(node, runtime, state.clips[_renderIdx], _renderIdx);
+                    } catch (e) {
+                        console.error("[H3] card render skipped (v2.82):", _renderIdx, e);
+                    }
+                }
+                // v2.88: 每批构建后同步实际已构建数(renderMoreClips/兜底据此判断)
+                runtime._renderedClips = _renderIdx;
+        } finally {
+            // v2.91: 统一分片推进 - 去掉 opts?.chunked 条件。此前无 opts 的
+            // render(连接建立/轮询等占绝大多数)只构建第一批 6 张就停止,
+            // 这是"DOM 永远停在 6 张"的直接原因。现在任何 render 都会
+            // rAF+setTimeout 双保险分片推进, 最终必然补全全部卡片。
+            if (_renderIdx < _renderTotal && runtime._renderSeq === _renderSeq) {
+                // v2.78 (2026-09-27): rAF + setTimeout 双保险。
+                // rAF 在页面节能/被判定无响应期间可能长时间不触发, 导致链条停在
+                // 前 6 张卡片。setTimeout 400ms 兜底: 若 rAF 未推进则强制继续,
+                // 保证全部卡片最终必然补全(每批最多延迟 400ms, 31 张约 2.4s)。
+                requestAnimationFrame(_buildChunk);
+                if (!runtime._renderTimeoutArmed) {
+                    runtime._renderTimeoutArmed = true;
+                    setTimeout(() => {
+                        runtime._renderTimeoutArmed = false;
+                        if (runtime._renderSeq === _renderSeq && _renderIdx < _renderTotal) {
+                            try { _buildChunk(); } catch (e) {}
+                        }
+                    }, 400);
+                }
+            }
+        }
+    };
+    _buildChunk();
 
     requestAnimationFrame(() => syncDomHeight(node, runtime, false));
     requestAnimationFrame(() => positionClipPorts(node, runtime));
@@ -4724,7 +4926,28 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         // Horizontal clipping/scrolling is still owned by `cards`.
         runtime.root.style.overflow = "visible";
 
-        runtime.cards.style.height = "auto";
+        // v2.87: 收起状态(_h3CollapsedAll)下 root 固定高度 + overflow hidden,
+        // cards 固定高度 + 纵向滚动条(用户可滚动查看全部; 手动拉长节点视口跟随);
+        // 展开时恢复 auto 高度(全部显示)。仅设 cards 高度不够 - nodes2 下
+        // root 若保持 height:auto, 31 张卡片会把节点撑到 13284px, 收起失效。
+        if (runtime._h3CollapsedAll) {
+            // v2.88: 收起时 root/cards 固定为 CLIP1 视口(不跟随 nodeH)。
+            // 若按 nodeH 跟随, getHeight 读 root 内容高 -> nodeH -> cards 高
+            // 会形成正反馈把节点撑回全高(13284px), 收起失效。
+            // v2.94: 仅用户拖拽时跟随
+            const _vh = runtime._userResize
+                ? Math.max(COLLAPSED_MIN_HEIGHT, bodyMinH - NON_CARD_FIXED, Number(node.size?.[1] || 0) - NON_CARD_FIXED)
+                : Math.max(COLLAPSED_MIN_HEIGHT, bodyMinH - NON_CARD_FIXED);
+            runtime.root.style.height = `${(_vh + NON_CARD_FIXED)}px`;
+            runtime.root.style.overflow = "hidden";
+            runtime.cards.style.height = `${_vh}px`;
+            runtime.cards.style.overflowY = "auto";
+        } else {
+            runtime.root.style.height = "auto";
+            runtime.root.style.overflow = "visible";
+            runtime.cards.style.height = "auto";
+            runtime.cards.style.overflowY = "visible";
+        }
         runtime.cards.style.flex = "1 1 auto";
         runtime.cards.style.minHeight = `${Math.max(COLLAPSED_MIN_HEIGHT, bodyMinH - NON_CARD_FIXED)}px`;
         runtime.cards.style.maxHeight = "none";
@@ -4732,6 +4955,10 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
     }
 
     const curLegacyH = Number(node.size?.[1] || 0);
+    // v2.98e: legacyMinH 提前计算 - y<=0 兜底也要用收起目标值(而不是残留的
+    // 旧 domHeight), 否则展开/收起切换瞬间 last_y 为 0 时, 兜底会用上次展开
+    // 残留的大 domHeight(如 1829)恢复出 2114px 大底板, 卡片溢出到底板外。
+    const legacyMinH = calculateMinHeight(runtime);
     const yRaw = Number(runtime.domWidget.last_y);
     // A last_y far beyond the current node height is a poisoned layout value
     // (runaway feedback). Treat it as absent so minNodeH is computed from the
@@ -4742,6 +4969,14 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
     if (!Number.isFinite(y) || y <= 0) {
         if (retry < 12) {
             requestAnimationFrame(() => syncDomHeight(node, runtime, forceMin, retry + 1));
+        } else if (runtime._h3CollapsedAll) {
+            // v2.100: last_y 抖动(移动画布/重布局瞬间为 0)时保持当前布局, 不强制
+            // 重置高度 - 否则画布一动卡片视口闪回 1 卡再弹回(用户可见断裂)。
+            // 只确保 overflow 正确; 高度由 last_y 恢复后的正常路径计算收敛。
+            try {
+                if (runtime.root) runtime.root.style.overflow = "hidden";
+                if (runtime.cards) runtime.cards.style.overflowY = "auto";
+            } catch (e) {}
         }
         return;
     }
@@ -4749,7 +4984,6 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
     // Remove Nodes 2.0-only intrinsic sizing when returning to Legacy.
     runtime.root.style.paddingTop = "5px";
     runtime.root.style.minHeight = "0";
-    const legacyMinH = calculateMinHeight(runtime);
     runtime.root.style.setProperty("--comfy-widget-min-height", `${legacyMinH}px`);
     runtime.root.style.maxHeight = "none";
     runtime.root.style.flex = "0 0 auto";
@@ -4760,6 +4994,40 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         let w = Math.max(NODE_MIN_WIDTH, Number(node.size?.[0] || NODE_MIN_WIDTH));
         let h = Number(node.size?.[1] || 0);
         const minNodeH = y + legacyMinH + BOTTOM_PAD;
+
+        // v2.92: 收起固定(legacy 分支) - 实测本环境 domWidgetRenderMode 判定为
+        // legacy(nodes2 分支的收起逻辑不执行, root 高度跟随节点被撑到 9401)。
+        // 收起时 root/cards 固定为 CLIP1 视口 + 纵向滚动条(滚动查看全部 31 张)。
+        if (runtime._h3CollapsedAll) {
+            // v2.94: 默认固定 CLIP1 视口(legacyMinH-285); 仅用户手动拖拽(_userResize,
+            // afterResize 钩子置位)时跟随 node.size - 拉多少显示多少。
+            // 初始 setSize 必须固定, 否则 setSize->getHeight 正反馈把节点撑回全高。
+            // v2.101: 默认(非拖拽)视口 = 4 卡(DEFAULT_COLLAPSED_VIEW_H);
+            // 拖拽跟随 size(拉多少显示多少, 可小于 4 卡)
+            const _vh2 = runtime._userResize
+                ? Math.max(COLLAPSED_MIN_HEIGHT, Number(node.size?.[1] || 0) - NON_CARD_FIXED)
+                : Math.max(COLLAPSED_MIN_HEIGHT, DEFAULT_COLLAPSED_VIEW_H);
+            runtime.root.style.height = `${(_vh2 + NON_CARD_FIXED)}px`;
+            runtime.root.style.overflow = "hidden";
+            runtime.cards.style.height = `${_vh2}px`;
+            runtime.cards.style.overflowY = "auto";
+            runtime.cards.style.flex = "1 1 auto";
+            runtime.cards.style.minHeight = "";
+            runtime.cards.style.maxHeight = "none";
+            runtime.domHeight = _vh2;
+            const _w3 = Math.max(NODE_MIN_WIDTH, Number(node.size?.[0] || NODE_MIN_WIDTH));
+            const _targetH3 = _vh2 + NON_CARD_FIXED;
+            // v2.97: 直接改 size 数组防 getHeight 覆盖
+            if (Math.abs(Number(node.size?.[1] || 0) - _targetH3) > 4) {
+                node.size = [_w3, _targetH3];
+                node.graph?.setDirtyCanvas(true, true);
+            }
+            runtime.state.nodeHeight = _targetH3;
+            runtime.lastRenderMode = "legacy";
+            node.graph?.setDirtyCanvas(true, true);
+            return;
+        }
+
         const returningFromNodes2 = runtime.lastRenderMode === "nodes2";
 
         if (returningFromNodes2) {
@@ -4804,12 +5072,26 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
 
         const actualH = Number(node.size?.[1] || h);
         const available = Math.max(legacyMinH, actualH - y - BOTTOM_PAD);
-        runtime.root.style.height = `${available}px`;
-        const cardsMin = Math.max(COLLAPSED_MIN_HEIGHT, legacyMinH - NON_CARD_FIXED);
-        runtime.cards.style.height = `${Math.max(cardsMin, available - NON_CARD_FIXED)}px`;
+        // v2.105: 展开态 root/cards 恢复 auto - 内容全高撑起节点, 黑色底板
+        // 跟随全部 CLIP; 之前固定为 node.size-285 视口导致 31 卡内容溢出
+        // 到底板外(用户看到"底板只显示一部分").
+        runtime.root.style.height = "auto";
+        runtime.cards.style.height = "auto";
         runtime.cards.style.flex = "1 1 auto";
         runtime.cards.style.minHeight = "";
         runtime.cards.style.maxHeight = "none";
+        // 展开态 domHeight 以真实内容全高为准, 并主动把 node.size 撑到全高
+        const _rootFullH = runtime.root ? Number(runtime.root.scrollHeight) || 0 : 0;
+        runtime.domHeight = Math.max(available, _rootFullH > 0 ? _rootFullH - NON_CARD_FIXED : 0);
+        const _fullNodeH = runtime.domHeight + NON_CARD_FIXED;
+        if (Math.abs(Number(node.size?.[1] || 0) - _fullNodeH) > 4) {
+            node.size = [w, _fullNodeH];
+            node.graph?.setDirtyCanvas(true, true);
+        }
+        // v2.98: 展开(非收起)路径明确 overflowY 可见 - 不清空会残留收起时的
+        // auto, 展开后仍有滚动条; root 也明确 visible(内容跟随 node.size 全显示)。
+        runtime.cards.style.overflowY = "visible";
+        runtime.root.style.overflow = "visible";
         runtime.domHeight = available;
         if (runtime._userResize || !obviouslyPoisonedHeight(actualH, minNodeH)) {
             runtime.legacyNodeHeight = actualH;
@@ -5134,28 +5416,49 @@ pauseBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 resumeBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("resume"); });
 stopAfterBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("stop_after"); });
 abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderControl("abort"); });
-	// v2.59: 收起CLIP按钮，点一下收起到只显示6个CLIP高度，其他用滚动条观看
+	// v2.83 (2026-09-27): 收起/展开CLIP按钮 - 收起时只渲染/显示 CLIP1,
+	// 展开时渲染全部 CLIP(增量分片), 不再只是缩放高度。
+	// 默认收起(打开工作流只展示 CLIP1), 与 onConfigure 的初始 limit:1 一致。
 	const collapseAllBtn = document.createElement("button");
-	collapseAllBtn.textContent = "📦 收起CLIP";
-	collapseAllBtn.title = "点一下收起到只显示6个CLIP高度，其他CLIP用滚动条观看。再点一下展开全部。";
+	collapseAllBtn.textContent = "📂 展开CLIP";
+	collapseAllBtn.title = "当前收起(只显示 CLIP1)。点击展开全部 CLIP; 再点收起回到只显示 CLIP1。";
 	collapseAllBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a5a3a;border:1px solid #3a7a4a;border-radius:4px;color:#dfd;cursor:pointer;font-weight:bold;";
-	let clipsCollapsed = false;
-	let savedNodeHeight = 0;
+	let clipsCollapsed = true; // v2.84: 默认收起
 	collapseAllBtn.addEventListener("click", (e) => {
 		e.preventDefault();
 		clipsCollapsed = !clipsCollapsed;
 		const w = Math.max(NODE_MIN_WIDTH, Number(node.size && node.size[0]) || NODE_MIN_WIDTH);
 		if (clipsCollapsed) {
-			// 收起：保存当前高度，然后设置成只显示6个CLIP的高度
-			savedNodeHeight = Number(node.size && node.size[1]) || 0;
-			// 6个CLIP的高度：每个CLIP大概200px，加上头部和全局提示词大概300px，总共大概1500px
-			const targetH = 300 + 6 * 200;
-			node.setSize([w, targetH]);
+			// 收起: 只显示 CLIP1 高度的视口, cards 纵向滚动条可滚动查看全部
 			collapseAllBtn.textContent = "📂 展开CLIP";
+			runtime._h3CollapsedAll = true;
+			try {
+				// v2.101: 收起 = 回到默认 4 卡视口
+				const _minH = NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING;
+				runtime.root.style.height = `${_minH}px`;
+				runtime.root.style.overflow = "hidden";
+				runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _minH - NON_CARD_FIXED)}px`;
+				runtime.cards.style.overflowY = "auto";
+				runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _minH - NON_CARD_FIXED);
+				// v2.97: 直接改 size 数组防 getHeight 覆盖
+				if (Math.abs(Number(node.size?.[1] || 0) - _minH) > 4) {
+					node.size = [w, _minH];
+					node.graph?.setDirtyCanvas(true, true);
+				}
+				runtime.state.nodeHeight = _minH;
+				syncDomHeight(node, runtime, true);
+			} catch (e2) {}
 		} else {
-			// 展开：恢复原来的高度
-			node.setSize([w, savedNodeHeight]);
+			// 展开: 一次性同步渲染全部 CLIP(保证点击必看到全部), 撑高到全量高度
 			collapseAllBtn.textContent = "📦 收起CLIP";
+			runtime._h3CollapsedAll = false;
+			try {
+				const _all = Number(runtime.state?.clips?.length) || 0;
+				if ((Number(runtime._renderedClips) || 0) < _all) {
+					render(node, runtime, { chunked: false, limit: _all });
+				}
+				setTimeout(() => { try { autoGrowNodeToFitAllClips(node, runtime); } catch (e2) {} }, 150);
+			} catch (err) {}
 		}
 	});
 
@@ -5949,6 +6252,19 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         getHeight: () => runtime.domHeight,
         afterResize: (resizedNode) => {
             runtime._userResize = true; // 用户拖边框: 尊重新高度
+            // v2.105: 收起态下节点高度不得小于默认 4 卡视口 - 程序 setSize
+            // 也会触发 afterResize, 防止任意路径(旧 nodeHeight/布局抖动)把
+            // 底板缩小到 1 卡; 用户拖大(>4卡)不受影响, 展开态不受影响。
+            if (runtime._h3CollapsedAll) {
+                const _minH4b = NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING;
+                if (Number(resizedNode.size?.[1] || 0) < _minH4b - 4) {
+                    resizedNode.size = [
+                        Math.max(NODE_MIN_WIDTH, Number(resizedNode.size?.[0] || NODE_MIN_WIDTH)),
+                        _minH4b,
+                    ];
+                    resizedNode.graph?.setDirtyCanvas(true, true);
+                }
+            }
             const mode = domWidgetRenderMode(root);
             if (mode === "nodes2") {
                 // Re-assert only intrinsic CSS. Never derive anything from
@@ -5966,9 +6282,11 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 cards.style.minHeight = `${Math.max(COLLAPSED_MIN_HEIGHT, dynH - TOOLBAR_HEIGHT)}px`;
                 runtime.lastRenderMode = "nodes2";
             } else if (mode === "legacy") {
-                requestAnimationFrame(() => syncDomHeight(resizedNode, runtime, false));
+                // v2.95: 同步执行 - rAF 延迟会被后续 getHeight 触发的固定逻辑覆盖,
+                // 导致用户拖拽跟随(_userResize)失效、节点弹回收起高度。
+                syncDomHeight(resizedNode, runtime, false);
             } else {
-                requestAnimationFrame(() => syncDomHeight(resizedNode, runtime, false));
+                syncDomHeight(resizedNode, runtime, false);
             }
         },
     });
@@ -6011,14 +6329,15 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
     installInvalidationHooks(node, runtime);
     wrapResolutionWidgetCallbacks(node, runtime);
-    render(node, runtime);
+    // v2.76: onNodeCreated 不再初始 render — onConfigure 是唯一初始渲染。
+    // 避免两套分片链并发(旧链被 replaceChildren 清空后仍在追加, 卡片缺失/重复)。
 
     const oldConfigure = node.onConfigure;
     node.onConfigure = function (info) {
         if (oldConfigure) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name
-        this.title = "BSAI ComfyUI H3 Film Factory";
+        this.title = "BSAI ComfyUI H3 Film Factory v2.105";
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -6058,7 +6377,31 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             setWidgetValue(this, "filename_prefix", "H3_Extender");
         }
 
+        // v2.105: 收起固定同步执行(不依赖 rAF) - 后台 tab /
+        // rAF 被页面占用时也能保证打开即默认 4 卡视口(底板跟 4 卡)。
+        // rAF 内的收起固定保留为二次兜底(覆盖 size 恢复)。
+        try {
+            runtime._h3CollapsedAll = true;
+            const _minH0 = NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING;
+            runtime.root.style.height = `${_minH0}px`;
+            runtime.root.style.overflow = "hidden";
+            runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _minH0 - NON_CARD_FIXED)}px`;
+            runtime.cards.style.overflowY = "auto";
+            runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _minH0 - NON_CARD_FIXED);
+            const _w0 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
+            if (Math.abs(Number(this.size?.[1] || 0) - _minH0) > 4) {
+                this.size = [_w0, _minH0];
+                this.graph?.setDirtyCanvas(true, true);
+            }
+            runtime.state.nodeHeight = _minH0;
+        } catch (e) {}
+
         requestAnimationFrame(() => {
+            // v2.102: 收起标记最先设置 - 原顺序在后面, 但
+            // removeLegacyRefs/rememberManualResolution 等初始化抛异常会中断
+            // 回调, 导致收起初始化不执行, 打开就是非收起态
+            // (卡片溢出、底板 1 卡)。
+            runtime._h3CollapsedAll = true;
             const removedLegacyRefs = removeLegacyImageRefInputs(this);
             runtime.state = parseState(runtime.jsonWidget.value);
             runtime.refsState = parseRefsState(runtime.refsWidget.value);
@@ -6101,18 +6444,57 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                     syncDomHeight(this, runtime, true);
                 }
             } catch (e) {}
-            if (removedLegacyRefs && refCount(runtime) === 0) {
-                runtime.statusText = "Legacy image-ref sockets removed — load references in the Extender";
-            }
-            if (String(getWidget(this, "resolution_mode")?.value || "manual") === "manual") {
-                rememberManualResolution(
-                    this,
-                    runtime,
-                    Number(getWidget(this, "width")?.value || runtime.manualWidth || 896),
-                    Number(getWidget(this, "height")?.value || runtime.manualHeight || 576),
-                );
-            }
-            render(this, runtime);
+            try {
+                if (removedLegacyRefs && refCount(runtime) === 0) {
+                    runtime.statusText = "Legacy image-ref sockets removed — load references in the Extender";
+                }
+                if (String(getWidget(this, "resolution_mode")?.value || "manual") === "manual") {
+                    rememberManualResolution(
+                        this,
+                        runtime,
+                        Number(getWidget(this, "width")?.value || runtime.manualWidth || 896),
+                        Number(getWidget(this, "height")?.value || runtime.manualHeight || 576),
+                    );
+                }
+            } catch (e) {}
+            // v2.84 (2026-09-27): 打开工作流默认收起(只显示 CLIP1 高度的视口),
+            // 但全量渲染(分片渐进), cards 容器带纵向滚动条, 用户可滚动查看全部
+            // 卡片; 也可手动拉长节点显示更多。点"展开CLIP"撑到全量高度,
+            // 点"收起CLIP"回到 CLIP1 视口。
+            runtime._h3CollapsedAll = true;
+            try {
+                // v2.101: 默认收起视口 = 4 张 CLIP 卡片。
+                const _minH = NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING;
+                // v2.88: 先固定 root/cards 样式, 再 setSize - 防止 getHeight
+                // 按 root 内容高度(13284)把节点撑回全高, 使收起失效。
+                runtime.root.style.height = `${_minH}px`;
+                runtime.root.style.overflow = "hidden";
+                runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _minH - NON_CARD_FIXED)}px`;
+                runtime.cards.style.overflowY = "auto";
+                // v2.96: setSize 前先同步 domHeight, 否则 ComfyUI getHeight 读到
+                // 旧值(跟随旧节点高度)把 setSize(700) 覆盖回全高(2114/2130)。
+                runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _minH - NON_CARD_FIXED);
+                const _w2 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
+                // v2.97: 直接改 size 数组(不走 setSize) - setSize 触发 getHeight
+                // 读到旧 domHeight 会把节点覆盖回旧高度, 收起固定失效(2130/13484)。
+                if (Math.abs(Number(this.size?.[1] || 0) - _minH) > 4) {
+                    this.size = [_w2, _minH];
+                    this.graph?.setDirtyCanvas(true, true);
+                }
+                runtime.state.nodeHeight = _minH;
+            } catch (e) {}
+            render(this, runtime, { chunked: true, limit: Number(runtime.state?.clips?.length) || 0 });
+            // v2.88: 分片兜底 - 若 rAF/setTimeout 分片被页面占用而停在部分卡片,
+            // 平滑循环补全(每 1.2s 补 6 张, 最多 30s), 保证滚动条可查看全部。
+            const _h3FallbackTimer = setInterval(() => {
+                try {
+                    const _r = runtime._renderedClips || 0;
+                    const _all2 = runtime.state?.clips?.length || 0;
+                    if (_r >= _all2) { clearInterval(_h3FallbackTimer); return; }
+                    renderMoreClips(this, runtime, 6);
+                } catch (e) {}
+            }, 1200);
+            setTimeout(() => { try { clearInterval(_h3FallbackTimer); } catch (e) {} }, 30000);
             // Remove malformed auto-ref residue saved by an older version.
             const sanGp = sanitizeGlobalPrompt(runtime.state.global_prompt || "");
             if (sanGp !== runtime.state.global_prompt) {
@@ -6176,7 +6558,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                             }
                         }
                         updateHidden(this, runtime);
-                        render(this, runtime);
+                        render(this, runtime, { chunked: true }); // v2.75: 分批渲染
                         autoGrowNodeToFitAllClips(this, runtime);
                     } catch(e) { /* source not ready yet */ }
                 }, delay);
@@ -6299,6 +6681,7 @@ app.registerExtension({
 
     setup() {
         console.log("[H3 Extender] v1.22.1-slotglue loaded");
+        console.log("[H3 Extender] v2.105 loaded (sync-collapse + rAF fallback) (collapse-init-first + 4card) (default-4card-view + y0-keep) (y0-keep-layout) (y0 fallback collapse-target) (collapse direct-size + domHeight sync + resize-follow)");
 
         // v2.61: 页面刚刷新进入时, 如果 URL 上带着 bsai_h3_restored=1 或者 localStorage
         // 里记了"刚恢复的 CLIP 数", 就在控制台和后续节点挂载时明确告知用户.
@@ -6376,6 +6759,17 @@ app.registerExtension({
             const prevActiveIndex = runtime.activeClipIndex;
             runtime.activeClipIndex = Number.isFinite(index) ? index : -1;
             runtime.activePhase = String(detail?.phase || "idle");
+            // v2.80: 渲染进行中自动展开当前卡片, 让用户能看到进度预览;
+            // 其他卡片保持折叠, 避免全量重建拖慢前端。
+            if ((runtime.activePhase === "preparing" || runtime.activePhase === "sampling") && index >= 0) {
+                const _act = runtime.state.clips[index];
+                if (_act && _act.collapsed) _act.collapsed = false;
+            }
+            // v2.82: 渲染推进时确保当前卡片已构建(增量懒加载场景下,
+            // 未加载到的卡片按需追加, 保证状态徽章/进度能更新到该卡片)。
+            if (index >= 0 && index >= (Number(runtime._renderedClips) || 0)) {
+                try { renderMoreClips(node, runtime, index + 1); } catch (e) {}
+            }
             runtime.statusText = String(detail?.message || runtime.statusText || "Ready");
             updatePauseBar(runtime);
 
@@ -6576,7 +6970,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.105";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not
@@ -6598,7 +6992,12 @@ app.registerExtension({
                         const savedH = Number(runtime.state?.nodeHeight || 0);
                         if (Number.isFinite(savedH) && savedH > 0) {
                             const minNodeH = calculateMinHeight(runtime) + NON_CARD_FIXED;
-                            const targetH = Math.max(savedH, minNodeH);
+                            let targetH = Math.max(savedH, minNodeH);
+                            // v2.105: 收起态下绝不恢复到 <4 卡视口(旧
+                            // nodeHeight 可能保存了1卡高度, 恢复会导致底板只到 clip1)
+                            if (runtime._h3CollapsedAll) {
+                                targetH = Math.max(targetH, NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING);
+                            }
                             const w = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
                             if (Math.abs(Number(this.size?.[1] || 0) - targetH) > 4) {
                                 this.setSize([w, targetH]);

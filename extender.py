@@ -89,7 +89,7 @@ from .motion_context_disk import (
     _restore_latest_backup,
 )
 
-BUILD = "minimax-h3-extender-v14.74-compact-prompt-bridge"
+BUILD = "minimax-h3-extender-v14.77-pending-enc-tuple-fix"
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -5463,7 +5463,7 @@ class BSAIH3FilmFactory:
         out_audios = []
         _av_decoded = set()
         paused_break = False  # v1.13: 用户暂停/停止后禁止自动合并
-        _pending_enc = []  # v1.70: async encode 队列 [(done_event, clip_index)]
+        _pending_enc = []  # v1.70: async encode 队列 [(done_event, 链内索引, 全局clip索引)]
 
         # v2.68 fix: 异步预览队列消费提前——encode 完成后立即推送预览/落盘，
         # 不再等下一个 CLIP 渲染完。原逻辑只在每个 CLIP 渲染完成的循环体末尾消费一次；
@@ -5471,7 +5471,7 @@ class BSAIH3FilmFactory:
         # CLIP(~30min)，导致 per-clip 预览/MP4 延迟出现、用户以为"没生成"。
         def _flush_pending_enc(_paused_break):
             while _pending_enc and _pending_enc[0][0].is_set():
-                _ev_done, _j = _pending_enc.pop(0)
+                _ev_done, _j, _gidx = _pending_enc.pop(0)
                 if not (not _paused_break and int(output_image_audio)):
                     continue
                 try:
@@ -5484,9 +5484,10 @@ class BSAIH3FilmFactory:
 
                     # 提取该 CLIP 的 MP4 blob 到持久目录(output/bsai_clips)，
                     # 供 BSAI Premiere Pro / 前端直接引用。
-                    _cv_off = first_sel if (single_clip_replace and first_sel is not None and first_sel > 0) else 0
+                    # v2.75: _j 是链索引(全局链=clip 索引; 局部链从 first_sel 起),
+                    # _gidx 是全局 clip 索引(命名/前端定位用)。
                     _clip_video_path = None
-                    _clip_name = clips[_j + _cv_off].get("name", f"CLIP{_j + _cv_off + 1}") if (_j + _cv_off) < len(clips) else f"CLIP{_j + _cv_off + 1}"
+                    _clip_name = clips[_gidx].get("name", f"CLIP{_gidx + 1}") if _gidx < len(clips) else f"CLIP{_gidx + 1}"
                     try:
                         _m = _load_manifest_from_paths(data_path, manifest_path)
                         if _m and _m.get("segments"):
@@ -5495,15 +5496,15 @@ class BSAIH3FilmFactory:
                                 _blob = _segs[_j].get("decoded_mp4_blob")
                                 if _blob is not None:
                                     _temp_dir = _clip_output_dir()
-                                    _out_name = f"h3_clip_{owner}_{_j + _cv_off + 1}_{int(time.time())}.mp4"
+                                    _out_name = f"h3_clip_{owner}_{_gidx + 1}_{int(time.time())}.mp4"
                                     _out_path = _temp_dir / _out_name
                                     _copy_blob_to_file(data_path, _blob, _out_path)
                                     _clip_video_path = str(_out_path)
-                                    print(f"[H3 Extender] per-clip video ready: clip {_j+1} -> {_out_path}")
+                                    print(f"[H3 Extender] per-clip video ready: clip {_gidx + 1} -> {_out_path}")
                     except Exception as _ve:
                         print(f"[H3 Extender] per-clip video extract failed clip={_j}: {_ve}")
 
-                    _send_clip_av_output(owner, _j, len(clips), _cimg, _caud,
+                    _send_clip_av_output(owner, _gidx, len(clips), _cimg, _caud,
                                           video_path=_clip_video_path, clip_name=_clip_name)
                 except Exception as _av_err:
                     print(f"[H3 Extender] per-clip AV output failed clip={_j}: {_av_err}")
@@ -5752,12 +5753,21 @@ class BSAIH3FilmFactory:
                         f"Decoding preview for clip {i + 1}/{len(clips)}",
                     )
                     _ff = _find_ffmpeg()
-                    # v1.73: 重渲染(single_clip_replace)时 disk 链是局部链(segments 从
-                    # first_sel 开始, segments[0]=clip[first_sel]), decode/AV 输出必须用
-                    # 局部索引 i-first_sel, 否则 clip_index 越界导致 preview 解码失败.
-                    _seg_off = first_sel if (single_clip_replace and first_sel is not None and first_sel > 0) else 0
-                    _seg_idx = (i - _seg_off) if i >= _seg_off else i
-                    print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'} seg_idx={_seg_idx} seg_off={_seg_off}")
+                    # v2.75: 链结构自适应 - 前置有缓存时链是全局索引
+                    # (segments[i]=clip[i+1]); 前置无缓存时(v2.66 接续链末尾)
+                    # 链是局部链(segments[0]=clip[first_sel])。按磁盘链实际
+                    # 长度判断, 否则 preview/MP4 会解码到错误段
+                    # (如单独渲染 clip29 却输出 clip1 内容).
+                    _seg_idx = i
+                    if single_clip_replace and first_sel is not None and first_sel > 0:
+                        try:
+                            _seg_m = _load_manifest_from_paths(data_path, manifest_path)
+                            _nseg = len(_seg_m.get("segments", [])) if _seg_m else 0
+                        except Exception:
+                            _nseg = 0
+                        if _nseg <= (i - first_sel + 1) and _nseg < i + 1:
+                            _seg_idx = i - first_sel
+                    print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'} seg_idx={_seg_idx}")
                     _dec_res = _decode_single_clip_preview(
                         owner=owner,
                         clip_index=_seg_idx,
@@ -5768,7 +5778,7 @@ class BSAIH3FilmFactory:
                         async_encode=True,
                     )
                     if isinstance(_dec_res, dict) and _dec_res.get("async"):
-                        _pending_enc.append((_dec_res["done_event"], _seg_idx))
+                        _pending_enc.append((_dec_res["done_event"], _seg_idx, i))
                 except Exception as _pv_err:
                     # Preview decode failure should never abort the main render loop.
                     _preview_error = str(_pv_err)
@@ -5853,6 +5863,7 @@ class BSAIH3FilmFactory:
         # ── v1.12: 重渲染单个/多个 CLIP 后不再自动恢复尾部 + 自动合并 ──
         # 链已由主循环从选中段连续渲染到结束，直接标记完成、正常输出。
         auto_merged = False
+        _was_single_replace = bool(single_clip_replace)
         if single_clip_replace:
             single_clip_replace = False
             # v2.66: 只清 replace_mode 开关，不把未渲染的前置段误标 validated=True。
@@ -5982,10 +5993,12 @@ class BSAIH3FilmFactory:
         # v1.13: 单独选择生成 / 重渲染 / 暂停停止后禁止自动合并输出（merged）。
         # 仅「全量渲染且未干预」才自动合成 merged.mp4；否则只保留 per-clip 片段，
         # 由用户手动点「合并输出」按钮合成。
-        suppress_auto_merge = bool(render_partial or paused_break)
+        # v2.76: 独立渲染(single_clip_replace)完成后也禁止自动合并与一切视频输出,
+        # 仅保留 latent 缓存+预览, 静默等待用户下一步指令(合并输出/续跑).
+        suppress_auto_merge = bool(render_partial or paused_break or _was_single_replace)
         if suppress_auto_merge:
             print("[H3 Extender] 单独生成/暂停：跳过合并与一切视频输出，仅保留 latent 缓存，静默等待新指令（v1.18）")
-        if str(output_mode) != "none" and final_manifest is not None and not single_clip_replace:
+        if str(output_mode) != "none" and final_manifest is not None and not single_clip_replace and not _was_single_replace:
             try:
                 out_dir = Path(folder_paths.get_output_directory()).resolve()
             except Exception:
@@ -6193,9 +6206,9 @@ class BSAIH3FilmFactory:
 
         # Decode any validated (cached, not re-generated) clips so the
         # v1.70: 等待所有 async encode 完成(blob 落盘), final AV 输出才能读全.
-        for _ev_done, _j in _pending_enc:
+        for _enc_entry in _pending_enc:
             try:
-                _ev_done.wait(timeout=600)
+                _enc_entry[0].wait(timeout=600)
             except Exception:
                 pass
         _pending_enc = []
