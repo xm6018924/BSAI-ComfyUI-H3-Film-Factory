@@ -158,10 +158,10 @@ const COLLAPSED_MIN_HEIGHT = 160;
 const PREVIEW_PANEL_WIDTH = 130;
 const MAX_AUTO_NODE_HEIGHT = 8000;  // v2.03 (2026-09-19): 从 2000 提升到 8000, 解决 CLIP>12 个时节点高度被截断只剩 4 个卡片的问题. CLIP 列表容器已有 overflow-y:auto, 超出部分可内部滚动.
 const MAX_CARDS_VISIBLE_HEIGHT = 3 * (CARD_MIN_HEIGHT + 9) + CARD_SCROLLBAR_SPACE;
-// v2.101: 默认收起视口高度 = 4 张 CLIP 卡片(卡片实际撑高 ~457px,
-// 5 卡基准(355+9)=1820 ≈ 4 卡实际高 1828)。用户确认: 默认显示 4 个 clip,
-// 底板跟 4 卡; 不再用 1 卡(415px) 视口。
-const DEFAULT_COLLAPSED_VIEW_H = 5 * (CARD_MIN_HEIGHT + 9);
+// v2.105 (fix): 收起视口 = 1 张 CLIP 卡片(卡片最小高 355 + 滚动条预留 24 = 379)。
+// 删除外部提示词后节点同步收回所有 CLIP、只留 CLIP1 时, 底部栏紧贴这张卡,
+// 不再残留 3~4 卡的空白(原 5 卡基准 1820px 导致"距离只有 1 个 CLIP 还差 3 卡")。
+const DEFAULT_COLLAPSED_VIEW_H = CARD_MIN_HEIGHT + CARD_SCROLLBAR_SPACE;
 // v2.21 (2026-09-20 fix): 节点高度逻辑:
 //   没输入外部提示词: 默认只显示 CLIP1 (最小值 = 1 个 CLIP)
 //   输入外部提示词后: autoGrowNodeToFitAllClips 自动撑大到显示全部 CLIP
@@ -174,8 +174,10 @@ function calculateMinHeight(runtime) {
     }
     let height = NON_CARD_FIXED;
     let cardsHeight = 0;
-    // 最小值 = 1 个 CLIP 的高度, 没输入外部提示词时默认只显示 CLIP1.
-    // 输入外部提示词后 autoGrowNodeToFitAllClips 会自动撑大到显示全部 CLIP.
+    // v2.105 (fix): 最小高度 = 1 个 CLIP 的展开高度, 供 getMinHeight /
+    // legacy minNodeH 兜底使用。展开态跟随全部 CLIP 由 autoGrowNodeToFitAllClips
+    // 负责; 这里若返回全部 CLIP 高度, getMinHeight 会读到超大值把收起态底板
+    // 重新撑开(刷新时"刚收回又自动脱离"), 并导致放大画布时节点超界消失。
     const clipsToCount = Math.min(runtime.state.clips.length, DEFAULT_MIN_VISIBLE_CLIPS);
     for (let i = 0; i < clipsToCount; i++) {
         const clip = runtime.state.clips[i];
@@ -189,6 +191,17 @@ function calculateMinHeight(runtime) {
     }
     height += cardsHeight;
     return Math.max(COLLAPSED_MIN_HEIGHT, height + BASE_PADDING);
+}
+
+// v2.105 (fix): 收起态视口高度 = 第 1 张 CLIP 卡片的实际高度(不折叠时),
+// 让"添加CLIP/删除CLIP"底部栏紧贴 CLIP1, 不再残留 3~4 卡空白。
+// 卡片实际撑高(card_height)优先; 未知时用最小卡高 + 滚动条预留。
+function collapsedViewportH(runtime) {
+    const c0 = runtime && runtime.state && runtime.state.clips && runtime.state.clips[0];
+    if (!c0) return COLLAPSED_MIN_HEIGHT;
+    if (c0.collapsed) return COLLAPSED_CLIP_HEIGHT + CARD_SCROLLBAR_SPACE;
+    const cardH = c0.card_height > 0 ? Math.max(CARD_MIN_HEIGHT, c0.card_height) : CARD_MIN_HEIGHT;
+    return Math.max(COLLAPSED_MIN_HEIGHT, cardH + CARD_SCROLLBAR_SPACE);
 }
 
 // v2.12: 按剧本分镜自动建完 CLIP 后, 把节点自动撑高能显示全部 CLIP 卡片.
@@ -4835,9 +4848,13 @@ function ensureGlobalSyncPoll() {
                 // Persist the user-adjusted node height so a page refresh or
                 // ComfyUI restart restores the exact last layout, including
                 // every CLIP card's share of the node body.
+                // v2.105 (fix): 收起态跳过持久化 - 收起视口由 syncDomHeight
+                // 统一按 1 卡计算; 若把旧的展开大高度写回 nodeHeight 并置
+                // _userResize, syncDomHeight 收起分支会跟随 node.size 又撑开
+                // (刷新后"刚收回 1 卡又自动脱离回 3 卡空白")。
                 try {
                     const rt = n.__h3Extender;
-                    if (rt && rt.state) {
+                    if (rt && rt.state && !rt._h3CollapsedAll) {
                         const h = Number(n.size?.[1] || 0);
                         if (Number.isFinite(h) && h > 100 && h < 100000 && h !== rt._lastNodeHeight) {
                             rt._lastNodeHeight = h;
@@ -4935,14 +4952,25 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
             // 若按 nodeH 跟随, getHeight 读 root 内容高 -> nodeH -> cards 高
             // 会形成正反馈把节点撑回全高(13284px), 收起失效。
             // v2.94: 仅用户拖拽时跟随
+            // v2.105 (fix): 非拖拽视口 = 1 张 CLIP 卡片的实际高度。
             const _vh = runtime._userResize
                 ? Math.max(COLLAPSED_MIN_HEIGHT, bodyMinH - NON_CARD_FIXED, Number(node.size?.[1] || 0) - NON_CARD_FIXED)
-                : Math.max(COLLAPSED_MIN_HEIGHT, bodyMinH - NON_CARD_FIXED);
-            runtime.root.style.height = `${(_vh + NON_CARD_FIXED)}px`;
+                : collapsedViewportH(runtime);
+            // v2.105 (fix): 收起态隐藏全局提示词区域(避免卡片与按钮栏之间空出 180px)。
+            try {
+                if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "none";
+                if (runtime.gpResizer) runtime.gpResizer.style.display = "none";
+            } catch (e) {}
+            runtime.root.style.height = "auto";
             runtime.root.style.overflow = "hidden";
             runtime.cards.style.height = `${_vh}px`;
             runtime.cards.style.overflowY = "auto";
         } else {
+            // v2.105 (fix): 展开态恢复全局提示词区域显示。
+            try {
+                if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "flex";
+                if (runtime.gpResizer) runtime.gpResizer.style.display = "";
+            } catch (e) {}
             runtime.root.style.height = "auto";
             runtime.root.style.overflow = "visible";
             runtime.cards.style.height = "auto";
@@ -4967,18 +4995,17 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         ? yRaw
         : 0;
     if (!Number.isFinite(y) || y <= 0) {
-        if (retry < 12) {
-            requestAnimationFrame(() => syncDomHeight(node, runtime, forceMin, retry + 1));
-        } else if (runtime._h3CollapsedAll) {
-            // v2.100: last_y 抖动(移动画布/重布局瞬间为 0)时保持当前布局, 不强制
-            // 重置高度 - 否则画布一动卡片视口闪回 1 卡再弹回(用户可见断裂)。
-            // 只确保 overflow 正确; 高度由 last_y 恢复后的正常路径计算收敛。
-            try {
-                if (runtime.root) runtime.root.style.overflow = "hidden";
-                if (runtime.cards) runtime.cards.style.overflowY = "auto";
-            } catch (e) {}
+        // v2.105 (fix): 收起态下 last_y 为 0/未布局时不能直接 return ——
+        // 否则收起固定(下方 root/cards 高度 + node.size)完全不执行, 节点
+        // 保持工作流保存的巨大高度(如 12881px), DOM widget 被定位到画布
+        // 可视区外: "节点存在但 CLIP 区域消失, 移动/缩小画布又出现"。
+        // 收起态直接走下方收起分支(不依赖 last_y); 非收起态才重试等待布局。
+        if (!runtime._h3CollapsedAll) {
+            if (retry < 12) {
+                requestAnimationFrame(() => syncDomHeight(node, runtime, forceMin, retry + 1));
+            }
+            return;
         }
-        return;
     }
 
     // Remove Nodes 2.0-only intrinsic sizing when returning to Legacy.
@@ -5002,21 +5029,35 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
             // v2.94: 默认固定 CLIP1 视口(legacyMinH-285); 仅用户手动拖拽(_userResize,
             // afterResize 钩子置位)时跟随 node.size - 拉多少显示多少。
             // 初始 setSize 必须固定, 否则 setSize->getHeight 正反馈把节点撑回全高。
-            // v2.101: 默认(非拖拽)视口 = 4 卡(DEFAULT_COLLAPSED_VIEW_H);
-            // 拖拽跟随 size(拉多少显示多少, 可小于 4 卡)
+            // v2.105 (fix): 默认(非拖拽)视口 = 1 张 CLIP 卡片的实际高度,
+            // 拖拽跟随 size(拉多少显示多少, 可小于 1 卡)
             const _vh2 = runtime._userResize
                 ? Math.max(COLLAPSED_MIN_HEIGHT, Number(node.size?.[1] || 0) - NON_CARD_FIXED)
-                : Math.max(COLLAPSED_MIN_HEIGHT, DEFAULT_COLLAPSED_VIEW_H);
-            runtime.root.style.height = `${(_vh2 + NON_CARD_FIXED)}px`;
+                : collapsedViewportH(runtime);
+            // v2.105 (fix): 收起态隐藏全局提示词区域 - 它常驻 180px,
+            // 视觉上就是"卡片底板与底部按钮栏之间的空白"。隐藏后
+            // 卡片与按钮栏紧贴, 底板高度 = 工具栏 + 卡片视口 + 按钮栏。
+            try {
+                if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "none";
+                if (runtime.gpResizer) runtime.gpResizer.style.display = "none";
+            } catch (e) {}
+            runtime.root.style.height = "auto";
             runtime.root.style.overflow = "hidden";
             runtime.cards.style.height = `${_vh2}px`;
             runtime.cards.style.overflowY = "auto";
             runtime.cards.style.flex = "1 1 auto";
             runtime.cards.style.minHeight = "";
             runtime.cards.style.maxHeight = "none";
+            // v2.69 fix: 用确定性公式计算节点高度, 不依赖 root.scrollHeight
+            // (它在卡片内容被 flex 拉伸/溢出时会偏大, 导致 bottomBar 被推到底部)。
+            // 收起态内容 = paddingTop + toolbar + cards视口 + bottomBar + paddingBottom
+            const _padTop = (runtime.root.style.paddingTop || "5px");
+            const _padTopNum = parseInt(_padTop) || 5;
+            const _contentH = _padTopNum + TOOLBAR_HEIGHT + _vh2 + BOTTOM_BAR_HEIGHT + 6;
+            runtime.root.style.height = `${_contentH}px`;
             runtime.domHeight = _vh2;
             const _w3 = Math.max(NODE_MIN_WIDTH, Number(node.size?.[0] || NODE_MIN_WIDTH));
-            const _targetH3 = _vh2 + NON_CARD_FIXED;
+            const _targetH3 = _contentH;
             // v2.97: 直接改 size 数组防 getHeight 覆盖
             if (Math.abs(Number(node.size?.[1] || 0) - _targetH3) > 4) {
                 node.size = [_w3, _targetH3];
@@ -5075,6 +5116,11 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         // v2.105: 展开态 root/cards 恢复 auto - 内容全高撑起节点, 黑色底板
         // 跟随全部 CLIP; 之前固定为 node.size-285 视口导致 31 卡内容溢出
         // 到底板外(用户看到"底板只显示一部分").
+        // v2.105 (fix): 展开态恢复全局提示词区域显示(收起时被隐藏)。
+        try {
+            if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "flex";
+            if (runtime.gpResizer) runtime.gpResizer.style.display = "";
+        } catch (e) {}
         runtime.root.style.height = "auto";
         runtime.cards.style.height = "auto";
         runtime.cards.style.flex = "1 1 auto";
@@ -5433,25 +5479,32 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 			collapseAllBtn.textContent = "📂 展开CLIP";
 			runtime._h3CollapsedAll = true;
 			try {
-				// v2.101: 收起 = 回到默认 4 卡视口
-				const _minH = NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING;
-				runtime.root.style.height = `${_minH}px`;
+				// v2.105 (fix): 收起 = 回到 1 张 CLIP 卡片的实际高度视口
+				const _vhBtn = collapsedViewportH(runtime);
+				const _minH = NON_CARD_FIXED + _vhBtn + BASE_PADDING;
+				// v2.105 (fix): 收起态隐藏全局提示词区域(卡片与按钮栏紧贴)。
+				if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "none";
+				if (runtime.gpResizer) runtime.gpResizer.style.display = "none";
+				runtime.root.style.height = `${_minH - GLOBAL_PROMPT_MIN_HEIGHT}px`;
 				runtime.root.style.overflow = "hidden";
-				runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _minH - NON_CARD_FIXED)}px`;
+				runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _vhBtn)}px`;
 				runtime.cards.style.overflowY = "auto";
-				runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _minH - NON_CARD_FIXED);
+				runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _vhBtn);
 				// v2.97: 直接改 size 数组防 getHeight 覆盖
-				if (Math.abs(Number(node.size?.[1] || 0) - _minH) > 4) {
-					node.size = [w, _minH];
+				if (Math.abs(Number(node.size?.[1] || 0) - (_minH - GLOBAL_PROMPT_MIN_HEIGHT)) > 4) {
+					node.size = [w, _minH - GLOBAL_PROMPT_MIN_HEIGHT];
 					node.graph?.setDirtyCanvas(true, true);
 				}
-				runtime.state.nodeHeight = _minH;
+				runtime.state.nodeHeight = _minH - GLOBAL_PROMPT_MIN_HEIGHT;
 				syncDomHeight(node, runtime, true);
 			} catch (e2) {}
 		} else {
 			// 展开: 一次性同步渲染全部 CLIP(保证点击必看到全部), 撑高到全量高度
 			collapseAllBtn.textContent = "📦 收起CLIP";
 			runtime._h3CollapsedAll = false;
+			// v2.105 (fix): 展开态恢复全局提示词区域显示。
+			if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "flex";
+			if (runtime.gpResizer) runtime.gpResizer.style.display = "";
 			try {
 				const _all = Number(runtime.state?.clips?.length) || 0;
 				if ((Number(runtime._renderedClips) || 0) < _all) {
@@ -5821,7 +5874,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     const gpFontMinusBtn = document.createElement("button");
     gpFontMinusBtn.textContent = "A−";
     gpFontMinusBtn.title = "减小全局提示词字号";
-    gpFontMinusBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;font-size:11px;background:rgba(40,40,40,.8);border:1px solid rgba(255,255,255,.15);border-radius:4px;color:#aaa;cursor:pointer;align-self:flex-start;";
+    gpFontMinusBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;font-size:10px;background:rgba(40,40,40,.8);border:1px solid rgba(255,255,255,.15);border-radius:4px;color:#aaa;cursor:pointer;align-self:flex-start;";
     gpFontMinusBtn.addEventListener("click", (e) => {
         e.preventDefault();
         gpFontSize -= 1;
@@ -5882,7 +5935,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
     // ── Bottom section: CLIPS total duration (left) + Add/Del buttons (right) ──
     const bottomBar = document.createElement("div");
-    bottomBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 4px;border-top:2px solid rgba(255,255,255,.25);margin-top:auto;margin-bottom:2px;flex-shrink:0;background:#152030;";
+    bottomBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 4px;border-top:2px solid rgba(255,255,255,.25);margin-top:0;margin-bottom:2px;flex-shrink:0;background:#152030;";
 
     const clipsTotalLabel = document.createElement("span");
     clipsTotalLabel.style.cssText = "font-size:12px;font-weight:bold;color:#8ab4f8;white-space:nowrap;";
@@ -6060,6 +6113,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // The backend clears/rebuilds that cache on the next Queue.
         resolutionInvalidated: false,
         ready: false,
+        // v2.105 (fix): 默认收起态显式初始化, 避免 onNodeCreated 的恢复逻辑
+        // 在 onConfigure 之前读到 undefined 走错分支(把旧的 4 卡高度恢复回去)。
+        _h3CollapsedAll: true,
         _gpPollTimer: null,
     };
     runtime.renderGlobalAssetPanel = renderGlobalAssetPanel;
@@ -6074,6 +6130,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         runtime.state.clips.push(newClipData);
         updateHidden(node, runtime);
         render(node, runtime);
+        // v2.105 (fix): 手动添加 CLIP 后底板跟随新数量撑大(展开态)。
+        // autoGrow 内部对收起态(_h3CollapsedAll)直接 return, 不影响收起视口。
+        setTimeout(() => { try { autoGrowNodeToFitAllClips(node, runtime); } catch (e) {} }, 150);
         requestAnimationFrame(() => {
             runtime.cards.scrollTop = runtime.cards.scrollHeight;
         });
@@ -6087,6 +6146,8 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         runtime.state.clips = [freshClip];
         updateHidden(node, runtime);
         render(node, runtime);
+        // v2.105 (fix): 删除全部 CLIP 后底板收回(展开态跟随新数量收缩)。
+        setTimeout(() => { try { autoGrowNodeToFitAllClips(node, runtime); } catch (e) {} }, 150);
     });
 
     // Poll for unified prompt_source input changes every 800ms
@@ -6252,11 +6313,14 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         getHeight: () => runtime.domHeight,
         afterResize: (resizedNode) => {
             runtime._userResize = true; // 用户拖边框: 尊重新高度
-            // v2.105: 收起态下节点高度不得小于默认 4 卡视口 - 程序 setSize
-            // 也会触发 afterResize, 防止任意路径(旧 nodeHeight/布局抖动)把
-            // 底板缩小到 1 卡; 用户拖大(>4卡)不受影响, 展开态不受影响。
+            // v2.105 (fix): 收起态下节点高度不得小于 1 张 CLIP 卡片的实际高度 -
+            // 程序 setSize 也会触发 afterResize, 防止任意路径(旧 nodeHeight/布局
+            // 抖动)把底板缩小到不足 1 卡; 用户拖大不受影响, 展开态不受影响。
             if (runtime._h3CollapsedAll) {
-                const _minH4b = NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING;
+                // v2.105 (fix): 收起态隐藏全局提示词区域(避免卡片与按钮栏之间的空白)。
+                if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "none";
+                if (runtime.gpResizer) runtime.gpResizer.style.display = "none";
+                const _minH4b = NON_CARD_FIXED + collapsedViewportH(runtime) + BASE_PADDING - GLOBAL_PROMPT_MIN_HEIGHT;
                 if (Number(resizedNode.size?.[1] || 0) < _minH4b - 4) {
                     resizedNode.size = [
                         Math.max(NODE_MIN_WIDTH, Number(resizedNode.size?.[0] || NODE_MIN_WIDTH)),
@@ -6291,6 +6355,30 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         },
     });
     runtime.domWidget = domWidget;
+    // v2.105 (fix): 批量隐藏所有非 DOM-widget 的原生 widget 的布局足迹。
+    // 此前只隐藏了 clips_json/refs_json 两个, 其余 43 个原生 widget
+    // (run_mode/width/height/steps 等) 的 last_y 足迹仍参与节点布局,
+    // 累计约 1194px, 把 DOM widget(CLIP 区域)挤出节点本体之外 ——
+    // 放大画布时偏移加剧导致"节点存在但 CLIP 区域消失"。
+    // 关键: LiteGraph 布局循环用 isWidgetVisible(widget) 判定, hidden=true
+    // 的 widget 完全不参与 last_y 累计; 单独改 computeSize 不够(多数原生
+    // widget 没有 computeSize 函数, 且 computedHeight 优先级更高)。
+    // 因此统一置 hidden=true + 清空 footprint, DOM widget 回到节点顶部。
+    try {
+        for (const _w of (node.widgets || [])) {
+            if (!_w || _w === domWidget || _w.name === "h3_extender_timeline") continue;
+            _w.hidden = true;
+            if (typeof _w.computeSize === "function") {
+                _w.computeSize = () => [0, 0];
+            }
+            if (typeof _w.computeLayoutSize === "function") {
+                _w.computeLayoutSize = () => ({ minWidth: 0, minHeight: 0, maxWidth: 0, maxHeight: 0 });
+            }
+            if ("computedHeight" in _w) {
+                try { _w.computedHeight = 0; } catch (e) {}
+            }
+        }
+    } catch (e) {}
     // v2.06 (2026-09-19 fix): 用 Object.defineProperty 定义为非可枚举属性,
     // 这样 ComfyUI 前端另存工作流时序列化会忽略 __h3Extender,
     // 避免 structuredClone 错误 (runtime 里包含 DOM 元素如 globalPromptTextarea).
@@ -6377,17 +6465,21 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             setWidgetValue(this, "filename_prefix", "H3_Extender");
         }
 
-        // v2.105: 收起固定同步执行(不依赖 rAF) - 后台 tab /
-        // rAF 被页面占用时也能保证打开即默认 4 卡视口(底板跟 4 卡)。
+        // v2.105 (fix): 收起固定同步执行(不依赖 rAF) - 后台 tab /
+        // rAF 被页面占用时也能保证打开即默认 1 卡视口(底板跟 CLIP1)。
         // rAF 内的收起固定保留为二次兜底(覆盖 size 恢复)。
         try {
             runtime._h3CollapsedAll = true;
-            const _minH0 = NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING;
-            runtime.root.style.height = `${_minH0}px`;
+            // v2.105 (fix): 收起态隐藏全局提示词区域(卡片与按钮栏紧贴)。
+            if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "none";
+            if (runtime.gpResizer) runtime.gpResizer.style.display = "none";
+            const _vh0 = collapsedViewportH(runtime);
+            const _minH0 = NON_CARD_FIXED + _vh0 + BASE_PADDING;
+            runtime.root.style.height = `${_minH0 - GLOBAL_PROMPT_MIN_HEIGHT}px`;
             runtime.root.style.overflow = "hidden";
-            runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _minH0 - NON_CARD_FIXED)}px`;
+            runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _vh0)}px`;
             runtime.cards.style.overflowY = "auto";
-            runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _minH0 - NON_CARD_FIXED);
+            runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _vh0);
             const _w0 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
             if (Math.abs(Number(this.size?.[1] || 0) - _minH0) > 4) {
                 this.size = [_w0, _minH0];
@@ -6418,6 +6510,11 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 }
             }
             runtime.validatedCount = restoredValidatedPrefix;
+            // v2.69 fix: 默认收起态必须在高度恢复之前就置位, 否则下面的
+            // savedH 分支会把节点恢复成之前 30 CLIP 展开时的大高度, 然后
+            // 行6581 才改 size —— ComfyUI 已按大高度布局, root 内容只占上面
+            // 一截, bottomBar 被 margin-top:auto 推到底部, 中间空一大截。
+            runtime._h3CollapsedAll = true;
             // Restore the exact node size the user last adjusted. This must run
             // AFTER widgets are applied: onNodeCreated sees pre-config defaults,
             // so the saved height is only available here in onConfigure. If the
@@ -6429,7 +6526,13 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 const nodeH = Number(this.size?.[1] || 0);
                 const minNodeH = calculateMinHeight(runtime) + NON_CARD_FIXED;
                 let targetH = 0;
-                if (Number.isFinite(savedH) && savedH > 0) {
+                // v2.105 (fix): 收起态下不恢复旧的 savedH/nodeH 高度 -
+                // 那些是之前展开时保存的 4 卡高度, 恢复会把刚固定好的 1 卡
+                // 视口又撑回去(刷新后"刚收回又自动脱离")。收起态统一用
+                // collapsedViewportH 的 1 卡视口, 展开态才恢复用户保存的高度。
+                if (runtime._h3CollapsedAll) {
+                    targetH = NON_CARD_FIXED + collapsedViewportH(runtime) + BASE_PADDING - GLOBAL_PROMPT_MIN_HEIGHT;
+                } else if (Number.isFinite(savedH) && savedH > 0) {
                     targetH = Math.max(savedH, minNodeH);
                 } else if (Number.isFinite(nodeH) && nodeH > minNodeH + 4) {
                     targetH = nodeH;
@@ -6463,25 +6566,29 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             // 点"收起CLIP"回到 CLIP1 视口。
             runtime._h3CollapsedAll = true;
             try {
-                // v2.101: 默认收起视口 = 4 张 CLIP 卡片。
-                const _minH = NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING;
+                // v2.105 (fix): 默认收起视口 = 1 张 CLIP 卡片的实际高度。
+                // 收起态隐藏全局提示词区域(避免卡片与按钮栏之间空出 180px)。
+                if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "none";
+                if (runtime.gpResizer) runtime.gpResizer.style.display = "none";
+                const _vh2b = collapsedViewportH(runtime);
+                const _minH = NON_CARD_FIXED + _vh2b + BASE_PADDING;
                 // v2.88: 先固定 root/cards 样式, 再 setSize - 防止 getHeight
                 // 按 root 内容高度(13284)把节点撑回全高, 使收起失效。
-                runtime.root.style.height = `${_minH}px`;
+                runtime.root.style.height = `${_minH - GLOBAL_PROMPT_MIN_HEIGHT}px`;
                 runtime.root.style.overflow = "hidden";
-                runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _minH - NON_CARD_FIXED)}px`;
+                runtime.cards.style.height = `${Math.max(COLLAPSED_MIN_HEIGHT, _vh2b)}px`;
                 runtime.cards.style.overflowY = "auto";
                 // v2.96: setSize 前先同步 domHeight, 否则 ComfyUI getHeight 读到
                 // 旧值(跟随旧节点高度)把 setSize(700) 覆盖回全高(2114/2130)。
-                runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _minH - NON_CARD_FIXED);
+                runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _vh2b);
                 const _w2 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
                 // v2.97: 直接改 size 数组(不走 setSize) - setSize 触发 getHeight
                 // 读到旧 domHeight 会把节点覆盖回旧高度, 收起固定失效(2130/13484)。
-                if (Math.abs(Number(this.size?.[1] || 0) - _minH) > 4) {
-                    this.size = [_w2, _minH];
+                if (Math.abs(Number(this.size?.[1] || 0) - (_minH - GLOBAL_PROMPT_MIN_HEIGHT)) > 4) {
+                    this.size = [_w2, _minH - GLOBAL_PROMPT_MIN_HEIGHT];
                     this.graph?.setDirtyCanvas(true, true);
                 }
-                runtime.state.nodeHeight = _minH;
+                runtime.state.nodeHeight = _minH - GLOBAL_PROMPT_MIN_HEIGHT;
             } catch (e) {}
             render(this, runtime, { chunked: true, limit: Number(runtime.state?.clips?.length) || 0 });
             // v2.88: 分片兜底 - 若 rAF/setTimeout 分片被页面占用而停在部分卡片,
@@ -6992,11 +7099,14 @@ app.registerExtension({
                         const savedH = Number(runtime.state?.nodeHeight || 0);
                         if (Number.isFinite(savedH) && savedH > 0) {
                             const minNodeH = calculateMinHeight(runtime) + NON_CARD_FIXED;
-                            let targetH = Math.max(savedH, minNodeH);
-                            // v2.105: 收起态下绝不恢复到 <4 卡视口(旧
-                            // nodeHeight 可能保存了1卡高度, 恢复会导致底板只到 clip1)
+                            let targetH;
+                            // v2.105 (fix): 收起态固定 1 卡视口, 绝不恢复旧的
+                            // 4 卡高度(savedH 是之前展开时存的 nodeHeight, 直接
+                            // Math.max 会把刚收回的 1 卡底板又撑回 3 卡空白)。
                             if (runtime._h3CollapsedAll) {
-                                targetH = Math.max(targetH, NON_CARD_FIXED + DEFAULT_COLLAPSED_VIEW_H + BASE_PADDING);
+                                targetH = NON_CARD_FIXED + collapsedViewportH(runtime) + BASE_PADDING - GLOBAL_PROMPT_MIN_HEIGHT;
+                            } else {
+                                targetH = Math.max(savedH, minNodeH);
                             }
                             const w = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
                             if (Math.abs(Number(this.size?.[1] || 0) - targetH) > 4) {
