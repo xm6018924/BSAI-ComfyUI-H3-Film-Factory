@@ -4948,23 +4948,23 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         // 展开时恢复 auto 高度(全部显示)。仅设 cards 高度不够 - nodes2 下
         // root 若保持 height:auto, 31 张卡片会把节点撑到 13284px, 收起失效。
         if (runtime._h3CollapsedAll) {
-            // v2.88: 收起时 root/cards 固定为 CLIP1 视口(不跟随 nodeH)。
-            // 若按 nodeH 跟随, getHeight 读 root 内容高 -> nodeH -> cards 高
-            // 会形成正反馈把节点撑回全高(13284px), 收起失效。
-            // v2.94: 仅用户拖拽时跟随
-            // v2.105 (fix): 非拖拽视口 = 1 张 CLIP 卡片的实际高度。
-            const _vh = runtime._userResize
-                ? Math.max(COLLAPSED_MIN_HEIGHT, bodyMinH - NON_CARD_FIXED, Number(node.size?.[1] || 0) - NON_CARD_FIXED)
-                : collapsedViewportH(runtime);
-            // v2.105 (fix): 收起态隐藏全局提示词区域(避免卡片与按钮栏之间空出 180px)。
+            // v2.69 fix: 收起态 cards 高度永远 = collapsedViewportH(1卡视口),
+            // 不跟随 node.size / _userResize。之前 _userResize=true 时读
+            // node.size-285, 旧大高度(1280)让 cards=995px 空壳, root auto 高度
+            // 跟着撑到 1080, 但 node.size 被设成 500, bottombar 被甩到节点外。
+            const _vh = collapsedViewportH(runtime);
             try {
                 if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "none";
                 if (runtime.gpResizer) runtime.gpResizer.style.display = "none";
             } catch (e) {}
-            runtime.root.style.height = "auto";
+            // 收起态 root 高度 = paddingTop + toolbar + cards视口 + bottombar + padding
+            const _padTopNum = parseInt(runtime.root.style.paddingTop) || 5;
+            const _rootH = _padTopNum + TOOLBAR_HEIGHT + _vh + BOTTOM_BAR_HEIGHT + 6;
+            runtime.root.style.height = `${_rootH}px`;
             runtime.root.style.overflow = "hidden";
             runtime.cards.style.height = `${_vh}px`;
             runtime.cards.style.overflowY = "auto";
+            runtime.domHeight = _vh;
         } else {
             // v2.105 (fix): 展开态恢复全局提示词区域显示。
             try {
