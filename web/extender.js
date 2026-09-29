@@ -6319,7 +6319,13 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // Give Nodes 2.0 a little more intrinsic room, while keeping the old
         // Legacy minimum unchanged.
         getMinHeight: () => calculateMinHeight(runtime),
-        getHeight: () => runtime.domHeight,
+        // v2.69 fix: getHeight 返回 root 实际内容高(padding+toolbar+cards+bottombar),
+        // 不是 domHeight(仅 cards 视口)。之前返回 domHeight=379, root 实际 473px,
+        // LiteGraph 只给 root 分 379px, bottombar 溢出节点底部。
+        getHeight: () => {
+            const dh = Number(runtime.domHeight) || 0;
+            return 5 + TOOLBAR_HEIGHT + 7 + dh + BOTTOM_BAR_HEIGHT + 10;
+        },
         afterResize: (resizedNode) => {
             runtime._userResize = true; // 用户拖边框: 尊重新高度
             // v2.105 (fix): 收起态下节点高度不得小于 1 张 CLIP 卡片的实际高度 -
