@@ -6373,9 +6373,14 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     // 的 widget 完全不参与 last_y 累计; 单独改 computeSize 不够(多数原生
     // widget 没有 computeSize 函数, 且 computedHeight 优先级更高)。
     // 因此统一置 hidden=true + 清空 footprint, DOM widget 回到节点顶部。
+    // v2.69 fix: 只隐藏内部状态 widgets (clips_json/refs_json 是多行 JSON 不可见),
+    // 其他用户参数 (width/height/steps/cfg/sampler/denoise/resolution_mode 等) 正常显示。
+    // 之前 v2.105 把全部 43 个 widgets 都 hidden=true, 导致用户看不到任何参数。
     try {
+        const _hideNames = new Set(["clips_json", "refs_json", "h3_extender_timeline"]);
         for (const _w of (node.widgets || [])) {
-            if (!_w || _w === domWidget || _w.name === "h3_extender_timeline") continue;
+            if (!_w || _w === domWidget) continue;
+            if (!_hideNames.has(_w.name)) continue;  // 只藏内部状态, 用户参数保留可见
             _w.hidden = true;
             if (typeof _w.computeSize === "function") {
                 _w.computeSize = () => [0, 0];
