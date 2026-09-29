@@ -4934,8 +4934,17 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
         // remount the element until a page refresh. Keep a real intrinsic
         // minimum instead and let Vue stretch the row/child naturally.
         runtime.root.style.height = "auto";
-        runtime.root.style.minHeight = `${bodyMinH}px`;
-        runtime.root.style.setProperty("--comfy-widget-min-height", `${bodyMinH}px`);
+        // v2.69: collapsed mode root.minHeight = actual collapsed content height,
+        // not bodyMinH (which includes the hidden 200px global prompt area).
+        if (runtime._h3CollapsedAll) {
+            const _vhNow = collapsedViewportH(runtime);
+            const _padTopNow = 5 + NODES2_TOP_GAP;
+            runtime.root.style.minHeight = `${_padTopNow + TOOLBAR_HEIGHT + _vhNow + BOTTOM_BAR_HEIGHT + 6}px`;
+            runtime.root.style.setProperty("--comfy-widget-min-height", `${_padTopNow + TOOLBAR_HEIGHT + _vhNow + BOTTOM_BAR_HEIGHT + 6}px`);
+        } else {
+            runtime.root.style.minHeight = `${bodyMinH}px`;
+            runtime.root.style.setProperty("--comfy-widget-min-height", `${bodyMinH}px`);
+        }
         runtime.root.style.maxHeight = "none";
         runtime.root.style.flex = "1 1 auto";
         runtime.root.style.paddingTop = `${5 + NODES2_TOP_GAP}px`;
@@ -4957,13 +4966,13 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
                 if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "none";
                 if (runtime.gpResizer) runtime.gpResizer.style.display = "none";
             } catch (e) {}
-            // 收起态 root 高度 = paddingTop + toolbar + cards视口 + bottombar + padding
-            const _padTopNum = parseInt(runtime.root.style.paddingTop) || 5;
-            const _rootH = _padTopNum + TOOLBAR_HEIGHT + _vh + BOTTOM_BAR_HEIGHT + 6;
-            runtime.root.style.height = `${_rootH}px`;
+            // v2.69: root 高度 auto — cards 已固定 _vh, root 自然高 = padding + toolbar + cards + bottombar.
+            // 不能设死 root.height: root 高度 > node.size 会把 native widgets(分辨率/步长/CFG)压成 0.
+            runtime.root.style.height = "auto";
             runtime.root.style.overflow = "hidden";
             runtime.cards.style.height = `${_vh}px`;
             runtime.cards.style.overflowY = "auto";
+            runtime.cards.style.flex = "0 0 auto";  /* don't stretch in flex column */
             runtime.domHeight = _vh;
         } else {
             // v2.105 (fix): 展开态恢复全局提示词区域显示。
