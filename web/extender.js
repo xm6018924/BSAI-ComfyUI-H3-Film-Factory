@@ -5066,8 +5066,10 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
             runtime.root.style.height = `${_contentH}px`;
             runtime.domHeight = _vh2;
             const _w3 = Math.max(NODE_MIN_WIDTH, Number(node.size?.[0] || NODE_MIN_WIDTH));
-            const _targetH3 = _contentH;
-            // v2.97: 直接改 size 数组防 getHeight 覆盖
+            // v2.69 fix: node.size[1] = native widgets高度(y) + root内容高度(_contentH)。
+            // 之前只设 _contentH(root-only ~464px), 漏掉 native widgets(~600px),
+            // 导致 root DOM 在 y=600 但节点背景只画到 y=464, root 全部溢出节点外。
+            const _targetH3 = y + _contentH;
             if (Math.abs(Number(node.size?.[1] || 0) - _targetH3) > 4) {
                 node.size = [_w3, _targetH3];
                 node.graph?.setDirtyCanvas(true, true);
