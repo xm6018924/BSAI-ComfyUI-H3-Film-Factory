@@ -5526,7 +5526,17 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 				if ((Number(runtime._renderedClips) || 0) < _all) {
 					render(node, runtime, { chunked: false, limit: _all });
 				}
-				setTimeout(() => { try { autoGrowNodeToFitAllClips(node, runtime); } catch (e2) {} }, 150);
+				setTimeout(() => {
+				try {
+					autoGrowNodeToFitAllClips(node, runtime);
+					// v2.69: autoGrow 用公式算, 可能不准。直接读 root.scrollHeight 设真实高度。
+					const _ny = Number(runtime.domWidget?.last_y) || 0;
+					const _rh = runtime.root ? runtime.root.scrollHeight : 400;
+					const _w3 = Math.max(NODE_MIN_WIDTH, Number(node.size?.[0] || NODE_MIN_WIDTH));
+					node.size = [_w3, _ny + _rh];
+					node.graph?.setDirtyCanvas(true, true);
+				} catch (e2) {}
+			}, 150);
 			} catch (err) {}
 		}
 	});
