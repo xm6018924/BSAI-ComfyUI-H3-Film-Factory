@@ -5054,7 +5054,9 @@ function syncDomHeight(node, runtime, forceMin = false, retry = 0) {
             runtime.root.style.overflow = "hidden";
             runtime.cards.style.height = `${_vh2}px`;
             runtime.cards.style.overflowY = "auto";
-            runtime.cards.style.flex = "1 1 auto";
+            // v2.69 fix: 收起态 cards=0 0 auto (固定高度不拉伸)。
+            // 之前 1 1 auto 在 flex-column root 里会拉伸填满 root, 把 bottomBar 推走。
+            runtime.cards.style.flex = "0 0 auto";
             runtime.cards.style.minHeight = "";
             runtime.cards.style.maxHeight = "none";
             // v2.69 fix: 用确定性公式计算节点高度, 不依赖 root.scrollHeight
