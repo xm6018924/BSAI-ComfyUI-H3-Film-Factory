@@ -6596,17 +6596,33 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 // 旧值(跟随旧节点高度)把 setSize(700) 覆盖回全高(2114/2130)。
                 runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _vh2b);
                 const _w2 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
-                // v2.69: Nodes2 模式下不强制 this.size — 40 个 native widgets 占 ~800px,
-                // 强制设 500px 会把 root 挤出节点。让 ComfyUI 自动按 widgets+root 算总高度。
-                // legacy 模式仍直接写 size 数组(防 getHeight 正反馈)。
-                const _modeNow = domWidgetRenderMode(runtime.root);
-                if (_modeNow !== "nodes2") {
-                    if (Math.abs(Number(this.size?.[1] || 0) - (_minH - GLOBAL_PROMPT_MIN_HEIGHT)) > 4) {
-                        this.size = [_w2, _minH - GLOBAL_PROMPT_MIN_HEIGHT];
-                        this.graph?.setDirtyCanvas(true, true);
+                // v2.69: 计算 native widgets 总高度(现在有40个可见参数),
+                // this.size = native widgets 高度 + root 内容高度。
+                // 之前硬编码 root-only 高度(500px), native widgets 占 800px 导致 root 被挤出节点。
+                let _nativeH = 0;
+                try {
+                    for (const _w of (this.widgets || [])) {
+                        if (!_w || _w === runtime.domWidget) continue;
+                        if (_w.hidden) continue;
+                        let _wh = 0;
+                        try {
+                            if (typeof _w.computeSize === "function") {
+                                const _sz = _w.computeSize();
+                                if (Array.isArray(_sz) && _sz.length >= 2) _wh = Number(_sz[1]) || 0;
+                            }
+                        } catch (e) {}
+                        if (_wh <= 0) _wh = 26;  // fallback: default widget row height
+                        _nativeH += _wh;
                     }
+                } catch (e) {}
+                // root 内容高度 = toolbar + cards视口 + bottombar + padding
+                const _rootContentH = TOOLBAR_HEIGHT + 7 + _vh2b + BOTTOM_BAR_HEIGHT + 10;
+                const _targetNodeH = _nativeH + _rootContentH;
+                if (Math.abs(Number(this.size?.[1] || 0) - _targetNodeH) > 4) {
+                    this.size = [_w2, _targetNodeH];
+                    this.graph?.setDirtyCanvas(true, true);
                 }
-                runtime.state.nodeHeight = _minH - GLOBAL_PROMPT_MIN_HEIGHT;
+                runtime.state.nodeHeight = _targetNodeH;
             } catch (e) {}
             render(this, runtime, { chunked: true, limit: Number(runtime.state?.clips?.length) || 0 });
             // v2.88: 分片兜底 - 若 rAF/setTimeout 分片被页面占用而停在部分卡片,
