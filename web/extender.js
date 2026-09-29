@@ -5514,6 +5514,13 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 			// v2.105 (fix): 展开态恢复全局提示词区域显示。
 			if (runtime.globalPromptSection) runtime.globalPromptSection.style.display = "flex";
 			if (runtime.gpResizer) runtime.gpResizer.style.display = "";
+			// v2.69 fix: 展开必须重置 cards/root 样式回 auto — 收起时设了 cards.height=379/
+			// root.height=500/root.overflow=hidden, 不重置会把 root 锁死在收起尺寸, 内容溢出节点。
+			runtime.root.style.height = "auto";
+			runtime.root.style.overflow = "visible";
+			runtime.cards.style.height = "auto";
+			runtime.cards.style.overflowY = "visible";
+			runtime.cards.style.flex = "1 1 auto";
 			try {
 				const _all = Number(runtime.state?.clips?.length) || 0;
 				if ((Number(runtime._renderedClips) || 0) < _all) {
