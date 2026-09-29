@@ -6319,12 +6319,17 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // Give Nodes 2.0 a little more intrinsic room, while keeping the old
         // Legacy minimum unchanged.
         getMinHeight: () => calculateMinHeight(runtime),
-        // v2.69 fix: getHeight 返回 root 实际内容高(padding+toolbar+cards+bottombar),
-        // 不是 domHeight(仅 cards 视口)。之前返回 domHeight=379, root 实际 473px,
-        // LiteGraph 只给 root 分 379px, bottombar 溢出节点底部。
+        // v2.69: getHeight = root.scrollHeight (实际渲染高度)。
+        // root=flex column: toolbar + cards + bottombar 顺序排列。
+        // 收起态 cards 固定 _vh, scrollHeight = toolbar+_vh+bottombar;
+        // 展开态 cards=auto, scrollHeight 跟随全部 CLIP 自然撑高。
+        // bottombar 永远在 root 内容底部, 不溢出。
         getHeight: () => {
-            const dh = Number(runtime.domHeight) || 0;
-            return 5 + TOOLBAR_HEIGHT + 7 + dh + BOTTOM_BAR_HEIGHT + 10;
+            try {
+                const h = runtime.root ? runtime.root.scrollHeight : 0;
+                if (h > 50) return h;
+            } catch (e) {}
+            return 400;
         },
         afterResize: (resizedNode) => {
             runtime._userResize = true; // 用户拖边框: 尊重新高度
@@ -6602,33 +6607,14 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 // 旧值(跟随旧节点高度)把 setSize(700) 覆盖回全高(2114/2130)。
                 runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _vh2b);
                 const _w2 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
-                // v2.69: 计算 native widgets 总高度(现在有40个可见参数),
-                // this.size = native widgets 高度 + root 内容高度。
-                // 之前硬编码 root-only 高度(500px), native widgets 占 800px 导致 root 被挤出节点。
-                let _nativeH = 0;
-                try {
-                    for (const _w of (this.widgets || [])) {
-                        if (!_w || _w === runtime.domWidget) continue;
-                        if (_w.hidden) continue;
-                        let _wh = 0;
-                        try {
-                            if (typeof _w.computeSize === "function") {
-                                const _sz = _w.computeSize();
-                                if (Array.isArray(_sz) && _sz.length >= 2) _wh = Number(_sz[1]) || 0;
-                            }
-                        } catch (e) {}
-                        if (_wh <= 0) _wh = 26;  // fallback: default widget row height
-                        _nativeH += _wh;
-                    }
-                } catch (e) {}
-                // root 内容高度 = toolbar + cards视口 + bottombar + padding
-                const _rootContentH = TOOLBAR_HEIGHT + 7 + _vh2b + BOTTOM_BAR_HEIGHT + 10;
-                const _targetNodeH = _nativeH + _rootContentH;
-                if (Math.abs(Number(this.size?.[1] || 0) - _targetNodeH) > 4) {
-                    this.size = [_w2, _targetNodeH];
+                // v2.69: 不手动设 this.size — getHeight=root.scrollHeight 让 LiteGraph
+                // 自动算节点总高度(native widgets + root)。手动设 size 会和 getHeight
+                // 打架, 导致 root 被挤出节点。只设宽度, 高度交给 LiteGraph。
+                if (Number(this.size?.[0] || 0) < _w2) {
+                    this.size = [_w2, Number(this.size?.[1] || 0)];
                     this.graph?.setDirtyCanvas(true, true);
                 }
-                runtime.state.nodeHeight = _targetNodeH;
+                runtime.state.nodeHeight = 0;
             } catch (e) {}
             render(this, runtime, { chunked: true, limit: Number(runtime.state?.clips?.length) || 0 });
             // v2.88: 分片兜底 - 若 rAF/setTimeout 分片被页面占用而停在部分卡片,
