@@ -6596,11 +6596,15 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 // 旧值(跟随旧节点高度)把 setSize(700) 覆盖回全高(2114/2130)。
                 runtime.domHeight = Math.max(COLLAPSED_MIN_HEIGHT, _vh2b);
                 const _w2 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
-                // v2.97: 直接改 size 数组(不走 setSize) - setSize 触发 getHeight
-                // 读到旧 domHeight 会把节点覆盖回旧高度, 收起固定失效(2130/13484)。
-                if (Math.abs(Number(this.size?.[1] || 0) - (_minH - GLOBAL_PROMPT_MIN_HEIGHT)) > 4) {
-                    this.size = [_w2, _minH - GLOBAL_PROMPT_MIN_HEIGHT];
-                    this.graph?.setDirtyCanvas(true, true);
+                // v2.69: Nodes2 模式下不强制 this.size — 40 个 native widgets 占 ~800px,
+                // 强制设 500px 会把 root 挤出节点。让 ComfyUI 自动按 widgets+root 算总高度。
+                // legacy 模式仍直接写 size 数组(防 getHeight 正反馈)。
+                const _modeNow = domWidgetRenderMode(runtime.root);
+                if (_modeNow !== "nodes2") {
+                    if (Math.abs(Number(this.size?.[1] || 0) - (_minH - GLOBAL_PROMPT_MIN_HEIGHT)) > 4) {
+                        this.size = [_w2, _minH - GLOBAL_PROMPT_MIN_HEIGHT];
+                        this.graph?.setDirtyCanvas(true, true);
+                    }
                 }
                 runtime.state.nodeHeight = _minH - GLOBAL_PROMPT_MIN_HEIGHT;
             } catch (e) {}
