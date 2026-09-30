@@ -274,6 +274,170 @@ function applyCollapsedLayout(runtime, viewportH) {
     return contentH;
 }
 
+// v2.111 (2026-09-30): 节点默认宽度下限 —— 保证工具栏里末尾的
+// 「📂 展开CLIP / 📦 收起CLIP」按钮完整可见。
+//
+// 背景: toolbar 是 display:flex + 默认 flex-wrap:nowrap, 而 flex 子项默认
+// flex-shrink:1。节点宽度不够时按钮不是"换行"而是被逐个压缩, 末尾的展开/收起
+// 按钮(排在 pauseBar/status 之前)首当其冲被压扁甚至裁掉。
+//
+// 这里实测工具栏的"自然宽度"当宽度下限, 而不是拍一个魔数:
+// 按钮文案增删、status 文本长短变化、字体/DPI 差异都会自动跟随。
+// 量自然宽度必须先让子项不压缩 —— 直接读 scrollWidth 只会得到容器宽度
+// (因为子项已被 shrink 压缩), 所以临时把 toolbar 设成 width:max-content
+// 量完再还原。
+const TOOLBAR_WIDTH_PADDING = 24; // root 左右内边距 + 一点余量
+// v2.114: 工具栏末尾的 status 是"弹性留白"项(margin-left:auto + max-width:45% +
+// text-overflow:ellipsis), 它按设计就是吸收剩余空间、放不下就省略号截断, 所以不
+// 参与自然宽度求和 —— 否则一段长状态文案会把节点撑到几千像素。给它固定额度。
+const TOOLBAR_STATUS_ALLOWANCE = 150;
+
+// v2.114: 量工具栏"自然宽度" —— 逐个子元素临时解除 flex 压缩后求和。
+//
+// 为什么不能用 tb.offsetWidth / tb.scrollWidth:
+//   flex 子项默认 flex-shrink:1, 容器窄的时候子项会被压缩(按钮文案折行成
+//   两行), 此时量到的 offsetWidth/scrollWidth 都等于"被压缩后的容器宽度",
+//   永远量不出真实需求, 于是 required 算出来偏小甚至等于当前宽度 → 不加宽 →
+//   死循环。对整个容器取 max-content 也不可靠: status 这类弹性项在 max-content
+//   下仍会参与压缩, 结果依赖容器当前宽度, 是个循环依赖。
+//
+// 可靠做法: 逐个把"固定尺寸"子元素设成 flex:0 0 auto + width:max-content,
+// 让每个都按自身内容撑开, 连同 gap 求和; 弹性留白项(status)跳过, 改用固定额度。
+// 判定弹性项: 显式 margin-left:auto, 或 max-width 是 <100% 的百分比。
+function measureToolbarNaturalWidth(tb) {
+    if (!tb) return 0;
+    const children = Array.prototype.slice.call(tb.children || []);
+    const saved = [];
+    let sum = 0;
+    let sawFlexible = false;
+    try {
+        for (let i = 0; i < children.length; i++) {
+            const el = children[i];
+            let flexible = !!(el.style && el.style.marginLeft === "auto");
+            if (!flexible) {
+                let mw = "";
+                try { mw = getComputedStyle(el).maxWidth || ""; } catch (e2) { mw = ""; }
+                if (/^\d+(\.\d+)?%$/.test(mw) && parseFloat(mw) < 100) flexible = true;
+            }
+            if (flexible) { sawFlexible = true; continue; }
+            saved.push({
+                el,
+                flex: el.style.flex,
+                width: el.style.width,
+                minWidth: el.style.minWidth,
+            });
+            el.style.flex = "0 0 auto";
+            el.style.width = "max-content";
+            el.style.minWidth = "0";
+        }
+        // 强制一次 reflow, 让 max-content 生效后再量。
+        void tb.offsetWidth;
+        const gap = parseFloat(getComputedStyle(tb).gap) || 0;
+        let counted = 0;
+        for (let i = 0; i < saved.length; i++) {
+            const w = saved[i].el.offsetWidth || 0;
+            if (w > 0) { sum += w; counted++; }
+        }
+        // gap 只按"参与求和的子元素个数"折算, 免得被跳过的弹性项把间距算多/算少。
+        if (counted > 1) sum += gap * (counted - 1);
+        if (sawFlexible) sum += TOOLBAR_STATUS_ALLOWANCE;
+    } catch (e) {
+        sum = 0;
+    } finally {
+        for (let i = 0; i < saved.length; i++) {
+            const s = saved[i];
+            s.el.style.flex = s.flex;
+            s.el.style.width = s.width;
+            s.el.style.minWidth = s.minWidth;
+        }
+    }
+    return Math.ceil(sum);
+}
+
+// 返回 true = 这次成功量到了有效自然宽度(不论是否需要加宽), 调用方可以收手。
+function ensureToolbarWidth(node, runtime) {
+    try {
+        const tb = runtime && runtime.toolbar;
+        // 注意: 不用 isConnected 早退。DOM widget 由 ComfyUI 在绘制时才挂进
+        // document, onNodeCreated / onConfigure 早期调用时通常还没连接, 早退会让
+        // 宽度修正永远不生效。未连接时 offsetWidth 为 0, 下面 `natural > 0` 自然跳过。
+        if (!tb) return false;
+        const natural = measureToolbarNaturalWidth(tb);
+        if (!(natural > 0)) return false;
+        const required = natural + TOOLBAR_WIDTH_PADDING;
+        const cur = Number(node.size && node.size[0]) || 0;
+        if (cur < required) {
+            // 只加宽, 不缩窄 —— 用户手动拉宽的宽度要保留。
+            node.size = [required, Number(node.size && node.size[1]) || 0];
+            try { node.graph && node.graph.setDirtyCanvas(true, true); } catch (e) {}
+        }
+        return true;
+    } catch (e) {}
+    return false;
+}
+
+// v2.112: 宽度修正的重试调度。
+// 单次调用常常量不到值(DOM 尚未挂载 / 按钮文案还没填 / counter 还没渲染),
+// 所以在几个时间点各试一次 —— 每次都重新实测, 量到就加宽。
+// 工具栏里的 counter("总时长 15s (1 clip)") 和 pauseBar 按钮的显示状态
+// 都会在渲染过程中变化, 后面的重试点覆盖这些变化。
+function scheduleToolbarWidthFix(node, runtime) {
+    // v2.114: 加"量到即收手"闩锁。
+    //
+    // 为什么必须有: ResizeObserver 是长驻监听, 节点被用户手动拉窄时它会立刻
+    // 再次触发并把宽度顶回去, 变成跟用户抢拖拽把手。而反复重试也只是在重复
+    // 做同一件事。默认宽度是"落地态"需求, 量到一次就够, 之后把控制权完全交回用户。
+    // 未挂载 / 量不到(返回 false)时不收手, 继续等下一个时间点。
+    const st = { done: false };
+    const stop = () => {
+        if (st.done) return;
+        st.done = true;
+        try {
+            if (runtime && runtime._toolbarWidthRO) {
+                runtime._toolbarWidthRO.disconnect();
+                runtime._toolbarWidthRO = null;
+            }
+        } catch (e) {}
+    };
+    const run = () => {
+        if (st.done) return;
+        try {
+            // 每次重试前先把展开态布局摆好, 让 toolbar 拿到真实尺寸。
+            if (runtime && runtime.root && runtime.root.style) {
+                runtime.root.style.width = "";
+            }
+            if (ensureToolbarWidth(node, runtime)) stop();
+        } catch (e) {}
+    };
+    const delays = [0, 120, 400, 900, 1800, 3200, 6000, 10000];
+    for (let i = 0; i < delays.length; i++) {
+        const d = delays[i];
+        if (d === 0) requestAnimationFrame(run);
+        else setTimeout(run, d);
+    }
+    // 挂载后兜底: ComfyUI 首次绘制 DOM widget 的时机不确定(画布缩放/节点在
+    // 视口外/后台 tab 时可能更晚), 固定几个时间点可能全部落空; ResizeObserver
+    // 在工具栏真正参与布局的那一刻必然触发一次, 那里再补一次测量。
+    // 先建 RO 再排定时器, 免得 d=0 那轮先收手、RO 才建起来又一直挂着。
+    try {
+        const tb = runtime && runtime.toolbar;
+        if (tb && typeof ResizeObserver === "function" && !runtime._toolbarWidthRO) {
+            let pending = false;
+            const ro = new ResizeObserver(() => {
+                if (st.done || pending) return;
+                pending = true;
+                // 合并同一帧的多次触发, 避免连续改 size 造成抖动。
+                requestAnimationFrame(() => {
+                    pending = false;
+                    run();
+                });
+            });
+            ro.observe(tb);
+            runtime._toolbarWidthRO = ro;
+        }
+    } catch (e) {}
+}
+
 // v2.12: 按剧本分镜自动建完 CLIP 后, 把节点自动撑高能显示全部 CLIP 卡片.
 // 只撑大不缩小, 不破坏用户手动拉大; 用 _userResize 标记防止 poisoned 守卫弹回.
 // v2.13: 双 rAF + 小延迟等展开卡片 textarea 真正排完再量; 不手动调 syncDomHeight(setSize 会触发 afterResize);
@@ -5549,10 +5713,12 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 	// 展开时渲染全部 CLIP(增量分片), 不再只是缩放高度。
 	// 默认收起(打开工作流只展示 CLIP1), 与 onConfigure 的初始 limit:1 一致。
 	const collapseAllBtn = document.createElement("button");
-	collapseAllBtn.textContent = "📂 展开CLIP";
-	collapseAllBtn.title = "当前收起(只显示 CLIP1)。点击展开全部 CLIP; 再点收起回到只显示 CLIP1。";
+	// v2.111: 默认「展开CLIP」状态(与 runtime._h3CollapsedAll = false 一致)。
+	// 按钮显示的是"下一步可点的动作", 所以展开态显示「📦 收起CLIP」。
+	collapseAllBtn.textContent = "📦 收起CLIP";
+	collapseAllBtn.title = "当前展开(显示全部 CLIP)。点击收起只显示 CLIP1; 再点展开恢复。";
 	collapseAllBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a5a3a;border:1px solid #3a7a4a;border-radius:4px;color:#dfd;cursor:pointer;font-weight:bold;";
-	let clipsCollapsed = true; // v2.84: 默认收起
+	let clipsCollapsed = false; // v2.111: 默认展开(与 runtime._h3CollapsedAll 一致)
 	collapseAllBtn.addEventListener("click", (e) => {
 		e.preventDefault();
 		clipsCollapsed = !clipsCollapsed;
@@ -6257,9 +6423,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // The backend clears/rebuilds that cache on the next Queue.
         resolutionInvalidated: false,
         ready: false,
-        // v2.105 (fix): 默认收起态显式初始化, 避免 onNodeCreated 的恢复逻辑
-        // 在 onConfigure 之前读到 undefined 走错分支(把旧的 4 卡高度恢复回去)。
-        _h3CollapsedAll: true,
+        // v2.111: 默认改为「展开CLIP」状态(之前默认收起)。用户点「收起CLIP」
+        // 后按钮 toggle 会在运行时改这个标志, 不影响这里的默认值。
+        _h3CollapsedAll: false,
         // v2.107 (fix): 「收起/展开CLIP」按钮 click handler 显式设的 guard —
         // true 时 afterResize 钩子不再二次调 syncDomHeight, 避免 _userResize=true
         // 让 legacy 收起/展开分支走错位公式把 click 设的高度覆盖掉。
@@ -6267,6 +6433,12 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // v2.108: 全局提示词区是否被用户手动折叠。默认 false = 始终显示,
         // 与 CLIP 收起/展开完全解耦(用户不再丢失提示词区可见性)。
         _h3GpUserCollapsed: false,
+        // v2.115: 是否还欠一次初始 render。v2.76 把 onNodeCreated 的初始 render
+        // 删掉、改由 onConfigure 兜底, 但 onConfigure 只在"从工作流 JSON 恢复"时
+        // 触发 —— 从搜索框新建的节点因此永远不构建卡片 DOM(state 里明明有 1 个
+        // 默认 CLIP, 画布上却是一块黑)。onConfigure 渲染后置 false, onNodeCreated
+        // 的兜底渲染只在它仍为 true 时执行, 两套分片链不会并发。
+        _needsInitialRender: true,
         _gpPollTimer: null,
     };
     runtime.renderGlobalAssetPanel = renderGlobalAssetPanel;
@@ -6612,7 +6784,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         if (oldConfigure) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name
-        this.title = "BSAI ComfyUI H3 Film Factory v2.105";
+        this.title = "BSAI ComfyUI H3 Film Factory v2.115";
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -6652,24 +6824,22 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             setWidgetValue(this, "filename_prefix", "H3_Extender");
         }
 
-        // v2.105 (fix): 收起固定同步执行(不依赖 rAF) - 后台 tab /
-        // rAF 被页面占用时也能保证打开即默认 1 卡视口(底板跟 CLIP1)。
-        // rAF 内的收起固定保留为二次兜底(覆盖 size 恢复)。
+        // v2.111: 默认改为「展开CLIP」状态(之前默认收起)。这里只置标记 +
+        // 保证宽度下限, 不再套用收起态的固定视口(v2.105 的默认行为);
+        // 具体高度交给 syncDomHeight 的展开分支实测决定。
         try {
-            runtime._h3CollapsedAll = true;
-            // v2.109: 统一走 applyCollapsedLayout(实测高度), 不用手工公式 ——
-            // 手工公式会漏掉 toolbar 真实高度/提示词区 margin/bottomBar 真实高度,
-            // 导致 overflow:hidden 裁掉 bottomBar。
-            const _vh0 = collapsedViewportH(runtime);
-            const _contentH0 = applyCollapsedLayout(runtime, _vh0);
-            const _w0 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
-            const _targetH0 = (Number(runtime.domWidget?.last_y) || 0) + _contentH0;
-            if (Number(runtime.domWidget?.last_y) > 0 &&
-                Math.abs(Number(this.size?.[1] || 0) - _targetH0) > 4) {
-                this.size = [_w0, _targetH0];
-                this.graph?.setDirtyCanvas(true, true);
-            }
-            runtime.state.nodeHeight = _targetH0;
+            runtime._h3CollapsedAll = false;
+            // v2.111: 宽度下限, 保证「📂 展开CLIP / 📦 收起CLIP」按钮完整可见。
+            scheduleToolbarWidthFix(this, runtime);
+            // 展开态: root/cards 交回 auto, 由 syncDomHeight 实测撑高。
+            runtime.root.style.height = "auto";
+            runtime.root.style.overflow = "visible";
+            runtime.cards.style.height = "auto";
+            runtime.cards.style.overflowY = "visible";
+            runtime.cards.style.flex = "0 0 auto";
+            runtime.cards.style.minHeight = "";
+            runtime.cards.style.maxHeight = "none";
+            runtime.state.nodeHeight = 0;
         } catch (e) {}
 
         requestAnimationFrame(() => {
@@ -6677,7 +6847,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             // removeLegacyRefs/rememberManualResolution 等初始化抛异常会中断
             // 回调, 导致收起初始化不执行, 打开就是非收起态
             // (卡片溢出、底板 1 卡)。
-            runtime._h3CollapsedAll = true;
+            runtime._h3CollapsedAll = false;
             const removedLegacyRefs = removeLegacyImageRefInputs(this);
             runtime.state = parseState(runtime.jsonWidget.value);
             runtime.refsState = parseRefsState(runtime.refsWidget.value);
@@ -6698,7 +6868,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             // savedH 分支会把节点恢复成之前 30 CLIP 展开时的大高度, 然后
             // 行6581 才改 size —— ComfyUI 已按大高度布局, root 内容只占上面
             // 一截, bottomBar 被 margin-top:auto 推到底部, 中间空一大截。
-            runtime._h3CollapsedAll = true;
+            runtime._h3CollapsedAll = false;
             // Restore the exact node size the user last adjusted. This must run
             // AFTER widgets are applied: onNodeCreated sees pre-config defaults,
             // so the saved height is only available here in onConfigure. If the
@@ -6747,26 +6917,19 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                     );
                 }
             } catch (e) {}
-            // v2.84 (2026-09-27): 打开工作流默认收起(只显示 CLIP1 高度的视口),
-            // 但全量渲染(分片渐进), cards 容器带纵向滚动条, 用户可滚动查看全部
-            // 卡片; 也可手动拉长节点显示更多。点"展开CLIP"撑到全量高度,
-            // 点"收起CLIP"回到 CLIP1 视口。
-            runtime._h3CollapsedAll = true;
+            // v2.111: 默认展开态 —— 不再套用收起态固定视口(applyCollapsedLayout),
+            // 高度交给 syncDomHeight 展开分支实测。宽度下限保证工具栏末尾的
+            // 「📂 展开CLIP / 📦 收起CLIP」按钮完整可见。
+            runtime._h3CollapsedAll = false;
             try {
-                // v2.105 (fix): 默认收起视口 = 1 张 CLIP 卡片的实际高度。
-                // v2.109: 统一走 applyCollapsedLayout(实测高度), 不用手工公式 ——
-                // 手工公式漏算 toolbar 真实高度/提示词区 margin/bottomBar 真实高度,
-                // 配合 overflow:hidden 会把 bottomBar 整条裁掉。
-                const _vh2b = collapsedViewportH(runtime);
-                applyCollapsedLayout(runtime, _vh2b);
-                // v2.69: 不手动设 this.size — getHeight=root.scrollHeight 让 LiteGraph
-                // 自动算节点总高度(native widgets + root)。手动设 size 会和 getHeight
-                // 打架, 导致 root 被挤出节点。只设宽度, 高度交给 LiteGraph。
-                const _w2 = Math.max(NODE_MIN_WIDTH, Number(this.size?.[0] || NODE_MIN_WIDTH));
-                if (Number(this.size?.[0] || 0) < _w2) {
-                    this.size = [_w2, Number(this.size?.[1] || 0)];
-                    this.graph?.setDirtyCanvas(true, true);
-                }
+                scheduleToolbarWidthFix(this, runtime);
+                runtime.root.style.height = "auto";
+                runtime.root.style.overflow = "visible";
+                runtime.cards.style.height = "auto";
+                runtime.cards.style.overflowY = "visible";
+                runtime.cards.style.flex = "0 0 auto";
+                runtime.cards.style.minHeight = "";
+                runtime.cards.style.maxHeight = "none";
                 runtime.state.nodeHeight = 0;
             } catch (e) {}
             // v2.108: 全局提示词区默认展开(收起 CLIP 也可见), 显隐由用户
@@ -6775,6 +6938,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             try {
                 applyGlobalPromptVisibility(runtime);
             } catch (e) {}
+            // v2.115: 恢复路径的首次渲染 —— 置位表明 onNodeCreated 的兜底渲染
+            // 不必再跑(它检查的就是这个标志)。
+            runtime._needsInitialRender = false;
             render(this, runtime, { chunked: true, limit: Number(runtime.state?.clips?.length) || 0 });
             // v2.88: 分片兜底 - 若 rAF/setTimeout 分片被页面占用而停在部分卡片,
             // 平滑循环补全(每 1.2s 补 6 张, 最多 30s), 保证滚动条可查看全部。
@@ -6807,6 +6973,10 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             }
             restoreCacheState(this, runtime);
             syncResolutionMirror(this, runtime);
+            // v2.112: 渲染完成后再跑一轮带重试的宽度修正 —— counter
+            // (「总时长 15s (1 clip)」) 和 pauseBar 按钮的显示状态此时才稳定,
+            // 早先那轮量到的可能偏小。
+            scheduleToolbarWidthFix(this, runtime);
             syncDomHeight(this, runtime, true);
             // v2.68 perf: 初始同步从 5 次减到 2 次, 文本没只 autoGrow 不全量 render.
             [200, 1500].forEach(delay => {
@@ -7262,7 +7432,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.105";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.115";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not
@@ -7275,8 +7445,15 @@ app.registerExtension({
             // Apply bilingual (EN/中文) labels to all widgets
             bsaiApplyBilingualLabels(this);
             if (runtime) {
+                // v2.114 (fix): 从搜索框拖到画布的新建节点只走 onNodeCreated,
+                // onConfigure 只在"从工作流 JSON 恢复"时才触发 —— 之前宽度修正只
+                // 挂在 onConfigure 上, 所以新建节点的默认宽度永远没被加宽, 工具栏
+                // 末尾的「📂 展开CLIP / 📦 收起CLIP」按钮溢出到节点外。这里补上。
+                scheduleToolbarWidthFix(this, runtime);
                 requestAnimationFrame(() => {
                     requestAnimationFrame(() => {
+                        // 卡片渲染完(counter/status 文案已填)再量一次, 比 rAF=0 那轮准。
+                        scheduleToolbarWidthFix(this, runtime);
                         syncDomHeight(this, runtime, true);
                         // Restore the exact node size the user last adjusted,
                         // so refresh / restart keeps the same CLIP card layout.
@@ -7303,6 +7480,34 @@ app.registerExtension({
                         }
                     });
                 });
+                // v2.115 (fix): 兜底的初始 render —— 见 _needsInitialRender 注释。
+                //
+                // 背景: v2.76 为了避免"onNodeCreated/onConfigure 两套分片链并发"
+                // 把 onNodeCreated 的初始 render 整段删掉, 认定 onConfigure 是唯一
+                // 初始渲染入口。但 onConfigure 只在 graph.configure() 恢复工作流时
+                // 触发, 从搜索框拖到画布的新建节点一次都不会走到它 —— 于是
+                // runtime.state.clips 里明明有 parseState 兜出来的 1 个默认 CLIP,
+                // 画布上却连一张卡片都没有, 底部按钮栏直接顶在提示词区下面,
+                // 后面留一大块黑。
+                //
+                // 这里不能简单地在 onNodeCreated 里同步 render: 那会重新引入
+                // v2.76 要修的并发。改成一个"欠一次渲染"的标志 —— onConfigure
+                // 渲染时置 false, 下面这个延时兜底只在它仍为 true 时才动手。
+                // 恢复路径下 onConfigure 是同步调用的, 500ms 早就跑完, 所以两套
+                // 分片链不会同时在跑; 新建路径则由这里补上唯一一次初始渲染。
+                const _h3InitialRender = () => {
+                    try {
+                        if (!runtime || !runtime._needsInitialRender) return;
+                        runtime._needsInitialRender = false;
+                        runtime.state = parseState(runtime.jsonWidget.value);
+                        updateHidden(this, runtime);
+                        render(this, runtime, { chunked: true, limit: Number(runtime.state?.clips?.length) || 0 });
+                        autoGrowNodeToFitAllClips(this, runtime);
+                        syncDomHeight(this, runtime, true);
+                    } catch (e) {}
+                };
+                setTimeout(_h3InitialRender, 500);
+                setTimeout(_h3InitialRender, 1800);
                 h3FetchAssets();
             }
             return r;
