@@ -50,6 +50,24 @@ from aiohttp import web
 from PIL import Image, ImageEnhance, ImageOps
 from server import PromptServer
 
+# ==== BSAI 插件协同 SDK：加载即自动注册（失败不拖垮插件） ====
+try:
+    import sys as _bsai_sys, os as _bsai_os
+    _BSAI_ORCH_DIR = _bsai_os.path.join(
+        _bsai_os.path.dirname(_bsai_os.path.abspath(__file__)),
+        "..", "BSAI-ComfyUI-Orchestrator")
+    if _bsai_os.path.isdir(_BSAI_ORCH_DIR) and _BSAI_ORCH_DIR not in _bsai_sys.path:
+        _bsai_sys.path.insert(0, _BSAI_ORCH_DIR)
+    from bsai_orch_client import BSAIOrch  # noqa: E402
+    BSAIOrch.register(
+        name="BSAI-H3-Film-Factory",
+        kind="sampling",
+        hardware=["cuda"],
+    )
+except Exception as _bsai_e:  # 注册失败不得拖垮插件
+    print(f"[BSAI SDK] BSAI-H3-Film-Factory 注册失败(忽略): {_bsai_e}")
+# ==== BSAI SDK 块结束 ====
+
 from .motion_context_ram import MiniMaxH3MotionContextRAM
 from .prompt_bridge import PROMPT_PACK_TYPE, _prompt_pack_signature
 from .motion_context_disk import (
@@ -2192,16 +2210,32 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
     except Exception as _lp1:
         print(f"[H3 Extender] 一采前驻留预算设置失败(走按需流式): {_lp1}")
-    samples = guider.sample(
-        noise,
-        latent_image,
-        sampler,
-        sigmas,
-        denoise_mask=noise_mask,
-        callback=callback,
-        disable_pbar=disable_pbar,
-        seed=int(seed),
-    )
+    # ---- BSAI 协同：GPU 主采样租约（失败不阻断采样，仅叠加租约管理） ----
+    _bsai_alloc = None
+    try:
+        _bsai_alloc = BSAIOrch.allocate("sampling", requester="8191")
+        if not _bsai_alloc.ok:
+            print(f"[H3 Extender] SDK 未取得 gpu1_sampling 租约({_bsai_alloc.reason})，仍按原逻辑采样", flush=True)
+    except Exception as _bsai_ae:
+        print(f"[H3 Extender] SDK allocate 异常(忽略): {_bsai_ae}", flush=True)
+        _bsai_alloc = None
+    try:
+        samples = guider.sample(
+            noise,
+            latent_image,
+            sampler,
+            sigmas,
+            denoise_mask=noise_mask,
+            callback=callback,
+            disable_pbar=disable_pbar,
+            seed=int(seed),
+        )
+    finally:
+        if _bsai_alloc is not None:
+            try:
+                _bsai_alloc.release()
+            except Exception:
+                pass
     samples = samples.to(comfy.model_management.intermediate_device())
 
     # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
