@@ -46,11 +46,26 @@ def _patched_extra_conds(self, **kwargs):
         return out
 
     # Layout order is: keyframe cond rows first, then Ref2VA reference rows.
+    # `is not None` (not `in`) so a present-but-None latent is skipped the
+    # same way PackedLayout skips it.
     payload["cond_video_latents"] = (
-        [kf["latent"] for kf in keyframes if "latent" in kf]
-        + [ref["latent"] for ref in refs if "latent" in ref]
+        [kf["latent"] for kf in keyframes if kf.get("latent") is not None]
+        + [ref["latent"] for ref in refs if ref.get("latent") is not None]
     )
+    # Audio follows the SAME keyframe-then-refs order. PackedLayout reserves a
+    # `cond_audio` segment for every keyframe that carries `audio_latent`
+    # BEFORE any `ref_audio` segment, and _cond_audio_rows() walks this list in
+    # order to fill exactly those reserved rows. Rebuilding this list from refs
+    # only therefore dropped the keyframe audio half and left the layout
+    # reserving more rows than the payload carried, crashing _embed_and_pack:
+    #   RuntimeError: shape mismatch: value tensor of shape [1054, 32]
+    #   cannot be broadcast to indexing result of shape [1128, 32]
+    # (74 missing rows = one 37-step Motion-Context guide audio tail x 2).
     payload["cond_audio_latents"] = [
+        kf["audio_latent"]
+        for kf in keyframes
+        if kf.get("audio_latent") is not None
+    ] + [
         ref["audio_latent"]
         for ref in refs
         if ref.get("audio_latent") is not None

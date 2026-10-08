@@ -106,76 +106,34 @@ from .motion_context_disk import (
     _snapshot_latest,
     _restore_latest_backup,
 )
+# v14.80: payload row-order guard. Wraps whatever MiniMaxH3.extra_conds
+# currently owns the site (whichever third-party pack won it) and rebuilds
+# cond_*_latents into PackedLayout's own order. See the module docstring.
+from .patch_h3_audio_row_order import (
+    apply_patch as _apply_row_order_patch,
+    is_applied as _row_order_patch_applied,
+)
 
-BUILD = "minimax-h3-extender-v14.78-audio-row-pad-fix"
+BUILD = "minimax-h3-extender-v14.80-payload-row-order-guard"
 
-# ── v14.78: 兜底修复 cond_audio_rows shape mismatch ──
-# 当 motion context 的 audio_latent 未被正确包含到 cond_audio_latents 时,
-# all_audio_rows[~audio_update] 的行数会大于 cond_audio_rows 的行数,
-# 导致 RuntimeError: shape mismatch。
-# 修复: monkey-patch MiniMaxH3._embed_and_pack, 在赋值前自动补零行。
-_H3_AUDIO_PAD_PATCHED = False
-
-def _patch_h3_audio_row_pad():
-    """Patch MiniMaxH3._embed_and_pack to pad cond_audio_rows when needed."""
-    global _H3_AUDIO_PAD_PATCHED
-    if _H3_AUDIO_PAD_PATCHED:
-        return
-    try:
-        from comfy.ldm.minimax import model as _mm_model
-        _orig_embed = _mm_model.MiniMaxH3._embed_and_pack
-
-        def _patched_embed_and_pack(self, video_x, audio_x, context, layout, payload, transformer_options):
-            device = video_x.device
-            dtype = context.dtype
-            img_update = layout.img_update.to(device)
-            audio_update = layout.audio_update.to(device)
-            video_rows = _mm_model.patchify_video(video_x.to(torch.float32), self.patch_size)
-            audio_rows = _mm_model.pack_audio(audio_x.to(torch.float32))
-            cond_video_rows = self._cond_video_rows(payload, device)
-            cond_audio_rows = self._cond_audio_rows(payload, device)
-
-            all_video_rows = video_rows
-            if cond_video_rows is not None:
-                all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
-                all_video_rows[~img_update] = cond_video_rows
-                all_video_rows[img_update] = video_rows
-
-            all_audio_rows = audio_rows
-            if cond_audio_rows is not None:
-                # v14.78: Pad cond_audio_rows if shorter than ~audio_update
-                target_count = int((~audio_update).sum().item())
-                current_count = cond_audio_rows.shape[0]
-                if current_count < target_count:
-                    pad_count = target_count - current_count
-                    pad = torch.zeros(pad_count, cond_audio_rows.shape[1],
-                                     dtype=cond_audio_rows.dtype, device=device)
-                    cond_audio_rows = torch.cat([pad, cond_audio_rows], dim=0)
-                    print(f"[H3 Extender] v14.78 音频行补零: {pad_count} rows "
-                          f"({current_count} -> {target_count})")
-                elif current_count > target_count:
-                    cond_audio_rows = cond_audio_rows[:target_count]
-                    print(f"[H3 Extender] v14.78 音频行截断: {current_count} -> {target_count}")
-
-                all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1],
-                                             dtype=torch.float32, device=device)
-                all_audio_rows[~audio_update] = cond_audio_rows
-                all_audio_rows[audio_update] = audio_rows
-
-            # Pack everything (rest of original _embed_and_pack)
-            img_pos = layout.img_pos.to(device)
-            audio_pos = layout.audio_pos.to(device)
-            all_rows = torch.empty(layout.seq_len, max(all_video_rows.shape[1], all_audio_rows.shape[1]),
-                                   dtype=dtype, device=device)
-            all_rows[img_pos] = self.video_patch_proj(all_video_rows.to(dtype))
-            all_rows[audio_pos] = self.audio_patch_proj(all_audio_rows.to(dtype))
-            return all_rows
-
-        _mm_model.MiniMaxH3._embed_and_pack = _patched_embed_and_pack
-        _H3_AUDIO_PAD_PATCHED = True
-        print("[H3 Extender] v14.78 音频行补零 patch 已安装")
-    except Exception as _e:
-        print(f"[H3 Extender] v14.78 音频行补零 patch 安装失败(可忽略): {_e}")
+# ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
+# 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
+# 从未生效过——所以 v14.78 报"已修复"的 shape mismatch 其实一次都没被拦住。
+# 而且它本身是错的: 它照抄了一份过时的打包实现, 用 layout.img_pos/audio_pos
+# 直接铺行, 既不填 text 段(那一段会留在 torch.empty 的未初始化内存里),
+# 也不走 token_refiner, 宽度还取 max(video, audio) 再喂给 Linear。
+# 真被调用的话不是修 crash, 而是静默出花屏 + NaN。
+#
+# 真正的成因在 payload 侧, 已就地根治 (无需在此兜底):
+#   comfyui-h3-multishot/h3_avbank_probe.py  与
+#   BSAI-ComfyUI-H3-Film-Factory/patch_motion_payload.py
+# 两个 extra_conds 包装都只用 refs 重建 cond_audio_latents, 丢掉了
+# PackedLayout 已经为 keyframe 音频预留的 cond_audio 段, 于是预留行数
+# (1128) > 实到行数 (1054), 差 74 行 = 一段 37 步 motion-context 引导音频 x2。
+# 两个包装都已改成 keyframe 音频 + ref 音频, 与 PackedLayout 的分段顺序一致。
+#
+# 不要再在这里加"补零"兜底: 行数不一致是上游语义错误, 补零只会把崩溃换成
+# 静默错帧。正确的防线是让 cond_*_latents 与 layout 的预留严格同序同量。
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -2242,6 +2200,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                temporal_chunk_tokens=0, temporal_overlap_tokens=8):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
+
+    # v14.80: install/refresh the payload row-order guard right before we ask
+    # ComfyUI to build conditioning. This is a guaranteed-late hook - every
+    # import-time extra_conds wrapper has already claimed the site by now, so
+    # the guard lands outermost and its fix cannot be undone by a later import.
+    # Self-detecting, so the per-clip calls after the first are a cheap no-op.
+    if not _row_order_patch_applied():
+        _apply_row_order_patch()
 
     _n_dropped = _drop_mismatched_adaln_patches(model)
     if _n_dropped:

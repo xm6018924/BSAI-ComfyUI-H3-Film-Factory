@@ -30,6 +30,9 @@ from .patch_motion_payload import (
     apply_patch as _apply_payload_patch,
     is_applied as _payload_patch_applied,
 )
+from .patch_h3_audio_row_order import (
+    apply_patch as _apply_row_order_patch,
+)
 
 FPS = 24
 AUDIO_HZ = 40.0
@@ -58,6 +61,18 @@ def _native_guide_api_supported():
 
 
 def _ensure_patches():
+    # v14.80: the row-order guard is owner-agnostic and wraps whatever
+    # extra_conds currently owns the site, so it must be applied on BOTH API
+    # paths - including the native early-return below, which is exactly where
+    # the third-party refs-only rebuild went unnoticed. Applied here (first
+    # execution) rather than at import so it always ends up outermost.
+    if not _apply_row_order_patch():
+        _LOG.warning(
+            "MiniMax H3 Motion Context RAM: could not install the payload "
+            "row-order guard; keyframe/reference audio rows may mismatch the "
+            "packed layout."
+        )
+
     if _native_guide_api_supported():
         return "native"
 
