@@ -37,16 +37,32 @@ This module is the plugin-owned backstop: it wraps whatever
 ``MiniMaxH3.extra_conds`` currently is - whichever third-party wrapper won the
 site - and rewrites the two lists into the layout's own order.
 
-Why it installs late, on purpose
---------------------------------
-Wrapping order decides whether the fix survives. A guard installed at import
-time can end up INNERMOST, in which case a wrapper that imports later stacks on
-top and re-breaks the list *after* the guard has already run. ``apply_patch()``
-therefore wraps "whatever is installed right now" and is called at first
-execution (Motion-Context node, or the Film-Factory sampler) - after every
-import-time wrapper has claimed the site. It also claims the shared ABI markers
-so no wrapper stacks on top of it. Being self-detecting, calling it twice is a
-no-op.
+Why it claims the shared ABI markers
+------------------------------------
+A wrapper that stacks on top of this one re-breaks the list it just fixed. So
+``apply_patch()`` claims the markers the other packs negotiate with
+(``_h3_avbank_merge``, ``_h3_motion_context_payload_patch``). Both of them
+explicitly stand down when they see a marker they recognise, rather than
+wrapping - and both of their merges are now redundant anyway, because current
+stock ``extra_conds`` already appends the ref latents instead of overwriting.
+That is what makes import-time installation safe.
+
+Why it is installed twice
+-------------------------
+``apply_patch()`` runs at import *and* is re-asserted at first execution (the
+Motion-Context node, or the Film-Factory sampler).
+
+- Import time closes the gap this module originally had: a hand-wired
+  ``H3KeyframeInject`` plus a stock ``KSampler`` never reaches
+  ``_sample_h3()`` / ``_ensure_patches()``, so without this the guard would
+  simply not be installed for that graph - even though it carries exactly the
+  keyframe + reference payload that triggers the bug.
+- First execution is the safety net for the reverse ordering: anything that
+  does manage to stack after startup gets wrapped over, putting the guard back
+  on top.
+
+Both call sites are safe to repeat: ``apply_patch()`` is self-detecting through
+its own marker, so the second call is a cheap no-op.
 """
 from __future__ import annotations
 
@@ -169,3 +185,16 @@ def apply_patch():
 def is_applied():
     cls = getattr(_mb, "MiniMaxH3", None)
     return bool(cls is not None and getattr(getattr(cls, "extra_conds", None), MARKER, False))
+
+
+# Import-time install. Safe to do here because apply_patch() claims the avbank /
+# motion-context ABI markers, so any wrapper that imports later recognises a
+# compatible owner and stands down instead of stacking back over this fix (and
+# their merges are redundant against current stock anyway). This is what covers
+# hand-wired H3KeyframeInject + stock KSampler graphs that never reach
+# _sample_h3() / _ensure_patches(). The execution-time call sites stay as a
+# safety net and are no-ops once this has run.
+try:
+    apply_patch()
+except Exception as _exc:               # never block node loading
+    _LOG.warning("MiniMax H3 payload row-order guard: import-time install failed: %s", _exc)

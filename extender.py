@@ -106,15 +106,17 @@ from .motion_context_disk import (
     _snapshot_latest,
     _restore_latest_backup,
 )
-# v14.80: payload row-order guard. Wraps whatever MiniMaxH3.extra_conds
+# v14.81: payload row-order guard. Wraps whatever MiniMaxH3.extra_conds
 # currently owns the site (whichever third-party pack won it) and rebuilds
-# cond_*_latents into PackedLayout's own order. See the module docstring.
+# cond_*_latents into PackedLayout's own order. Installed at import by the
+# module itself; re-asserted below at execution time as a safety net.
+# See the module docstring.
 from .patch_h3_audio_row_order import (
     apply_patch as _apply_row_order_patch,
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.80-payload-row-order-guard"
+BUILD = "minimax-h3-extender-v14.81-payload-row-order-guard-import-install"
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -2201,11 +2203,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
-    # v14.80: install/refresh the payload row-order guard right before we ask
-    # ComfyUI to build conditioning. This is a guaranteed-late hook - every
-    # import-time extra_conds wrapper has already claimed the site by now, so
-    # the guard lands outermost and its fix cannot be undone by a later import.
-    # Self-detecting, so the per-clip calls after the first are a cheap no-op.
+    # v14.81: safety net for the payload row-order guard. The module installs
+    # itself at import; re-asserting here puts it back on top in the rare case
+    # something stacked over it after startup, and covers graphs that reached
+    # the sampler before the import-time install could. Self-detecting, so the
+    # per-clip calls after the first are a cheap no-op.
     if not _row_order_patch_applied():
         _apply_row_order_patch()
 
