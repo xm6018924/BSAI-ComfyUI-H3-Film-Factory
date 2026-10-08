@@ -26,15 +26,18 @@ def _patched_extra_conds(self, **kwargs):
     keyframes = kwargs.get("minimax_keyframes", None)
     refs = kwargs.get("minimax_refs", None)
 
-    if not keyframes or not refs:
+    if not keyframes and not refs:
         return out
 
-    if not (
-        any(MC_KEY in kf for kf in keyframes)
-        or any(MC_AUDIO_KEY in ref for ref in refs)
-    ):
-        # Completely unrelated H3 graph: preserve stock behavior exactly.
-        return out
+    # v1.3 (2026-10-07) audiofix 触发条件放宽：
+    # 旧版仅当 keyframes 含 MC_KEY 或 refs 含 MC_AUDIO_KEY 时才拼接 keyframes
+    # 音频，但 ComfyUI 新版 native 布局的 keyframes 只带
+    #   {"resolved_frame_index", "latent" | "audio_latent"}（无 MC_KEY），
+    # 导致 native 分支直接 return、keyframes 音频丢失 →
+    #   all_audio_rows[~audio_update] = cond_audio_rows  shape mismatch
+    #   (keyframes 37步*2 + refs 490步*2 = 1054 vs refs-only 980)。
+    # 现在：只要 keyframes 或 refs 任一非空即按「keyframes 先、refs 后」
+    # 拼接（无 keyframes 时等价于 refs 列表本身，不改变普通 ref2va 行为）。
 
     cond = out.get("minimax_payload", None)
     payload = getattr(cond, "cond", None) if cond is not None else None
@@ -47,14 +50,28 @@ def _patched_extra_conds(self, **kwargs):
 
     # Layout order is: keyframe cond rows first, then Ref2VA reference rows.
     payload["cond_video_latents"] = (
-        [kf["latent"] for kf in keyframes if "latent" in kf]
-        + [ref["latent"] for ref in refs if "latent" in ref]
+        [kf["latent"] for kf in (keyframes or []) if "latent" in kf]
+        + [ref["latent"] for ref in (refs or []) if "latent" in ref]
     )
-    payload["cond_audio_latents"] = [
-        ref["audio_latent"]
-        for ref in refs
-        if ref.get("audio_latent") is not None
-    ]
+    # v1.2 audiofix (2026-10-07): audio must mirror video's keyframes-first
+    # order too, otherwise PackedLayout's ~audio_update rows (keyframes audio +
+    # refs audio, e.g. 74 + 1200 = 1274) exceed cond_audio_rows (refs audio
+    # only, 1200) -> RuntimeError in model._embed_and_pack
+    #   all_audio_rows[~audio_update] = cond_audio_rows  [1274,32] vs [1200,32].
+    # Only chained clips (CLIP>=1, motion-context keyframes present) hit this;
+    # the first clip has no keyframes and stock path stays intact.
+    payload["cond_audio_latents"] = (
+        [
+            kf["audio_latent"]
+            for kf in (keyframes or [])
+            if kf.get("audio_latent") is not None
+        ]
+        + [
+            ref["audio_latent"]
+            for ref in (refs or [])
+            if ref.get("audio_latent") is not None
+        ]
+    )
 
     frame_count = kwargs.get("minimax_frame_count", None)
     if frame_count is not None:

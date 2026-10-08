@@ -1,4 +1,4 @@
-﻿"""
+"""
 MiniMax H3 Extender
 ===================
 
@@ -49,6 +49,36 @@ import threading
 from aiohttp import web
 from PIL import Image, ImageEnhance, ImageOps
 from server import PromptServer
+
+# ==== BSAI 对口型模块（2026-10-06）：H3 原生 Ref2VA 音频驱动 + IndexTTS-2.5 ====
+try:
+    from .lipsync import build_clip_lips, load_audio_file, normalize_lip_mode
+    _LIPSYNC_AVAILABLE = True
+except Exception as _lse:
+    print(f"[H3 Extender] lipsync 模块导入失败(忽略, 对口型功能不可用): {_lse}")
+    _LIPSYNC_AVAILABLE = False
+
+    def normalize_lip_mode(value):  # 兜底：无 lipsync 时只认 off
+        return "off"
+
+    def load_audio_file(path):  # 兜底：torchaudio 直读 → ComfyUI AUDIO dict
+        waveform, sr = torchaudio.load(str(path))
+        if waveform.dim() == 1:
+            waveform = waveform.unsqueeze(0)
+        if waveform.shape[0] > 1:
+            waveform = waveform.mean(dim=0, keepdim=True)
+        if waveform.dim() == 2:
+            waveform = waveform.unsqueeze(0)
+        return {"waveform": waveform.float(), "sample_rate": int(sr)}
+
+    def build_clip_lips(clips, lip_cfg, asset_library):  # 兜底：全部 off
+        return (
+            [None] * len(clips),
+            [None] * len(clips),
+            [None] * len(clips),
+            [],
+            [{"use": False, "reason": "no_lipsync"}] * len(clips),
+        )
 
 # ==== BSAI 插件协同 SDK：加载即自动注册（失败不拖垮插件） ====
 try:
@@ -105,6 +135,8 @@ from .motion_context_disk import (
     _snapshot_chain,
     _snapshot_latest,
     _restore_latest_backup,
+    _ensure_audiotrack_persisted,
+    _external_audio_or_model,
 )
 
 BUILD = "minimax-h3-extender-v14.77-pending-enc-tuple-fix"
@@ -243,23 +275,31 @@ def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=N
 def _read_frames_from_mp4(path, ffmpeg, total_frames, trim, width, height):
     """v1.67: 从已编码 MP4 blob 读帧(preview decode 产物), 返回 [T,H,W,C] float 0-1
     cpu tensor. 替代 _decode_clip_to_av 里重复的 VAE decode(2X 时每段省 ~30-60s).
-    MP4 已按 trim 裁剪, 帧数以实际 raw 数据为准(编码器可能微调)."""
+    MP4 已按 trim 裁剪, 帧数以实际 raw 数据为准(编码器可能微调).
+    v1.81: 追加 -fps_mode passthrough —— 保证 1 帧进 1 帧出, 杜绝 ffmpeg 因帧率
+    换算插入/丢弃帧(跳帧); 老版本 ffmpeg 不认该参数时自动退回不带参数的调用。"""
     import subprocess as _sp
     import numpy as _np
     n = max(0, int(total_frames) - int(trim))
     if n == 0:
         return None
-    try:
-        _p = _sp.run(
-            [str(ffmpeg), "-y", "-i", str(path),
-             "-f", "rawvideo", "-pix_fmt", "rgb24",
-             "-s:v", f"{int(width)}x{int(height)}", "-"],
-            stdout=_sp.PIPE, stderr=_sp.DEVNULL, timeout=600,
-        )
-    except Exception as _e:
-        print(f"[H3 Extender] MP4 读帧失败: {_e}")
+    _head = [str(ffmpeg), "-y", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgb24"]
+    _tail = ["-s:v", f"{int(width)}x{int(height)}", "-"]
+    raw = b""
+    for _extra in (["-fps_mode", "passthrough"], []):
+        try:
+            _p = _sp.run(
+                _head + _extra + _tail,
+                stdout=_sp.PIPE, stderr=_sp.DEVNULL, timeout=600,
+            )
+            raw = _p.stdout or b""
+        except Exception as _e:
+            print(f"[H3 Extender] MP4 读帧失败: {_e}")
+            raw = b""
+        if raw:
+            break
+    if not raw:
         return None
-    raw = _p.stdout
     one = int(width) * int(height) * 3
     actual = len(raw) // one
     if actual == 0:
@@ -267,6 +307,43 @@ def _read_frames_from_mp4(path, ffmpeg, total_frames, trim, width, height):
     arr = _np.frombuffer(raw[:actual * one], dtype=_np.uint8).reshape(
         actual, int(height), int(width), 3)
     return torch.from_numpy(arr.copy()).float().div_(255.0)
+
+
+def _verify_merged_frames(ffmpeg, merged_path, expected_frames, clip_count):
+    """v1.81: 合并后核对帧数 —— 让"跳帧/重复帧"在日志里可见, 而不是静默发生。
+
+    用 stream copy 数帧(`-c copy -f null -`): 只搬包不解码, 几十秒级;
+    任何失败只提示, 不影响输出。expected = 各段 (frames - trim) 之和。
+    """
+    if ffmpeg is None or int(expected_frames) <= 0:
+        return
+    got = None
+    try:
+        p = subprocess.run(
+            [str(ffmpeg), "-i", str(merged_path), "-map", "0:v:0",
+             "-c", "copy", "-f", "null", "-"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=1800,
+        )
+        text = (p.stderr or b"").decode("utf-8", errors="replace")
+        for line in reversed(text.splitlines()):
+            if "frame=" in line:
+                m = re.search(r"frame=\s*(\d+)", line)
+                if m:
+                    got = int(m.group(1))
+                    break
+    except Exception as _e:
+        print(f"[H3 Extender] 合并帧数核对跳过(可忽略): {_e}")
+        return
+    if got is None:
+        print("[H3 Extender] 合并帧数核对: 未能从 ffmpeg 输出解析帧数(跳过)")
+        return
+    if int(got) != int(expected_frames):
+        print(f"[H3 Extender] ⚠️ 合并帧数不一致: 实际 {int(got)} 帧 != 各段之和 "
+              f"{int(expected_frames)} 帧 ({int(clip_count)} 段) —— 可能丢帧/重复帧, "
+              f"请检查 output 目录下各段 MP4")
+    else:
+        print(f"[H3 Extender] ✅ 合并帧数核对通过: {int(got)} 帧 == 各段之和 "
+              f"({int(clip_count)} 段, 无丢帧/无重复帧)")
 
 
 def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
@@ -352,6 +429,13 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
                 except Exception as _e:
                     print(f"[H3 Extender] _decode_clip_to_av audio decode failed clip={i}: {_e}")
                     audio = None
+                # v1.81: AUDIO 输出口与其它出口保持一致 —— 同样按切片计划替换外部原声
+                if audio is not None:
+                    _net = max(0, int(curr.get("frames", 0)) - (
+                        int(curr.get("trim_frames", 0)) if i > 0 else 0))
+                    audio, _rep = _external_audio_or_model(
+                        data_path, i, segments, _net, float(fps), audio
+                    )
                 print(f"[H3 Extender] _decode_clip_to_av: clip={i} 复用 MP4 blob ({images.shape[0]} 帧, 跳过 VAE decode)")
                 return images, audio
         except Exception as _mp4err:
@@ -389,6 +473,14 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
     except Exception as _e:
         print(f"[H3 Extender] _decode_clip_to_av audio decode failed clip={i}: {_e}")
         audio = None
+
+    # v1.81: AUDIO 输出口与其它出口保持一致 —— 同样按切片计划替换成外部原声,
+    # 否则本节点的 audios 端口(下游/剪辑软件)会是模型音频, 与 MP4/最终解码不一致。
+    if audio is not None:
+        net_frames = max(0, int(curr.get("frames", 0)) - int(trim))
+        audio, _rep = _external_audio_or_model(
+            data_path, i, segments, net_frames, float(fps), audio
+        )
 
     return images, audio
 
@@ -3024,6 +3116,31 @@ def _default_clip(index: int = 0):
     }
 
 
+_ALLOWED_CLIP_LIP_MODES = ("", "off", "speech", "sing", "speech_audio")
+
+
+def _normalize_clip_lip_mode(value):
+    """v1.81: 逐 CLIP lip_mode 归一化（留空 "" = 跟随节点全局）。
+
+    旧版 `_parse_clips_json` 用固定 key 集重建 clip dict，lip_* 字段被整体丢弃，
+    导致插件文档宣称的「CLIP 卡片逐 CLIP 覆盖」永远不生效。此处保留并归一化。
+    """
+    s = str(value or "").strip().lower()
+    if s in _ALLOWED_CLIP_LIP_MODES:
+        return s
+    try:
+        norm = normalize_lip_mode(s)
+    except Exception:
+        norm = "off"
+    if norm == "off":
+        return "off"
+    if norm != "__invalid__":
+        return norm
+    print(f"[H3 LipSync] WARNING: CLIP lip_mode='{value}' 无法识别, 已按「跟随全局」处理"
+          f"（可选: 空/off/speech/sing/speech_audio）")
+    return ""
+
+
 def _parse_clips_json(value: str):
     try:
         payload = json.loads(value or "{}")
@@ -3068,6 +3185,11 @@ def _parse_clips_json(value: str):
                 "id": str(raw.get("id") or f"clip_{i + 1}"),
                 "name": str(raw.get("name", "")),
                 "prompt": str(raw.get("prompt", "")),
+                # v1.81: 逐 CLIP 对口型字段必须保留（旧版在此被整体丢弃）
+                "lip_mode": _normalize_clip_lip_mode(raw.get("lip_mode")),
+                "lip_text": str(raw.get("lip_text", "") or ""),
+                "lip_audio": str(raw.get("lip_audio", "") or ""),
+                "lip_voice": str(raw.get("lip_voice", "") or ""),
                 "seed": seed,
                 "seed_mode": seed_mode,
                 "duration": duration,
@@ -4379,6 +4501,18 @@ class BSAIH3FilmFactory:
                 "BOOLEAN",
                 {"default": True, "tooltip": "把小MLP输出的向量模长对齐到原hidden。原版默认开。"},
             ),
+            # v2.xx: 参考图注入策略(追加在末尾, 不破坏旧工作流widget数组)。
+            # strict_per_clip=仅CLIP自身prompt引用注入(旧行为, 防场景串扰)；
+            # global_inherit=global prompt的<Picture N>也注入每个CLIP(角色全局可用, 默认)。
+            # 兼容旧工作流: 早期版本该参数为布尔开关(True=global_inherit, False=strict_per_clip),
+            # 这里把 True/False 也纳入合法值, 校验通过后由代码归一化, 新老工作流通吃。
+            "ref_strategy": (
+                ["global_inherit", "strict_per_clip", True, False],
+                {
+                    "default": "global_inherit",
+                    "tooltip": "参考图注入策略。global_inherit(默认): global prompt里引用的角色图注入每个CLIP的ref槽, CLIP自身场景引用随后追加(去重,超槽位截断), 解决角色档案放global时参考图不生效。strict_per_clip: 仅CLIP自身prompt的<Picture N>注入(旧行为, 场景严格隔离)。兼容旧工作流的布尔值(True=global_inherit, False=strict_per_clip)。",
+                },
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -4418,6 +4552,48 @@ class BSAIH3FilmFactory:
                     "tooltip": f"External prompt override for CLIP {_ci}. If connected and non-empty, replaces CLIP {_ci}'s prompt (duration/refs/timings still come from the clip card). Leave unconnected to use the built-in clip prompt.",
                 },
             )
+
+        # ── BSAI 对口型 LipSync (v1.0, 2026-10-06) ──────────────────────
+        # ★★ 必须追加在 optional 字典最末尾（clip_prompt_N 之后）：
+        #   (1) widgets 型参数(lip_mode/lip_text/lip_lang/lip_fit_duration)
+        #       在 widgets_values 末尾追加 → 旧工作流 45 个值零错位；
+        #   (2) socket 型参数(lip_audio/lip_voice/tts_model)在 inputs 末尾
+        #       追加 → 旧链接端口 index 0..21 全部保持不变。
+        # speech: lip_text 说话文本 -> IndexTTS-2.5 TTS -> 该 CLIP 音频条件,
+        #         角色对口型说话 (需连接 tts_model_TTS模型 + lip_voice 声线)。
+        # sing  : lip_audio AUDIO 输入(歌曲) -> 角色对口型唱歌。
+        # CLIP 卡片上的 lip_mode/lip_text/lip_audio/lip_voice 逐 CLIP 覆盖全局。
+        # 全部默认 off / 空，不连接不影响任何现有功能。
+        optional["lip_mode"] = (
+            ["off", "speech", "sing", "speech_audio"],
+            {"default": "off", "tooltip": "对口型全局模式。off=关闭(现有行为不变); speech=外部输入一句话(文本台词, 走 IndexTTS 需 tts_model_TTS模型+声线); sing=外部输入歌曲音频, 角色对口型唱歌; speech_audio=外部说话/口播/相声/主持/直播录音直接驱动口型(不做歌声分段, 可选填 lip_text 当字幕先验)。音频来源: 节点 lip_audio(AUDIO) 或 CLIP 卡片/Prompt 里的 @音频N。CLIP 卡片 lip_mode 可逐 CLIP 覆盖。"},
+        )
+        optional["lip_text"] = (
+            "STRING",
+            {"default": "", "tooltip": "全局说话文本(一句台词)。speech 模式必填；speech_audio 模式可选填(填了用 H3 官方 <d>...</d> 逐字朗读标签加强口型)。也可在每个 CLIP 卡片 lip_text 单独填(逐 CLIP 覆盖)。"},
+        )
+        optional["lip_audio"] = ("AUDIO", {"forceInput": True, "tooltip": "全局音频输入(AUDIO): sing 模式的歌 / speech_audio 模式的口播·相声·主持·直播录音。也可在 CLIP 卡片 lip_audio 填 @音频N 或 prompt 引用 @音频N(逐 CLIP 覆盖)。"})
+        optional["lip_voice"] = ("AUDIO", {"forceInput": True, "tooltip": "全局角色声线参考(AUDIO, 3~10s 干净人声)。speech 模式 TTS 克隆用；也可在 CLIP 卡片 lip_voice 填 @音频N(逐 CLIP 覆盖)。"})
+        optional["lip_lang"] = (
+            ["ZH", "EN", "JA", "ES", "AR", "zhen"],
+            {"default": "ZH", "tooltip": "TTS 合成语言: ZH中文 EN英文 JA日文 ES西文 AR阿文 zhen中英混。"},
+        )
+        optional["tts_model_TTS模型"] = (
+            "INDEX_TTS_MODEL",
+            {"forceInput": True, "tooltip": "IndexTTS-2.5 模型(接 BSAI_IndexTTS2_5Loader 的 tts_model 输出)。speech 模式必连。"},
+        )
+        optional["lip_fit_duration"] = (
+            "BOOLEAN",
+            {"default": True, "tooltip": "True=音频优先: 对口型 CLIP 的时长自动=音频时长(对齐 17n+5 帧网格, H3 按音频长度重生成镜头, 口型最自然)。False=剧本时长优先: 保持卡片 duration, 音频裁剪到剧本时长。"},
+        )
+        optional["lip_auto_cut_自动切段"] = (
+            "BOOLEAN",
+            {"default": True, "tooltip": "True=自动切段: CLIP 未单独指定音频时, 从全局 lip_audio 按 CLIP 顺序与各 CLIP 时长自动顺序切段(CLIP1取0~d1, CLIP2取d1~d1+d2...), 一首长歌/一段长录音自动分给多个 CLIP。False=不切段(每个 CLIP 都用全局音频整段, 上限15s)。"},
+        )
+        optional["lip_sing_detect"] = (
+            "BOOLEAN",
+            {"default": True, "tooltip": "sing 模式是否做歌声分段(htdemucs 分离人声轨): True=纯音乐段(前奏/间奏/尾奏)角色闭口不唱, 首次约 1-2 分钟(分段结果有磁盘缓存, 只付一次); False=整段都按演唱对口型。仅当存在 sing 模式 CLIP 时才会执行；speech_audio 口播模式不做分段。"},
+        )
 
 
         # v1.21: INPUT_TYPES keys kept as pure English for workflow compatibility.
@@ -4565,6 +4741,15 @@ class BSAIH3FilmFactory:
         resolution_mode = kwargs.get("resolution_mode", "auto_from_ref")
         megapixels = kwargs.get("megapixels", DEFAULT_MEGAPIXELS)
         refs_json = kwargs.get("refs_json", None)
+        # v2.xx: 参考图注入策略。strict_per_clip=仅CLIP自身prompt的<Picture N>注入；
+        # global_inherit=global prompt的<Picture N>也注入每个CLIP的ref槽(角色全局可用)，
+        # CLIP自身的场景引用随后追加(去重, 超槽位cap截断)。默认global_inherit。
+        ref_strategy = kwargs.get("ref_strategy", "global_inherit")
+        # 兼容旧工作流: 早期布尔值归一化 (True->global_inherit, False->strict_per_clip)。
+        if ref_strategy is True:
+            ref_strategy = "global_inherit"
+        elif ref_strategy is False:
+            ref_strategy = "strict_per_clip"
         output_mode = kwargs.get("output_mode", "none")
         filename_prefix = kwargs.get("filename_prefix", "H3_Extender")
         prompt_pack = kwargs.get("prompt_pack", None)
@@ -4648,6 +4833,36 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
         unique_id = kwargs.get("unique_id", None)
+        # ── BSAI 对口型 LipSync (v1.0, 2026-10-06) ──────────────────────
+        # 全局参数；CLIP 卡片 lip_mode/lip_text/lip_audio/lip_voice 逐 CLIP 覆盖。
+        lip_cfg = {
+            "mode": str(kwargs.get("lip_mode", "off") or "off"),
+            "text": str(kwargs.get("lip_text", "") or ""),
+            "audio": kwargs.get("lip_audio", None),
+            "voice": kwargs.get("lip_voice", None),
+            "lang": str(kwargs.get("lip_lang", "ZH") or "ZH"),
+            "tts_model": kwargs.get("tts_model_TTS模型", None),
+            "fit_duration": bool(kwargs.get("lip_fit_duration", True)),
+            "auto_cut": bool(kwargs.get("lip_auto_cut_自动切段", True)),
+            # v1.81: 歌声分段开关(旧版写死 True, 无法关闭)
+            "sing_detect": bool(kwargs.get("lip_sing_detect", True)),
+            "duration_factor": 1.0,
+        }
+        if lip_cfg["mode"] != "off" or any(
+            (c or {}).get("lip_mode") for c in _parse_clips_json(clips_json)
+        ):
+            print(f"[H3 LipSync] 全局模式={lip_cfg['mode']} lang={lip_cfg['lang']} "
+                  f"fit_duration={lip_cfg['fit_duration']} "
+                  f"auto_cut={lip_cfg['auto_cut']} sing_detect={lip_cfg['sing_detect']} "
+                  f"tts_model={'已连接' if lip_cfg['tts_model'] is not None else '未连接(说话模式不可用)'} "
+                  f"text={'有' if lip_cfg['text'] else '空'} "
+                  f"lip_audio={'已连接' if lip_cfg['audio'] is not None else '未连接'}")
+            _clip_lip_modes = [
+                (c or {}).get("lip_mode") for c in _parse_clips_json(clips_json)
+            ]
+            if any(_clip_lip_modes):
+                print(f"[H3 LipSync] 逐 CLIP lip_mode 覆盖: "
+                      f"{[m or '跟随全局' for m in _clip_lip_modes]}")
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
         clips = _parse_clips_json(clips_json)
         merge_output = _merge_output_from_state(clips_json)
@@ -4696,6 +4911,36 @@ class BSAIH3FilmFactory:
             print("[H3 Extender] no global_prompt connected")
             clips, resolved_img_paths, resolved_aud_paths, clip_asset_paths = self._resolve_asset_library_refs(clips, asset_library)
             global_asset_paths = []
+
+        # ── BSAI 对口型 LipSync (v1.0): 逐 CLIP 构建对口型音频条件 ──────
+        # 每个 CLIP 生成自己的 ref_audio（说话=TTS / 唱歌=歌曲音频），
+        # 主循环里 per-CLIP 传入 _prepare_shared_refs_cached，替代原来的全局单条。
+        # 默认全 off 时 clip_lip_audios 全为 None，行为与旧版完全一致。
+        clip_lip_audios = []
+        lip_notes = []
+        lip_durations = []
+        lip_plans = []
+        if lip_cfg["mode"] != "off" or any((c or {}).get("lip_mode") for c in clips):
+            try:
+                (clip_lip_audios, lip_notes, lip_durations,
+                 lip_warns, lip_plans) = build_clip_lips(
+                    clips, lip_cfg, asset_library
+                )
+                for _w in lip_warns:
+                    print(f"[H3 LipSync] {_w}")
+            except Exception as _le:
+                import traceback as _tb_lip
+                print(f"[H3 LipSync] 对口型构建失败(继续渲染, 全部按 off): {_le}")
+                _tb_lip.print_exc()
+                clip_lip_audios = [None] * len(clips)
+                lip_notes = [None] * len(clips)
+                lip_durations = [None] * len(clips)
+                lip_plans = [{"use": False, "reason": "build_failed"}] * len(clips)
+        else:
+            clip_lip_audios = [None] * len(clips)
+            lip_notes = [None] * len(clips)
+            lip_durations = [None] * len(clips)
+            lip_plans = [{"use": False, "reason": "off"}] * len(clips)
         external_prompt_pack = _normalize_external_prompt_pack(prompt_pack)
         clips, active_prompt_pack_signature, prompt_pack_imported, _prompt_pack_count_changed = (
             _sync_clips_from_prompt_pack(
@@ -4729,6 +4974,20 @@ class BSAIH3FilmFactory:
         if external_prompt_pack is None:
             active_prompt_pack_signature = ""
         data_path, manifest_path, manifest = _manifest_for_extender(owner, FPS)
+
+        # v1.80/v1.81 音轨替换持久化: 全局 lip_audio 外部原声落盘 + 逐 CLIP 切片计划,
+        # 解码阶段(含最终解码导出)按计划精确切段替换模型音频 -> 成片音轨 = 外部输入音频。
+        # v1.81: 未启用/未连接时删除旧音轨并失效已解码分段, 避免旧音轨继续污染成片。
+        try:
+            _at_ok = _ensure_audiotrack_persisted(owner, lip_cfg.get("audio"), lip_plans)
+            if not _at_ok and (lip_cfg["mode"] != "off" or any(
+                    p.get("use") for p in lip_plans if isinstance(p, dict))):
+                print("[H3 Extender] WARNING: 已启用对口型但没有可用的全局 lip_audio —— "
+                      "口型仅按各 CLIP 自身音频驱动, 成片音轨将使用模型生成音频")
+        except Exception as _at_err:
+            import traceback as _tb_at
+            print(f"[H3 Extender] audiotrack persist failed (non-fatal): {_at_err}")
+            _tb_at.print_exc()
 
         # v1.98: 一键恢复缓存——从最近一次自动快照恢复主链，
         # 已渲染的 CLIP 无需从 clip1 重新渲染补链；执行完成后前端自动复位开关。
@@ -4897,10 +5156,21 @@ class BSAIH3FilmFactory:
                     return _pic_re.sub(_sub, str(text))
 
                 _gp_nums = _collect_pic_nums(_gp_text)
+                # v2.xx: ref_strategy 决定 global prompt 的角色引用是否注入每个 CLIP。
+                # global_inherit: global 引用优先占槽(角色全局可用), CLIP 自身场景引用随后
+                # 追加(去重, 超槽位截断) —— 解决角色档案放 global prompt 时参考图完全不生效。
+                # strict_per_clip: 仅 CLIP 自身引用注入(旧行为, 场景严格隔离)。
+                _inherit_global = str(ref_strategy) != "strict_per_clip"
                 clip_ref_plans = []
                 for _ci, _clip in enumerate(clips):
                     _clip_nums = _collect_pic_nums(_clip.get("prompt", ""))
-                    _ordered = _clip_nums[:MAX_IMAGE_REFS]
+                    if _inherit_global:
+                        _ordered = _gp_nums[:MAX_IMAGE_REFS]
+                        for _n in _clip_nums:
+                            if _n not in _ordered and len(_ordered) < MAX_IMAGE_REFS:
+                                _ordered.append(_n)
+                    else:
+                        _ordered = _clip_nums[:MAX_IMAGE_REFS]
                     _o2n = {_old: _idx + 1 for _idx, _old in enumerate(_ordered)}
                     _slot_refs = [None] * MAX_IMAGE_REFS
                     for _idx, _old in enumerate(_ordered):
@@ -4909,17 +5179,14 @@ class BSAIH3FilmFactory:
                         {
                             "refs": _slot_refs,
                             "clip_prompt": _remap_prompt_text(_clip.get("prompt", ""), _o2n),
-                            # Strict per-CLIP isolation: the global prompt NEVER
-                            # injects picture refs into a CLIP. Only the CLIP's
-                            # own @图N tags drive its reference images, so assets
-                            # mentioned only in the global prompt (other scenes,
-                            # other characters) never appear in this shot.
-                            "global_prompt": _remap_prompt_text(_gp_text, {}),
+                            # global_inherit: global 的 <Picture N> 重编号到同一映射并保留；
+                            # strict_per_clip: global 的图片引用整体删除(旧行为)。
+                            "global_prompt": _remap_prompt_text(_gp_text, _o2n) if _inherit_global else _remap_prompt_text(_gp_text, {}),
                         }
                     )
                     print(
                         f"[H3 Extender] clip[{_ci}] ref plan: {len(_ordered)} assets "
-                        f"(strict per-clip, global refs excluded), "
+                        f"(strategy={str(ref_strategy)}, global_refs={len(_gp_nums)}), "
                         f"slots={[i + 1 for i, r in enumerate(_slot_refs) if r is not None]}"
                     )
             else:
@@ -4928,8 +5195,20 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] no resolved_img_paths, using UI refs: {sum(1 for r in refs if r is not None)} active")
 
         # Set ref_audio from asset library if audio refs were resolved
+        # v1.81 fix: resolved_aud_paths 里存的是「文件路径字符串」，旧版直接把它写进
+        # kwargs["ref_audio"]，后面 _encode_ref_audio 执行 audio["waveform"] →
+        # TypeError: string indices must be integers（Prompt 里写 @音频N 就崩）。
+        # 这里先加载成 ComfyUI AUDIO dict 再注入。
         if resolved_aud_paths and not kwargs.get("ref_audio"):
-            kwargs["ref_audio"] = resolved_aud_paths[0]
+            _ra_path = str(resolved_aud_paths[0] or "")
+            if _ra_path and os.path.exists(_ra_path):
+                try:
+                    kwargs["ref_audio"] = load_audio_file(_ra_path)
+                    print(f"[H3 Extender] v1.81 ref_audio(@音频N) 载入: {_ra_path}")
+                except Exception as _ra_err:
+                    print(f"[H3 Extender] v1.81 ref_audio(@音频N) 载入失败, 不注入音频参考: {_ra_err}")
+            else:
+                print(f"[H3 Extender] v1.81 ref_audio(@音频N) 路径不存在, 跳过: {_ra_path}")
 
         refs_signature = _refs_signature(refs)
         requested_resolution = _resolve_generation_resolution(
@@ -5097,6 +5376,23 @@ class BSAIH3FilmFactory:
 
         audio_vae = kwargs.get("audio_vae")
         ref_audio = kwargs.get("ref_audio")
+        # v1.81: 防御性转换 —— 历史工作流 / 外部节点可能把音频参考存成路径字符串，
+        # 直接进 _encode_ref_audio 会抛 "string indices must be integers"。
+        if isinstance(ref_audio, str):
+            _ra_s = ref_audio.strip()
+            if _ra_s and os.path.exists(_ra_s):
+                try:
+                    ref_audio = load_audio_file(_ra_s)
+                    print(f"[H3 Extender] v1.81 ref_audio 字符串自动载入: {_ra_s}")
+                except Exception as _ra_e2:
+                    print(f"[H3 Extender] v1.81 ref_audio 字符串载入失败, 忽略该参考: {_ra_e2}")
+                    ref_audio = None
+            else:
+                print(f"[H3 Extender] v1.81 ref_audio 字符串不是有效路径, 忽略: {_ra_s}")
+                ref_audio = None
+        elif ref_audio is not None and not isinstance(ref_audio, dict):
+            print(f"[H3 Extender] v1.81 ref_audio 类型异常({type(ref_audio).__name__}), 忽略该参考")
+            ref_audio = None
         ref_items = None
         ref_blocks = None
         active_picture_slots = None
@@ -5233,18 +5529,29 @@ class BSAIH3FilmFactory:
                     temp_root = _ensure_cache_root()
                     concat_list = temp_root / f"_concat_{owner}_{uuid.uuid4().hex[:8]}.txt"
                     clip_paths = []
+                    merge_frames = 0
+                    _missing_blobs = []
                     for si, seg in enumerate(segments_out):
                         blob = seg.get("decoded_mp4_blob")
                         if blob is None:
+                            _missing_blobs.append(si + 1)
                             continue
                         cp = temp_root / f"_mergeclip_{owner}_{si}_{uuid.uuid4().hex[:8]}.mp4"
                         try:
                             _copy_blob_to_file(data_path, blob, cp)
                             clip_paths.append(cp)
+                            # v1.81: 累计各段净帧数(合并后用 ffmpeg 数帧核对, 跳帧可见)
+                            merge_frames += int(seg.get("frames", 0)) - (
+                                int(seg.get("trim_frames", 0)) if si > 0 else 0
+                            )
                         except Exception:
                             pass
 
                     if clip_paths:
+                        if _missing_blobs:
+                            print(f"[H3 Extender] ⚠️ 合并输出缺段: CLIP {_missing_blobs} 没有已解码 MP4 "
+                                  f"(尚未解码/解码失败), 这些段不会出现在合并成片里 —— "
+                                  f"成片内容会跳变, 请对该段单独渲染或跑一次最终解码补解码")
                         with open(concat_list, "w", encoding="utf-8") as f:
                             for cp in clip_paths:
                                 f.write(f"file '{cp.as_posix()}'\n")
@@ -5255,9 +5562,10 @@ class BSAIH3FilmFactory:
                         elif ff:
                             cmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(merged_path)]
                             try:
-                                subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+                                subprocess.run(cmd, check=True, capture_output=True, timeout=1800)
                             except Exception as _e:
                                 print(f"[H3 Extender] ffmpeg merge failed: {_e}")
+                        _verify_merged_frames(ff, merged_path, merge_frames, len(clip_paths))
 
                         try:
                             item = _comfy_media_item(merged_path, float(FPS), "output")
@@ -5623,6 +5931,14 @@ class BSAIH3FilmFactory:
                 _refs_for_clip = _plan["refs"]
                 _clip_prompt_for_cond = _plan["clip_prompt"]
                 _gp_for_cond = _plan["global_prompt"]
+
+            # ── BSAI 对口型 LipSync (v1.0): 本 CLIP 的专属音频条件 ─────────
+            # 说话/唱歌时 ref_audio 用本 CLIP 的音频(TTS 或歌曲)，否则回退全局。
+            _lip_audio_for_clip = None
+            if clip_lip_audios is not None and i < len(clip_lip_audios):
+                _lip_audio_for_clip = clip_lip_audios[i]
+            _clip_ref_audio = _lip_audio_for_clip if _lip_audio_for_clip is not None else ref_audio
+
             ref_items, ref_blocks, active_picture_slots, _ref_cache_hit = _prepare_shared_refs_cached(
                 vae,
                 audio_vae,
@@ -5630,7 +5946,7 @@ class BSAIH3FilmFactory:
                 resolved_height,
                 str(ref_image_size),
                 _refs_for_clip,
-                ref_audio=ref_audio,
+                ref_audio=_clip_ref_audio,
                 enable_cache=bool(ref_cache),
                 cache_bias=_asset_paths_signature(resolved_img_paths) + f"|clip{i}",
             )
@@ -5638,6 +5954,11 @@ class BSAIH3FilmFactory:
                 print(f"[H3 Extender] _prepare_shared_refs: {len(ref_items)} ref_items, "
                       f"{len(ref_blocks)} ref_blocks, active_picture_slots={active_picture_slots}")
 
+            # ── BSAI 对口型 LipSync (v1.0): 音频优先覆盖 CLIP 时长 ─────────
+            # lip_fit_duration=True 时时长已在 build_clip_lips 中对齐音频(帧网格)。
+            if lip_durations is not None and i < len(lip_durations) and lip_durations[i] is not None:
+                cfg["duration"] = float(lip_durations[i])
+                print(f"[H3 LipSync] clip[{i}] 时长覆盖 -> {cfg['duration']:.2f}s")
             frame_count = _duration_to_frames(cfg["duration"])
             # Prepend global prompt if connected from an external node.
             # The [角色档案]/[道具档案]/[场景档案] inventories are stripped so
@@ -5647,6 +5968,12 @@ class BSAIH3FilmFactory:
                 gp = _strip_archive_sections(str(_gp_for_cond)).strip()
                 if gp:
                     effective_prompt = gp + "\n" + effective_prompt
+            # ── BSAI 对口型 LipSync (v1.0): 提示词注入 <d> 逐字朗读标记 ─────
+            # speech: "<d>台词</d>" 是 H3 官方逐字朗读+口型同步标签(社区实测有效)。
+            # sing  : 描述演唱行为, 口型随歌曲旋律。
+            if lip_notes is not None and i < len(lip_notes) and lip_notes[i]:
+                effective_prompt = effective_prompt.rstrip() + "\n" + lip_notes[i]
+                print(f"[H3 LipSync] clip[{i}] 提示词注入对口型描述")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:100]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
@@ -6068,18 +6395,28 @@ class BSAIH3FilmFactory:
                 temp_root = _ensure_cache_root()
                 concat_list = temp_root / f"_concat_{owner}_{uuid.uuid4().hex[:8]}.txt"
                 clip_paths = []
+                merge_frames = 0
+                _missing_blobs = []
                 for si, seg in enumerate(segments_out):
                     blob = seg.get("decoded_mp4_blob")
                     if blob is None:
+                        _missing_blobs.append(si + 1)
                         continue
                     cp = temp_root / f"_mergeclip_{owner}_{si}_{uuid.uuid4().hex[:8]}.mp4"
                     try:
                         _copy_blob_to_file(data_path, blob, cp)
                         clip_paths.append(cp)
+                        # v1.81: 累计各段净帧数, 合并后用 ffmpeg 数帧核对
+                        merge_frames += int(seg.get("frames", 0)) - (
+                            int(seg.get("trim_frames", 0)) if si > 0 else 0
+                        )
                     except Exception:
                         pass
 
                 if clip_paths:
+                    if _missing_blobs:
+                        print(f"[H3 Extender] ⚠️ 合并输出缺段: CLIP {_missing_blobs} 没有已解码 MP4, "
+                              f"不会出现在合并成片里 —— 成片内容会跳变, 请补解码/单独渲染该段")
                     with open(concat_list, "w", encoding="utf-8") as f:
                         for cp in clip_paths:
                             f.write(f"file '{cp.as_posix()}'\n")
@@ -6120,6 +6457,8 @@ class BSAIH3FilmFactory:
                     if merged_path.exists():
                         item = _comfy_media_item(merged_path, float(FPS), "output")
                         output_ui_videos.append(item)
+                        # v1.81: 合并后逐帧核对(实际帧数 vs 各段之和)
+                        _verify_merged_frames(ff, merged_path, merge_frames, len(clip_paths))
 
                     # Clean up temp files
                     for cp in clip_paths:
@@ -6193,6 +6532,15 @@ class BSAIH3FilmFactory:
         clip_videos_json = "[]"
         # v1.18: 单独生成/暂停后静默，不提取 clip_videos（等用户后续合并输出/全量渲染）。
         if not suppress_auto_merge:
+            # v2.xx: 先等所有 async encode 完成(blob 落盘到 manifest)，再提取 clip_videos。
+            # 旧顺序是提取在前、等待在后——最后一段走后台线程编码时 blob 尚未写入，
+            # 导致 segment N has no decoded blob / Premiere Pro 缺失末段 clip。
+            for _enc_entry in _pending_enc:
+                try:
+                    _enc_entry[0].wait(timeout=600)
+                except Exception:
+                    pass
+            _pending_enc = []
             try:
                 final_manifest = _load_manifest_from_paths(data_path, manifest_path)
                 if final_manifest and final_manifest.get("segments"):

@@ -915,6 +915,11 @@ function newClip(index) {
         duration: 15.0,
         validated: false,
         context_enabled: true,
+        // v1.81 逐 CLIP 对口型（留空 lip_mode = 跟随节点全局 lip_mode）
+        lip_mode: "",
+        lip_text: "",
+        lip_audio: "",
+        lip_voice: "",
         color_adjustment: normalizeColorAdjustment(),
         card_height: 0,
         collapsed: false,
@@ -967,6 +972,13 @@ function parseState(raw) {
                         duration: Math.max(0.25, Math.min(300, Number(c?.duration || 15))),
                         validated: Boolean(c?.validated),
                         context_enabled: c?.context_enabled !== undefined ? Boolean(c.context_enabled) : true,
+                        // v1.81 逐 CLIP 对口型（旧版 parseState 不认这几个 key，保存/刷新即丢失）
+                        lip_mode: ["", "off", "speech", "sing", "speech_audio"].includes(String(c?.lip_mode ?? ""))
+                            ? String(c?.lip_mode ?? "")
+                            : "",
+                        lip_text: String(c?.lip_text ?? ""),
+                        lip_audio: String(c?.lip_audio ?? ""),
+                        lip_voice: String(c?.lip_voice ?? ""),
                         color_adjustment: normalizeColorAdjustment(c?.color_adjustment),
                     };
                     clip.card_height = c?.card_height || 0;
@@ -4236,6 +4248,85 @@ function buildClipCard(node, runtime, clip, index) {
         ctxRow.appendChild(ctxCheck);
         ctxRow.appendChild(ctxLabel);
         rightPanel.appendChild(ctxRow);
+
+        // ── BSAI 对口型 / Lip Sync (v1.81) ──────────────────────────────
+        // 逐 CLIP 覆盖节点全局 lip_mode。留空 = 跟随全局。
+        // sing        : 本段用外部歌曲音频对口型唱
+        // speech_audio: 本段用外部说话/口播/相声/主持录音对口型说
+        // speech      : 本段用文本走 IndexTTS 合成后对口型（需全局连 TTS 模型+声线）
+        const lipRow = document.createElement("div");
+        lipRow.style.cssText = "display:flex;align-items:center;gap:6px;margin-top:6px;font-size:11px;";
+        const lipLabel = document.createElement("span");
+        lipLabel.textContent = "对口型";
+        lipLabel.style.cssText = "color:#aaa;min-width:44px;user-select:none;";
+        lipRow.appendChild(lipLabel);
+        const lipSel = document.createElement("select");
+        lipSel.style.cssText = "background:#1a1a1a;color:#c8c8c8;border:1px solid #333;border-radius:2px;padding:1px 3px;font-size:11px;";
+        for (const [v, t] of [
+            ["", "跟随全局 / Global"],
+            ["off", "关闭 / Off"],
+            ["speech", "说话·TTS / Speech"],
+            ["sing", "唱歌 / Sing"],
+            ["speech_audio", "口播录音 / Speech-Audio"],
+        ]) {
+            const o = document.createElement("option");
+            o.value = v;
+            o.textContent = t;
+            lipSel.appendChild(o);
+        }
+        lipSel.value = clip.lip_mode || "";
+        lipRow.appendChild(lipSel);
+        rightPanel.appendChild(lipRow);
+
+        const lipDetail = document.createElement("div");
+        lipDetail.style.cssText = "display:flex;flex-direction:column;gap:3px;margin-top:3px;font-size:11px;";
+        const lipAudioIn = document.createElement("input");
+        lipAudioIn.type = "text";
+        lipAudioIn.placeholder = "本 CLIP 音频 @音频N（唱歌 / 口播录音）";
+        lipAudioIn.value = clip.lip_audio || "";
+        lipAudioIn.style.cssText = "width:100%;box-sizing:border-box;background:#1a1a1a;color:#c8c8c8;border:1px solid #333;border-radius:3px;padding:2px 4px;font-size:11px;";
+        const lipTextIn = document.createElement("input");
+        lipTextIn.type = "text";
+        lipTextIn.placeholder = "本 CLIP 台词/文本（说话TTS 必填；口播可填字幕先验）";
+        lipTextIn.value = clip.lip_text || "";
+        lipTextIn.style.cssText = lipAudioIn.style.cssText;
+        lipDetail.appendChild(lipAudioIn);
+        lipDetail.appendChild(lipTextIn);
+        rightPanel.appendChild(lipDetail);
+
+        const refreshLipUi = () => {
+            const m = String(clip.lip_mode || "");
+            const globalMode = String(getWidget(node, "lip_mode")?.value || "off");
+            const effective = m || globalMode;
+            const needsAudio = m === "sing" || m === "speech_audio";
+            const needsText = m === "speech" || m === "speech_audio";
+            lipDetail.style.display = (m === "" || m === "off") ? "none" : "flex";
+            lipAudioIn.style.display = needsAudio ? "" : "none";
+            lipTextIn.style.display = needsText ? "" : "none";
+            lipSel.title = `本 CLIP 对口型模式（当前生效: ${effective}）。留空 = 跟随节点全局 lip_mode。`;
+        };
+        // 对口型配置会改变该 CLIP 的音频条件 → 必须使本段及之后失效重渲
+        const markLipChange = () => {
+            clip.validated = false;
+            updateHidden(node, runtime);
+            invalidateFrom(runtime.state, runtime.state.clips.indexOf(clip));
+            refreshLipUi();
+        };
+        lipSel.addEventListener("change", () => {
+            clip.lip_mode = lipSel.value;
+            markLipChange();
+        });
+        lipAudioIn.addEventListener("input", () => {
+            clip.lip_audio = lipAudioIn.value;
+            updateHidden(node, runtime);
+        });
+        lipAudioIn.addEventListener("change", markLipChange);
+        lipTextIn.addEventListener("input", () => {
+            clip.lip_text = lipTextIn.value;
+            updateHidden(node, runtime);
+        });
+        lipTextIn.addEventListener("change", markLipChange);
+        refreshLipUi();
 
         // Ref Frame Extract section (collapsible)
         const rfeToggle = document.createElement("div");

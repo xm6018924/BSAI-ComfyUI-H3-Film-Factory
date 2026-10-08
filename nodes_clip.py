@@ -11,7 +11,9 @@ import re
 import json
 
 FPS = 24
-H3_FRAME_GRID = [5, 22, 39, 56, 73, 90, 107, 124, 141, 158, 175, 192, 209, 226, 243]
+# H3 官方帧数约束 17n+5（n≥0）。扩展覆盖到 15.08s（362 帧 = n=21），
+# 保证 15s 级 CLIP 音频对齐不落在 243 帧(10.1s) 截断点上。
+H3_FRAME_GRID = [17 * n + 5 for n in range(0, 22)]  # [5, 22, ..., 345, 362]
 
 MAX_REF_IMAGES = 9
 MAX_REF_VIDEOS = 3
@@ -126,10 +128,16 @@ class BSAI_ClipComposer:
             },
             "optional": {
                 "asset_library": ("ASSET_LIBRARY", {"tooltip": "Connect BSAI_AssetLibraryInput to enable @ notation resolution."}),
+                # ── BSAI 对口型 LipSync (v1.0, 2026-10-06) ──────────────────
+                # 单 CLIP 级对口型配置；留空则跟随 Extender 节点全局 lip_mode。
+                "lip_mode": (["", "speech", "sing"], {"default": "", "tooltip": "本 CLIP 对口型模式(留空=跟随节点全局)。speech=说话(需 Extender 连 tts_model+声线); sing=唱歌(音频来自 lip_audio 或 prompt 内 @音频N)。"}),
+                "lip_text": ("STRING", {"default": "", "tooltip": "本 CLIP 说话文本(一句台词)。speech 模式必填；留空=用节点全局 lip_text。"}),
+                "lip_audio": ("STRING", {"default": "", "multiline": False, "tooltip": "本 CLIP 歌曲音频引用(@音频N)。sing 模式用；留空=用节点 lip_audio 输入或 prompt 内 @音频N。"}),
+                "lip_voice": ("STRING", {"default": "", "multiline": False, "tooltip": "本 CLIP 声线参考(@音频N, 3~10s 干净人声)。speech TTS 克隆用；留空=用节点 lip_voice 输入或 CLIP prompt 内 @音频N。"}),
             },
         }
 
-    def compose_clip(self, prompt, asset_refs, narration, dialogue, subtitle_source, audio_mode, duration, width, height, seed, asset_library=None):
+    def compose_clip(self, prompt, asset_refs, narration, dialogue, subtitle_source, audio_mode, duration, width, height, seed, asset_library=None, lip_mode="", lip_text="", lip_audio="", lip_voice=""):
         narr_text = narration
         dial_text = dialogue
         if subtitle_source == "extract_from_prompt":
@@ -159,8 +167,12 @@ class BSAI_ClipComposer:
             "width": width,
             "height": height,
             "seed": seed,
+            "lip_mode": lip_mode,
+            "lip_text": lip_text,
+            "lip_audio": lip_audio,
+            "lip_voice": lip_voice,
         }
-        print(f"[BSAI ClipComposer] Clip composed: {duration}s -> {clip_info['frame_count']} frames, refs: {len(ref_image_paths)}img/{len(ref_video_paths)}vid/{len(ref_audio_paths)}aud")
+        print(f"[BSAI ClipComposer] Clip composed: {duration}s -> {clip_info['frame_count']} frames, refs: {len(ref_image_paths)}img/{len(ref_video_paths)}vid/{len(ref_audio_paths)}aud, lip={lip_mode or 'off'}")
         return (clip_info,)
 
     @classmethod
@@ -233,6 +245,12 @@ class BSAI_ClipSequencer:
             width = clip_def.get("width", 1344)
             height = clip_def.get("height", 768)
             seed = clip_def.get("seed", 0)
+            # ── BSAI 对口型 LipSync (v1.0, 2026-10-06) ─────────────────────
+            # CLIP 卡片逐 CLIP 对口型配置：空=跟随节点全局 lip_mode。
+            lip_mode = clip_def.get("lip_mode", "")
+            lip_text = clip_def.get("lip_text", "")
+            lip_audio = clip_def.get("lip_audio", "")
+            lip_voice = clip_def.get("lip_voice", "")
 
             narr_text = narration
             dial_text = dialogue
@@ -263,6 +281,10 @@ class BSAI_ClipSequencer:
                 "width": width,
                 "height": height,
                 "seed": seed,
+                "lip_mode": lip_mode,
+                "lip_text": lip_text,
+                "lip_audio": lip_audio,
+                "lip_voice": lip_voice,
             }
             clips.append(clip_info)
 

@@ -110,6 +110,24 @@
 | `pause_enable` | 每 clip 生成完暂停 | `false` | 等待用户操作 |
 | `pause_timeout` | 暂停超时（秒）| `120` | 超时自动继续 |
 
+### 对口型 / Lip Sync (v1.81)
+| 参数 | 中文说明 | 默认 | 说明 |
+|---|---|---|---|
+| `lip_mode` | 对口型全局模式 | `off` | `off` 关闭 / `speech` 文本台词走 IndexTTS（需 `tts_model_TTS模型` + 声线）/ `sing` 外部歌曲音频对口型唱 / **`speech_audio` 外部说话·口播·相声·主持·直播·对白录音直接对口型**（不做歌声分段） |
+| `lip_text` | 说话/台词文本 | 空 | `speech` 必填；`speech_audio` 可选填（填了走 H3 官方 `<d>…</d>` 逐字标签加强口型） |
+| `lip_audio` | 全局音频输入（socket） | 未连接 | `sing` 的歌 / `speech_audio` 的口播录音。**成片音轨的唯一来源** |
+| `lip_voice` | 角色声线参考（socket） | 未连接 | `speech` 模式 TTS 克隆用（3~10s 干净人声） |
+| `lip_fit_duration` | 时长优先级 | `true` | `true`=音频优先：CLIP 时长跟随音频长度（对齐 17n+5 网格）；`false`=剧本优先：按卡片 duration 渲染并把音频裁到该长度 |
+| `lip_auto_cut_自动切段` | 自动顺序切段 | `true` | 一首长歌/一段长录音按 CLIP 顺序自动分配给多个 CLIP（`CLIP1→[0,d1)`, `CLIP2→[d1,d1+d2)`…） |
+| `lip_sing_detect` | 歌声分段（仅 sing） | `true` | htdemucs 分离人声轨：纯音乐段（前奏/间奏/尾奏）闭口不唱。首次约 1-2 分钟（有缓存），只为 sing 执行 |
+
+**用法（一首歌铺满整片）**：`lip_mode=sing` → 把歌曲接到 `lip_audio` → 保持 `lip_auto_cut_自动切段=true`、`lip_fit_duration=true` → 每个 CLIP 自动分到歌曲的一段，**模型听到的就是这一段音频**，且成片（最终解码导出 / per-clip MP4 / merged MP4）音轨按同一时间轴精确替换为原歌，样本级连续无缝。
+**口播/相声/主持/直播**：`lip_mode=speech_audio`，把录音接到 `lip_audio`（可选在卡片填台词当字幕先验）。
+
+**CLIP 卡片逐 CLIP 覆盖（v1.81 起真正生效）**：每张卡片可选 `跟随全局/关闭/说话TTS/唱歌/口播录音`，并单独填本 CLIP 的 `@音频N` 与文本。注意：用**卡片独立音频**的 CLIP，成片该段音轨保留模型生成音频（只驱动口型，不做替换）——全局 `lip_audio` 才是成片音轨来源。
+
+**边界**：H3 帧网格 17n+5 @24fps → 单 CLIP 只能是 0.208s~15.083s 的 22 个离散值之一；画面接缝为硬切（连贯性靠 motion-context + 光度匹配），音频为样本级连续。
+
 ### Sol-H3 Self-Lift 双采（v1.31）/ Dual-sample Refine (v1.31)
 | 参数 | 中文说明 | 默认 | 说明 |
 |---|---|---|---|

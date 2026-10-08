@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import zlib
 
 import numpy as np
 import torch
@@ -2310,6 +2311,375 @@ def _cache_candidate_render(
     return updated, desc
 
 
+def _audiotrack_paths(data_path):
+    """外部原歌音轨持久化文件路径: <chain>.audiotrack.wav + .json"""
+    return f"{data_path}.audiotrack.wav", f"{data_path}.audiotrack.wav.json"
+
+
+_AUDIOTRACK_WARNED = set()
+
+
+def _audiotrack_warn_once(key, message):
+    """同类告警只打印一次(逐 clip 调用时避免刷屏), 但绝不静默。"""
+    if key in _AUDIOTRACK_WARNED:
+        return
+    _AUDIOTRACK_WARNED.add(key)
+    print(message)
+
+
+def _audiotrack_content_hash(wave, sr):
+    """v1.81: 波形内容指纹(下采样 float32 crc32 + 采样率)。
+
+    旧版只比对「样本数 + 采样率」, 换一首同长度同采样率的歌不会被识别,
+    成片会一直用旧音轨。改为内容哈希后可正确触发重写与失效。
+    """
+    try:
+        x = wave.detach().float()
+        if x.dim() == 3:
+            x = x[0]
+        if x.dim() == 2:
+            x = x.mean(0)
+        n = int(x.shape[-1])
+        step = max(1, n // 200000)
+        ds = x[::step].contiguous().cpu().numpy().astype("<f4")
+        return "%08x" % (zlib.crc32(ds.tobytes()) ^ (int(sr) & 0xFFFFFFFF))
+    except Exception:
+        return ""
+
+
+def _audio_to_int16(wave):
+    """v1.81: float [-1,1] → int16, 四舍五入(旧版直接截断, 有 -1/32767 直流偏差)。"""
+    x = wave.detach().float().clamp(-1.0, 1.0) * 32767.0
+    return torch.round(x).to(torch.int16).cpu().numpy()
+
+
+def _conform_audio(audio, target_sr=None, target_channels=None):
+    """v1.81: 把 AUDIO dict 重采样/声道对齐到目标格式(装配层要求整片统一)。"""
+    if not isinstance(audio, dict) or audio.get("waveform") is None:
+        return audio
+    wave = audio["waveform"]
+    sr = int(audio.get("sample_rate", 32000))
+    if wave.dim() == 2:
+        wave = wave.unsqueeze(0)
+    if target_channels and int(wave.shape[1]) != int(target_channels):
+        if int(wave.shape[1]) == 1:
+            wave = wave.repeat(1, int(target_channels), 1)
+        else:
+            wave = wave[:, : int(target_channels)]
+    if target_sr and int(target_sr) != sr:
+        try:
+            import torchaudio
+            wave = torchaudio.functional.resample(wave, sr, int(target_sr))
+        except Exception:
+            n_new = max(1, int(round(int(wave.shape[-1]) * float(target_sr) / float(sr))))
+            wave = torch.nn.functional.interpolate(
+                wave, size=n_new, mode="linear", align_corners=False
+            )
+        sr = int(target_sr)
+    return {"waveform": wave, "sample_rate": sr}
+
+
+def _pad_audio_to_frames(audio, frames, fps):
+    """v1.81: 把音频补零到「至少覆盖 frames 帧」的样本数（只补不裁）。
+
+    为什么必须补：单段 MP4 编码用 `-shortest`，而 N 帧对应的样本数
+    `N/fps*sr` 在 24fps/44.1k 下是 N*1837.5 —— 四舍五入后音频会比画面**短半个
+    样本**，ffmpeg 就会在音频结束处收尾，**最后一帧画面可能不被写入（跳帧）**。
+    统一向上取整补零后，最短的流永远是视频，N 帧一定全部写出；
+    多出来的 ≤1 个样本由 ffmpeg 的 -shortest 裁掉，不产生可听差异。
+    """
+    if not isinstance(audio, dict) or audio.get("waveform") is None:
+        return audio
+    try:
+        sr = int(audio.get("sample_rate", 32000))
+        need = int(math.ceil(float(frames) / float(fps) * float(sr) - 1e-6))
+        wave = audio["waveform"]
+        if wave.dim() == 2:
+            wave = wave.unsqueeze(0)
+        cur = int(wave.shape[-1])
+        if cur >= need:
+            return {"waveform": wave, "sample_rate": sr}
+        wave = torch.nn.functional.pad(wave, (0, need - cur))
+        return {"waveform": wave, "sample_rate": sr}
+    except Exception as _e:
+        print(f"[H3 Extender]   音频补零对齐失败(继续, 可能少一帧): {_e}")
+        return audio
+
+
+def _invalidate_decoded_audio(data_path, manifest_path, reason=""):
+    """v1.81: 外部音轨变化/移除时, 清掉已解码分段的 MP4 blob 与 PCM 缓存。
+
+    `_decode_single_clip_to_blob` 见到 decoded_mp4_version>=2 会直接复用旧段,
+    外部音轨换了也不会重新切段 —— 这里显式失效, 强制下次解码重新替换音轨。
+    (只清 manifest 字段, 数据文件里的孤立字节由下次 blob 写入时的 truncate 回收。)
+    v1.81 注意: 这里直接读写 manifest JSON, 不走 _load_manifest_from_paths ——
+    后者在 manifest 与磁盘不一致时会 *删除* manifest, 本函数不能有这种副作用。
+    """
+    try:
+        mp = Path(manifest_path)
+        if not mp.exists():
+            return 0
+        try:
+            manifest = json.loads(mp.read_text(encoding="utf-8"))
+        except Exception as _je:
+            print(f"[H3 LipSync] v1.81 跳过已解码音轨失效(manifest 读取失败, 不动缓存): {_je}")
+            return 0
+        if not isinstance(manifest, dict):
+            return 0
+        segs = manifest.get("segments")
+        if not isinstance(segs, list) or not segs:
+            return 0
+        n = 0
+        for seg in segs:
+            if not isinstance(seg, dict):
+                continue
+            had = seg.pop("decoded_mp4_blob", None) is not None
+            had = (seg.pop("decoded_audio", None) is not None) or had
+            seg.pop("decoded_mp4_version", None)
+            seg.pop("decoded_mp4_has_audio", None)
+            if had:
+                n += 1
+        if n == 0:
+            return 0
+        manifest["segments"] = segs
+        manifest["preview_committed_count"] = 0
+        manifest["build"] = BUILD
+        manifest["updated_at"] = time.time()
+        _write_json_atomic(manifest_path, manifest)
+        for p in (
+            _decoded_preview_cache_path(data_path),
+            _decoded_preview_video_cache_path(data_path),
+        ):
+            try:
+                if Path(p).exists():
+                    Path(p).unlink()
+            except OSError:
+                pass
+        print(f"[H3 LipSync] v1.81 已失效 {n} 段已解码音轨({reason}), 下次解码将按新音轨重新切段")
+        return n
+    except Exception as _e:
+        print(f"[H3 LipSync] v1.81 失效已解码音轨失败(可忽略): {_e}")
+        return 0
+
+
+def _ensure_audiotrack_persisted(owner_id, audio, plan=None):
+    """v1.80/v1.81 (2026-10-07): 把全局 lip_audio 外部原声持久化到
+    <chain>.audiotrack.wav + json(内容哈希 + 逐 CLIP 切片计划), 解码阶段据计划
+    精确切段替换模型生成音频 -> 成片音轨 = 外部输入音频.
+
+    v1.81 变化:
+      (1) audio 为 None(未连接/未启用对口型) 时删除旧音轨 —— 旧版从不删除,
+          一旦跑过一次, 之后即使关掉对口型成片音轨仍被旧音频替换;
+      (2) 指纹从「样本数+采样率」升级为内容哈希(换同长度的歌也能识别);
+      (3) plan 一并落盘, 切片与模型侧消费游标同源, 消除逐段漂移;
+      (4) 音频或计划变化时失效已解码分段, 强制重新切段。
+    返回 True 表示当前存在有效的外部音轨。
+    """
+    data_path, manifest_path = _chain_paths(f"extender_{_safe_name(str(owner_id))}")
+    wav_path, json_path = _audiotrack_paths(data_path)
+
+    if audio is None or not isinstance(audio, dict) or audio.get("waveform") is None:
+        if os.path.exists(wav_path) or os.path.exists(json_path):
+            for _p in (wav_path, json_path):
+                try:
+                    if os.path.exists(_p):
+                        os.unlink(_p)
+                except OSError:
+                    pass
+            print("[H3 LipSync] v1.81 未启用外部音轨(或 lip_audio 未连接): "
+                  "已删除旧音轨持久化文件, 成片将使用模型音频")
+            _invalidate_decoded_audio(data_path, manifest_path, "audiotrack_removed")
+        return False
+
+    try:
+        wave = audio["waveform"]
+        if wave.ndim == 2:
+            wave = wave.unsqueeze(0)
+        if wave.ndim != 3:
+            print("[H3 LipSync] 音轨替换持久化跳过: 波形维度不是 [B,C,L]")
+            return False
+        wave = wave[0]  # [C, L]
+        sr = int(audio.get("sample_rate", 44100))
+        samples = int(wave.shape[-1])
+        if samples <= 0:
+            print("[H3 LipSync] 音轨替换持久化跳过: 波形为空")
+            return False
+
+        digest = _audiotrack_content_hash(wave, sr)
+        plan_list = plan if isinstance(plan, list) else []
+        plan_json = json.dumps(plan_list, ensure_ascii=False, sort_keys=True)
+
+        old = None
+        if os.path.exists(json_path):
+            try:
+                with open(json_path, "r", encoding="utf-8") as f:
+                    old = json.load(f)
+            except Exception as _je:
+                print(f"[H3 LipSync] 旧音轨 json 读取失败(将重写): {_je}")
+                old = None
+        same_audio = bool(
+            isinstance(old, dict)
+            and old.get("hash")
+            and old.get("hash") == digest
+            and int(old.get("samples", -1)) == samples
+            and int(old.get("sr", -1)) == sr
+            and os.path.exists(wav_path)
+        )
+        old_plan_json = (
+            json.dumps(old.get("plan") or [], ensure_ascii=False, sort_keys=True)
+            if isinstance(old, dict)
+            else ""
+        )
+        if same_audio and old_plan_json == plan_json:
+            return True
+
+        if not same_audio:
+            os.makedirs(os.path.dirname(wav_path), exist_ok=True)
+            import wave as _wave
+            wav_wave = wave.repeat(2, 1) if wave.shape[0] == 1 else wave[:2]
+            wav_np = _audio_to_int16(wav_wave)
+            with _wave.open(wav_path, "wb") as wf:
+                wf.setnchannels(2)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(wav_np.T.tobytes())
+            print(f"[H3 LipSync] v1.81 音轨替换持久化: 外部音频 {samples} samples @ {sr}Hz "
+                  f"hash={digest} -> {os.path.basename(wav_path)}")
+
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"sr": sr, "samples": samples, "hash": digest, "plan": plan_list},
+                f, ensure_ascii=False,
+            )
+
+        if not same_audio:
+            _invalidate_decoded_audio(data_path, manifest_path, "audiotrack_changed")
+        elif old_plan_json != plan_json:
+            _invalidate_decoded_audio(data_path, manifest_path, "audiotrack_plan_changed")
+            print("[H3 LipSync] v1.81 切片计划变化: 已失效已解码分段, 下次解码按新计划切段")
+        if plan_list:
+            _used = sum(1 for e in plan_list if isinstance(e, dict) and e.get("use"))
+            print(f"[H3 LipSync] v1.81 切片计划: {len(plan_list)} 个 CLIP, "
+                  f"{_used} 个使用外部音轨, {len(plan_list) - _used} 个保留模型音频")
+        return True
+    except Exception as _e:
+        print(f"[H3 LipSync] 音轨替换持久化失败(不影响渲染, 成片将用模型音频): {_e}")
+        return False
+
+
+def _read_audiotrack_segment(data_path, clip_index, segments, frames, trim, fps, fallback_audio):
+    """v1.80/v1.81: 从外部音轨持久化文件切出本 CLIP 的音频段, 替换模型生成音频.
+
+    v1.81: 优先使用 json 里的 per-CLIP 切片计划 plan[clip_index]:
+      {"use": true, "start": 秒, "dur": 秒} —— 与模型侧消费游标同源, 无漂移;
+      {"use": false}                        —— 本段保留模型音频(直接返回 fallback)。
+    没有 plan(旧缓存 / 旧 json)时回退到 v1.80 口径:
+      start = 前面所有 CLIP 的净帧数之和 / fps。
+    起始秒与时长都以「秒」计算后再乘 WAV 实际采样率, 因此 json 采样率与 WAV
+    不一致时也不会切错位置。越界/文件缺失/异常一律返回 fallback_audio 并打印原因。
+    """
+    try:
+        wav_path, json_path = _audiotrack_paths(data_path)
+        if not (os.path.exists(wav_path) and os.path.exists(json_path)):
+            _audiotrack_warn_once(
+                f"missing:{data_path}",
+                f"[H3 Extender]   外部音轨文件不存在({os.path.basename(wav_path)}), "
+                f"本段及后续用模型音频",
+            )
+            return fallback_audio
+        with open(json_path, "r", encoding="utf-8") as f:
+            meta = json.load(f)
+        plan = meta.get("plan")
+
+        if isinstance(plan, list) and plan:
+            entry = plan[clip_index] if 0 <= int(clip_index) < len(plan) else None
+            if not isinstance(entry, dict) or not entry.get("use"):
+                return fallback_audio  # 本 CLIP 计划为「保留模型音频」
+            start_sec = float(entry.get("start", 0.0) or 0.0)
+            dur_sec = float(entry.get("dur", 0.0) or 0.0)
+            if dur_sec <= 0:
+                dur_sec = float(frames) / float(fps)
+            plan_tag = "plan"
+        else:
+            off_frames = 0
+            for j in range(int(clip_index)):
+                s = segments[j]
+                off_frames += int(s.get("frames", 0)) - (
+                    int(s.get("trim_frames", 0)) if j > 0 else 0
+                )
+            start_sec = float(off_frames) / float(fps)
+            dur_sec = float(frames) / float(fps)
+            plan_tag = "legacy-frames"
+
+        import wave as _wave
+        with _wave.open(wav_path, "rb") as w:
+            wsr = int(w.getframerate())
+            wch = int(w.getnchannels())
+            wtotal = int(w.getnframes())
+            start_samp = int(round(start_sec * wsr))
+            n_samp = int(round(dur_sec * wsr))
+            if n_samp <= 0 or wch <= 0:
+                return fallback_audio
+            if start_samp >= wtotal:
+                print(f"[H3 Extender]   audiotrack 越界(offset={start_samp} >= total={wtotal}), "
+                      f"本段用模型音频")
+                return fallback_audio
+            read_n = max(0, min(n_samp, wtotal - start_samp))
+            if read_n < n_samp:
+                _audiotrack_warn_once(
+                    f"short:{data_path}:{clip_index}",
+                    f"[H3 Extender]   外部音轨余量不足: 本段 {read_n}/{n_samp} samples, "
+                    f"不足部分补零静音(成片时间轴保持不变)",
+                )
+            w.setpos(start_samp)
+            raw = w.readframes(read_n)
+
+        arr = (
+            torch.from_numpy(np.frombuffer(raw, dtype=np.int16).copy())
+            .float()
+            .div_(32767.0)
+            .reshape(-1, wch)
+            .t()
+            .contiguous()
+        )
+        if int(arr.shape[-1]) < n_samp:
+            pad = torch.zeros(arr.shape[0], n_samp - int(arr.shape[-1]))
+            arr = torch.cat([arr, pad], dim=1)
+        print(f"[H3 Extender]   replace audio track: 外部原声段 {n_samp} samples @ {wsr}Hz "
+              f"({frames} 帧, {plan_tag}, start={start_sec:.3f}s)")
+        return {"waveform": arr.unsqueeze(0), "sample_rate": wsr}
+    except Exception as _e:
+        print(f"[H3 Extender]   audiotrack 替换失败(用模型音频): {_e}")
+        return fallback_audio
+
+
+def _external_audio_or_model(data_path, clip_index, segments, frames, fps, fallback_audio):
+    """v1.81 统一出入口: 本 CLIP 该用外部原声还是模型音频, 并统一采样率/声道.
+
+    返回 (audio, replaced)
+      replaced=True  —— audio 是外部音轨里本 CLIP 的片段;
+      replaced=False —— audio 是模型音频(未被切片计划覆盖)。此时若外部音轨存在,
+                        会把模型音频重采样/对齐到外部音轨的采样率与 2 声道,
+                        保证整片音频装配时格式一致
+                        (装配层 _write_preview_pcm_audio 要求全片单一采样率)。
+    """
+    wav_path, json_path = _audiotrack_paths(data_path)
+    if not (os.path.exists(wav_path) and os.path.exists(json_path)):
+        return fallback_audio, False
+    seg = _read_audiotrack_segment(data_path, clip_index, segments, frames, 0, fps, None)
+    if isinstance(seg, dict) and seg.get("waveform") is not None:
+        return seg, True
+    if not isinstance(fallback_audio, dict) or fallback_audio.get("waveform") is None:
+        return fallback_audio, False
+    ext_sr = None
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            ext_sr = int(json.load(f).get("sr", 0)) or None
+    except Exception:
+        ext_sr = None
+    return _conform_audio(fallback_audio, ext_sr, 2), False
+
+
 def _decode_single_clip_to_blob(
     owner_id,
     clip_index,
@@ -2394,6 +2764,16 @@ def _decode_single_clip_to_blob(
         video = video[trim:]
         print(f"[H3 Extender]   trimmed {trim} leading overlap frames -> {video.shape[0]} frames")
 
+    # v1.81: 逐帧账目校验 —— 解码帧数必须等于 manifest 记录的 frames - trim。
+    # 若不等(不应发生), 以实际解码结果为准对齐音频并**明确告警**,
+    # 绝不静默产出"短一帧/多一帧"的片段(那就是跳帧/重复帧)。
+    net_frames_actual = int(video.shape[0])
+    if net_frames_actual != int(out_frames):
+        print(f"[H3 Extender]   ⚠️ clip={i} 解码 {net_frames_actual} 帧 != 预期 {int(out_frames)} 帧 "
+              f"(manifest frames={int(total_frames)}, trim={trim}); "
+              f"本段按实际帧数对齐音频, 请检查该段缓存")
+    out_frames = net_frames_actual
+
     # Decode audio
     print(f"[H3 Extender]   step 3: decoding audio (audio_vae={type(audio_vae).__name__ if audio_vae else 'None'})...")
     try:
@@ -2411,6 +2791,16 @@ def _decode_single_clip_to_blob(
             audio = dict(audio)
             audio["waveform"] = wave[..., trim_samples:]
             print(f"[H3 Extender]   trimmed {trim_samples} audio samples ({trim} frames @ {sr}Hz)")
+
+    # v1.80/v1.81 音轨替换: 按切片计划用外部原声段替换模型生成音频
+    # (成片音轨 = 外部输入音频; 未纳入计划的段保留模型音频, 但会统一采样率/声道)
+    audio, _audio_replaced = _external_audio_or_model(
+        data_path, i, segments, out_frames, fps, audio
+    )
+
+    # v1.81: 编码前把音频补零到「至少覆盖 out_frames 帧」——
+    # 编码命令带 -shortest, 音频只要短于画面半个样本, 最后一帧就会被丢掉(跳帧)。
+    audio = _pad_audio_to_frames(audio, out_frames, fps)
 
     # v1.70: encode 段拆为内部函数——统一预转 uint8 CPU 后编码(不再逐批 GPU->CPU
     # 拷贝); async_encode=True 时在后台线程执行(encode ~55s 与下一段 GPU 工作
@@ -2444,8 +2834,8 @@ def _decode_single_clip_to_blob(
                     wave = wave.squeeze(0)
                 if wave.shape[0] == 1:
                     wave = wave.repeat(2, 1)
-                # Convert float -> int16
-                wav_np = (wave.detach().float().clamp(-1.0, 1.0) * 32767.0).to(torch.int16).cpu().numpy()
+                # Convert float -> int16 (v1.81: 四舍五入, 不再截断)
+                wav_np = _audio_to_int16(wave)
                 import wave as _wave
                 temp_wav = root / f"_{token}.wav"
                 with _wave.open(str(temp_wav), "wb") as wf:
@@ -3013,6 +3403,11 @@ def _render_one_final_segment(
         audio = _decode_single_audio(data_path, curr, audio_vae, fps)
         if progress is not None:
             progress.advance()
+        # v1.81: 统一出入口 —— 按切片计划用外部原声替换模型音频(全片导出/分段导出
+        # /渐进预览/实时预览都走这里, 保证任何出口的成片音轨都一致)
+        audio, _audio_replaced = _external_audio_or_model(
+            data_path, 0, segments, int(curr["frames"]), fps, audio
+        )
         return video, audio, 0
 
     prev = segments[i - 1]
@@ -3060,6 +3455,10 @@ def _render_one_final_segment(
         "waveform": current_audio,
         "sample_rate": sr,
     }
+    # v1.81: 按切片计划替换为外部原声段(未纳入计划的段保留模型音频并统一格式)
+    audio, _audio_replaced = _external_audio_or_model(
+        data_path, i, segments, int(curr_frames), fps, audio
+    )
 
     del chain, decoded, previous_raw, current_raw, pair_audio, wave, previous_audio
     return current_video, audio, int(shift)
@@ -3812,9 +4211,13 @@ if web is not None and PromptServer is not None and getattr(PromptServer, "insta
             data_path, manifest_path = _chain_paths(
                 f"extender_{_safe_name(owner_id)}"
             )
+            # v1.81: 一并删除外部音轨持久化文件(否则清空后重启渲染,
+            # 旧音轨仍会被 _read_audiotrack_segment 拿去替换成片音频)
             for p in (
                 _decoded_preview_cache_path(data_path),
                 _decoded_preview_video_cache_path(data_path),
+                Path(_audiotrack_paths(data_path)[0]),
+                Path(_audiotrack_paths(data_path)[1]),
             ):
                 try:
                     if p.exists():
@@ -4297,6 +4700,10 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                 if len(segments) == 1:
                     audio0 = _decode_single_audio(data_path, segments[0], audio_vae, fps)
                     progress.advance()
+                    # v1.81: 单片全片导出同样接入外部音轨替换
+                    audio0, _rep0 = _external_audio_or_model(
+                        data_path, 0, segments, int(segments[0]["frames"]), fps, audio0
+                    )
                     sample_rate = int(audio0["sample_rate"])
                     wave0 = audio0["waveform"]
                     channels = int(wave0.shape[1])
@@ -4308,6 +4715,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                     previous_tail = _audio_seam_tail(wave0, sample_rate)
                     del audio0, wave0
                 else:
+                    prev_was_external = False
                     for i in range(1, len(segments)):
                         pair, prev_frames, curr_frames = _decode_pair_audio(
                             data_path,
@@ -4324,38 +4732,76 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                         pair_previous = w[..., :prev_n]
                         current = w[..., prev_n:]
 
+                        # v1.81: 按 lipsync 落盘的切片计划替换为外部原声段。
+                        # 模型音频会被重采样/对齐到外部音轨格式, 保证整片单一采样率。
+                        current, current_external = _external_audio_or_model(
+                            data_path, i, segments, int(curr_frames), fps,
+                            {"waveform": current, "sample_rate": sr},
+                        )
+                        cur_sr = int(current.get("sample_rate", sr))
+                        if channels is not None and int(current["waveform"].shape[1]) != int(channels):
+                            current = _conform_audio(current, cur_sr, int(channels))
+                            cur_sr = int(current.get("sample_rate", cur_sr))
+
                         if sample_rate is None:
-                            sample_rate = sr
-                            channels = int(w.shape[1])
+                            pair_previous, _prev_rep = _external_audio_or_model(
+                                data_path, i - 1, segments, int(prev_frames), fps,
+                                {"waveform": pair_previous, "sample_rate": sr},
+                            )
+                            sample_rate = int(pair_previous.get("sample_rate", sr))
+                            channels = int(pair_previous["waveform"].shape[1])
                             cumulative_frames = int(prev_frames)
-                            target = int(round(float(cumulative_frames) / float(fps) * sr))
+                            target = int(round(float(cumulative_frames) / float(fps) * sample_rate))
                             first = _fit_audio_segment_to_cumulative(
-                                pair_previous, target, written_samples
+                                pair_previous["waveform"], target, written_samples
                             )
                             _write_audio_raw(af, first)
                             written_samples += int(first.shape[-1])
-                            previous_tail = _audio_seam_tail(first, sr)
+                            previous_tail = _audio_seam_tail(first, sample_rate)
                             previous_clip_wave = first.detach().clone()
                             del first
                         else:
-                            if sr != sample_rate:
-                                raise RuntimeError("Disk Final Decode: audio sample rate changed.")
-                            gain = _match_pair_gain_to_previous(
-                                previous_clip_wave, pair_previous, sr
-                            )
-                            if abs(gain - 1.0) > 1.0e-8:
-                                current = current * gain
+                            # 上一段是外部原声 → 不需要模型音频的电平补偿
+                            # (两段来自同一首歌, 做增益比对只会引入误差)
+                            if not prev_was_external:
+                                if cur_sr != sample_rate:
+                                    raise RuntimeError(
+                                        "Disk Final Decode: audio sample rate changed."
+                                    )
+                                gain = _match_pair_gain_to_previous(
+                                    previous_clip_wave, pair_previous, sr
+                                )
+                                if abs(gain - 1.0) > 1.0e-8:
+                                    current = {
+                                        "waveform": current["waveform"] * gain,
+                                        "sample_rate": cur_sr,
+                                    }
 
-                        current = _smooth_segment_entry_level(previous_tail, current, sr)
-                        current = _declick_segment(previous_tail, current, sr, 12.0)
+                        # 外部原声段是连续原曲, 跳过接缝电平掩蔽/去咔哒(只对模型音频做)
+                        if not current_external:
+                            current = {
+                                "waveform": _smooth_segment_entry_level(
+                                    previous_tail, current["waveform"], cur_sr
+                                ),
+                                "sample_rate": cur_sr,
+                            }
+                            current = {
+                                "waveform": _declick_segment(
+                                    previous_tail, current["waveform"], cur_sr, 12.0
+                                ),
+                                "sample_rate": cur_sr,
+                            }
                         cumulative_frames += int(curr_frames)
-                        target = int(round(float(cumulative_frames) / float(fps) * sr))
-                        current = _fit_audio_segment_to_cumulative(current, target, written_samples)
-                        _write_audio_raw(af, current)
-                        written_samples += int(current.shape[-1])
-                        previous_tail = _audio_seam_tail(current, sr)
-                        previous_clip_wave = current.detach().clone()
-                        del pair, w, pair_previous, current
+                        target = int(round(float(cumulative_frames) / float(fps) * sample_rate))
+                        cur_wave = _fit_audio_segment_to_cumulative(
+                            current["waveform"], target, written_samples
+                        )
+                        _write_audio_raw(af, cur_wave)
+                        written_samples += int(cur_wave.shape[-1])
+                        previous_tail = _audio_seam_tail(cur_wave, cur_sr)
+                        previous_clip_wave = cur_wave.detach().clone()
+                        prev_was_external = current_external
+                        del pair, w, pair_previous, current, cur_wave
 
             if int(cumulative_frames) != int(expected_frames):
                 raise RuntimeError(

@@ -16,6 +16,47 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 
 
+### v1.80 → v1.81 对口型 LipSync (2026-10-07) — 外部音频驱动口型 + 成片音轨替换全链路修复 / External-Audio Lip Sync + Soundtrack Replacement, End-to-End Fix
+
+**核心：外部音频（歌曲 / 口播 / 相声 / 主持 / 直播 / 对白录音）切片驱动口型这条链路，现在从"能跑"变成"成片音轨确实等于外部音频"；新增「口播录音」模式；逐 CLIP 覆盖真正生效；切片与成片音轨口径统一（消除逐段漂移）。**
+**Core: the external-audio → lip-sync pipeline now actually lands in the final film's audio track; adds a dedicated "speech recording" mode; per-CLIP overrides really work; slice cursor and soundtrack slicing now share one source of truth (no more per-clip drift).**
+
+#### 🔧 后端 / Backend
+
+- **最终解码导出接入外部音轨（v1.81，关键）**：`MiniMaxH3MotionContextDiskFinalDecode.export` 的全片导出 + 分段导出过去只用模型 latent 解码出的音频，**完全没有读外部音轨** → 工作流里的"最终解码导出(MP4)"成片音轨是模型音频。现在统一走 `_external_audio_or_model()` 出入口，按 `plan` 精确切段替换为外部音频。/ The Final Decode export used to rebuild audio from latents only and never touched the persisted external track — so the film's audio was model-generated. It now goes through one choke point (`_external_audio_or_model`) and replaces each clip with the exact external-audio slice.
+- **逐 CLIP 对口型覆盖修复（v1.81，关键）**：`_parse_clips_json()` 用固定 key 集重建 clip dict，把 `lip_mode/lip_text/lip_audio/lip_voice` **整体丢弃** —— 插件文档宣称的"CLIP 卡片逐 CLIP 覆盖"从未生效（只有全局 `lip_mode` 起作用）。现已保留并归一化（非法值回退"跟随全局"并告警）。/ `_parse_clips_json()` rebuilt each clip dict from a fixed key set and silently dropped all four `lip_*` fields, so per-CLIP overrides could never work. They are now preserved and normalized.
+- **新增 `speech_audio` 模式（口播/相声/主持/直播/对白录音）**：外部**说话**音频直接驱动口型，注入"正在说话"提示词而非"正在演唱"，并**跳过 demucs 人声分离**（省掉首次 1-2 分钟，也避免把语音误判为纯音乐段）。可另填 `lip_text` 作为字幕先验（走 H3 官方 `<d>…</d>` 逐字标签）。/ New `speech_audio` mode: an external speech recording drives the mouth directly, with a speaking prompt and no vocal separation; optional `lip_text` adds the official `<d>…</d>` tag.
+- **切片口径统一，消除逐段漂移（v1.81，关键）**：旧版 `fit_duration=False` 时按"剧本 duration"切片、渲染却按 17n+5 向下取网格，成片音轨又按累计净帧切片 → 每段错开 `(clip_dur − 网格时长)` 并逐段累积。现在两种模式都按"实际渲染时长"切片并输出 per-CLIP 切片计划 `lip_plans`，落盘到 `<chain>.audiotrack.wav.json`，解码阶段按计划精确切片；无计划（旧缓存）时回退原累计净帧口径，两者逐样本一致（已单测覆盖）。/ Slice cursor and soundtrack slicing now share one source of truth: per-CLIP plan entries are persisted next to the track and used at decode time; legacy (plan-less) caches still fall back to the frame-sum scheme, verified sample-identical.
+- **音轨生命周期治理（v1.81）**：指纹从"样本数 + 采样率"升级为**内容哈希**（换一首同长度的歌也能识别）；未启用/未连接 `lip_audio` 时**删除旧音轨**（旧版从不删除 → 关掉对口型后成片仍被旧音频替换）；音轨或计划变化时**失效已解码分段的 MP4 blob / PCM 缓存**，强制重新切段；`/h3_extender/clear_preview` 一并删除音轨文件。/ Content-hash fingerprint, delete-on-disable, decode-cache invalidation on change, and clear-preview now removes the track.
+- **采样率/声道统一（v1.81）**：外部音轨(44.1k)与模型音频(32k)混在一部片里会让装配层直接抛 `audio sample rate changed`。计划外的段现在被重采样/声道对齐到外部音轨格式（无外部音轨时行为不变）。/ Model-audio clips not covered by the plan are resampled/channel-aligned to the external track, so a partially-replaced film no longer crashes the PCM assembler.
+- **`@音频N` 类型崩溃修复（v1.81）**：`resolved_aud_paths[0]` 是**路径字符串**却被直接写进 `kwargs["ref_audio"]`，`_encode_ref_audio` 执行 `audio["waveform"]` 即 `TypeError: string indices must be integers`（Prompt 里写 `@音频N` 必崩）。现已先 `load_audio_file()` 载入为 AUDIO dict，并对历史字符串做防御性转换。/ Fixed the `@音频N` → `ref_audio` str/dict crash.
+- **`lip_sing_detect` 开关（v1.81）**：`sing_detect` 过去写死 True（每次渲染都跑人声分离，无法关闭），现在暴露为全局 widget，且**仅当存在 sing CLIP 时**才执行。/ `sing_detect` is now a global widget and only runs when a `sing` CLIP exists.
+- **音频 16bit 写入四舍五入（v1.81）**：旧版直接截断（有 −1/32767 直流偏差），改为 `torch.round`。/ 16-bit conversion now rounds instead of truncating.
+- **静默失败改为显式告警（v1.81）**：音轨文件缺失/余量不足/越界/计划外分段/构建失败等路径全部打印明确原因（同类告警去重，不刷屏），不再出现"成片音轨悄悄变成模型音频"。/ Silent fallbacks now log explicit reasons.
+
+#### 🎨 前端 / Frontend
+
+- **CLIP 卡片新增「对口型」控件（v1.81）**：每张卡片可单独设置 `lip_mode`（跟随全局 / 关闭 / 说话·TTS / 唱歌 / 口播录音）、本 CLIP 音频 `@音频N`、本 CLIP 文本；改动即使本段及之后失效重渲。此前前端 **完全没有** lip 字段（`web/*.js` 里 0 匹配），逐 CLIP 配置只能手改 JSON。/ Each CLIP card now exposes lip mode, per-clip audio (`@音频N`) and per-clip text; changing them invalidates that clip onward.
+- **`lip_mode` 下拉新增「口播录音 / Speech-Audio」**。/ The global `lip_mode` combo gains `speech_audio`.
+
+#### 🎬 逐帧完整性 / Frame integrity（实测确认的跳帧根因，强烈建议更新）
+
+- **单段 MP4 少最后一帧（v1.81，实测复现）**：N 帧画面在 24fps/44100Hz 下对应 `N*1837.5` 个样本，旧 `_audio_exact_frames` 用 `round()` → **N ≡ 3 (mod 4) 时音频比画面短 0.5 个样本**，而单段编码命令带 `-shortest` → ffmpeg 在音频结束处收尾，**最后一帧不被写入**。已用插件实际使用的 ffmpeg 7.1 与系统 ffmpeg 8.1.1 双版本实测：107 帧输入 → 输出 **106 帧**（丢 1 帧）；补零后 → 稳定 107 帧。受影响帧数：44.1kHz(外部音轨) 下 **39/107/175/243/311 帧**（5/22 种时长），32kHz(模型音频) 下 **22/73/124/175/226/277/328 帧**（7/22 种时长）—— 常见卡片时长 5s→107 帧、10s→226 帧都在其中；多段成片会在**每个接缝少一帧**，即"卡顿/跳帧"的直接来源。修复：编码前用新函数 `_pad_audio_to_frames()` 把音频**补零到至少覆盖本段帧数**（只补不裁，多出的 ≤1 样本由 `-shortest` 裁掉）。/ **Root cause of per-clip frame drops, reproduced empirically on two ffmpeg versions: the rounded audio was 0.5 sample shorter than the video, so `-shortest` dropped the last frame (107 in → 106 out). Fixed by zero-padding the audio to cover at least the clip's frame count (pad-only, never truncate).**
+- **逐帧账目校验（v1.81）**：单段解码后校验「实际解码帧数 == manifest frames − trim」，不一致时按实际帧数对齐音频并**明确告警**，绝不静默产出短/长的片段。/ Per-clip decode now verifies the decoded frame count against the manifest and aligns audio to the actual count with a loud warning on mismatch.
+- **读帧 1:1（v1.81）**：从 MP4 blob 读帧追加 `-fps_mode passthrough`（杜绝 ffmpeg 帧率换算插帧/丢帧；老版本 ffmpeg 自动退回原命令）。/ Frame reading from blob MP4s now uses `-fps_mode passthrough` (with an automatic fallback for older ffmpeg).
+- **合并后帧数核对（v1.81）**：merged MP4 生成后用 `-c copy -f null -` 数帧，与「各段 (frames − trim) 之和」比对并打印 ✅/⚠️ —— 跳帧/重复帧从此在日志里可见。/ After merging, the extender counts frames and compares against the sum of the segments, logging a clear pass/fail line.
+- **AUDIO 输出口与其他出口一致（v1.81）**：`audios` 端口过去是模型音频（与 MP4/最终解码的外部音轨不一致），现已统一走同一替换出入口。/ The `audios` output port now carries the same replaced soundtrack as the MP4/Final-Decode outputs.
+
+#### ⚠️ 已知边界 / Known limits
+
+- H3 帧网格 17n+5 @24fps：单个 CLIP 只能是 **0.208s ~ 15.083s** 的 22 个离散值之一，"自定义时长"按此网格取整（`fit_duration=False` 时向下取整、与渲染帧数严格一致）。
+- `lip_fit_duration=True`（默认）= **音频优先**：CLIP 时长跟随音频长度（网格对齐）；要"按剧本时长裁音频"请设 `False`。
+- 逐 CLIP 独立音频（卡片 `@音频N` / TTS）那一段，成片音轨保留**模型生成音频**（只驱动口型，不做替换）—— 全局 `lip_audio` 是成片音轨的唯一来源，插件会打印明确提示。
+- 画面接缝仍是**硬切**（无交叉溶解），连贯性靠 motion-context + 光度匹配；音频是样本级连续（`_auto_early_seam_shift` 最多 2 帧的画面接缝微调不作用于外部音轨，以保证歌曲连续）。
+- 口型是否真正逐帧跟随外部波形，取决于 H3 Ref2VA 的参考音频是"驱动信号"还是"音色参考"，建议先用 1 段实测确认（见 v1.81 验证脚本 `_h3_v181_verify/`）。
+
+---
+
 ### v2.72 → v2.115 / v14.85 (2026-09-30) — 崩溃修复 + 独立渲染正确性 + 前端底板全高 + 展开/收起CLIP按钮紧贴 + 全局提示词区独立折叠 + 高度实测 + 默认展开/宽度保证按钮完整可见 + 新建节点渲染 CLIP1 卡片 / Crash Fixes + Per-Clip Render Correctness + Full-Height Backdrop + Tight Collapse/Expand Toggle + Independent Global-Prompt Fold + Measured Heights + Expanded-by-Default & Toolbar-Fit Width + CLIP1 Card on New Nodes
 
 **核心：崩溃后断点续跑不丢链；独立渲染"渲谁是谁"且渲染完静默等待；节点黑色底板跟随 CLIP 数量；展开/收起CLIP按钮点击后节点高度紧贴；全局提示词区不再随 CLIP 收起而消失，改为独立的「▲/▼」折叠按钮；收起态与展开态高度都实测，底部按钮栏不裁切、底板盖满节点；节点默认「展开CLIP」状态，默认宽度保证工具栏末尾的「📦 收起CLIP / 📂 展开CLIP」按钮完整可见。**
