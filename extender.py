@@ -125,7 +125,7 @@ def _patch_h3_audio_row_pad():
         from comfy.ldm.minimax import model as _mm_model
         _orig_embed = _mm_model.MiniMaxH3._embed_and_pack
 
-    def _patched_embed_and_pack(self, video_x, audio_x, context, layout, payload, transformer_options):
+        def _patched_embed_and_pack(self, video_x, audio_x, context, layout, payload, transformer_options):
             device = video_x.device
             dtype = context.dtype
             img_update = layout.img_update.to(device)
