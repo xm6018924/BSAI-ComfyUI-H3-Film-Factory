@@ -116,7 +116,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.81-payload-row-order-guard-import-install"
+BUILD = "minimax-h3-extender-v14.82-lipaudio-exclusive-mix"
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -242,10 +242,11 @@ def _release_dynamic_vram(tag=""):
         pass
 
 
-def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None, async_encode=False):
+def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None, async_encode=False, lip_audio_segment=None):
     """Decode a single cached clip to MP4 and store as blob for frontend preview.
     v1.70: async_encode=True 时 encode 段在后台线程执行, 返回
-    {"async": True, "done_event": threading.Event}."""
+    {"async": True, "done_event": threading.Event}.
+    lip_audio_segment: 对口型模式下该 CLIP 对应的歌曲片段，会与模型环境音混音。"""
     return _decode_single_clip_to_blob(
         owner_id=owner,
         clip_index=clip_index,
@@ -254,6 +255,7 @@ def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=N
         fps=fps,
         ffmpeg=ffmpeg,
         async_encode=async_encode,
+        lip_audio_segment=lip_audio_segment,
     )
 
 
@@ -4579,7 +4581,7 @@ class BSAIH3FilmFactory:
         optional = {
             "audio_vae": ("VAE", {"forceInput": True}),
             "ref_audio": ("AUDIO", {"forceInput": True}),
-            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "对口型驱动音频：完整歌曲/对白音频。连接后自动按各CLIP时长分割为N段，每段驱动对应CLIP对口型生成。最终输出无缝合并的完整音频。"}),
+            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "【唯一歌曲源】完整歌曲/对白音频。一旦连接：①所有CLIP及@图N角色的口型完全由这首歌对应片段驱动；②自动忽略ref_audio端口与@音频N；③模型自生成音频全部丢弃；④出片听到的就是这里接入的这首歌。按各CLIP时长自动切段，最终输出与视频等长。"}),
             "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [分镜N] marker: text before → global prompt, text from [分镜N] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
@@ -5120,8 +5122,9 @@ class BSAIH3FilmFactory:
         else:
             print(f"[H3 Extender] no resolved_img_paths, using UI refs: {sum(1 for r in refs if r is not None)} active")
 
-        # Set ref_audio from asset library if audio refs were resolved
-        if resolved_aud_paths and not kwargs.get("ref_audio"):
+        # Set ref_audio from asset library if audio refs were resolved.
+        # 若 lip_audio 已连接，则忽略 @音频N——对口型模式下 lip_audio 是唯一音频源。
+        if resolved_aud_paths and not kwargs.get("ref_audio") and not kwargs.get("lip_audio"):
             kwargs["ref_audio"] = resolved_aud_paths[0]
 
         refs_signature = _refs_signature(refs)
@@ -5302,6 +5305,19 @@ class BSAIH3FilmFactory:
         if lip_audio is not None:
             lip_audio_segments = _split_lip_audio_by_clips(lip_audio, clips, fps=float(FPS))
             print(f"[H3 LipSync] ✅ 已启用对口型模式，{len(lip_audio_segments)} 段音频已就绪")
+            # ── 硬保证：lip_audio 是唯一音频源 ──
+            # 一旦用户把外部歌曲接到 lip_audio，全局 ref_audio（ref_audio 端口输入、
+            # 或 clip 提示词里 @音频N 从资产库解析出的音频）一律作废，绝不允许任何
+            # CLIP 串到别的音频。每段 CLIP 的口型只能由这首歌对应片段驱动。
+            if ref_audio is not None:
+                print("[H3 LipSync] ℹ️ 已忽略外部 ref_audio 输入（lip_audio 连接时以对口型音频为唯一音频源）")
+            ref_audio = None
+            # 已缓存(validated)的 CLIP 不会重渲：若它们是接歌之前生成的，口型对不上新歌。
+            _cached_count = sum(1 for _c in clips if _c.get("validated"))
+            if _cached_count:
+                print(f"[H3 LipSync] ⚠️ 注意：{_cached_count} 个 CLIP 当前为缓存(validated)状态，"
+                      f"本次不会重新渲染对口型。若它们是接入 lip_audio 之前生成的，"
+                      f"请取消这些 CLIP 的 ✅ 校验标记后重渲，否则口型与歌曲不匹配。")
 
         disk_join = MiniMaxH3MotionContextDiskJoin()
         motion = MiniMaxH3MotionContextRAM()
@@ -5825,14 +5841,21 @@ class BSAIH3FilmFactory:
                 _refs_for_clip = _plan["refs"]
                 _clip_prompt_for_cond = _plan["clip_prompt"]
                 _gp_for_cond = _plan["global_prompt"]
-            # Determine ref_audio for this clip
-            # Priority: lip_audio segment (per-clip) > global ref_audio > None
-            _clip_ref_audio = ref_audio
-            if lip_audio_segments is not None and i < len(lip_audio_segments):
+            # Determine ref_audio for this clip.
+            # 对口型模式（lip_audio 已连接）：每段 CLIP 的音频条件只能是 lip_audio
+            # 切出来的那一段。此时全局 ref_audio 已被置 None，绝不允许串到别的音频；
+            # 段缺失直接报错，避免该 CLIP 静默变成"无音频/别人的歌"。
+            if lip_audio_segments is not None:
+                if i >= len(lip_audio_segments) or lip_audio_segments[i] is None:
+                    raise RuntimeError(
+                        f"[H3 LipSync] clip[{i+1}] 缺少对口型音频段（共 {len(lip_audio_segments)} 段，"
+                        f"当前 clip 索引 {i}）。请检查 lip_audio 时长是否覆盖全部 CLIP。"
+                    )
                 _clip_ref_audio = lip_audio_segments[i]
-                if _clip_ref_audio is not None:
-                    _seg_dur = int(_clip_ref_audio["waveform"].shape[-1]) / float(_clip_ref_audio["sample_rate"])
-                    print(f"[H3 LipSync] clip[{i+1}] 使用对口型音频段: {_seg_dur:.2f}s")
+                _seg_dur = int(_clip_ref_audio["waveform"].shape[-1]) / float(_clip_ref_audio["sample_rate"])
+                print(f"[H3 LipSync] clip[{i+1}] 对口型驱动音频段: {_seg_dur:.2f}s")
+            else:
+                _clip_ref_audio = ref_audio
 
             ref_items, ref_blocks, active_picture_slots, _ref_cache_hit = _prepare_shared_refs_cached(
                 vae,
@@ -6013,6 +6036,9 @@ class BSAIH3FilmFactory:
                         if _nseg <= (i - first_sel + 1) and _nseg < i + 1:
                             _seg_idx = i - first_sel
                     print(f"[H3 Extender] preview decode: clip={i} ffmpeg={_ff} vae={type(vae).__name__} audio_vae={type(audio_vae).__name__ if audio_vae else 'None'} seg_idx={_seg_idx}")
+                    _lip_seg = None
+                    if lip_audio_segments is not None and i < len(lip_audio_segments):
+                        _lip_seg = lip_audio_segments[i]
                     _dec_res = _decode_single_clip_preview(
                         owner=owner,
                         clip_index=_seg_idx,
@@ -6021,6 +6047,7 @@ class BSAIH3FilmFactory:
                         fps=float(FPS),
                         ffmpeg=_ff,
                         async_encode=True,
+                        lip_audio_segment=_lip_seg,
                     )
                     if isinstance(_dec_res, dict) and _dec_res.get("async"):
                         _pending_enc.append((_dec_res["done_event"], _seg_idx, i))
@@ -6478,35 +6505,81 @@ class BSAIH3FilmFactory:
 
         out_images_t, out_audios_t = _concat_clip_av(out_images, out_audios)
 
-        # ── Lip Sync 模式：最终音频替换为原始完整 lip_audio（无缝） ──
-        # 视频由各 CLIP 对口型生成后合并，音频用原始完整歌曲，保证音画完全同步且无缝。
+        # ── Lip Sync 模式：最终音频 = lip_audio 主唱(满音量) + 模型环境音(压低垫底) ──
+        # 视频由各 CLIP 用对应歌曲片段驱动对口型生成。出片音轨以用户接入的原始歌曲为主
+        # (满音量)，模型采样时自生成的环境音/音效不丢弃，压低到 15% 音量垫在歌曲底下
+        # 作为 MV 辅助音。
         if lip_audio is not None and lip_audio_segments is not None:
             try:
-                # 计算视频总帧数对应的音频时长
+                import torchaudio as _ta_final
                 total_video_frames = int(out_images_t.shape[0])
                 video_duration = float(total_video_frames) / float(FPS)
 
-                # 截取或填充 lip_audio 到视频总时长
-                lip_wave = lip_audio["waveform"]
+                lip_wave = lip_audio["waveform"].float()
                 lip_sr = int(lip_audio["sample_rate"])
-                target_samples = max(1, int(video_duration * lip_sr))
-                actual_samples = int(lip_wave.shape[-1])
 
-                if actual_samples >= target_samples:
-                    # 音频比视频长，截取到视频时长
-                    final_wave = lip_wave[..., :target_samples].clone()
+                # 模型生成的拼接音频(out_audios_t)，作为垫底环境音
+                model_wave = out_audios_t["waveform"].float()
+                model_sr = int(out_audios_t["sample_rate"])
+
+                # 歌曲重采样到模型音频采样率
+                if lip_sr != model_sr:
+                    lip_wave = _ta_final.functional.resample(lip_wave, lip_sr, model_sr)
+                # 维度对齐 [B, C, L]
+                if lip_wave.ndim == 2:
+                    lip_wave = lip_wave.unsqueeze(0)
+                if model_wave.ndim == 2:
+                    model_wave = model_wave.unsqueeze(0)
+                # 声道对齐
+                if lip_wave.shape[1] != model_wave.shape[1]:
+                    if lip_wave.shape[1] == 1 and model_wave.shape[1] == 2:
+                        lip_wave = lip_wave.repeat(1, 2, 1)
+                    elif model_wave.shape[1] == 1 and lip_wave.shape[1] == 2:
+                        model_wave = model_wave.repeat(1, 2, 1)
+
+                # 长度对齐到视频时长对应的模型采样数
+                target_samples = max(1, int(video_duration * model_sr))
+                # 歌曲段截/填到 target_samples
+                if int(lip_wave.shape[-1]) >= target_samples:
+                    lip_aligned = lip_wave[..., :target_samples]
                 else:
-                    # 音频比视频短，后面补静音（一般不会出现，因为分割时已缩放对齐）
-                    pad_len = target_samples - actual_samples
-                    pad = torch.zeros(lip_wave.shape[0], lip_wave.shape[1], pad_len,
-                                      dtype=lip_wave.dtype, device=lip_wave.device)
-                    final_wave = torch.cat([lip_wave, pad], dim=-1)
+                    _pad = target_samples - int(lip_wave.shape[-1])
+                    lip_aligned = torch.cat([
+                        lip_wave,
+                        torch.zeros(lip_wave.shape[0], lip_wave.shape[1], _pad,
+                                    dtype=lip_wave.dtype, device=lip_wave.device)
+                    ], dim=-1)
+                # 模型环境音截/填到 target_samples
+                if int(model_wave.shape[-1]) >= target_samples:
+                    model_aligned = model_wave[..., :target_samples]
+                else:
+                    _pad = target_samples - int(model_wave.shape[-1])
+                    model_aligned = torch.cat([
+                        model_wave,
+                        torch.zeros(model_wave.shape[0], model_wave.shape[1], _pad,
+                                    dtype=model_wave.dtype, device=model_wave.device)
+                    ], dim=-1)
 
-                out_audios_t = {"waveform": final_wave.cpu().float().contiguous(), "sample_rate": lip_sr}
-                print(f"[H3 LipSync] ✅ 最终音频替换为原始完整 lip_audio: "
-                      f"{int(final_wave.shape[-1])} samples @ {lip_sr}Hz ({float(int(final_wave.shape[-1])) / lip_sr:.2f}s)")
+                # 混音: 主唱满音量 + 模型环境音 x0.15
+                _FINAL_DUCK = 0.15
+                final_wave = lip_aligned + model_aligned * _FINAL_DUCK
+                out_audios_t = {
+                    "waveform": final_wave.cpu().float().contiguous(),
+                    "sample_rate": model_sr,
+                }
+                print(f"[H3 LipSync] ✅ 最终出片音频混音: 歌曲主唱满音量 + 模型环境音 x{_FINAL_DUCK} "
+                      f"= {int(final_wave.shape[-1])} samples @ {model_sr}Hz "
+                      f"({float(int(final_wave.shape[-1])) / model_sr:.2f}s)")
             except Exception as _lip_err:
-                print(f"[H3 LipSync] 最终音频替换失败(使用H3生成音频): {_lip_err}")
+                # 兜底：混音失败也要输出歌曲主体，不回退到纯模型音频。
+                print(f"[H3 LipSync] ⚠️ 最终混音失败({_lip_err})，直接输出原始 lip_audio 波形兜底")
+                try:
+                    out_audios_t = {
+                        "waveform": lip_audio["waveform"].cpu().float().contiguous(),
+                        "sample_rate": int(lip_audio["sample_rate"]),
+                    }
+                except Exception:
+                    pass
 
         if len(out_images) > 0:
             print(f"[H3 Extender] AV outputs: {int(out_images_t.shape[0])} frames, "

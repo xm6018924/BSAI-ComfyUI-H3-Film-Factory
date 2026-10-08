@@ -2318,6 +2318,7 @@ def _decode_single_clip_to_blob(
     fps,
     ffmpeg=None,
     async_encode=False,
+    lip_audio_segment=None,
 ):
     """Decode one cached clip's latent to an MP4 blob and persist it in the segment.
 
@@ -2411,6 +2412,51 @@ def _decode_single_clip_to_blob(
             audio = dict(audio)
             audio["waveform"] = wave[..., trim_samples:]
             print(f"[H3 Extender]   trimmed {trim_samples} audio samples ({trim} frames @ {sr}Hz)")
+
+    # ── 对口型混音模式：lip_audio 主音(满音量) + 模型生成的环境音/音效(压低垫底) ──
+    # lip_audio_segment 由外部传入(每段 CLIP 对应的歌曲片段)。模型解码出来的音频
+    # (环境音/动效/呼吸声)不丢弃，压低到 ~15% 音量垫在歌曲底下，作为 MV 辅助音。
+    if lip_audio_segment is not None and audio.get("waveform") is not None:
+        try:
+            import torchaudio as _ta_mix
+            _model_wave = audio["waveform"].float()
+            _model_sr = int(audio["sample_rate"])
+            _lip_wave = lip_audio_segment["waveform"].float()
+            _lip_sr = int(lip_audio_segment["sample_rate"])
+            # 统一到模型音频的采样率
+            if _lip_sr != _model_sr:
+                _lip_wave = _ta_mix.functional.resample(_lip_wave, _lip_sr, _model_sr)
+            # 维度对齐 [B, C, L]
+            if _lip_wave.ndim == 2:
+                _lip_wave = _lip_wave.unsqueeze(0)
+            if _model_wave.ndim == 2:
+                _model_wave = _model_wave.unsqueeze(0)
+            # 声道对齐
+            if _lip_wave.shape[1] != _model_wave.shape[1]:
+                if _lip_wave.shape[1] == 1 and _model_wave.shape[1] == 2:
+                    _lip_wave = _lip_wave.repeat(1, 2, 1)
+                elif _model_wave.shape[1] == 1 and _lip_wave.shape[1] == 2:
+                    _model_wave = _model_wave.repeat(1, 2, 1)
+            # 长度对齐到模型音频长度(歌曲段可能略长/略短)
+            _target = int(_model_wave.shape[-1])
+            if int(_lip_wave.shape[-1]) >= _target:
+                _lip_aligned = _lip_wave[..., :_target]
+            else:
+                _pad = _target - int(_lip_wave.shape[-1])
+                _lip_aligned = torch.cat([
+                    _lip_wave,
+                    torch.zeros(_lip_wave.shape[0], _lip_wave.shape[1], _pad,
+                                dtype=_lip_wave.dtype, device=_lip_wave.device)
+                ], dim=-1)
+            # 混音: 歌曲主音满音量 + 模型环境音 15% 音量
+            _DUCK = 0.15
+            _mixed = _lip_aligned + _model_wave * _DUCK
+            audio = dict(audio)
+            audio["waveform"] = _mixed
+            print(f"[H3 LipSync]   clip[{i}] 音频混音: 歌曲满音量 + 模型环境音 x{_DUCK} "
+                  f"({int(_mixed.shape[-1])} samples @ {_model_sr}Hz)")
+        except Exception as _mix_err:
+            print(f"[H3 LipSync]   clip[{i}] 混音失败(回退模型原音): {_mix_err}")
 
     # v1.70: encode 段拆为内部函数——统一预转 uint8 CPU 后编码(不再逐批 GPU->CPU
     # 拷贝); async_encode=True 时在后台线程执行(encode ~55s 与下一段 GPU 工作

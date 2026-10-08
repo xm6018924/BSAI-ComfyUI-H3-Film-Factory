@@ -15,6 +15,24 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 ---
 
 
+### v2.116 / v14.82 (2026-10-08) — lip_audio 独占歌曲源 + 模型环境音垫底混音 / lip_audio as Exclusive Song Source + Model Ambience Bed Mix
+
+**核心：一旦把外部歌曲接到 lip_audio，所有 CLIP（含 @图N 角色）的口型完全由这首歌驱动；ref_audio 端口和 @音频N 资产库音频自动忽略，绝不串歌；逐段预览和最终出片音轨 = 歌曲主唱（满音量）+ 模型生成的环境音/音效（压低到 15%）作为 MV 辅助音；缺段直接报错而不是悄悄回退。**
+**Core: once an external song is connected to lip_audio, every CLIP (including @图N characters) lip-syncs exclusively to that song; the ref_audio port and @音频N asset-library audio are auto-ignored so no other audio can leak in; per-clip previews and the final output track = lead song at full volume + model-generated ambience/SFX ducked to 15% as MV bed audio; a missing segment raises an error instead of silently falling back.**
+
+---
+
+#### 后端 / Backend
+
+- **lip_audio 独占音频源 / lip_audio exclusive audio source**：连接 lip_audio 后立即把全局 `ref_audio` 置 None，`@音频N` 资产库注入同步跳过；每段 CLIP 的音频条件只能是 lip 切出的对应片段，段缺失直接 `RuntimeError`。 / Once lip_audio is connected, the global `ref_audio` is dropped and `@音频N` asset injection is skipped; every CLIP's audio conditioning is forced to its own lip segment, raising on a missing segment.
+- **逐段预览 MP4 混音 / per-clip preview MP4 mix**：`_decode_single_clip_to_blob` 新增 `lip_audio_segment` 参数，模型解码出的环境音与对应歌曲片段自动混音（重采样/长度/声道对齐），歌曲满音量、模型音 ×0.15。 / `_decode_single_clip_to_blob` now accepts `lip_audio_segment`; the model-decoded ambience and the matching song segment are auto-mixed (resampled/length/channel aligned), lead full volume + model audio ×0.15.
+- **最终输出混音 / final output mix**：最终 AUDIO 输出从"纯替换为歌曲"改为"歌曲 + 模型拼接音频 ×0.15"，模型的环境音不再丢弃。 / The final AUDIO output changed from "pure song replacement" to "song + concatenated model audio ×0.15"; model ambience is no longer discarded.
+- **缓存提醒 / cache reminder**：连接 lip_audio 时若已有 validated 缓存 CLIP，日志明确提示需要取消校验重渲，否则口型与新歌不匹配。 / When lip_audio connects and some CLIPs are already validated/cached, the log warns to uncheck them and re-render so lips match the new song.
+- **Bug 修复 / bug fix**：修复首次接入 lip_audio 时引用未赋值变量 `loop_end` 导致的 `UnboundLocalError`。 / Fixed an `UnboundLocalError` on `loop_end` when first connecting lip_audio.
+
+---
+
+
 
 ### v2.72 → v2.115 / v14.85 (2026-09-30) — 崩溃修复 + 独立渲染正确性 + 前端底板全高 + 展开/收起CLIP按钮紧贴 + 全局提示词区独立折叠 + 高度实测 + 默认展开/宽度保证按钮完整可见 + 新建节点渲染 CLIP1 卡片 / Crash Fixes + Per-Clip Render Correctness + Full-Height Backdrop + Tight Collapse/Expand Toggle + Independent Global-Prompt Fold + Measured Heights + Expanded-by-Default & Toolbar-Fit Width + CLIP1 Card on New Nodes
 
