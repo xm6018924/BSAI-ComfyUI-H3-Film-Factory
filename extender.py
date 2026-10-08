@@ -107,7 +107,75 @@ from .motion_context_disk import (
     _restore_latest_backup,
 )
 
-BUILD = "minimax-h3-extender-v14.77-pending-enc-tuple-fix"
+BUILD = "minimax-h3-extender-v14.78-audio-row-pad-fix"
+
+# ── v14.78: 兜底修复 cond_audio_rows shape mismatch ──
+# 当 motion context 的 audio_latent 未被正确包含到 cond_audio_latents 时,
+# all_audio_rows[~audio_update] 的行数会大于 cond_audio_rows 的行数,
+# 导致 RuntimeError: shape mismatch。
+# 修复: monkey-patch MiniMaxH3._embed_and_pack, 在赋值前自动补零行。
+_H3_AUDIO_PAD_PATCHED = False
+
+def _patch_h3_audio_row_pad():
+    """Patch MiniMaxH3._embed_and_pack to pad cond_audio_rows when needed."""
+    global _H3_AUDIO_PAD_PATCHED
+    if _H3_AUDIO_PAD_PATCHED:
+        return
+    try:
+        from comfy.ldm.minimax import model as _mm_model
+        _orig_embed = _mm_model.MiniMaxH3._embed_and_pack
+
+    def _patched_embed_and_pack(self, video_x, audio_x, context, layout, payload, transformer_options):
+            device = video_x.device
+            dtype = context.dtype
+            img_update = layout.img_update.to(device)
+            audio_update = layout.audio_update.to(device)
+            video_rows = _mm_model.patchify_video(video_x.to(torch.float32), self.patch_size)
+            audio_rows = _mm_model.pack_audio(audio_x.to(torch.float32))
+            cond_video_rows = self._cond_video_rows(payload, device)
+            cond_audio_rows = self._cond_audio_rows(payload, device)
+
+            all_video_rows = video_rows
+            if cond_video_rows is not None:
+                all_video_rows = torch.empty(img_update.shape[0], video_rows.shape[1], dtype=torch.float32, device=device)
+                all_video_rows[~img_update] = cond_video_rows
+                all_video_rows[img_update] = video_rows
+
+            all_audio_rows = audio_rows
+            if cond_audio_rows is not None:
+                # v14.78: Pad cond_audio_rows if shorter than ~audio_update
+                target_count = int((~audio_update).sum().item())
+                current_count = cond_audio_rows.shape[0]
+                if current_count < target_count:
+                    pad_count = target_count - current_count
+                    pad = torch.zeros(pad_count, cond_audio_rows.shape[1],
+                                     dtype=cond_audio_rows.dtype, device=device)
+                    cond_audio_rows = torch.cat([pad, cond_audio_rows], dim=0)
+                    print(f"[H3 Extender] v14.78 音频行补零: {pad_count} rows "
+                          f"({current_count} -> {target_count})")
+                elif current_count > target_count:
+                    cond_audio_rows = cond_audio_rows[:target_count]
+                    print(f"[H3 Extender] v14.78 音频行截断: {current_count} -> {target_count}")
+
+                all_audio_rows = torch.empty(audio_update.shape[0], audio_rows.shape[1],
+                                             dtype=torch.float32, device=device)
+                all_audio_rows[~audio_update] = cond_audio_rows
+                all_audio_rows[audio_update] = audio_rows
+
+            # Pack everything (rest of original _embed_and_pack)
+            img_pos = layout.img_pos.to(device)
+            audio_pos = layout.audio_pos.to(device)
+            all_rows = torch.empty(layout.seq_len, max(all_video_rows.shape[1], all_audio_rows.shape[1]),
+                                   dtype=dtype, device=device)
+            all_rows[img_pos] = self.video_patch_proj(all_video_rows.to(dtype))
+            all_rows[audio_pos] = self.audio_patch_proj(all_audio_rows.to(dtype))
+            return all_rows
+
+        _mm_model.MiniMaxH3._embed_and_pack = _patched_embed_and_pack
+        _H3_AUDIO_PAD_PATCHED = True
+        print("[H3 Extender] v14.78 音频行补零 patch 已安装")
+    except Exception as _e:
+        print(f"[H3 Extender] v14.78 音频行补零 patch 安装失败(可忽略): {_e}")
 FPS = 24
 AUDIO_LATENT_FPS = 40
 
@@ -448,6 +516,162 @@ def _concat_clip_av(images_list, audios_list):
     else:
         audio = {"waveform": torch.zeros(1, 1, 1), "sample_rate": 32000}
     return images, audio
+
+
+def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
+    """Split a full lip-sync audio into per-clip segments based on clip durations.
+
+    Args:
+        lip_audio: AUDIO dict {"waveform": [B,C,L], "sample_rate": int}
+        clips: list of clip dicts, each with "duration" (seconds)
+        fps: video frame rate (used to align clip durations to frame grid)
+
+    Returns:
+        list of AUDIO dicts, one per clip. Length = len(clips).
+        If lip_audio is None, returns [None] * len(clips).
+    """
+    if lip_audio is None:
+        return [None] * len(clips)
+
+    waveform = lip_audio["waveform"]
+    sr = int(lip_audio["sample_rate"])
+    total_samples = int(waveform.shape[-1])
+    total_duration = float(total_samples) / float(sr)
+
+    # Calculate per-clip durations aligned to H3 frame grid
+    clip_durations = []
+    for cfg in clips:
+        dur = float(cfg.get("duration", 5.0))
+        frames = _duration_to_frames(dur)
+        clip_durations.append(float(frames) / fps)
+
+    sum_clip_dur = sum(clip_durations)
+
+    # If clip total > audio total, scale down proportionally
+    if sum_clip_dur > total_duration + 0.01:
+        scale = total_duration / sum_clip_dur
+        clip_durations = [d * scale for d in clip_durations]
+        print(f"[H3 LipSync] CLIP总时长({sum_clip_dur:.1f}s) > 音频总时长({total_duration:.1f}s)，按比例缩放到 {scale:.3f}x")
+
+    # Split audio into segments
+    # v2: For clips after the first, extend the segment backward by ~1s to cover
+    # the motion context's audio overlap (carry-over from previous clip).
+    # The H3 model's motion context carries ~22 video frames (~0.9s) from the
+    # previous clip, which adds ~74 audio latent rows. Without this overlap,
+    # cond_audio_rows is shorter than all_audio_rows[~audio_update] → shape mismatch.
+    MOTION_CONTEXT_OVERLAP_SEC = 1.2  # a bit extra for safety
+    overlap_samples = int(MOTION_CONTEXT_OVERLAP_SEC * sr)
+
+    segments = []
+    current_sample = 0
+    for idx, dur in enumerate(clip_durations):
+        seg_samples = max(1, int(round(dur * sr)))
+
+        # Last clip gets whatever is left (to avoid gaps from rounding)
+        if idx == len(clip_durations) - 1:
+            seg_samples = max(1, total_samples - current_sample)
+
+        end_sample = min(current_sample + seg_samples, total_samples)
+
+        # For clips after the first, extend backward to include motion context audio
+        if idx > 0:
+            seg_start = max(0, current_sample - overlap_samples)
+        else:
+            seg_start = current_sample
+
+        actual_samples = end_sample - seg_start
+
+        if actual_samples <= 0:
+            # Audio too short for this many clips — fill with silence
+            silent = torch.zeros(waveform.shape[0], waveform.shape[1], max(1, int(dur * sr)),
+                                 dtype=waveform.dtype, device=waveform.device)
+            segments.append({"waveform": silent, "sample_rate": sr})
+        else:
+            seg_wave = waveform[..., seg_start:end_sample].clone()
+            # If we got less than needed (end of audio), pad with silence
+            needed_samples = seg_samples + (overlap_samples if idx > 0 else 0)
+            if seg_wave.shape[-1] < needed_samples:
+                pad_len = needed_samples - seg_wave.shape[-1]
+                pad = torch.zeros(waveform.shape[0], waveform.shape[1], pad_len,
+                                  dtype=waveform.dtype, device=waveform.device)
+                seg_wave = torch.cat([seg_wave, pad], dim=-1)
+            segments.append({"waveform": seg_wave, "sample_rate": sr})
+
+        current_sample = end_sample
+
+    print(f"[H3 LipSync] 音频分割完成: {len(segments)} 段, 总时长 {total_duration:.2f}s / {total_samples} samples")
+    for i, seg in enumerate(segments[:5]):
+        if seg:
+            d = int(seg["waveform"].shape[-1]) / float(sr)
+            print(f"  clip[{i+1}]: {d:.2f}s ({int(seg['waveform'].shape[-1])} samples)")
+    if len(segments) > 5:
+        print(f"  ... 共 {len(segments)} 段")
+
+    return segments
+
+
+def _detect_speech_in_audio(audio, sr=32000, threshold_db=-35.0, min_duration=0.15):
+    """Detect speech/singing segments in audio based on RMS energy.
+
+    Returns list of (start_sec, end_sec) tuples where audio energy is above threshold.
+    Used to determine which parts of a clip should have lip-sync and which shouldn't.
+    """
+    import numpy as np
+
+    waveform = audio["waveform"]
+    if waveform.dim() > 2:
+        waveform = waveform[0]  # take first batch
+    if waveform.shape[0] > 1:
+        mono = waveform.mean(dim=0)
+    else:
+        mono = waveform[0]
+
+    mono_np = mono.cpu().numpy().astype(np.float32)
+    total_samples = len(mono_np)
+
+    # Frame size for energy calculation (20ms windows)
+    frame_len = max(1, int(sr * 0.02))
+    hop_len = frame_len // 2
+
+    # Compute RMS per frame
+    num_frames = max(1, (total_samples - frame_len) // hop_len + 1)
+    rms_values = np.zeros(num_frames, dtype=np.float32)
+    for f in range(num_frames):
+        start = f * hop_len
+        end = min(start + frame_len, total_samples)
+        frame = mono_np[start:end]
+        rms_values[f] = np.sqrt(np.mean(frame ** 2) + 1e-10)
+
+    # Convert to dB
+    rms_db = 20.0 * np.log10(rms_values + 1e-10)
+
+    threshold_linear = 10.0 ** (threshold_db / 20.0)
+    mask = rms_values > threshold_linear
+
+    # Find contiguous segments
+    segments = []
+    in_seg = False
+    seg_start = 0
+    min_frames = max(1, int(min_duration * sr / hop_len))
+
+    for f in range(num_frames):
+        if mask[f] and not in_seg:
+            seg_start = f
+            in_seg = True
+        elif not mask[f] and in_seg:
+            if f - seg_start >= min_frames:
+                start_sec = seg_start * hop_len / float(sr)
+                end_sec = f * hop_len / float(sr)
+                segments.append((start_sec, end_sec))
+            in_seg = False
+
+    if in_seg:
+        if num_frames - seg_start >= min_frames:
+            start_sec = seg_start * hop_len / float(sr)
+            end_sec = num_frames * hop_len / float(sr)
+            segments.append((start_sec, end_sec))
+
+    return segments
 
 
 def _apply_h3_block_cache(model, residual_diff_threshold=0.12, cache_device="cpu"):
@@ -4387,6 +4611,7 @@ class BSAIH3FilmFactory:
         optional = {
             "audio_vae": ("VAE", {"forceInput": True}),
             "ref_audio": ("AUDIO", {"forceInput": True}),
+            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "对口型驱动音频：完整歌曲/对白音频。连接后自动按各CLIP时长分割为N段，每段驱动对应CLIP对口型生成。最终输出无缝合并的完整音频。"}),
             "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [分镜N] marker: text before → global prompt, text from [分镜N] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
@@ -5097,9 +5322,18 @@ class BSAIH3FilmFactory:
 
         audio_vae = kwargs.get("audio_vae")
         ref_audio = kwargs.get("ref_audio")
+        lip_audio = kwargs.get("lip_audio")
         ref_items = None
         ref_blocks = None
         active_picture_slots = None
+
+        # ── Lip Sync Audio 预分割 ──
+        # 连接 lip_audio 时，按各 CLIP 时长把完整音频切成 N 段，
+        # 每段驱动对应 CLIP 的对口型生成。
+        lip_audio_segments = None
+        if lip_audio is not None:
+            lip_audio_segments = _split_lip_audio_by_clips(lip_audio, clips, fps=float(FPS))
+            print(f"[H3 LipSync] ✅ 已启用对口型模式，{len(lip_audio_segments)} 段音频已就绪")
 
         disk_join = MiniMaxH3MotionContextDiskJoin()
         motion = MiniMaxH3MotionContextRAM()
@@ -5623,6 +5857,15 @@ class BSAIH3FilmFactory:
                 _refs_for_clip = _plan["refs"]
                 _clip_prompt_for_cond = _plan["clip_prompt"]
                 _gp_for_cond = _plan["global_prompt"]
+            # Determine ref_audio for this clip
+            # Priority: lip_audio segment (per-clip) > global ref_audio > None
+            _clip_ref_audio = ref_audio
+            if lip_audio_segments is not None and i < len(lip_audio_segments):
+                _clip_ref_audio = lip_audio_segments[i]
+                if _clip_ref_audio is not None:
+                    _seg_dur = int(_clip_ref_audio["waveform"].shape[-1]) / float(_clip_ref_audio["sample_rate"])
+                    print(f"[H3 LipSync] clip[{i+1}] 使用对口型音频段: {_seg_dur:.2f}s")
+
             ref_items, ref_blocks, active_picture_slots, _ref_cache_hit = _prepare_shared_refs_cached(
                 vae,
                 audio_vae,
@@ -5630,7 +5873,7 @@ class BSAIH3FilmFactory:
                 resolved_height,
                 str(ref_image_size),
                 _refs_for_clip,
-                ref_audio=ref_audio,
+                ref_audio=_clip_ref_audio,
                 enable_cache=bool(ref_cache),
                 cache_bias=_asset_paths_signature(resolved_img_paths) + f"|clip{i}",
             )
@@ -6266,6 +6509,37 @@ class BSAIH3FilmFactory:
                 print(f"[H3 Extender] cached-clip AV decode failed: {_av2}")
 
         out_images_t, out_audios_t = _concat_clip_av(out_images, out_audios)
+
+        # ── Lip Sync 模式：最终音频替换为原始完整 lip_audio（无缝） ──
+        # 视频由各 CLIP 对口型生成后合并，音频用原始完整歌曲，保证音画完全同步且无缝。
+        if lip_audio is not None and lip_audio_segments is not None:
+            try:
+                # 计算视频总帧数对应的音频时长
+                total_video_frames = int(out_images_t.shape[0])
+                video_duration = float(total_video_frames) / float(FPS)
+
+                # 截取或填充 lip_audio 到视频总时长
+                lip_wave = lip_audio["waveform"]
+                lip_sr = int(lip_audio["sample_rate"])
+                target_samples = max(1, int(video_duration * lip_sr))
+                actual_samples = int(lip_wave.shape[-1])
+
+                if actual_samples >= target_samples:
+                    # 音频比视频长，截取到视频时长
+                    final_wave = lip_wave[..., :target_samples].clone()
+                else:
+                    # 音频比视频短，后面补静音（一般不会出现，因为分割时已缩放对齐）
+                    pad_len = target_samples - actual_samples
+                    pad = torch.zeros(lip_wave.shape[0], lip_wave.shape[1], pad_len,
+                                      dtype=lip_wave.dtype, device=lip_wave.device)
+                    final_wave = torch.cat([lip_wave, pad], dim=-1)
+
+                out_audios_t = {"waveform": final_wave.cpu().float().contiguous(), "sample_rate": lip_sr}
+                print(f"[H3 LipSync] ✅ 最终音频替换为原始完整 lip_audio: "
+                      f"{int(final_wave.shape[-1])} samples @ {lip_sr}Hz ({float(int(final_wave.shape[-1])) / lip_sr:.2f}s)")
+            except Exception as _lip_err:
+                print(f"[H3 LipSync] 最终音频替换失败(使用H3生成音频): {_lip_err}")
+
         if len(out_images) > 0:
             print(f"[H3 Extender] AV outputs: {int(out_images_t.shape[0])} frames, "
                   f"audio {int(out_audios_t['waveform'].shape[-1])} samples @ "
@@ -6472,6 +6746,140 @@ if getattr(PromptServer, "instance", None) is not None:
                 print(f"[H3 Extender] ref2va cache cleared on asset change: removed={removed}")
             return web.json_response({"ok": True, "removed": removed, "path": str(root)})
         except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
+    @PromptServer.instance.routes.post("/h3_extender/clear_chain_cache")
+    async def h3_extender_clear_chain_cache(request):
+        """清空链缓存：删除上一版生成的缓存文件，重新渲染新缓存用。
+
+        清理范围：
+        - chain_*.h3cache / chain_*.json（主链缓存）
+        - _ref2va_cache/*.pt（参考图VAE编码缓存）
+        - _refs/*（参考图缓存）
+        - _preview/*（预览缓存）
+        - _color_*.log（颜色日志）
+        - bsai_clips/h3_clip_*.mp4（已渲染CLIP成片，可选）
+        - _clippv_*（临时预览，temp目录）
+        """
+        try:
+            import shutil
+            body = await request.json() if request.can_read_body else {}
+            clear_clips = bool(body.get("clear_clips", True))
+
+            cache_root = _ensure_cache_root()
+            removed = 0
+            freed_mb = 0.0
+            details = {}
+
+            # 1. 主链缓存 chain_*.h3cache / chain_*.json
+            chain_files = list(cache_root.glob("chain_*.h3cache")) + list(cache_root.glob("chain_*.json"))
+            for p in chain_files:
+                try:
+                    sz = p.stat().st_size if p.exists() else 0
+                    p.unlink(missing_ok=True)
+                    removed += 1
+                    freed_mb += sz / (1024 * 1024)
+                except Exception:
+                    pass
+            details["chain_cache"] = len(chain_files)
+
+            # 2. ref2va 缓存
+            ref2va_dir = cache_root / _REF2VA_CACHE_DIRNAME
+            ref2va_count = 0
+            if ref2va_dir.exists() and ref2va_dir.is_dir():
+                for p in ref2va_dir.glob("*.pt"):
+                    try:
+                        sz = p.stat().st_size
+                        p.unlink(missing_ok=True)
+                        ref2va_count += 1
+                        freed_mb += sz / (1024 * 1024)
+                    except Exception:
+                        pass
+            details["ref2va"] = ref2va_count
+
+            # 3. _refs 目录
+            refs_dir = cache_root / "_refs"
+            refs_count = 0
+            if refs_dir.exists() and refs_dir.is_dir():
+                for p in refs_dir.rglob("*"):
+                    if p.is_file():
+                        try:
+                            sz = p.stat().st_size
+                            p.unlink(missing_ok=True)
+                            refs_count += 1
+                            freed_mb += sz / (1024 * 1024)
+                        except Exception:
+                            pass
+            details["refs"] = refs_count
+
+            # 4. _preview 目录
+            preview_dir = cache_root / "_preview"
+            preview_count = 0
+            if preview_dir.exists() and preview_dir.is_dir():
+                for p in preview_dir.rglob("*"):
+                    if p.is_file():
+                        try:
+                            sz = p.stat().st_size
+                            p.unlink(missing_ok=True)
+                            preview_count += 1
+                            freed_mb += sz / (1024 * 1024)
+                        except Exception:
+                            pass
+            details["preview"] = preview_count
+
+            # 5. _color_*.log
+            color_logs = list(cache_root.glob("_color_*.log"))
+            for p in color_logs:
+                try:
+                    p.unlink(missing_ok=True)
+                    removed += 1
+                except Exception:
+                    pass
+            details["color_logs"] = len(color_logs)
+
+            # 6. CLIP 成片（可选）
+            clips_count = 0
+            if clear_clips:
+                clips_dir = _clip_output_dir()
+                if clips_dir.exists() and clips_dir.is_dir():
+                    for p in clips_dir.glob("h3_clip_*.mp4"):
+                        try:
+                            sz = p.stat().st_size
+                            p.unlink(missing_ok=True)
+                            clips_count += 1
+                            freed_mb += sz / (1024 * 1024)
+                        except Exception:
+                            pass
+            details["clips"] = clips_count
+
+            # 7. 临时预览 _clippv_*
+            temp_dir = _comfyui_temp_dir()
+            temp_count = 0
+            if temp_dir.exists() and temp_dir.is_dir():
+                for p in temp_dir.glob("_clippv_*"):
+                    try:
+                        if p.is_file():
+                            sz = p.stat().st_size
+                            p.unlink(missing_ok=True)
+                            temp_count += 1
+                            freed_mb += sz / (1024 * 1024)
+                        elif p.is_dir():
+                            shutil.rmtree(p, ignore_errors=True)
+                            temp_count += 1
+                    except Exception:
+                        pass
+            details["temp_previews"] = temp_count
+
+            print(f"[H3 Extender] 缓存已清空: removed={removed + ref2va_count + refs_count + preview_count + clips_count + temp_count}, freed={freed_mb:.1f}MB, details={details}")
+            return web.json_response({
+                "ok": True,
+                "removed": removed + ref2va_count + refs_count + preview_count + clips_count + temp_count,
+                "freed_mb": round(freed_mb, 1),
+                "details": details,
+                "cache_root": str(cache_root),
+            })
+        except Exception as exc:
+            print(f"[H3 Extender] clear_chain_cache error: {exc}")
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
     @PromptServer.instance.routes.post("/h3_extender/project/prepare_save")
