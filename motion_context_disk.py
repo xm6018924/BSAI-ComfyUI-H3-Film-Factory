@@ -2413,6 +2413,28 @@ def _decode_single_clip_to_blob(
             audio["waveform"] = wave[..., trim_samples:]
             print(f"[H3 Extender]   trimmed {trim_samples} audio samples ({trim} frames @ {sr}Hz)")
 
+    # v2.117f: lip_audio 模式时长对齐 — H3 时间网格把 12s 对齐到 294 帧(多 ~6 帧),
+    # 而对口型歌曲段只有 11.98s(288 帧)。多出来的对齐帧被模型生成为延续画面,
+    # 累积后每段都像"吃了上一段尾巴"。裁掉视频末尾的对齐帧, 让视频时长精确匹配歌曲段。
+    if lip_audio_segment is not None and video.shape[0] > 0:
+        try:
+            _lip_wl = int(lip_audio_segment["waveform"].shape[-1])
+            _lip_sr2 = int(lip_audio_segment["sample_rate"])
+            _exp_frames = int(round(_lip_wl / float(_lip_sr2) * fps))
+            _diff = int(video.shape[0] - _exp_frames)
+            if 0 < _diff <= 12:
+                video = video[:_exp_frames]
+                print(f"[H3 Extender]   lip_audio 时长对齐: 裁末尾 {_diff} 帧 -> {_exp_frames} 帧 "
+                      f"(匹配歌曲段 {_lip_wl/float(_lip_sr2):.2f}s)")
+                if audio.get("waveform") is not None:
+                    _tail_samples = int(round(_diff / float(fps) * float(audio["sample_rate"])))
+                    _aw = audio["waveform"]
+                    if 0 < _tail_samples < int(_aw.shape[-1]):
+                        audio = dict(audio)
+                        audio["waveform"] = _aw[..., :-_tail_samples]
+        except Exception as _te:
+            print(f"[H3 Extender]   lip_audio 末尾对齐跳过: {_te}")
+
     # ── 对口型混音模式：lip_audio 主音(满音量) + 模型生成的环境音/音效(压低垫底) ──
     # lip_audio_segment 由外部传入(每段 CLIP 对应的歌曲片段)。模型解码出来的音频
     # (环境音/动效/呼吸声)不丢弃，压低到 ~15% 音量垫在歌曲底下，作为 MV 辅助音。
