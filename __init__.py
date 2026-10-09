@@ -18,6 +18,24 @@ Film Factory nodes (new):
   - BSAI_VideoCombiner/AudioCombiner: Media combining
 """
 
+# === WinError 10054 noise suppression (Windows asyncio browser disconnect) ===
+# Browser refresh / tab close causes asyncio proactor to raise ConnectionResetError
+# when shutting down an already-dead socket. This patch swallows it silently.
+import asyncio as _asyncio
+import socket as _socket
+
+try:
+    from asyncio import proactor_events as _proactor_events
+    _orig_call_connection_lost = _proactor_events._ProactorBasePipeTransport._call_connection_lost
+    def _silent_call_connection_lost(self, exc):
+        try:
+            _orig_call_connection_lost(self, exc)
+        except (ConnectionResetError, BrokenPipeError):
+            pass
+    _proactor_events._ProactorBasePipeTransport._call_connection_lost = _silent_call_connection_lost
+except Exception:
+    pass
+
 NODE_CLASS_MAPPINGS = {}
 NODE_DISPLAY_NAME_MAPPINGS = {}
 
