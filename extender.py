@@ -5947,6 +5947,11 @@ class BSAIH3FilmFactory:
                     str(context_length),
                     int(audio_context_length),
                 )
+            # v2.117d: lip_audio 模式模型独立渲染、无前导重叠, 显式 trim=0 —
+            # 绝不能让 disk_join.join 回退默认 22 帧 trim(那会把 clip2+ 自己的
+            # 开头裁掉 → clip2 尾巴少帧, 段与段之间累积出空白帧)。
+            if lip_audio is not None:
+                trim_frames = 0
 
             _send_extender_progress(
                 owner,
