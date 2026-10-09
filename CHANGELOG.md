@@ -27,6 +27,7 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 - **上下文感知切分 / context-aware split**：`_split_lip_audio_by_clips` 逐段读取 `context_enabled`——关闭上下文参考的 CLIP（含 clip2+）切出纯净段（零重叠），开启的 CLIP 仍切重叠但把 `overlap_samples` 写进段 dict。 / `_split_lip_audio_by_clips` reads each CLIP's `context_enabled`: CLIPs with context reference OFF (incl. clip2+) get pure zero-overlap segments; ON CLIPs keep the overlap but record `overlap_samples` in the segment dict.
 - **混音跳过重叠 / mix skips overlap**：`_decode_single_clip_to_blob` 混音前读取段元数据 `overlap_samples`，从歌曲段头部精确跳过重叠，再与模型音频对齐 → 输出 MP4 音频 = 本 CLIP 对应纯净歌曲段，与 lip_audio 原始音频逐帧对齐。 / Before mixing, `_decode_single_clip_to_blob` reads `overlap_samples` and skips exactly that many samples from the song segment head, then aligns to the model audio — the output MP4 audio is the clip's own pure song segment, frame-aligned with the original lip_audio.
 - **日志增强 / log enhancement**：切分日志打印每段时长与头部重叠秒数，便于核对。 / Split log prints each segment's duration and head-overlap seconds for verification.
+- **lip_audio 连接即自动关闭上下文 / auto-disable context on lip_audio connect**：一旦外部歌曲接入 lip_audio，后端强制所有 CLIP 零重叠切分且不做 motion context（即使前端开关仍开着也忽略）；前端 onConnectionsChange 检测到连线后自动把所有 CLIP 的「上下文参考」复选框关掉并刷新 UI。 / Once a song connects to lip_audio, the backend forces zero-overlap splitting and skips motion context for every CLIP (ignoring the front-end switch); the front-end onConnectionsChange handler auto-unchecks every CLIP's "Context Reference" box and refreshes the UI.
 
 ---
 

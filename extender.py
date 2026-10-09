@@ -545,6 +545,10 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
         # (渲染时接了上一段 motion context) 才需要往前扩展重叠音频；
         # 关闭上下文参考时不再加重叠，切出的段与 lip_audio 原始音频精确对齐。
         _ctx_on = bool(clips[idx].get("context_enabled", True)) if idx < len(clips) else True
+        # v2.117b: lip_audio 一旦连接, 后端强制关闭所有 CLIP 的上下文参考 —
+        # 切分零重叠, 从源头保证 clip2+ 与 lip_audio 原始音频逐帧对齐。
+        if lip_audio is not None:
+            _ctx_on = False
         _overlap = overlap_samples if (idx > 0 and _ctx_on) else 0
 
         if idx > 0 and _overlap > 0:
@@ -5931,7 +5935,11 @@ class BSAIH3FilmFactory:
             trim_frames = None
             # v1.14: previous_proxy 为 None（前段无缓存）时不再 raise，防御性跳过
             # motion context（从当前段独立渲染，链拼接由 disk_join 的 previous_cache 保证）。
-            if i > 0 and cfg.get("context_enabled", True) and previous_proxy is not None:
+            # v2.117b: lip_audio 连接时后端强制不做 motion context(音频零重叠对齐)，
+            # 即使前端"上下文参考"开关仍开着也忽略。
+            if i > 0 and lip_audio is not None and cfg.get("context_enabled", True):
+                print(f"[H3 LipSync] clip[{i}] lip_audio 已连接, 自动忽略上下文参考(音频零重叠, 与原始歌曲对齐)")
+            if lip_audio is None and i > 0 and cfg.get("context_enabled", True) and previous_proxy is not None:
                 positive, trim_frames, _, _, _ = motion.apply(
                     positive,
                     latent,

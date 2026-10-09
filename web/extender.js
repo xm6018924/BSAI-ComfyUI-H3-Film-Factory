@@ -7538,6 +7538,27 @@ app.registerExtension({
                     syncExternalPrompts(this, runtime);
                 }
             } catch (e) {}
+            // v2.117b: lip_audio 一连接外部歌曲, 自动把所有 CLIP 的"上下文参考"关掉,
+            // UI 同步(卡片复选框 + 批量按钮), 保证渲染时音频零重叠、与原始歌曲对齐。
+            try {
+                const lipInput = this.inputs && this.inputs.find(inp => inp && inp.name === "lip_audio");
+                const lipConnected = !!(lipInput && lipInput.link !== null && lipInput.link !== undefined);
+                if (lipConnected) {
+                    let _changed = false;
+                    runtime.state.clips.forEach((clip) => {
+                        if (clip.context_enabled !== false) {
+                            clip.context_enabled = false;
+                            clip.validated = false;
+                            _changed = true;
+                        }
+                    });
+                    if (_changed) {
+                        invalidateFrom(runtime.state, 0);
+                        updateHidden(this, runtime);
+                        render(this, runtime);
+                    }
+                }
+            } catch (e) {}
             // Sync from prompt_source (was incorrectly looking for "global_prompt")
             const psInput = this.inputs?.find(inp => inp.name === "prompt_source");
             if (psInput) {
