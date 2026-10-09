@@ -4299,11 +4299,13 @@ function buildClipCard(node, runtime, clip, index) {
 
         // Ref Frame Extract section (collapsible)
         const rfeToggle = document.createElement("div");
+        rfeToggle.id = `rfe_toggle_${clip.id}`;
         rfeToggle.style.cssText = "cursor:pointer;font-size:11px;color:#888;margin-top:6px;margin-bottom:3px;user-select:none;";
         rfeToggle.textContent = "▶ 参考帧提取 / Ref Frame Extract";
         if (!ctxCheck.checked) rfeToggle.style.opacity = "0.5";
         let rfeExpanded = false;
         const rfeContent = document.createElement("div");
+        rfeContent.id = `rfe_content_${clip.id}`;
         rfeContent.style.cssText = "display:none;padding:4px 6px;border:1px solid #333;border-radius:3px;background:#0e0e0e;margin-bottom:6px;";
         if (!ctxCheck.checked) {
             rfeContent.style.opacity = "0.4";
@@ -5580,6 +5582,14 @@ function buildUi(node) {
         runtime.state.clips.forEach((clip) => {
             clip.context_enabled = batchCtxOn;
             clip.validated = false;
+            // v2.117c: 卡片是增量构建、不重建, render() 不会刷新已有复选框 —
+            // 这里直接改 DOM: 全开启=绿色打勾, 全关闭=空框; rfe 区域同步明暗。
+            const cb = document.getElementById(`ctx_${clip.id}`);
+            if (cb) cb.checked = batchCtxOn;
+            const tg = document.getElementById(`rfe_toggle_${clip.id}`);
+            if (tg) tg.style.opacity = batchCtxOn ? "1" : "0.5";
+            const ct = document.getElementById(`rfe_content_${clip.id}`);
+            if (ct) { ct.style.opacity = batchCtxOn ? "1" : "0.4"; ct.style.pointerEvents = batchCtxOn ? "" : "none"; }
         });
         if (batchCtxOn) {
             setBtnText(batchCtxBtn, "全部关闭", "Disable All", { bg: "#6a3a3a", border: "#7a4a4a", color: "#cde" });
@@ -7553,6 +7563,15 @@ app.registerExtension({
                         }
                     });
                     if (_changed) {
+                        // v2.117c: 直接刷新已存在卡片的复选框 DOM, 不依赖重建
+                        runtime.state.clips.forEach((clip) => {
+                            const cb = document.getElementById(`ctx_${clip.id}`);
+                            if (cb) cb.checked = false;
+                            const tg = document.getElementById(`rfe_toggle_${clip.id}`);
+                            if (tg) tg.style.opacity = "0.5";
+                            const ct = document.getElementById(`rfe_content_${clip.id}`);
+                            if (ct) { ct.style.opacity = "0.4"; ct.style.pointerEvents = "none"; }
+                        });
                         invalidateFrom(runtime.state, 0);
                         updateHidden(this, runtime);
                         render(this, runtime);
