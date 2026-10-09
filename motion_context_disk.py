@@ -2424,6 +2424,7 @@ def _decode_single_clip_to_blob(
             _diff = int(video.shape[0] - _exp_frames)
             if 0 < _diff <= 12:
                 video = video[:_exp_frames]
+                out_frames = _exp_frames  # v2.117g: 同步给 MP4 编码用
                 print(f"[H3 Extender]   lip_audio 时长对齐: 裁末尾 {_diff} 帧 -> {_exp_frames} 帧 "
                       f"(匹配歌曲段 {_lip_wl/float(_lip_sr2):.2f}s)")
                 if audio.get("waveform") is not None:
