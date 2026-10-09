@@ -5141,6 +5141,36 @@ function ensureGlobalSyncPoll() {
                         /* v2.25: 去掉 autoGrowNodeToFitAllClips, 防止自动撑大 */
                     }
                 } catch (e) {}
+                // v2.117e: 轮询兜底 — lip_audio 一连接就自动关闭所有 CLIP 的
+                // 上下文参考(onConnectionsChange 在某些拖线方式下不触发)。
+                // 改完数据直接刷新已渲染卡片的复选框 DOM, 不重建卡片。
+                try {
+                    const rtC = n.__h3Extender;
+                    if (rtC && rtC.state && rtC.state.clips) {
+                        const lipIn = n.inputs && n.inputs.find(inp => inp && inp.name === "lip_audio");
+                        const lipOn = !!(lipIn && lipIn.link !== null && lipIn.link !== undefined);
+                        if (lipOn) {
+                            let _ch = false;
+                            rtC.state.clips.forEach((clip) => {
+                                if (clip.context_enabled !== false) {
+                                    clip.context_enabled = false;
+                                    clip.validated = false;
+                                    _ch = true;
+                                }
+                            });
+                            if (_ch) {
+                                rtC.state.clips.forEach((clip) => {
+                                    const cb = document.getElementById(`ctx_${clip.id}`);
+                                    if (cb) cb.checked = false;
+                                    const tg = document.getElementById(`rfe_toggle_${clip.id}`);
+                                    if (tg) tg.style.opacity = "0.5";
+                                    const ct = document.getElementById(`rfe_content_${clip.id}`);
+                                    if (ct) { ct.style.opacity = "0.4"; ct.style.pointerEvents = "none"; }
+                                });
+                            }
+                        }
+                    }
+                } catch (e) {}
                 // Persist the user-adjusted node height so a page refresh or
                 // ComfyUI restart restores the exact last layout, including
                 // every CLIP card's share of the node body.
