@@ -521,6 +521,12 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
     # The H3 model's motion context carries ~22 video frames (~0.9s) from the
     # previous clip, which adds ~74 audio latent rows. Without this overlap,
     # cond_audio_rows is shorter than all_audio_rows[~audio_update] → shape mismatch.
+    # v2.111 (fix): 重叠只对"开启上下文参考"的 CLIP 生效。用户关闭 context_enabled
+    # 时模型不带 motion context，若仍切重叠会(1)渲染条件多 1.2s 音频、(2)输出混音
+    # 把上一段尾部音乐带进本段 → clip2+ 与 lip_audio 原始音频错位。现在：
+    #   - context_enabled=True  → 段头部含 overlap_samples 重叠(模型 latent 行需要)，
+    #     同时把 overlap_samples 记进段 dict，解码混音时精确跳过 → 输出仍与原始对齐。
+    #   - context_enabled=False → 纯净切分(零重叠)，输入/输出双侧都与原始音频对齐。
     MOTION_CONTEXT_OVERLAP_SEC = 1.2  # a bit extra for safety
     overlap_samples = int(MOTION_CONTEXT_OVERLAP_SEC * sr)
 
@@ -535,9 +541,14 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
 
         end_sample = min(current_sample + seg_samples, total_samples)
 
-        # For clips after the first, extend backward to include motion context audio
-        if idx > 0:
-            seg_start = max(0, current_sample - overlap_samples)
+        # v2.111: 上下文参考开关感知 — 只有该 CLIP 自身 context_enabled=True
+        # (渲染时接了上一段 motion context) 才需要往前扩展重叠音频；
+        # 关闭上下文参考时不再加重叠，切出的段与 lip_audio 原始音频精确对齐。
+        _ctx_on = bool(clips[idx].get("context_enabled", True)) if idx < len(clips) else True
+        _overlap = overlap_samples if (idx > 0 and _ctx_on) else 0
+
+        if idx > 0 and _overlap > 0:
+            seg_start = max(0, current_sample - _overlap)
         else:
             seg_start = current_sample
 
@@ -547,25 +558,26 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
             # Audio too short for this many clips — fill with silence
             silent = torch.zeros(waveform.shape[0], waveform.shape[1], max(1, int(dur * sr)),
                                  dtype=waveform.dtype, device=waveform.device)
-            segments.append({"waveform": silent, "sample_rate": sr})
+            segments.append({"waveform": silent, "sample_rate": sr, "overlap_samples": 0})
         else:
             seg_wave = waveform[..., seg_start:end_sample].clone()
             # If we got less than needed (end of audio), pad with silence
-            needed_samples = seg_samples + (overlap_samples if idx > 0 else 0)
+            needed_samples = seg_samples + _overlap
             if seg_wave.shape[-1] < needed_samples:
                 pad_len = needed_samples - seg_wave.shape[-1]
                 pad = torch.zeros(waveform.shape[0], waveform.shape[1], pad_len,
                                   dtype=waveform.dtype, device=waveform.device)
                 seg_wave = torch.cat([seg_wave, pad], dim=-1)
-            segments.append({"waveform": seg_wave, "sample_rate": sr})
+            segments.append({"waveform": seg_wave, "sample_rate": sr, "overlap_samples": _overlap})
 
         current_sample = end_sample
 
     print(f"[H3 LipSync] 音频分割完成: {len(segments)} 段, 总时长 {total_duration:.2f}s / {total_samples} samples")
-    for i, seg in enumerate(segments[:5]):
+    for i, seg in enumerate(segments[:8]):
         if seg:
             d = int(seg["waveform"].shape[-1]) / float(sr)
-            print(f"  clip[{i+1}]: {d:.2f}s ({int(seg['waveform'].shape[-1])} samples)")
+            _ov_d = int(seg.get("overlap_samples", 0)) / float(sr)
+            print(f"  clip[{i+1}]: {d:.2f}s ({int(seg['waveform'].shape[-1])} samples, 头部重叠 {_ov_d:.2f}s)")
     if len(segments) > 5:
         print(f"  ... 共 {len(segments)} 段")
 

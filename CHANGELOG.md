@@ -15,6 +15,21 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 ---
 
 
+### v2.117 / v14.86 (2026-10-09) — lip_audio 逐段音频错位彻底修复（上下文参考感知切分 + 混音跳过重叠）/ lip_audio Per-Clip Audio Drift Fully Fixed (Context-Aware Split + Mix Skips Overlap)
+
+**核心：开启上下文参考时，lip_audio 切给 clip2+ 的段头部带 ~1.2s 上一段尾部重叠（用于模型音频 latent 行对齐），但输出混音时未跳过这段重叠，导致每个 clip 的预览 MP4 开头都混入上一段尾部的音乐，与 lip_audio 原始音频错位（用户需手动裁剪开头才能对上）。现在：切分感知「上下文参考」开关——关闭上下文参考的 CLIP 不再切重叠、纯净对齐；开启时把重叠量记录进段元数据，输出混音精确跳过重叠，clip2+ 与原始音频零错位。**
+**Core: with context reference ON, the lip_audio segment handed to clip2+ carries ~1.2s of the previous segment's tail (needed to align the model's audio latent rows), but the output mix never skipped that overlap, so every clip preview MP4 started with the previous segment's music and drifted from the original lip_audio (users had to manually trim the head to realign). Now: split is context-aware — CLIPs with context reference OFF get pure zero-overlap segments; when ON, the overlap size is recorded in the segment metadata and the output mix skips it exactly, so clip2+ aligns with the original audio with zero drift.**
+
+---
+
+#### 后端 / Backend
+
+- **上下文感知切分 / context-aware split**：`_split_lip_audio_by_clips` 逐段读取 `context_enabled`——关闭上下文参考的 CLIP（含 clip2+）切出纯净段（零重叠），开启的 CLIP 仍切重叠但把 `overlap_samples` 写进段 dict。 / `_split_lip_audio_by_clips` reads each CLIP's `context_enabled`: CLIPs with context reference OFF (incl. clip2+) get pure zero-overlap segments; ON CLIPs keep the overlap but record `overlap_samples` in the segment dict.
+- **混音跳过重叠 / mix skips overlap**：`_decode_single_clip_to_blob` 混音前读取段元数据 `overlap_samples`，从歌曲段头部精确跳过重叠，再与模型音频对齐 → 输出 MP4 音频 = 本 CLIP 对应纯净歌曲段，与 lip_audio 原始音频逐帧对齐。 / Before mixing, `_decode_single_clip_to_blob` reads `overlap_samples` and skips exactly that many samples from the song segment head, then aligns to the model audio — the output MP4 audio is the clip's own pure song segment, frame-aligned with the original lip_audio.
+- **日志增强 / log enhancement**：切分日志打印每段时长与头部重叠秒数，便于核对。 / Split log prints each segment's duration and head-overlap seconds for verification.
+
+---
+
 ### v2.116 / v14.82 (2026-10-08) — lip_audio 独占歌曲源 + 模型环境音垫底混音 / lip_audio as Exclusive Song Source + Model Ambience Bed Mix
 
 **核心：一旦把外部歌曲接到 lip_audio，所有 CLIP（含 @图N 角色）的口型完全由这首歌驱动；ref_audio 端口和 @音频N 资产库音频自动忽略，绝不串歌；逐段预览和最终出片音轨 = 歌曲主唱（满音量）+ 模型生成的环境音/音效（压低到 15%）作为 MV 辅助音；缺段直接报错而不是悄悄回退。**

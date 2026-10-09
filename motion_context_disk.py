@@ -2437,6 +2437,14 @@ def _decode_single_clip_to_blob(
                     _lip_wave = _lip_wave.repeat(1, 2, 1)
                 elif _model_wave.shape[1] == 1 and _lip_wave.shape[1] == 2:
                     _model_wave = _model_wave.repeat(1, 2, 1)
+            # v2.111 (fix): 跳过该段头部的 motion-context 重叠 — 开启上下文参考时
+            # lip_audio_segment 头部含上一段尾部 ~1.2s 音频(供模型 latent 行对齐)，
+            # 若不跳过直接截前段会把上一段的音乐混进本 CLIP 输出，导致 clip2+ 与
+            # 原始 lip_audio 错位(用户需手动裁掉开头才能对齐)。跳过 overlap_samples
+            # 后只取本 CLIP 对应的纯净歌曲段，再对齐到模型音频长度。
+            _ov = int(lip_audio_segment.get("overlap_samples", 0))
+            if _ov > 0 and int(_lip_wave.shape[-1]) > _ov:
+                _lip_wave = _lip_wave[..., _ov:]
             # 长度对齐到模型音频长度(歌曲段可能略长/略短)
             _target = int(_model_wave.shape[-1])
             if int(_lip_wave.shape[-1]) >= _target:
@@ -2454,7 +2462,7 @@ def _decode_single_clip_to_blob(
             audio = dict(audio)
             audio["waveform"] = _mixed
             print(f"[H3 LipSync]   clip[{i}] 音频混音: 歌曲满音量 + 模型环境音 x{_DUCK} "
-                  f"({int(_mixed.shape[-1])} samples @ {_model_sr}Hz)")
+                  f"({int(_mixed.shape[-1])} samples @ {_model_sr}Hz, 跳过重叠 {_ov} samples)")
         except Exception as _mix_err:
             print(f"[H3 LipSync]   clip[{i}] 混音失败(回退模型原音): {_mix_err}")
 
