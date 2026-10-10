@@ -1723,6 +1723,14 @@ _PICTURE_TAG_RE = re.compile(r"<Picture\s+(\d+)>", re.IGNORECASE)
 _ARCHIVE_SECTION_RE = re.compile(r"^\s*\[[^\[\]\n]*档案[^\[\]\n]*\]", re.MULTILINE)
 
 
+def _strip_singing_talk_descriptions(text):
+    """lip_audio 模式: 不再删除唱歌/开口描述。
+    音频已注入 AV latent 并锁定, 模型需要知道角色要跟随音频动嘴。
+    此函数保留为空操作(兼容调用), 实际不删除任何描述。
+    """
+    return text
+
+
 def _strip_archive_sections(text):
     """Remove [角色档案]/[道具档案]/[场景档案] sections (heading plus their
     item lines) from a global prompt. Those character/prop/scene inventories
@@ -5893,11 +5901,30 @@ class BSAIH3FilmFactory:
             # The [角色档案]/[道具档案]/[场景档案] inventories are stripped so
             # the render prompt only ever describes THIS CLIP's own content.
             effective_prompt = _clip_prompt_for_cond
+            # v14.84 lip-audio: 只净化本段CLIP提示词(全局提示词不受影响),
+            # 抹掉唱歌/说话/开口描述, 口型完全由音频驱动。
+            if lip_audio_segments is not None:
+                _before = effective_prompt[:80]
+                effective_prompt = _strip_singing_talk_descriptions(effective_prompt)
+                if _before != effective_prompt[:80]:
+                    print(f"[H3 LipSync]   clip[{i+1}] 提示词净化(去唱歌/说话描述): '{_before}' -> '{effective_prompt[:80]}'")
             if _gp_for_cond:
                 gp = _strip_archive_sections(str(_gp_for_cond)).strip()
                 if gp:
                     effective_prompt = gp + "\n" + effective_prompt
-            print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:100]}'")
+            # v2.120 lip-audio: 强化音频驱动提示词。
+            # 参考B站最佳实践: 提示词必须明确告诉模型"人物在跟着音频唱",
+            # 否则模型可能 lip-sync to nothing 或乱张嘴。
+            if lip_audio_segments is not None:
+                _audio_tag = (
+                    "\n<Audio 1> 是本段中人物正在演唱的歌曲。"
+                    "人物的嘴唇、舌头和下颌必须跟随<Audio 1>的歌声自然开合，"
+                    "口型与歌词精确同步，演唱时面部表情随歌曲情绪起伏，"
+                    "身体随音乐节奏微微律动。人物正在对着麦克风深情演唱。"
+                )
+                if "<Audio 1>" not in effective_prompt:
+                    effective_prompt = effective_prompt + _audio_tag
+            print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
             # v1.23: unload_all_models 走 detach 分支不释放 dynamic 显存（OOM 根因），
@@ -5932,6 +5959,37 @@ class BSAIH3FilmFactory:
                 semantic_bridge_pack=sb_pack,
             )
 
+            # v2.119: lip_audio 注入 AV latent 音频区 + zero-denoise 锁定
+            # 参考 VRGDG Audio Drive: 把歌曲编码后直接塞进 latent 音频区,
+            # 采样器无法修改它, 模型必须让画面配合已锁定的音频 → 真正对口型.
+            if lip_audio_segments is not None and audio_vae is not None:
+                try:
+                    _lip_seg = lip_audio_segments[i]
+                    _lip_wave = _lip_seg["waveform"]
+                    _lip_sr = int(_lip_seg["sample_rate"])
+                    _vae_sr = int(getattr(audio_vae, "audio_sample_rate", 32000))
+                    if _lip_sr != _vae_sr:
+                        _lip_wave = torchaudio.functional.resample(_lip_wave, _lip_sr, _vae_sr)
+                    _lip_latent = audio_vae.encode(_lip_wave[:1].movedim(1, -1))
+                    # latent["samples"] 是 NestedTensor((video, audio))
+                    _samples = latent["samples"]
+                    if isinstance(_samples, comfy.nested_tensor.NestedTensor):
+                        _video_t, _audio_t = _samples.tensors[0], _samples.tensors[1]
+                        # 对齐时间轴长度
+                        _t_target = min(_audio_t.shape[-1], _lip_latent.shape[-1])
+                        _audio_locked = _audio_t.clone()
+                        _audio_locked[..., :_t_target] = _lip_latent[..., :_t_target].to(_audio_t.device)
+                        latent["samples"] = comfy.nested_tensor.NestedTensor((_video_t, _audio_locked))
+                        # noise_mask: video=1(全去噪), audio=0(锁定不修改)
+                        _vmask = torch.ones_like(_video_t)
+                        _amask = torch.zeros_like(_audio_locked)
+                        latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_vmask, _amask))
+                        print(f"[H3 LipSync]   音频已注入AV latent并锁定: "
+                              f"audio_latent={tuple(_lip_latent.shape)}, "
+                              f"video_denoise=1.0, audio_denoise=0.0")
+                except Exception as _inject_err:
+                    print(f"[H3 LipSync]   音频注入AV latent失败(回退参考模式): {_inject_err}")
+
             trim_frames = None
             # v1.14: previous_proxy 为 None（前段无缓存）时不再 raise，防御性跳过
             # motion context（从当前段独立渲染，链拼接由 disk_join 的 previous_cache 保证）。
@@ -5962,6 +6020,7 @@ class BSAIH3FilmFactory:
             )
 
             try:
+                _eff_refine = bool(refine_enable)
                 sampled = _sample_h3(
                     sampling_model,
                     positive,
@@ -5973,7 +6032,7 @@ class BSAIH3FilmFactory:
                     float(denoise),
                     owner_id=owner,
                     clip_index=i,
-                    refine_enable=bool(refine_enable),
+                    refine_enable=_eff_refine,
                     refine_denoise=float(refine_denoise),
                     refine_steps=int(refine_steps),
                     refine_upscale_factor=float(refine_upscale_factor),

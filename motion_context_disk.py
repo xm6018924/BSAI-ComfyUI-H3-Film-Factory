@@ -1467,25 +1467,17 @@ _NVENC_PRESET = {"ultrafast": "p1", "superfast": "p1", "veryfast": "p2", "faster
 
 def _nvenc_available(ffmpeg, codec="h264"):
     """v1.66: 检测 ffmpeg 是否支持 NVENC 硬编(结果缓存). RTX 5090 硬编比
-    libx264/libx265 软编快 5-10 倍, 用于 preview blob / final export."""
+    libx264/libx265 软编快 5-10 倍, 用于 preview blob / final export.
+    v2.118: 强制启用 NVENC — 用户 RTX 5090 已确认 h264_nvenc/hevc_nvenc 可用,
+    运行时检测因 GPU 高负载超时导致回退 libx264(每个 clip 多花 300 秒)."""
     import subprocess as _sp
     import tempfile
     key = (str(ffmpeg), codec)
     _cache = getattr(_nvenc_available, "_cache", {})
     if key in _cache:
         return _cache[key]
-    ok = False
-    try:
-        with tempfile.TemporaryFile() as _f:
-            _p = _sp.run(
-                [str(ffmpeg), "-hide_banner", "-encoders"],
-                stdout=_sp.PIPE, stderr=_sp.STDOUT, timeout=20,
-            )
-            text = _p.stdout.decode("utf-8", errors="replace")
-        enc = "h264_nvenc" if codec == "h264" else "hevc_nvenc"
-        ok = f" {enc} " in f" {text} " or f"{enc} " in text
-    except Exception:
-        ok = False
+    # v2.118: 直接返回 True (RTX 5090 + imageio-ffmpeg v7.1 已确认支持 NVENC)
+    ok = True
     _cache[key] = ok
     _nvenc_available._cache = _cache
     return ok
@@ -2384,9 +2376,7 @@ def _decode_single_clip_to_blob(
     print(f"[H3 Extender]   step 2: vae.decode (shape={tuple(v.shape)})...")
     video = vae.decode(v)
     if video.ndim == 5:
-        video = video.reshape(
-            -1, video.shape[-3], video.shape[-2], video.shape[-1]
-        )
+        video = video.reshape(-1, video.shape[-3], video.shape[-2], video.shape[-1])
     print(f"[H3 Extender]   step 2 done: video shape={tuple(video.shape)}")
     _t66_mark("VAE decode")
 
@@ -2436,9 +2426,9 @@ def _decode_single_clip_to_blob(
         except Exception as _te:
             print(f"[H3 Extender]   lip_audio 末尾对齐跳过: {_te}")
 
-    # ── 对口型混音模式：lip_audio 主音(满音量) + 模型生成的环境音/音效(压低垫底) ──
-    # lip_audio_segment 由外部传入(每段 CLIP 对应的歌曲片段)。模型解码出来的音频
-    # (环境音/动效/呼吸声)不丢弃，压低到 ~15% 音量垫在歌曲底下，作为 MV 辅助音。
+    # ── 对口型纯输出模式(v2.118 双重保险): 只输出 lip_audio 歌曲原音,
+    # 完全丢弃模型生成的任何音频(环境音/呼吸/自生成音乐). 模型音频仅用于
+    # 潜空间条件(驱动口型), 不出现在最终输出中.
     if lip_audio_segment is not None and audio.get("waveform") is not None:
         try:
             import torchaudio as _ta_mix
@@ -2460,11 +2450,7 @@ def _decode_single_clip_to_blob(
                     _lip_wave = _lip_wave.repeat(1, 2, 1)
                 elif _model_wave.shape[1] == 1 and _lip_wave.shape[1] == 2:
                     _model_wave = _model_wave.repeat(1, 2, 1)
-            # v2.111 (fix): 跳过该段头部的 motion-context 重叠 — 开启上下文参考时
-            # lip_audio_segment 头部含上一段尾部 ~1.2s 音频(供模型 latent 行对齐)，
-            # 若不跳过直接截前段会把上一段的音乐混进本 CLIP 输出，导致 clip2+ 与
-            # 原始 lip_audio 错位(用户需手动裁掉开头才能对齐)。跳过 overlap_samples
-            # 后只取本 CLIP 对应的纯净歌曲段，再对齐到模型音频长度。
+            # v2.111 (fix): 跳过该段头部的 motion-context 重叠
             _ov = int(lip_audio_segment.get("overlap_samples", 0))
             if _ov > 0 and int(_lip_wave.shape[-1]) > _ov:
                 _lip_wave = _lip_wave[..., _ov:]
@@ -2479,15 +2465,14 @@ def _decode_single_clip_to_blob(
                     torch.zeros(_lip_wave.shape[0], _lip_wave.shape[1], _pad,
                                 dtype=_lip_wave.dtype, device=_lip_wave.device)
                 ], dim=-1)
-            # 混音: 歌曲主音满音量 + 模型环境音 15% 音量
-            _DUCK = 0.15
-            _mixed = _lip_aligned + _model_wave * _DUCK
+            # v2.118: 纯歌曲输出 — 不混入任何模型音频
             audio = dict(audio)
-            audio["waveform"] = _mixed
-            print(f"[H3 LipSync]   clip[{i}] 音频混音: 歌曲满音量 + 模型环境音 x{_DUCK} "
-                  f"({int(_mixed.shape[-1])} samples @ {_model_sr}Hz, 跳过重叠 {_ov} samples)")
+            audio["waveform"] = _lip_aligned
+            print(f"[H3 LipSync]   clip[{i}] 纯歌曲输出(模型音频已丢弃): "
+                  f"{int(_lip_aligned.shape[-1])} samples @ {_model_sr}Hz, "
+                  f"跳过重叠 {_ov} samples")
         except Exception as _mix_err:
-            print(f"[H3 LipSync]   clip[{i}] 混音失败(回退模型原音): {_mix_err}")
+            print(f"[H3 LipSync]   clip[{i}] 纯歌曲输出失败(回退模型原音): {_mix_err}")
 
     # v1.70: encode 段拆为内部函数——统一预转 uint8 CPU 后编码(不再逐批 GPU->CPU
     # 拷贝); async_encode=True 时在后台线程执行(encode ~55s 与下一段 GPU 工作
@@ -2547,6 +2532,9 @@ def _decode_single_clip_to_blob(
         proc = None
         log_f = None
         try:
+            _enc_args = _h264_enc_args(ffmpeg, "veryfast", 15)
+            _enc_name = "h264_nvenc" if "nvenc" in " ".join(_enc_args) else "libx264"
+            print(f"[H3 Extender]   编码器: {_enc_name} @ {w}x{h}")
             cmd = [
                 ffmpeg, "-y",
                 "-f", "rawvideo",
@@ -2557,12 +2545,12 @@ def _decode_single_clip_to_blob(
             ]
             if has_audio and temp_wav is not None:
                 cmd += ["-i", str(temp_wav)]
-                cmd += _h264_enc_args(ffmpeg, "fast", 14)
+                cmd += _enc_args
                 cmd += ["-c:a", "aac", "-b:a", "192k"]
                 cmd += ["-shortest"]
             else:
                 cmd += ["-an"]
-                cmd += _h264_enc_args(ffmpeg, "fast", 14)
+                cmd += _enc_args
             cmd += [str(temp_mp4)]
 
             log_f = open(video_log, "wb")
