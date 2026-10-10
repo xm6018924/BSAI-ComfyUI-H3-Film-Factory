@@ -457,7 +457,14 @@ def _concat_clip_av(images_list, audios_list):
     + one AUDIO dict (same format as ComfyUI IMAGE/AUDIO)."""
     imgs = [im for im in images_list if im is not None and int(im.shape[0]) > 0]
     if imgs:
-        images = torch.cat(imgs, dim=0).float().cpu().contiguous()
+        try:
+            images = torch.cat(imgs, dim=0).float().cpu().contiguous()
+        except Exception as _cat_err:
+            # v2.118: 22 段 1080p 全分辨率 concat 会要 ~157GB 内存(OOM 崩节点)。
+            # per-clip MP4 与 merged.mp4 早已落盘, 节点输出 tensor 仅用于 UI 预览,
+            # concat 失败时降级为单帧占位, 不让整次渲染收尾崩掉。
+            print(f"[H3 Extender] _concat_clip_av 大内存拼接跳过(MP4 已落盘): {_cat_err}")
+            images = imgs[0][:1].float().cpu().contiguous()
     else:
         images = torch.zeros((0, 64, 64, 3), dtype=torch.float32)
 
@@ -4604,7 +4611,7 @@ class BSAIH3FilmFactory:
         # by the Extender itself and embedded in portable .ext projects.
         optional = {
             "audio_vae": ("VAE", {"forceInput": True}),
-            "ref_audio": ("AUDIO", {"forceInput": True}),
+            "ref_audio": ("AUDIO", {"forceInput": True, "tooltip": "【音色参考】参考音频。连接后告诉H3模型：人物的声音/音色/音乐风格应该像这个参考。可以与lip_audio同时连接——lip_audio驱动口型，ref_audio提供音色参考。"}),
             "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "【唯一歌曲源】完整歌曲/对白音频。一旦连接：①所有CLIP及@图N角色的口型完全由这首歌对应片段驱动；②自动忽略ref_audio端口与@音频N；③模型自生成音频全部丢弃；④出片听到的就是这里接入的这首歌。按各CLIP时长自动切段，最终输出与视频等长。"}),
             "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [分镜N] marker: text before → global prompt, text from [分镜N] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
@@ -5329,13 +5336,11 @@ class BSAIH3FilmFactory:
         if lip_audio is not None:
             lip_audio_segments = _split_lip_audio_by_clips(lip_audio, clips, fps=float(FPS))
             print(f"[H3 LipSync] ✅ 已启用对口型模式，{len(lip_audio_segments)} 段音频已就绪")
-            # ── 硬保证：lip_audio 是唯一音频源 ──
-            # 一旦用户把外部歌曲接到 lip_audio，全局 ref_audio（ref_audio 端口输入、
-            # 或 clip 提示词里 @音频N 从资产库解析出的音频）一律作废，绝不允许任何
-            # CLIP 串到别的音频。每段 CLIP 的口型只能由这首歌对应片段驱动。
+            # ── 声音参考共存模式（v2.121）──
+            # lip_audio 注入 AV latent 锁定口型；ref_audio 保留为音色/风格参考（ref_block）。
+            # 两者各司其职：lip_audio 驱动嘴型，ref_audio 告诉模型"这个人的声音应该什么样"。
             if ref_audio is not None:
-                print("[H3 LipSync] ℹ️ 已忽略外部 ref_audio 输入（lip_audio 连接时以对口型音频为唯一音频源）")
-            ref_audio = None
+                print("[H3 LipSync] 🎙️ ref_audio 保留为音色参考（与 lip_audio 共存）")
             # 已缓存(validated)的 CLIP 不会重渲：若它们是接歌之前生成的，口型对不上新歌。
             _cached_count = sum(1 for _c in clips if _c.get("validated"))
             if _cached_count:
@@ -5866,18 +5871,18 @@ class BSAIH3FilmFactory:
                 _clip_prompt_for_cond = _plan["clip_prompt"]
                 _gp_for_cond = _plan["global_prompt"]
             # Determine ref_audio for this clip.
-            # 对口型模式（lip_audio 已连接）：每段 CLIP 的音频条件只能是 lip_audio
-            # 切出来的那一段。此时全局 ref_audio 已被置 None，绝不允许串到别的音频；
-            # 段缺失直接报错，避免该 CLIP 静默变成"无音频/别人的歌"。
+            # lip_audio 模式：lip_audio_segment 已注入 AV latent 锁定口型，
+            # 不需要再作为 ref_block。全局 ref_audio（音色参考）保留为 ref_block。
             if lip_audio_segments is not None:
                 if i >= len(lip_audio_segments) or lip_audio_segments[i] is None:
                     raise RuntimeError(
                         f"[H3 LipSync] clip[{i+1}] 缺少对口型音频段（共 {len(lip_audio_segments)} 段，"
                         f"当前 clip 索引 {i}）。请检查 lip_audio 时长是否覆盖全部 CLIP。"
                     )
-                _clip_ref_audio = lip_audio_segments[i]
-                _seg_dur = int(_clip_ref_audio["waveform"].shape[-1]) / float(_clip_ref_audio["sample_rate"])
-                print(f"[H3 LipSync] clip[{i+1}] 对口型驱动音频段: {_seg_dur:.2f}s")
+                _clip_ref_audio = ref_audio  # 音色参考（可能为 None）
+                _seg_dur = int(lip_audio_segments[i]["waveform"].shape[-1]) / float(lip_audio_segments[i]["sample_rate"])
+                print(f"[H3 LipSync] clip[{i+1}] 对口型驱动音频段: {_seg_dur:.2f}s"
+                      + (f"，音色参考: 已连接" if ref_audio is not None else ""))
             else:
                 _clip_ref_audio = ref_audio
 
