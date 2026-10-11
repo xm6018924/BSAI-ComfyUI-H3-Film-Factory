@@ -7000,14 +7000,19 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                     // widget 当前值 != 数组对应值 达 3 个以上 → 判定填充错位 → 按键名重排。
                     // 正常对齐(含 1.55 named 恢复、用户未改值)时抽查应全一致 → 跳过。
                     const _T59 = _T43.slice(0, 33).concat(['refine_lipsync_mode','upscale_per_clip','upscale_final','upscale_mode','upscale_engine','upscale_factor','upscale_model','upscale_tile','upscale_batch','upscale_fp16','upscale_face_restore','tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match','env_audio_enable','env_audio_gain','face_lock_mode','restore_cache','h3_extender_timeline']);
+                    // v2.115 旧版保存的尾部键序：idx54=face_lock_mode, idx55=restore_cache,
+                    // idx56=env_audio_enable(布尔开关), idx57=env_audio_gain(布尔开关)
+                    const _T59b = _T43.slice(0, 33).concat(['refine_lipsync_mode','upscale_per_clip','upscale_final','upscale_mode','upscale_engine','upscale_factor','upscale_model','upscale_tile','upscale_batch','upscale_fp16','upscale_face_restore','tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match','face_lock_mode','restore_cache','env_audio_enable','env_audio_gain','h3_extender_timeline']);
+                    // idx56 为布尔 → v2.115 旧版尾部键序；否则标准中间插入键序
+                    const _tpl59 = (typeof _hist[56] === "boolean") ? _T59b : _T59;
                     const _probe = ['steps','sampler_name','speed_preset','refine_lipsync_mode','output_mode','refine_audio_denoise','env_audio_enable'];
                     let _mism = 0;
                     for (const _k of _probe) {
-                        const _ai = _T59.indexOf(_k);
+                        const _ai = _tpl59.indexOf(_k);
                         const _w = this.widgets[_cur.indexOf(_k)];
                         if (_w && _w.type !== "dom" && String(_w.value) !== String(_hist[_ai])) _mism++;
                     }
-                    if (_mism >= 3) _tpl = _T59;
+                    if (_mism >= 3) _tpl = _tpl59;
                 }
             }
             else if (_L === 47) { _tpl = _T43.concat(['env_audio_enable','env_audio_gain','restore_cache','h3_extender_timeline']); }
@@ -7018,7 +7023,15 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 for (let i = 0; i < _L; i++) {
                     const _idx = _cur.indexOf(_tpl[i]);
                     if (_idx >= 0 && this.widgets[_idx] && this.widgets[_idx].type !== "dom") {
-                        this.widgets[_idx].value = _hist[i];
+                        let _v = _hist[i];
+                        // 旧版(v2.115/47键) env_audio_enable/gain 以布尔开关保存：
+                        // 赋给数值滑块会显示 NaN —— 归一为 0-1 / 增益数值。
+                        if (typeof _v === "boolean" && this.widgets[_idx].type === "number") {
+                            if (_tpl[i] === "env_audio_enable") _v = _v ? 0.15 : 0;
+                            else if (_tpl[i] === "env_audio_gain") _v = _v ? 1 : 0;
+                            else _v = _v ? 1 : 0;
+                        }
+                        this.widgets[_idx].value = _v;
                     }
                 }
             }
@@ -7026,7 +7039,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         if (oldConfigure) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name
-        this.title = "BSAI ComfyUI H3 Film Factory v2.120·v14.95";
+        this.title = "BSAI ComfyUI H3 Film Factory v2.121·v14.98";
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -7707,7 +7720,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.120·v14.95";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.121·v14.98";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not
