@@ -6988,7 +6988,13 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             const _T43 = ['run_mode','width','height','ref_image_size','steps','sampler_name','scheduler','denoise','context_length','audio_context_length','clips_json','resolution_mode','megapixels','refs_json','output_mode','filename_prefix','output_image_audio','block_cache','block_cache_threshold','block_cache_device','ref_cache','cache_dit','clip_select_enable','clip_select','pause_enable','pause_timeout','refine_enable','refine_denoise','refine_steps','refine_upscale_factor','refine_upscaler_model','refine_align_to','refine_audio_denoise','tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match'];
             let _tpl = null;
             const _L = _hist.length;
-            if (_L === 59) { _tpl = null; }
+            if (_L === 59) {
+                // 59 键也有两种键序：中间插入(v14.85) vs 尾部追加(v14.91)。
+                // 用 idx33 值类型判别：COMBO 档位=字符串(中间插入/已对齐)，布尔=尾部追加版。
+                if (typeof _hist[33] === "boolean") {
+                    _tpl = _T43.slice(0, 33).concat(['tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match','refine_lipsync_mode','upscale_per_clip','upscale_final','upscale_mode','upscale_engine','upscale_factor','upscale_model','upscale_tile','upscale_batch','upscale_fp16','upscale_face_restore','env_audio_enable','env_audio_gain','face_lock_mode','restore_cache','h3_extender_timeline']);
+                }
+            }
             else if (_L === 47) { _tpl = _T43.concat(['env_audio_enable','env_audio_gain','restore_cache','h3_extender_timeline']); }
             else if (_L === 45) { _tpl = _T43.concat(['restore_cache','h3_extender_timeline']); }
             else if (_L === 43) { _tpl = _T43; }
