@@ -4907,11 +4907,12 @@ class BSAIH3FilmFactory:
             ),
         }
 
-        # v1.22: per-clip external prompt input ports (clip_prompt_1..clip_prompt_12).
-        # Real, connectable input sockets. The frontend repositions each socket to
-        # the matching CLIP card's prompt-window top-left corner via input.pos, so
-        # you can drag from an external text node straight onto that CLIP.
-        for _ci in range(1, 13):
+        # v1.22: per-clip external prompt input ports (clip_prompt_1..clip_prompt_2).
+        # v14.100: 恢复 v2.115 时代节点结构 — clip_prompt 减回 1-2（与旧工作流输入对齐），
+        # 并加回 lip_voice / tts_model_TTS模型 输入端口（TTS 模块剥离时被移除，旧工作流
+        # 直连这两个端口的连接需恢复）。三者均为 forceInput 输入端口，不序列化，不影响
+        # widgets_values 数组对齐。
+        for _ci in range(1, 3):
             optional[f"clip_prompt_{_ci}"] = (
                 "STRING",
                 {
@@ -4920,6 +4921,14 @@ class BSAIH3FilmFactory:
                     "tooltip": f"External prompt override for CLIP {_ci}. If connected and non-empty, replaces CLIP {_ci}'s prompt (duration/refs/timings still come from the clip card). Leave unconnected to use the built-in clip prompt.",
                 },
             )
+        optional["lip_voice"] = (
+            "AUDIO",
+            {"forceInput": True, "tooltip": "全局角色声线参考(AUDIO, 3~10s 干净人声)。speech 模式 TTS 克隆用；也可在 CLIP 卡片 lip_voice 填 @音频N(逐 CLIP 覆盖)。"},
+        )
+        optional["tts_model_TTS模型"] = (
+            "INDEX_TTS_MODEL",
+            {"forceInput": True, "tooltip": "IndexTTS-2.5 模型(接 BSAI_IndexTTS2_5Loader 的 tts_model 输出)。speech 模式必连。"},
+        )
 
 
         # v1.21: INPUT_TYPES keys kept as pure English for workflow compatibility.
@@ -5627,6 +5636,15 @@ class BSAIH3FilmFactory:
         audio_vae = kwargs.get("audio_vae")
         ref_audio = kwargs.get("ref_audio")
         lip_audio = kwargs.get("lip_audio")
+        # v14.100: 恢复 v2.115 时代输入端口 — lip_voice(声线参考) / tts_model_TTS模型(IndexTTS模型)。
+        # 台词合成由独立 IndexTTS-2.5 节点完成；合成音频请接入 lip_audio 驱动口型。
+        # 此处仅识别连接并提示正确链路，不改变任何渲染行为。
+        _lip_voice = kwargs.get("lip_voice")
+        _tts_model = kwargs.get("tts_model_TTS模型")
+        if _lip_voice is not None or _tts_model is not None:
+            print(f"[H3 LipSync] 检测到 TTS 输入连接: lip_voice={'已连接' if _lip_voice is not None else '未连接'} "
+                  f"tts_model={'已连接' if _tts_model is not None else '未连接'} — "
+                  f"台词合成请走独立 IndexTTS 节点，合成音频接入 lip_audio 驱动口型")
         ref_items = None
         ref_blocks = None
         active_picture_slots = None
