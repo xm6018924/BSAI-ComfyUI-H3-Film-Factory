@@ -6991,9 +6991,23 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             const _L = _hist.length;
             if (_L === 59) {
                 // 59 键也有两种键序：中间插入(v14.85) vs 尾部追加(v14.91)。
-                // 用 idx33 值类型判别：COMBO 档位=字符串(中间插入/已对齐)，布尔=尾部追加版。
+                // 用 idx33 值类型判别：COMBO 档位=字符串(中间插入)，布尔=尾部追加版。
                 if (typeof _hist[33] === "boolean") {
                     _tpl = _T43.slice(0, 33).concat(['tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match','refine_lipsync_mode','upscale_per_clip','upscale_final','upscale_mode','upscale_engine','upscale_factor','upscale_model','upscale_tile','upscale_batch','upscale_fp16','upscale_face_restore','env_audio_enable','env_audio_gain','face_lock_mode','restore_cache','h3_extender_timeline']);
+                } else {
+                    // 中间插入版：不能无条件跳过 —— 旧前端 widget 列表结构差异
+                    // 会导致"数组正确但填充错位"(实测整体差2位)。抽查 7 个关键键：
+                    // widget 当前值 != 数组对应值 达 3 个以上 → 判定填充错位 → 按键名重排。
+                    // 正常对齐(含 1.55 named 恢复、用户未改值)时抽查应全一致 → 跳过。
+                    const _T59 = _T43.slice(0, 33).concat(['refine_lipsync_mode','upscale_per_clip','upscale_final','upscale_mode','upscale_engine','upscale_factor','upscale_model','upscale_tile','upscale_batch','upscale_fp16','upscale_face_restore','tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match','env_audio_enable','env_audio_gain','face_lock_mode','restore_cache','h3_extender_timeline']);
+                    const _probe = ['steps','sampler_name','speed_preset','refine_lipsync_mode','output_mode','refine_audio_denoise','env_audio_enable'];
+                    let _mism = 0;
+                    for (const _k of _probe) {
+                        const _ai = _T59.indexOf(_k);
+                        const _w = this.widgets[_cur.indexOf(_k)];
+                        if (_w && _w.type !== "dom" && String(_w.value) !== String(_hist[_ai])) _mism++;
+                    }
+                    if (_mism >= 3) _tpl = _T59;
                 }
             }
             else if (_L === 47) { _tpl = _T43.concat(['env_audio_enable','env_audio_gain','restore_cache','h3_extender_timeline']); }
