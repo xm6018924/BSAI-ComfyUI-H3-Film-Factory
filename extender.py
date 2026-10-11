@@ -4774,8 +4774,52 @@ class BSAIH3FilmFactory:
                     "tooltip": "二采音频重绘强度：0=锁定一采音频（推荐，音频不重噪、不重绘，保持语音/音效一致）；0.5-1.0=音频随视频一起重噪重绘（可能改变声音）。仅 refine_enable 开启时生效。",
                 },
             ),
-            # v14.83 对口型×二采组合预设 + 像素超分旁支参数已移至 required 末尾
-            # （保持前 43 位与 v2.115/v2.118/v2.120 历史键序完全一致，旧工作流按 index 恢复零错位）
+            # v14.83 对口型×二采组合预设（一采注入 lip_audio → 二采音频锁定保口型 / 二采音频参与重绘）
+            "refine_lipsync_mode": (
+                ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"],
+                {"default": "锁定保口型(推荐)", "tooltip": "对口型×二采预设：锁定保口型=二采音频锁定一采音频不重绘(refine_audio_denoise=0)；音频参与重绘0.7=refine_audio_denoise=0.7；音频全重绘1.0=refine_audio_denoise=1.0。仅 refine_enable 开启时生效。"},
+            ),
+            # v14.83 像素超分旁支：per-clip 逐段超分 + final 全片超分（双开关，默认关）
+            "upscale_per_clip": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "每CLIP解码后逐段像素超分（单段显存可控；CLIP卡片 H 按钮优先于此总开关）。默认关。"},
+            ),
+            "upscale_final": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "全片合并后一次性像素超分（出片前统一处理，更快更省）。默认关。"},
+            ),
+            "upscale_mode": (
+                ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"],
+                {"default": "平衡(质量+速度)", "tooltip": "超分模式预设：平衡=2.0x auto(DLSS5可用则DLSS5否则REALESR)；质量优先=3.0x REALESR；速度优先=1.5x auto；自定义=按下方各参数显式值。"},
+            ),
+            "upscale_engine": (
+                ["auto", "dlss5", "realesr", "bicubic"],
+                {"default": "auto", "tooltip": "超分引擎：auto=自动选择；dlss5=NVIDIA DLSS5(需N卡驱动+库)；realesr=RealESRGAN(upscale_models)；bicubic=内置插值(最快无模型依赖)。"},
+            ),
+            "upscale_factor": (
+                "FLOAT",
+                {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5, "tooltip": "像素超分倍率（相对二采输出分辨率）。默认2.0x。"},
+            ),
+            "upscale_model": (
+                _bsai_list_upscale_models(),
+                {"default": "realesr-general-x4v3.pth", "tooltip": "REALESR 超分模型（models/upscale_models/）。仅 upscale_engine=realesr 时使用。"},
+            ),
+            "upscale_tile": (
+                "INT",
+                {"default": 0, "min": 0, "max": 4096, "step": 1, "tooltip": "超分分块像素（0=整幅；显存不足时设 512~1024）。"},
+            ),
+            "upscale_batch": (
+                "INT",
+                {"default": 4, "min": 1, "max": 32, "step": 1, "tooltip": "超分批量帧数（显存换速度，越大越快越吃显存）。"},
+            ),
+            "upscale_fp16": (
+                "BOOLEAN",
+                {"default": True, "tooltip": "超分 FP16 半精度加速（N卡/XPU均支持时自动）。"},
+            ),
+            "upscale_face_restore": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "超分后人脸修复（FaceRestore，需 GPFGAN/CodeFormer 权重且额外耗时）。默认关。"},
+            ),
             "tiled_refine": (
                 "BOOLEAN",
                 {"default": False, "tooltip": "v1.48 分块二采(默认关)。开启后二采沿长空间轴分块采样，激活/attention workspace 随 tile_count 线性下降，根治外部进程挤占显存后 21.8GB 模型 + 全幅 workspace OOM/假死。算法移植自 MiniMaxH3 Director spatial tiling (Apache-2.0)。显存大时保持关。仅 refine_enable 开启时生效。"},
@@ -4822,52 +4866,6 @@ class BSAIH3FilmFactory:
             "semantic_bridge_magnitude_match": (
                 "BOOLEAN",
                 {"default": True, "tooltip": "把小MLP输出的向量模长对齐到原hidden。原版默认开。"},
-            ),
-            # v14.83 对口型×二采组合预设（一采注入 lip_audio → 二采音频锁定保口型 / 二采音频参与重绘）
-            "refine_lipsync_mode": (
-                ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"],
-                {"default": "锁定保口型(推荐)", "tooltip": "对口型×二采预设：锁定保口型=二采音频锁定一采音频不重绘(refine_audio_denoise=0)；音频参与重绘0.7=refine_audio_denoise=0.7；音频全重绘1.0=refine_audio_denoise=1.0。仅 refine_enable 开启时生效。"},
-            ),
-            # v14.83 像素超分旁支：per-clip 逐段超分 + final 全片超分（双开关，默认关）
-            "upscale_per_clip": (
-                "BOOLEAN",
-                {"default": False, "tooltip": "每CLIP解码后逐段像素超分（单段显存可控；CLIP卡片 H 按钮优先于此总开关）。默认关。"},
-            ),
-            "upscale_final": (
-                "BOOLEAN",
-                {"default": False, "tooltip": "全片合并后一次性像素超分（出片前统一处理，更快更省）。默认关。"},
-            ),
-            "upscale_mode": (
-                ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"],
-                {"default": "平衡(质量+速度)", "tooltip": "超分模式预设：平衡=2.0x auto(DLSS5可用则DLSS5否则REALESR)；质量优先=3.0x REALESR；速度优先=1.5x auto；自定义=按下方各参数显式值。"},
-            ),
-            "upscale_engine": (
-                ["auto", "dlss5", "realesr", "bicubic"],
-                {"default": "auto", "tooltip": "超分引擎：auto=自动选择；dlss5=NVIDIA DLSS5(需N卡驱动+库)；realesr=RealESRGAN(upscale_models)；bicubic=内置插值(最快无模型依赖)。"},
-            ),
-            "upscale_factor": (
-                "FLOAT",
-                {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5, "tooltip": "像素超分倍率（相对二采输出分辨率）。默认2.0x。"},
-            ),
-            "upscale_model": (
-                _bsai_list_upscale_models(),
-                {"default": "realesr-general-x4v3.pth", "tooltip": "REALESR 超分模型（models/upscale_models/）。仅 upscale_engine=realesr 时使用。"},
-            ),
-            "upscale_tile": (
-                "INT",
-                {"default": 0, "min": 0, "max": 4096, "step": 1, "tooltip": "超分分块像素（0=整幅；显存不足时设 512~1024）。"},
-            ),
-            "upscale_batch": (
-                "INT",
-                {"default": 4, "min": 1, "max": 32, "step": 1, "tooltip": "超分批量帧数（显存换速度，越大越快越吃显存）。"},
-            ),
-            "upscale_fp16": (
-                "BOOLEAN",
-                {"default": True, "tooltip": "超分 FP16 半精度加速（N卡/XPU均支持时自动）。"},
-            ),
-            "upscale_face_restore": (
-                "BOOLEAN",
-                {"default": False, "tooltip": "超分后人脸修复（FaceRestore，需 GPFGAN/CodeFormer 权重且额外耗时）。默认关。"},
             ),
             # v2.24 模型环境音开关（对口型时是否混入H3自生成环境音；关=只留主唱/克隆语音）
             "env_audio_enable": (
