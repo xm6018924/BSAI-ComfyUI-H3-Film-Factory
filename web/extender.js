@@ -6978,12 +6978,13 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
     const oldConfigure = node.onConfigure;
     node.onConfigure = function (info) {
-        // v14.93 历史工作流键序自适应：任意旧 json（43/45/47 键）加载零错位。
-        // 仅当 json 无 named（旧版保存）时按历史模板重排数组到当前 59 键序；
-        // 1.55 named 恢复顺序无关、59 键已对齐，均直接跳过。
+        // v14.95 历史工作流键序自适应（无条件按数组重排）：
+        // ComfyUI 核心 1.53 只认 widgets_values 数组（named 无效），
+        // 因此不能因 named 存在而跳过——数组错位必须在此修复。
+        // 1.55 核心下 named 恢复结果与本重排一致，无害。
+        // 命中模板：43/45/47 键历史版、59 键尾部追加版；59 键中间插入(已对齐)跳过。
         const _hist = info && info.widgets_values;
-        const _named = info && info.widgets_values_named;
-        if (Array.isArray(_hist) && _hist.length && !(_named && Object.keys(_named).length >= 43)) {
+        if (Array.isArray(_hist) && _hist.length) {
             const _cur = this.widgets.map(w => w.name);
             const _T43 = ['run_mode','width','height','ref_image_size','steps','sampler_name','scheduler','denoise','context_length','audio_context_length','clips_json','resolution_mode','megapixels','refs_json','output_mode','filename_prefix','output_image_audio','block_cache','block_cache_threshold','block_cache_device','ref_cache','cache_dit','clip_select_enable','clip_select','pause_enable','pause_timeout','refine_enable','refine_denoise','refine_steps','refine_upscale_factor','refine_upscaler_model','refine_align_to','refine_audio_denoise','tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match'];
             let _tpl = null;
@@ -7075,10 +7076,13 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             // 回调, 导致收起初始化不执行, 打开就是非收起态
             // (卡片溢出、底板 1 卡)。
             runtime._h3CollapsedAll = false;
-            const removedLegacyRefs = removeLegacyImageRefInputs(this);
-            runtime.state = parseState(runtime.jsonWidget.value);
-            runtime.refsState = parseRefsState(runtime.refsWidget.value);
-            updateRefsHidden(this, runtime);
+            // v14.95: 初始化段逐项 try 兜底 —— 任何单项抛异常都不允许
+            // 中断 rAF 渲染链（否则 CLIP 区/全局提示词区整体丢失）。
+            let removedLegacyRefs = false;
+            try { removedLegacyRefs = removeLegacyImageRefInputs(this); } catch (e) {}
+            try { runtime.state = parseState(runtime.jsonWidget.value); } catch (e) {}
+            try { runtime.refsState = parseRefsState(runtime.refsWidget.value); } catch (e) {}
+            try { updateRefsHidden(this, runtime); } catch (e) {}
             const restoredValidatedPrefix = validatedPrefixFromState(runtime.state);
             runtime.cachedCount = restoredValidatedPrefix;
             for (let i = 0; i < restoredValidatedPrefix && i < runtime.state.clips.length; i++) {
