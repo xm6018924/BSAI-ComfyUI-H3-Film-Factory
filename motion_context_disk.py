@@ -301,11 +301,20 @@ def _write_json_atomic(path, payload):
     """v1.79: 原子写 + .bak 双保险。manifest 丢失(0字节/损坏)会导致
     断点续跑失效(h3cache 有数据但段数只能从 json 读), 故每写一份主文件
     就同步写一份 .bak, 读取时可回退。"""
+    import time
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    # Windows: Final Decode 可能正在读此文件, os.replace 会 PermissionError
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.5 * (attempt + 1))
     try:
         bak = path.with_name(path.name + ".bak")
         bak.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3081,6 +3090,32 @@ def _render_one_final_segment(
         return video, audio, 0
 
     prev = segments[i - 1]
+
+    # trim=0 means the current clip is kept in full and directly follows the
+    # previous one (no overlap to trim). Concatenating two H3 video latents
+    # directly would break the 2-mod-5 temporal grid (the combined T is not
+    # decodable by the VAE), so decode this segment standalone, same policy
+    # as the first clip. Audio has no 2-mod-5 constraint and stays exact.
+    if int(curr.get("trim_frames", 0)) == 0:
+        v = _load_segment_video(data_path, curr)
+        video = vae.decode(v)
+        if progress is not None:
+            progress.advance()
+        if video.ndim == 5:
+            video = video.reshape(
+                -1, video.shape[-3], video.shape[-2], video.shape[-1]
+            )
+        expected = int(curr["frames"])
+        if int(video.shape[0]) != expected:
+            raise RuntimeError(
+                f"H3 progressive preview: clip {i + 1} decoded {video.shape[0]}, "
+                f"expected {expected}."
+            )
+        audio = _decode_single_audio(data_path, curr, audio_vae, fps)
+        if progress is not None:
+            progress.advance()
+        return video, audio, 0
+
     chain, meta = _build_pair_video(data_path, prev, curr)
     decoded, previous_raw, current_raw, shift = _decode_pair_video(
         vae, chain, meta
@@ -4314,7 +4349,51 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                 del decoded, v
             else:
                 for i in range(1, len(segments)):
-                    chain, meta = _build_pair_video(data_path, segments[i - 1], segments[i])
+                    prev_desc = segments[i - 1]
+                    curr_desc = segments[i]
+
+                    if int(curr_desc.get("trim_frames", 0)) == 0:
+                        # trim=0: clip 首尾相接、无重叠裁剪。H3 video latent
+                        # 直接拼接会破坏 2mod5 时间网格（合并 T 无法被 VAE
+                        # 解码），因此逐段单独解码并顺序写入；进度计数与
+                        # pair 路径一致（每个 seam 一次 advance）。
+                        seam_shifts[i] = 0
+                        if video_proc is None:
+                            pv = _load_segment_video(data_path, prev_desc)
+                            dec_p = vae.decode(pv)
+                            if dec_p.ndim == 5:
+                                dec_p = dec_p.reshape(-1, dec_p.shape[-3], dec_p.shape[-2], dec_p.shape[-1])
+                            exp_p = int(prev_desc["frames"])
+                            if int(dec_p.shape[0]) != exp_p:
+                                raise RuntimeError(
+                                    f"Disk Final Decode: VAE returned {dec_p.shape[0]}, expected {exp_p}."
+                                )
+                            h, w = int(dec_p.shape[1]), int(dec_p.shape[2])
+                            video_proc, video_log_f = _start_video_encoder(
+                                ffmpeg, temp_video, w, h, fps, codec, crf, preset, video_log
+                            )
+                            _write_image_frames(video_proc, dec_p)
+                            written_frames += int(dec_p.shape[0])
+                            last_frame = dec_p[-1:].detach().cpu().clone()
+                            del dec_p, pv
+
+                        cv = _load_segment_video(data_path, curr_desc)
+                        dec_c = vae.decode(cv)
+                        progress.advance()
+                        if dec_c.ndim == 5:
+                            dec_c = dec_c.reshape(-1, dec_c.shape[-3], dec_c.shape[-2], dec_c.shape[-1])
+                        exp_c = int(curr_desc["frames"])
+                        if int(dec_c.shape[0]) != exp_c:
+                            raise RuntimeError(
+                                f"Disk Final Decode: VAE returned {dec_c.shape[0]}, expected {exp_c}."
+                            )
+                        _write_image_frames(video_proc, dec_c)
+                        written_frames += int(dec_c.shape[0])
+                        last_frame = dec_c[-1:].detach().cpu().clone()
+                        del dec_c, cv
+                        continue
+
+                    chain, meta = _build_pair_video(data_path, prev_desc, curr_desc)
                     decoded, previous_raw, current_raw, shift = _decode_pair_video(vae, chain, meta)
                     progress.advance()
                     seam_shifts[i] = int(shift)
