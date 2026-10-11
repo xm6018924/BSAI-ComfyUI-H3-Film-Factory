@@ -2089,6 +2089,203 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
     return out.to(dtype=orig_dtype)
 
 
+# ── v14.83/84/85: 像素域超分旁支（per-clip 逐段 + final 全片，默认关）────────
+def _ff_clip_upscale_enabled(clip, master):
+    """CLIP 级超分开关优先于总开关 upscale_per_clip：
+    None=跟随总开关；True=强制本 CLIP 超分；False=强制本 CLIP 不超分。"""
+    if clip is None:
+        return bool(master)
+    v = clip.get("upscale")
+    if v is None:
+        return bool(master)
+    return bool(v)
+
+
+def _ff_resolve_upscale_mode(mode, factor, engine):
+    """v14.84 超分模式预设 → (factor, engine)。默认『平衡(质量+速度)』。"""
+    if mode == "质量优先":
+        return 3.0, "realesr"
+    if mode == "速度优先":
+        return 1.5, "auto"
+    if mode == "自定义":
+        return float(factor), str(engine)
+    return 2.0, "auto"
+
+
+def _ff_probe_video(path, ff):
+    """返回 (width, height, fps_float, frame_count)。失败返回 None。"""
+    try:
+        r = subprocess.run(
+            [ff, "-i", str(path), "-f", "null", "-"],
+            capture_output=True, timeout=60,
+        )
+        stderr = (r.stderr or b"").decode("utf-8", "replace")
+        import re as _re
+        w = h = None
+        m = _re.search(r"(\d{2,5})x(\d{2,5})", stderr)
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+        fps = None
+        m2 = _re.search(r"(\d+(?:\.\d+)?)\s*fps", stderr)
+        if m2:
+            fps = float(m2.group(1))
+        frames = None
+        m3 = _re.search(r"(\d+)\s*frames\s*$", stderr, _re.MULTILINE)
+        if m3:
+            frames = int(m3.group(1))
+        return (w, h, fps, frames)
+    except Exception:
+        return None
+
+
+def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_restore):
+    """对已生成的视频文件做像素超分重编码（原子替换原文件）。
+
+    引擎：
+      bicubic —— ffmpeg scale 滤镜（最快、无模型依赖、内存安全）；
+      realesr —— 逐帧读入 → ComfyUI UpscaleModelLoader → 重编码（质量优先）；
+      dlss5  —— 预留（需 NVIDIA DLSS SDK 与驱动），暂回退 bicubic；
+      auto   —— 按可用性自动选择。
+    默认平衡档=auto → realesr 可用则 realesr，否则 bicubic。
+    """
+    import torch
+    import torch.nn.functional as F
+    try:
+        factor = float(factor)
+        if factor <= 1.0:
+            return True
+        ff = _find_ffmpeg()
+        if not ff:
+            print("[H3 Extender] 超分: 找不到 ffmpeg, 跳过")
+            return False
+        path = Path(path)
+        if not path.exists():
+            return False
+        probe = _ff_probe_video(path, ff)
+        if not probe or not probe[0] or not probe[1]:
+            print("[H3 Extender] 超分: 无法探测视频尺寸, 跳过")
+            return False
+        w, h, fps, _frames = probe
+        fw = max(2, int(round(w * factor)) // 2 * 2)
+        fh = max(2, int(round(h * factor)) // 2 * 2)
+        engine_eff = str(engine)
+        if engine_eff == "auto":
+            engine_eff = "realesr" if _ff_realesr_available(model) else "bicubic"
+        tmp = path.with_name(path.stem + ".upscaled" + path.suffix)
+        if engine_eff == "bicubic":
+            cmd = [
+                ff, "-y", "-i", str(path),
+                "-vf", f"scale={fw}:{fh}:flags=bicubic",
+                "-c:v", "libx264", "-crf", "18", "-preset", "slow",
+                "-pix_fmt", "yuv420p",
+                str(tmp),
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
+        elif engine_eff == "realesr":
+            _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, batch)
+        else:
+            # dlss5 预留：无 SDK 时回退 bicubic
+            print(f"[H3 Extender] 超分引擎 {engine_eff} 暂不可用, 回退 bicubic")
+            cmd = [
+                ff, "-y", "-i", str(path),
+                "-vf", f"scale={fw}:{fh}:flags=bicubic",
+                "-c:v", "libx264", "-crf", "18", "-preset", "slow",
+                "-pix_fmt", "yuv420p",
+                str(tmp),
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
+        os.replace(tmp, path)
+        print(f"[H3 Extender] 像素超分完成: {path.name} {w}x{h} -> {fw}x{fh} engine={engine_eff}")
+        if face_restore:
+            _ff_face_restore_file(path, ff)
+        return True
+    except Exception as e:
+        print(f"[H3 Extender] 像素超分失败: {e}")
+        try:
+            if tmp and Path(tmp).exists():
+                Path(tmp).unlink()
+        except Exception:
+            pass
+        return False
+
+
+def _ff_realesr_available(model):
+    """检查 ComfyUI 的 UpscaleModelLoader 链路是否可用（bicubic 无需模型）。"""
+    try:
+        import importlib.util as _ilu_r
+        import comfy_extras.nodes_upscale_model as _num
+        import comfy.ldm.modules.upscale as _lmu
+        return bool(model and _num.UpscaleModelLoader and _lmu.ImageUpscaleWithModel)
+    except Exception:
+        return False
+
+
+def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, batch):
+    """realesr 逐帧超分：ffmpeg 抽帧(rgb24) → torch → UpscaleModelLoader → 重编码。"""
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    import comfy_extras.nodes_upscale_model as _num
+    import comfy.ldm.modules.upscale as _lmu
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    loader = _num.UpscaleModelLoader()
+    up_model = loader.load_model(model).to(dev)
+    if fp16 and dev.type == "cuda":
+        up_model = up_model.half()
+    raw = str(tmp) + ".raw"
+    # 抽原始帧
+    subprocess.run(
+        [ff, "-y", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgb24", raw],
+        check=True, capture_output=True, timeout=7200,
+    )
+    nbytes = os.path.getsize(raw)
+    fw_in, fh_in = _ff_probe_video(path, ff)[0], _ff_probe_video(path, ff)[1]
+    fw_in = fw_in or 1
+    fh_in = fh_in or 1
+    per_frame = fw_in * fh_in * 3
+    n_frames = max(1, nbytes // per_frame)
+    bs = max(1, int(batch))
+    arr = np.frombuffer(open(raw, "rb").read(), dtype=np.uint8)
+    out_frames = []
+    with torch.inference_mode():
+        for s in range(0, n_frames, bs):
+            chunk = arr[s * per_frame:(s + bs) * per_frame]
+            t = torch.from_numpy(chunk).reshape(-1, fh_in, fw_in, 3).permute(0, 3, 1, 2).float().div_(255.0).to(dev)
+            if fp16 and dev.type == "cuda":
+                t = t.half()
+            t = up_model(t, tile_size=int(tile) if int(tile) > 0 else None, tile_overlap=16, scale=1.0)
+            if fp16 and dev.type == "cuda":
+                t = t.float()
+            out_frames.append(t.clamp_(0.0, 1.0).mul_(255.0).byte().cpu())
+    os.unlink(raw)
+    if not out_frames:
+        raise RuntimeError("realesr: 无输出帧")
+    cat = torch.cat(out_frames, dim=0).permute(0, 2, 3, 1).numpy()
+    tmpraw = str(tmp) + ".out.raw"
+    cat.tofile(tmpraw)
+    subprocess.run(
+        [ff, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{fw}x{fh}",
+         "-r", str(fps or 30.0), "-i", tmpraw,
+         "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p",
+         str(tmp)],
+        check=True, capture_output=True, timeout=7200,
+    )
+    os.unlink(tmpraw)
+
+
+def _ff_face_restore_file(path, ff):
+    """人脸修复预留：检测到 codeformer/gfpgan 权重时启用，否则打印提示跳过。"""
+    try:
+        import folder_paths as _fp_fr
+        has = _fp_fr.get_filename_list("facerestore_models")
+        if not has:
+            print("[H3 Extender] 人脸修复: 无 facerestore_models 权重, 跳过")
+            return
+        print(f"[H3 Extender] 人脸修复: 检测到 {len(has)} 个权重, 预留接入 FaceRestore (后续)")
+    except Exception:
+        pass
+
+
 def _ff_const_add_noise(model, noise_tensor, sigmas, latent, audio_denoise):
     """v1.31: CONST 重加噪(对齐 Sol-H3 LatentUpscaleAlign 语义, 输入为噪声 tensor):
     process_latent_in/out 作用于整体 NestedTensor, 在 sigmas[0] 处混合,
@@ -3288,6 +3485,12 @@ def _parse_clips_json(value: str):
         if seed_mode not in {"randomize", "fixed", "increment", "decrement"}:
             seed_mode = "randomize"
 
+        # v14.85 CLIP 级独立超分开关（三态）：None=跟随总开关 upscale_per_clip；
+        # True=强制本 CLIP 超分；False=强制本 CLIP 不超分（优先于总开关）。
+        _up_raw = raw.get("upscale")
+        if _up_raw not in (None, True, False):
+            _up_raw = None
+
         out.append(
             {
                 "id": str(raw.get("id") or f"clip_{i + 1}"),
@@ -3301,6 +3504,7 @@ def _parse_clips_json(value: str):
                 "color_adjustment": _normalize_color_adjustment(raw.get("color_adjustment")),
                 "render_enabled": bool(raw.get("render_enabled", True)),
                 "replace_mode": bool(raw.get("replace_mode", False)),
+                "upscale": _up_raw,
             }
         )
 
@@ -4355,6 +4559,19 @@ def _bsai_list_semantic_bridge_adapters():
         return ["(关闭: 无权重)"]
 
 
+def _bsai_list_upscale_models():
+    """INPUT_TYPES 用: 列 models/upscale_models/ 下的超分模型, 至少返回占位项."""
+    try:
+        import folder_paths as _fp_u
+        names = list(_fp_u.get_filename_list("upscale_models"))
+        names = [n for n in names if n.lower().endswith((".pth", ".pt", ".safetensors", ".onnx", ".bin"))]
+        if names and "realesr-general-x4v3.pth" not in names:
+            names.insert(0, "realesr-general-x4v3.pth")
+        return names or ["realesr-general-x4v3.pth"]
+    except Exception:
+        return ["realesr-general-x4v3.pth"]
+
+
 class BSAIH3FilmFactory:
     @classmethod
     def INPUT_TYPES(cls):
@@ -4390,10 +4607,10 @@ class BSAIH3FilmFactory:
             "context_length": (["22", "5", "39", "56"], {"default": "39"}),
             "audio_context_length": ("INT", {"default": 0, "min": 0, "max": 240, "step": 1}),
             "clips_json": (
-                "STRING",
+                "hidden",
                 {
                     "default": _state_json([_default_clip(0)]),
-                    "multiline": True,
+                    "tooltip": "内部状态：CLIP 剧本 JSON（官方 hidden 类型，不渲染不编辑）",
                 },
             ),
             # Keep these AFTER clips_json so pre-v14.25 workflow widget arrays
@@ -4416,10 +4633,10 @@ class BSAIH3FilmFactory:
             # Internal image-reference manager state. Appended after the v14.25
             # widgets so older positional workflow widget arrays keep mapping.
             "refs_json": (
-                "STRING",
+                "hidden",
                 {
                     "default": _refs_json(_empty_refs()),
-                    "multiline": True,
+                    "tooltip": "内部状态：参考图 JSON（官方 hidden 类型，不渲染不编辑）",
                 },
             ),
             "output_mode": (
@@ -4557,6 +4774,8 @@ class BSAIH3FilmFactory:
                     "tooltip": "二采音频重绘强度：0=锁定一采音频（推荐，音频不重噪、不重绘，保持语音/音效一致）；0.5-1.0=音频随视频一起重噪重绘（可能改变声音）。仅 refine_enable 开启时生效。",
                 },
             ),
+            # v14.83 对口型×二采组合预设 + 像素超分旁支参数已移至 required 末尾
+            # （保持前 43 位与 v2.115/v2.118/v2.120 历史键序完全一致，旧工作流按 index 恢复零错位）
             "tiled_refine": (
                 "BOOLEAN",
                 {"default": False, "tooltip": "v1.48 分块二采(默认关)。开启后二采沿长空间轴分块采样，激活/attention workspace 随 tile_count 线性下降，根治外部进程挤占显存后 21.8GB 模型 + 全幅 workspace OOM/假死。算法移植自 MiniMaxH3 Director spatial tiling (Apache-2.0)。显存大时保持关。仅 refine_enable 开启时生效。"},
@@ -4603,6 +4822,65 @@ class BSAIH3FilmFactory:
             "semantic_bridge_magnitude_match": (
                 "BOOLEAN",
                 {"default": True, "tooltip": "把小MLP输出的向量模长对齐到原hidden。原版默认开。"},
+            ),
+            # v14.83 对口型×二采组合预设（一采注入 lip_audio → 二采音频锁定保口型 / 二采音频参与重绘）
+            "refine_lipsync_mode": (
+                ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"],
+                {"default": "锁定保口型(推荐)", "tooltip": "对口型×二采预设：锁定保口型=二采音频锁定一采音频不重绘(refine_audio_denoise=0)；音频参与重绘0.7=refine_audio_denoise=0.7；音频全重绘1.0=refine_audio_denoise=1.0。仅 refine_enable 开启时生效。"},
+            ),
+            # v14.83 像素超分旁支：per-clip 逐段超分 + final 全片超分（双开关，默认关）
+            "upscale_per_clip": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "每CLIP解码后逐段像素超分（单段显存可控；CLIP卡片 H 按钮优先于此总开关）。默认关。"},
+            ),
+            "upscale_final": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "全片合并后一次性像素超分（出片前统一处理，更快更省）。默认关。"},
+            ),
+            "upscale_mode": (
+                ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"],
+                {"default": "平衡(质量+速度)", "tooltip": "超分模式预设：平衡=2.0x auto(DLSS5可用则DLSS5否则REALESR)；质量优先=3.0x REALESR；速度优先=1.5x auto；自定义=按下方各参数显式值。"},
+            ),
+            "upscale_engine": (
+                ["auto", "dlss5", "realesr", "bicubic"],
+                {"default": "auto", "tooltip": "超分引擎：auto=自动选择；dlss5=NVIDIA DLSS5(需N卡驱动+库)；realesr=RealESRGAN(upscale_models)；bicubic=内置插值(最快无模型依赖)。"},
+            ),
+            "upscale_factor": (
+                "FLOAT",
+                {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5, "tooltip": "像素超分倍率（相对二采输出分辨率）。默认2.0x。"},
+            ),
+            "upscale_model": (
+                _bsai_list_upscale_models(),
+                {"default": "realesr-general-x4v3.pth", "tooltip": "REALESR 超分模型（models/upscale_models/）。仅 upscale_engine=realesr 时使用。"},
+            ),
+            "upscale_tile": (
+                "INT",
+                {"default": 0, "min": 0, "max": 4096, "step": 1, "tooltip": "超分分块像素（0=整幅；显存不足时设 512~1024）。"},
+            ),
+            "upscale_batch": (
+                "INT",
+                {"default": 4, "min": 1, "max": 32, "step": 1, "tooltip": "超分批量帧数（显存换速度，越大越快越吃显存）。"},
+            ),
+            "upscale_fp16": (
+                "BOOLEAN",
+                {"default": True, "tooltip": "超分 FP16 半精度加速（N卡/XPU均支持时自动）。"},
+            ),
+            "upscale_face_restore": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "超分后人脸修复（FaceRestore，需 GPFGAN/CodeFormer 权重且额外耗时）。默认关。"},
+            ),
+            # v2.24 模型环境音开关（对口型时是否混入H3自生成环境音；关=只留主唱/克隆语音）
+            "env_audio_enable": (
+                ["global_inherit", "on", "off"],
+                {"default": "global_inherit", "tooltip": "模型环境音开关：global_inherit=跟随全局默认；on=混入H3自生成环境音；off=只留主唱/克隆语音。"},
+            ),
+            "env_audio_gain": (
+                "FLOAT",
+                {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "模型环境音音量（0=无声，1=满音量，默认0.15垫底）。"},
+            ),
+            "face_lock_mode": (
+                "BOOLEAN",
+                {"default": False, "tooltip": "远景保脸模式（自动锁五官一致；@图1=全身，@图2.N=各人物脸特写）。"},
             ),
         }
 
@@ -4814,6 +5092,32 @@ class BSAIH3FilmFactory:
         refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear插值, 无需模型)")
         refine_align_to = int(kwargs.get("refine_align_to", 32))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
+        # v14.83 对口型×二采组合预设（优先于 refine_audio_denoise 原始值）
+        refine_lipsync_mode = str(kwargs.get("refine_lipsync_mode", "锁定保口型(推荐)"))
+        if refine_lipsync_mode == "音频参与重绘0.7":
+            refine_audio_denoise = 0.7
+        elif refine_lipsync_mode == "音频全重绘1.0":
+            refine_audio_denoise = 1.0
+        else:
+            refine_audio_denoise = 0.0
+        # v14.83 像素超分旁支（双开关，默认关）+ v14.84 模式预设
+        upscale_per_clip = bool(kwargs.get("upscale_per_clip", False))
+        upscale_final = bool(kwargs.get("upscale_final", False))
+        upscale_mode = str(kwargs.get("upscale_mode", "平衡(质量+速度)"))
+        upscale_engine = str(kwargs.get("upscale_engine", "auto"))
+        upscale_factor = float(kwargs.get("upscale_factor", 2.0))
+        upscale_model = str(kwargs.get("upscale_model", "realesr-general-x4v3.pth"))
+        upscale_tile = int(kwargs.get("upscale_tile", 0))
+        upscale_batch = int(kwargs.get("upscale_batch", 4))
+        upscale_fp16 = bool(kwargs.get("upscale_fp16", True))
+        upscale_face_restore = bool(kwargs.get("upscale_face_restore", False))
+        _up_factor, _up_engine = _ff_resolve_upscale_mode(
+            upscale_mode, upscale_factor, upscale_engine
+        )
+        # v2.24 模型环境音开关 / face_lock_mode（v14.83 起参数化；读取并传入渲染配置）
+        env_audio_enable = str(kwargs.get("env_audio_enable", "global_inherit"))
+        env_audio_gain = float(kwargs.get("env_audio_gain", 0.15))
+        face_lock_mode = bool(kwargs.get("face_lock_mode", False))
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
         tile_overlap = int(kwargs.get("tile_overlap", 128))
@@ -5470,6 +5774,12 @@ class BSAIH3FilmFactory:
                         clip_path = out_dir / f"{prefix}_clip{si + 1:02d}.mp4"
                         try:
                             _copy_blob_to_file(data_path, blob, clip_path)
+                            # v14.83 per-clip 逐段超分（总开关 + CLIP 级三态优先，clips[si] 含 upscale 字段）
+                            if _ff_clip_upscale_enabled(clips[si] if si < len(clips) else None, upscale_per_clip):
+                                _ff_upscale_video_file(clip_path, _up_factor, _up_engine,
+                                                       upscale_model, upscale_fp16,
+                                                       upscale_tile, upscale_batch,
+                                                       upscale_face_restore)
                             item = _comfy_media_item(clip_path, float(FPS), "output")
                             output_ui_videos.append(item)
                             print(f"[H3 Extender] saved per-clip video: {clip_path}")
@@ -5505,6 +5815,13 @@ class BSAIH3FilmFactory:
                                 subprocess.run(cmd, check=True, capture_output=True, timeout=120)
                             except Exception as _e:
                                 print(f"[H3 Extender] ffmpeg merge failed: {_e}")
+
+                        # v14.83 全片合并后一次性超分（默认关）
+                        if upscale_final:
+                            _ff_upscale_video_file(merged_path, _up_factor, _up_engine,
+                                                   upscale_model, upscale_fp16,
+                                                   upscale_tile, upscale_batch,
+                                                   upscale_face_restore)
 
                         try:
                             item = _comfy_media_item(merged_path, float(FPS), "output")
@@ -6384,6 +6701,12 @@ class BSAIH3FilmFactory:
                     clip_path = out_dir / f"{prefix}_clip{si + 1:02d}.mp4"
                     try:
                         _copy_blob_to_file(data_path, blob, clip_path)
+                        # v14.83 per-clip 逐段超分（总开关 + CLIP 级三态优先）
+                        if _ff_clip_upscale_enabled(seg, upscale_per_clip):
+                            _ff_upscale_video_file(clip_path, _up_factor, _up_engine,
+                                                   upscale_model, upscale_fp16,
+                                                   upscale_tile, upscale_batch,
+                                                   upscale_face_restore)
                         item = _comfy_media_item(clip_path, float(FPS), "output")
                         output_ui_videos.append(item)
                         print(f"[H3 Extender] saved per-clip video: {clip_path}")
@@ -6445,6 +6768,12 @@ class BSAIH3FilmFactory:
                         shutil.copy2(clip_paths[0], merged_path)
 
                     if merged_path.exists():
+                        # v14.83 全片合并后一次性超分（默认关）
+                        if upscale_final:
+                            _ff_upscale_video_file(merged_path, _up_factor, _up_engine,
+                                                   upscale_model, upscale_fp16,
+                                                   upscale_tile, upscale_batch,
+                                                   upscale_face_restore)
                         item = _comfy_media_item(merged_path, float(FPS), "output")
                         output_ui_videos.append(item)
 

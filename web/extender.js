@@ -1001,6 +1001,8 @@ function newClip(index) {
         rfe_filename_prefix: "frame",
         render_enabled: true,
         replace_mode: false,
+        // v14.85 CLIP 级独立超分开关（三态）：null=跟随总开关 upscale_per_clip；true=强制本 CLIP 超分；false=强制本 CLIP 不超分
+        upscale: null,
     };
 }
 
@@ -1054,6 +1056,8 @@ function parseState(raw) {
                     clip.rfe_filename_prefix = c?.rfe_filename_prefix || "frame";
                     clip.render_enabled = c?.render_enabled !== undefined ? Boolean(c.render_enabled) : true;
                     clip.replace_mode = c?.replace_mode !== undefined ? Boolean(c.replace_mode) : false;
+                    // v14.85 CLIP 级超分三态：仅 true/false 保留，其余（含缺失）归一为 null=跟随总开关
+                    clip.upscale = c?.upscale === true ? true : c?.upscale === false ? false : null;
                     return clip;
                 }),
             };
@@ -1064,7 +1068,9 @@ function parseState(raw) {
 
 function serializeState(state) {
     const clips = state.clips.map((c) => {
-        const { _previewLoaded, _previewVideoUrl, _previewExpanded, _previewReady, _latentPreviewUrl, _latentStep, _latentTotal, _previewError, ...rest } = c;
+        const { _previewLoaded, _previewVideoUrl, _previewExpanded, _previewReady, _latentPreviewUrl, _latentStep, _latentTotal, _previewError, upscale, ...rest } = c;
+        // v14.85: 跟随态(null)不落盘，仅开(true)/关(false)存进 clips_json
+        if (upscale === true || upscale === false) rest.upscale = upscale;
         return rest;
     });
     const payload = { version: 1, clips };
@@ -3675,7 +3681,39 @@ function buildClipCard(node, runtime, clip, index) {
             render(node, runtime);
         });
 
-        clipActions.append(renderToggle, replaceBtn);
+        // ── v14.85 CLIP 级独立超分三态开关（H） ─────────────────────
+        // 循环：跟随(H·灰) → 强制开(H↑绿) → 强制关(H↓红) → 跟随
+        const upscaleBtn = document.createElement("button");
+        upscaleBtn.type = "button";
+        const _upState = clip.upscale; // null | true | false
+        const _upLabel = _upState === true ? "H↑" : _upState === false ? "H↓" : "H·";
+        const _upTip = _upState === true
+            ? "超分：强制开（本 CLIP 必逐段超分，无视总开关）"
+            : _upState === false
+                ? "超分：强制关（本 CLIP 必不逐段超分，无视总开关）"
+                : "超分：跟随（由节点总开关 upscale_per_clip 决定）";
+        upscaleBtn.title = _upTip;
+        upscaleBtn.textContent = _upLabel;
+        upscaleBtn.style.cssText = "width:24px;height:22px;padding:0;font-size:11px;font-weight:bold;border-radius:4px;border:1px solid rgba(255,255,255,.15);cursor:pointer;";
+        upscaleBtn.style.background = _upState === true
+            ? "rgba(60,160,70,.32)"
+            : _upState === false
+                ? "rgba(180,60,60,.30)"
+                : "rgba(100,100,100,.18)";
+        upscaleBtn.style.color = _upState === true ? "#9fe" : _upState === false ? "#fbb" : "#aaa";
+        upscaleBtn.style.opacity = _upState === null ? ".6" : ".95";
+        upscaleBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            // null → true → false → null
+            if (clip.upscale === null) clip.upscale = true;
+            else if (clip.upscale === true) clip.upscale = false;
+            else clip.upscale = null;
+            updateHidden(node, runtime);
+            render(node, runtime);
+        });
+
+        clipActions.append(renderToggle, upscaleBtn, replaceBtn);
 
         // ── Independent Render button: render ONLY this CLIP ──
         const clipRenderBtn = document.createElement("button");

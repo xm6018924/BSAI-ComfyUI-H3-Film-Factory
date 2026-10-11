@@ -121,6 +121,40 @@
 | `refine_align_to` | 像素对齐步长 | `32` | H3 官方分辨率网格 32px；其他分辨率自动取整避免边缘色条 |
 | `refine_audio_denoise` | 音频重绘强度 | `0.0` | 0=锁定一采音频（推荐）；0.5-1.0=音频随视频重绘 |
 
+### 对口型×二采预设（v14.83）/ Lip-sync × Dual-sample Preset
+| 参数 | 中文说明 | 默认 | 说明 |
+|---|---|---|---|
+| `refine_lipsync_mode` | 对口型×二采预设 | `锁定保口型(推荐)` | `锁定保口型(推荐)`=二采音频锁定一采音频不重绘(refine_audio_denoise=0)；`音频参与重绘0.7`=refine_audio_denoise=0.7；`音频全重绘1.0`=refine_audio_denoise=1.0。一采注入 lip_audio → 二采音频锁定保口型或参与重绘，开箱即用 |
+
+### 像素超分旁支（v14.83-84）/ Pixel Upscale Branch
+| 参数 | 中文说明 | 默认 | 说明 |
+|---|---|---|---|
+| `upscale_per_clip` | 逐段超分 | `false` | 每 CLIP 解码后逐段像素超分（单段显存可控；CLIP 卡片 H 按钮优先于此总开关）|
+| `upscale_final` | 全片超分 | `false` | 全片合并后一次性像素超分（出片前统一处理，更快更省）|
+| `upscale_mode` | 超分模式预设 | `平衡(质量+速度)` | 平衡=2.0x auto；质量优先=3.0x REALESR；速度优先=1.5x auto；自定义=按下方参数 |
+| `upscale_engine` | 超分引擎 | `auto` | auto 自动选择 / dlss5（N卡）/ realesr（upscale_models）/ bicubic（内置，最快）|
+| `upscale_factor` | 超分倍率 | `2.0` | 相对二采输出分辨率的像素放大倍率 |
+| `upscale_model` | REALESR 模型 | `realesr-general-x4v3.pth` | `models/upscale_models/` 下的模型 |
+| `upscale_tile` | 超分分块像素 | `0` | 0=整幅；显存不足设 512~1024 |
+| `upscale_batch` | 超分批量帧数 | `4` | 显存换速度 |
+| `upscale_fp16` | 超分 FP16 | `true` | 半精度加速 |
+| `upscale_face_restore` | 超分人脸修复 | `false` | FaceRestore 预留（需权重+耗时）|
+
+### 环境音与保脸（v14.83）/ Env Audio & Face Lock
+| 参数 | 中文说明 | 默认 | 说明 |
+|---|---|---|---|
+| `env_audio_enable` | 模型环境音开关 | `global_inherit` | global_inherit 跟随全局 / on 混入 H3 自生成环境音 / off 只留主唱/克隆语音 |
+| `env_audio_gain` | 环境音音量 | `0.15` | 0=无声，1=满音量 |
+| `face_lock_mode` | 远景保脸模式 | `false` | 自动锁五官一致 |
+
+### CLIP 级超分开关（v14.85，前端按钮 v14.90 待恢复）
+- 后端已支持每个 CLIP 的 `upscale` 三态字段（`跟随`/`强制超分`/`强制不超分`），**CLIP 级优先于总开关 `upscale_per_clip`**。
+- 前端 CLIP 卡片内的三态按钮因 v14.86-88 快捷条事件已临时移除，稳定后恢复；在此之前可通过手动编辑 `clips_json` 中每个 clip 的 `"upscale": true/false` 生效。
+
+### 参数位置兼容（v14.91）
+- 14 个新参数（对口型预设/超分×10/环境音×2/保脸）**全部追加在 required 末尾**，参数区前 43 位与 v2.115/v2.118/v2.120 历史键序**完全一致**。
+- 任意历史版本工作流（43 键/59 键）按 index 恢复**零错位**，不再出现 NaN/参数串位；新增参数缺失时自动用默认值。
+
 ---
 
 
