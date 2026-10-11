@@ -7033,6 +7033,9 @@ NODE_CLASS_MAPPINGS = {
     "BSAIH3FilmFactoryFinalDecode": MiniMaxH3MotionContextDiskFinalDecode,
 }
 
+# v14.95 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
+print("[BSAI-H3-Film-Factory] v14.95 backend loaded (59-widget mid-insert layout, history-key remap supported)")
+
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
     "BSAIMiniMaxH3Extender": "BSAI H3 Extender (旧版兼容别名)",

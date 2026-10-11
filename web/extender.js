@@ -7012,7 +7012,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         if (oldConfigure) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name
-        this.title = "BSAI ComfyUI H3 Film Factory v2.115";
+        this.title = "BSAI ComfyUI H3 Film Factory v2.120·v14.95";
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -7693,7 +7693,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.115";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.120·v14.95";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not
