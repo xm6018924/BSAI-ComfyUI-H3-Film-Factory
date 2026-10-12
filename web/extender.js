@@ -1087,7 +1087,8 @@ function parseState(raw) {
 
 function serializeState(state) {
     const clips = state.clips.map((c) => {
-        const { _previewLoaded, _previewVideoUrl, _previewExpanded, _previewReady, _latentPreviewUrl, _latentStep, _latentTotal, _previewError, upscale, ...rest } = c;
+        // v14.137: _h3ExtDriven 只是 syncExternalPrompts 的运行时标记, 不落盘
+        const { _previewLoaded, _previewVideoUrl, _previewExpanded, _previewReady, _latentPreviewUrl, _latentStep, _latentTotal, _previewError, _h3ExtDriven, upscale, ...rest } = c;
         // v14.85: 跟随态(null)不落盘，仅开(true)/关(false)存进 clips_json
         if (upscale === true || upscale === false) rest.upscale = upscale;
         return rest;
@@ -5124,6 +5125,10 @@ function syncExternalPrompts(node, runtime) {
         }
         const clip = runtime.state.clips && runtime.state.clips[idx];
         if (!clip) return;
+        // v14.137: 标记"这张卡由已连接的 clip_prompt_N 端口驱动"。端口后续断开时
+        // 不清除该标记, 让下面的空卡回收逻辑仍能收拾它; 反过来, 端口从未连接的卡
+        // (用户点"添加CLIP"新建的空卡) 永远不带这个标记, 不会被当成垃圾清掉。
+        if (inp.link != null) clip._h3ExtDriven = true;
         const val = readUpstreamText(node, graph, inp);
         if (val !== null) {
             if (val === "") {
@@ -5159,10 +5164,14 @@ function syncExternalPrompts(node, runtime) {
         }
     });
 
-    // v2.2: 空CLIP自动清理 — 从后往前删，只删空的、非CLIP1的卡片
-    // CLIP1（idx=0）永远保留，永不删除
+    // v2.2 + v14.137: 空CLIP自动清理 — 从后往前删, 只删"由已连接的 clip_prompt_N
+    // 端口驱动、且内容已清空"的卡片。CLIP1(idx=0) 永远保留, 永不删除。
+    // v14.137 根因修复: 原来无条件删除任何空卡, 而 newClip() 生成的 prompt 就是
+    // 空字符串 —— 于是"添加CLIP"新建的第 3 张卡在同一个 rAF 里就被这里 splice 掉,
+    // 表现为"点多少次都加不出第 3 个 CLIP"(只保留有外部提示词的旧卡)。
     for (let idx = runtime.state.clips.length - 1; idx > 0; idx--) {
         const clip = runtime.state.clips[idx];
+        if (clip._h3ExtDriven !== true) continue;
         const promptEmpty = !clip.prompt || !clip.prompt.trim();
         const externalEmpty = !clip.external_prompt || !clip.external_prompt.trim();
         if (promptEmpty && externalEmpty) {
