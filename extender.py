@@ -4889,6 +4889,8 @@ class BSAIH3FilmFactory:
             "audio_vae": ("VAE", {"forceInput": True}),
             "ref_audio": ("AUDIO", {"forceInput": True, "tooltip": "【音色参考】参考音频。连接后告诉H3模型：人物的声音/音色/音乐风格应该像这个参考。可以与lip_audio同时连接——lip_audio驱动口型，ref_audio提供音色参考。"}),
             "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "【唯一歌曲源】完整歌曲/对白音频。一旦连接：①所有CLIP及@图N角色的口型完全由这首歌对应片段驱动；②自动忽略ref_audio端口与@音频N；③模型自生成音频全部丢弃；④出片听到的就是这里接入的这首歌。按各CLIP时长自动切段，最终输出与视频等长。"}),
+            # v14.101: 回退 18:35(v14.84) — lip_voice 位置与 v2.7.json 一致（lip_audio 之后）
+            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "全局角色声线参考(AUDIO, 3~10s 干净人声)。speech 模式 TTS 克隆用；也可在 CLIP 卡片 lip_voice 填 @音频N(逐 CLIP 覆盖)。"}),
             "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [分镜N] marker: text before → global prompt, text from [分镜N] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
@@ -4907,12 +4909,11 @@ class BSAIH3FilmFactory:
             ),
         }
 
-        # v1.22: per-clip external prompt input ports (clip_prompt_1..clip_prompt_2).
-        # v14.100: 恢复 v2.115 时代节点结构 — clip_prompt 减回 1-2（与旧工作流输入对齐），
-        # 并加回 lip_voice / tts_model_TTS模型 输入端口（TTS 模块剥离时被移除，旧工作流
-        # 直连这两个端口的连接需恢复）。三者均为 forceInput 输入端口，不序列化，不影响
-        # widgets_values 数组对齐。
-        for _ci in range(1, 3):
+        # v1.22: per-clip external prompt input ports (clip_prompt_1..clip_prompt_12).
+        # v14.101: 回退到 18:35（v14.84）节点结构 — 依据 v2.7.json 权威文件：
+        # 当时即有 clip_prompt_1-12 端口（1/2 常连、3-12 预留）。均为 forceInput
+        # 输入端口，不序列化，不影响 widgets_values 数组对齐。
+        for _ci in range(1, 13):
             optional[f"clip_prompt_{_ci}"] = (
                 "STRING",
                 {
@@ -4921,10 +4922,7 @@ class BSAIH3FilmFactory:
                     "tooltip": f"External prompt override for CLIP {_ci}. If connected and non-empty, replaces CLIP {_ci}'s prompt (duration/refs/timings still come from the clip card). Leave unconnected to use the built-in clip prompt.",
                 },
             )
-        optional["lip_voice"] = (
-            "AUDIO",
-            {"forceInput": True, "tooltip": "全局角色声线参考(AUDIO, 3~10s 干净人声)。speech 模式 TTS 克隆用；也可在 CLIP 卡片 lip_voice 填 @音频N(逐 CLIP 覆盖)。"},
-        )
+        # v14.101: 回退 18:35(v14.84) — tts_model_TTS模型 在 optional 末尾（v2.7.json 一致）
         optional["tts_model_TTS模型"] = (
             "INDEX_TTS_MODEL",
             {"forceInput": True, "tooltip": "IndexTTS-2.5 模型(接 BSAI_IndexTTS2_5Loader 的 tts_model 输出)。speech 模式必连。"},
