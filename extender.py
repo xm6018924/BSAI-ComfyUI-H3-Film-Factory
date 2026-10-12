@@ -4838,10 +4838,10 @@ class BSAIH3FilmFactory:
             # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
             # 24G 跑 15s 208wpx(1920x1088) 极速模式预计 ~10-12 分钟/clip.
             "speed_preset": (
-                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"],
+                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim"],
                 {
                     "default": "均衡",
-                    "tooltip": "v1.86 速度预设。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(旧默认, ~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流(UNETLoader+ApplyVDNH3)使用：一采固定 VDN 8 步(蒸馏最优,质量≈dense 50 步)，二采 3/4/6 步。custom=按下方各widget显式值。",
+                    "tooltip": "v1.86 速度预设。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(旧默认, ~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流(UNETLoader+ApplyVDNH3)使用：一采固定 VDN 8 步(蒸馏最优,质量≈dense 50 步)，二采 3/4/6 步。FastH3-Trim=搭配 fastvideo_fasth3_trim_8step_nvfp4 模型：42层剪枝比V2快15%，8步单采无二采，5s视频~39s。custom=按下方各widget显式值。",
                 },
             ),
             "temporal_chunk_tokens": (
@@ -4901,14 +4901,6 @@ class BSAIH3FilmFactory:
                 },
             ),
             "asset_library": ("ASSET_LIBRARY", {"forceInput": True, "tooltip": "Connect BSAI_AssetLibraryInput to resolve @图N/@视频N/@音频N references in clip prompts."}),
-            # v1.98: 恢复缓存（追加在末尾，不改动旧参数顺序，保证旧工作流兼容）
-            "restore_cache": (
-                "BOOLEAN",
-                {
-                    "default": False,
-                    "tooltip": "恢复缓存：从最近一次自动快照恢复已渲染 CLIP 的主链缓存（缓存被误删/清空后使用）。恢复后无需从 clip1 重新渲染补链，仅渲染新增 CLIP。执行完成后自动复位。",
-                },
-            ),
         }
 
         # v1.22: per-clip external prompt input ports (clip_prompt_1..clip_prompt_12).
@@ -5181,6 +5173,10 @@ class BSAIH3FilmFactory:
         elif speed_preset == "精细-VDN":
             # 一采 VDN 8 步 + 二采 6 步: 与 FastH3 精细同画质, 一采更快更稳.
             steps, refine_steps, tile_count, refine_denoise = 8, 6, 4, 0.55
+        elif speed_preset == "FastH3-Trim":
+            # FastH3 Trim: 42层剪枝模型(nvfp4), 8步单采无二采.
+            # 5s视频~39s(RTX 4090), 5090更快. 参数容错高, 不易崩.
+            steps, refine_steps, tile_count, refine_denoise = 8, 0, 4, 0.45
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")

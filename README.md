@@ -151,6 +151,15 @@
 - 后端已支持每个 CLIP 的 `upscale` 三态字段（`跟随`/`强制超分`/`强制不超分`），**CLIP 级优先于总开关 `upscale_per_clip`**。
 - 前端 CLIP 卡片内的三态按钮因 v14.86-88 快捷条事件已临时移除，稳定后恢复；在此之前可通过手动编辑 `clips_json` 中每个 clip 的 `"upscale": true/false` 生效。
 
+### 一键化快捷开关条（v14.104-106）/ Quick Toggle Bar (v14.104-106)
+- **位置**：CLIP 卡片区底部按钮栏（添加CLIP / 全部删除CLIP）后面，独立一行。/ Below the bottom button bar.
+- **20 个一键开关（全部 true/false 布尔全覆盖）**：
+  - **高频组（10）**：二采、逐段超分、全片超分、块缓存、参考缓存、输出（none→per_clip→merged→both 循环）、速度（极速→均衡→精细）、口型（锁定保口型→参与重绘0.7→全重绘1.0）、超分模式（平衡→质量→速度→自定义）、暂停。/ Core 10: refine / upscale per-clip / upscale final / block cache / ref cache / output / speed / lipsync / upscale mode / pause.
+  - **扩展组（10，v14.106）**：预览（output_image_audio）、DiT缓存（cache_dit）、CLIP选择（clip_select_enable）、超分FP16（upscale_fp16）、人脸修复（upscale_face_restore）、分块二采（tiled_refine）、语义桥（semantic_bridge_enable）、桥对齐（semantic_bridge_magnitude_match）、保脸（face_lock_mode）、恢复缓存（restore_cache）。/ Ext 10: preview / DiT cache / clip select / upscale fp16 / face restore / tiled refine / semantic bridge / mag match / face lock / restore cache.
+- **交互**：布尔点一下开/关（绿色=开）；枚举点一下循环下一档；悬停按钮显示完整名称 + 功能简介（中英双语双排）。/ Click to toggle (green=on); hover for full description (bilingual).
+- **参数区同步隐藏（v14.105-106）**：被快捷按钮覆盖的参数（共 20 个）从参数区隐藏，一键开关替代原设置栏；其余参数保留。/ The covered params are hidden from the param area; others remain.
+- **零风险设计**：隐藏复用 hideNativeWidget（与 clips_json/refs_json 同一成熟机制，computeSize 归零 + 重绘 re-hide），widget 仍保留在 widgets 数组 → widgets_values 对齐不变 → 任意版本旧工作流加载零 NaN 零错位零重连；按钮状态实时读 widget 真实值，保存后参数与按钮一致。/ Pure front-end, no serialization impact, no param reorder → zero NaN for all legacy workflows.
+
 ### 参数位置兼容（v14.92）
 - 参数区恢复 **v14.85 中间插入布局**（对口型预设/超分系列在 refine_audio_denoise 之后，用户验收过的正常版）。
 - 用户工作流目录（ComfyUI `user/default/workflows/` + OneDrive）内 **16 个电影工厂工作流已全部转换为 59 键对齐**（named + 数组），任意版本加载零 NaN/零错位；历史 45/47 键文件缺失的新参数自动补默认值。

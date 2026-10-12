@@ -2,6 +2,25 @@
 // extender.js v2.4.0 — cache-bust marker (2026-08-22-clean-break-from-original)
 import { api } from "../../scripts/api.js";
 
+// v14.113: restore_cache 全局守卫已移除（安全回退）。
+// 背景：restore_cache 是 1.55 新式 toggle widget（optional），computeSize 归零
+// 在真实 Chrome 无痕窗口无效（行仍显示），v14.107-112 的 DOM 级兜底（轮询/
+// MutationObserver/CSS 注入）在部分环境引发画布白屏（隐藏动作影响布局）。
+// 两害相权：白屏（画布不可用）> restore_cache 参数行显示（可接受、可点击）。
+// 本版彻底移除全部守卫与 CSS 注入，只保留 v14.105 的 computeSize 归零
+// （无副作用的隐藏尝试）——restore_cache 行在支持的环境隐藏、在 1.55
+// toggle 环境正常显示；快捷条「恢复缓存」按钮照常可用（功能不受影响）。
+// 只操作 DOM，不动 widget 数组 → 零 NaN、零重连、旧版工作流加载正常。
+// v14.113: restore_cache 全局守卫已移除（安全回退）。
+// 背景：restore_cache 是 1.55 新式 toggle widget（optional），computeSize 归零
+// 在真实 Chrome 无痕窗口无效（行仍显示），v14.107-112 的 DOM 级兜底（轮询/
+// MutationObserver/CSS 注入）在部分环境引发画布白屏（隐藏动作影响布局）。
+// 两害相权：白屏（画布不可用）> restore_cache 参数行显示（可接受、可点击）。
+// 本版彻底移除全部守卫与 CSS 注入，只保留 v14.105 的 computeSize 归零
+// （无副作用的隐藏尝试）——restore_cache 行在支持的环境隐藏、在 1.55
+// toggle 环境正常显示；快捷条「恢复缓存」按钮照常可用（功能不受影响）。
+// 只操作 DOM，不动 widget 数组 → 零 NaN、零重连、旧版工作流加载正常。
+
 // v2.40: 电影提示词模板库 (内嵌)
 window.H3_FILM_TEMPLATES = {
   version: "1.0.0",
@@ -1479,38 +1498,142 @@ function wrapResolutionWidgetCallbacks(node, runtime) {
     document.head.appendChild(style);
 })();
 
+// v14.133 —— 参数行隐藏机制重写：改用前端官方可见性 API。
+//
+// 旧实现为什么会出现"参数栏错位重叠 / 隐藏不干净"（用户 2026-10-12 实测）：
+//   1) widget.computeSize = () => [0, 0] 只把行高压成 0，行仍然留在 widgets
+//      布局里占位，画布照样给它画圆角边框 → 多个 0 高行的边框叠在同一 y 上
+//      （截图放大后就是好几条嵌套的圆角线）。
+//   2) 1.5s 常驻轮询对整页 querySelectorAll("*") 扫文本，命中后做
+//      display:none / height:0 / textContent="" / element.remove()。
+//      remove() 和清空文本直接改 Vue 拥有的 DOM，vnode 与真实 DOM 失配，
+//      下一次 Vue 重渲染就把行插回错误位置 → 参数栏错位。
+//   3) 全文档扫描 + 常驻定时器阻塞主线程，多 H3 节点时画布卡死。
+//
+// 官方路径（comfyui_frontend 1.55.14）：
+//   src/types/widgetVisibility.ts
+//     widget.hidden = true / widget.options.hidden = true
+//       → visibility.suppression.byExtension = true
+//   src/lib/litegraph/src/LGraphNode.ts
+//     getLayoutWidgets() 过滤 suppression.byExtension 的 widget
+//       → 画布不分配行、不绘制边框（行彻底消失，不是 0 高）
+//     drawWidgets() 同样跳过 isWidgetRowVisible() 为 false 的行
+//   src/renderer/extensions/vueNodes/composables/processedWidgetRenderModel.ts
+//     isWidgetVisibleOnSurface(visibility, 'vueNode') = false
+//   src/renderer/extensions/vueNodes/components/WidgetGrid.vue
+//     renderedRows 不返回该行 → v-if 不渲染 → DOM 行根本不存在
+//   serializeFromStoreState 只跳过 serialize === false
+//     → widgets_values 顺序/长度不变 → 零 NaN、零重连、旧工作流正常
+//
+// 关键点：Vue 侧读的是 widgetValueStore 里的 visibility 副本，只改 live
+// widget 不会更新 DOM。setNodeId() 会重新 registerWidget 把 live visibility
+// 同步进 store；随后 BaseWidget.bindRegisteredState() 让 _visibility 直接
+// 指向 store 里那份响应式对象，所以"写 hidden"必须在 setNodeId 之后再写一次。
+function setWidgetRowHidden(node, widget, hidden) {
+    if (!widget) return false;
+
+    const write = () => {
+        // options.hidden 走 BaseWidget 的 legacy shim → applyLegacyHiddenWrite，
+        // 并且写进 _rawOptions：之后任何 options 重新赋值 /
+        // syncVisibilityFromOptions 重新推导都不会把 hidden 冲掉。
+        try { widget.options.hidden = hidden; } catch (e) {}
+        try { widget.hidden = hidden; } catch (e) {}
+    };
+
+    write();
+
+    // 同步到 widgetValueStore —— Vue DOM 行的可见性来源。
+    try {
+        if (typeof widget.setNodeId === "function") widget.setNodeId(node?.id);
+    } catch (e) {}
+
+    // _visibility 此时已指向 store 的响应式对象，再写一次保证 Vue 立刻收到变更。
+    write();
+
+    return true;
+}
+
 function hideNativeWidget(node, widget) {
-    if (!widget) return;
+    setWidgetRowHidden(node, widget, true);
+}
 
-    // LiteGraph / Nodes 1.0: remove the logical footprint but keep the widget
-    // itself intact so its normal workflow serialization continues to work.
-    // Do NOT use canvasOnly/hidden here: Vue does not reliably honour those
-    // flags for native widgets, while the pre-emptive CSS above does.
-    widget.computeSize = () => [0, -4];
-    widget.computeLayoutSize = () => ({
-        minWidth: 0,
-        minHeight: 0,
-        maxWidth: 0,
-        maxHeight: 0,
-    });
-
-    // LiteGraph may recreate the textarea when the node leaves/re-enters the
-    // viewport, so re-hide the actual legacy DOM element on every foreground
-    // draw, exactly as Stem Mixer does for its state widget.
-    const oldDrawForeground = node?.onDrawForeground;
-    if (node) {
-        node.onDrawForeground = function (ctx) {
-            if (oldDrawForeground) oldDrawForeground.apply(this, arguments);
-            const inputEl = widget.inputEl;
-            if (inputEl) {
-                if (inputEl.style.display !== "none") inputEl.style.display = "none";
-                const parent = inputEl.parentElement;
-                if (parent && parent.style.display !== "none") {
-                    parent.style.display = "none";
-                }
-            }
-        };
+// 只在本节点的参数区网格里做兜底（异常前端 / 渲染时序），绝不再扫描整个
+// document：只 display:none，绝不 remove / 不清空 textContent —— Vue 拥有的
+// 节点不能删，删了下一次重渲染就会插回错误位置。
+function nukeVisibleHiddenRows(node, keys) {
+    if (!node || !Array.isArray(keys)) return;
+    const grid = node.element?.querySelector?.(".lg-node-widgets")
+        || document.querySelector('[data-node-id="' + node.id + '"] .lg-node-widgets');
+    if (!grid) return;
+    for (const row of Array.from(grid.children)) {
+        const t = row.textContent || "";
+        if (!t || t.length > 200) continue;
+        if (!keys.some((k) => t.indexOf(k) >= 0)) continue;
+        if (row.style.display === "none") continue;
+        row.style.setProperty("display", "none", "important");
     }
+}
+
+// Vue 首次渲染参数区有延迟，创建后按固定节奏补几次兜底即可，之后不再常驻轮询。
+function scheduleHiddenRowFallback(node, keys) {
+    if (!node || node.__h3HiddenRowFallback) return;
+    node.__h3HiddenRowFallback = true;
+    const delays = [0, 150, 400, 900, 1600];
+    delays.forEach((d, i) => {
+        setTimeout(() => {
+            try { nukeVisibleHiddenRows(node, keys); } catch (e) {}
+            if (i === delays.length - 1) node.__h3HiddenRowFallback = false;
+        }, d);
+    });
+}
+
+// 超分模式的 5 个"自定义"档参数：默认随快捷条隐藏，选「自定义」时必须放回来，
+// 否则后端 _ff_resolve_upscale_mode 的"自定义"分支拿不到用户填的倍率/引擎。
+const UPSCALE_ADV_ROW_KEYS = [
+    "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch",
+];
+
+function refreshCustomUpscaleRows(node) {
+    if (!node) return;
+    const mode = String(getWidget(node, "upscale_mode")?.value || "");
+    const custom = mode === "自定义";
+    for (const key of UPSCALE_ADV_ROW_KEYS) {
+        const w = node.widgets?.find((x) => x && x.name === key);
+        if (!w) continue;
+        setWidgetRowHidden(node, w, !custom);
+    }
+    try { node._widgetSlotsDirty = true; } catch (e) {}
+    try { node.setDirtyCanvas?.(true, true); } catch (e) {}
+}
+
+// 用户把某个"本该隐藏"的参数接成了输入线（converted to input）——
+// 说明他就是要手动控制它，这时不能藏，否则连线没有落点。
+function widgetIsInputSlot(node, key) {
+    for (const inp of node.inputs || []) {
+        if (!inp) continue;
+        if (inp.widget && inp.widget.name === key) return true;
+        if (inp.widgetId !== undefined && inp.name === key) return true;
+        if (inp.link != null && (inp.name === key || inp.label === key)) return true;
+    }
+    return false;
+}
+
+// 参数区需要隐藏的行。keys 记在 node 上，onConfigure 恢复工作流后复用。
+function applyHiddenParamRows(node, keys) {
+    if (!node || !Array.isArray(keys) || !keys.length) return;
+    node.__h3HiddenRowKeys = keys;
+    let touched = 0;
+    for (const key of keys) {
+        const w = node.widgets?.find((x) => x && x.name === key);
+        if (!w) continue;
+        try { if (widgetIsInputSlot(node, key)) continue; } catch (e) {}
+        if (setWidgetRowHidden(node, w, true)) touched++;
+    }
+    if (!touched) return;
+    // 让 _arrangeWidgets 重算行位置，画布节点高度随之收缩。
+    try { node._widgetSlotsDirty = true; } catch (e) {}
+    try { node.setDirtyCanvas?.(true, true); } catch (e) {}
+    scheduleHiddenRowFallback(node, keys);
 }
 
 function domWidgetRenderMode(element) {
@@ -6455,6 +6578,114 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     bottomBtnGroup.append(addClipBtn, delAllClipsBtn);
     bottomBar.append(clipsTotalLabel, bottomBtnGroup);
 
+    // ── v14.104: 一键化快捷开关条（底部按钮栏后面；纯前端 DOM，不参与
+    //    widgets_values 序列化、不改变后端参数顺序 → 旧工作流零 NaN 零错位）──
+    //    布尔: 点一下开/关；枚举: 点一下循环下一档。按钮状态实时读 widget.value。
+    const QUICK_DEFS = [
+        { key: "refine_enable", zh: "二采", en: "Refine", desc: "Sol-H3 双采：latent 放大 + CONST 重噪 + 二采去噪，直出高清(1920×1088)。" },
+        { key: "upscale_per_clip", zh: "逐段超分", en: "Upx/Clip", desc: "每 CLIP 解码后逐段像素超分（单段显存可控）。" },
+        { key: "upscale_final", zh: "全片超分", en: "Upx/Final", desc: "全片合并后一次性像素超分（出片前统一处理，更快更省）。" },
+        { key: "block_cache", zh: "块缓存", en: "BlkCache", desc: "H3 Block Cache(F1B0 残差)加速，需 T8 插件；顺序画面稳定时显著提速。" },
+        { key: "ref_cache", zh: "参考缓存", en: "RefCache", desc: "Ref2VA 参考图编码磁盘缓存，调参重跑跳过重复编码。" },
+        { key: "output_mode", zh: "输出", en: "Output", desc: "输出模式循环：none(仅缓存)→per_clip(分段)→merged(合并)→both(两者)。", cycle: ["none", "per_clip", "merged", "both"] },
+        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环：极速(一采4+二采3步/denoise0.5)→均衡(6+4步)→精细(8+6步)。", cycle: ["极速", "均衡", "精细"] },
+        { key: "refine_lipsync_mode", zh: "口型", en: "Lipsync", desc: "对口型×二采预设循环：锁定保口型→音频参与重绘0.7→音频全重绘1.0。", cycle: ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"] },
+        { key: "upscale_mode", zh: "超分模式", en: "UpxMode", desc: "超分模式循环：平衡(质量+速度)→质量优先→速度优先→自定义。", cycle: ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"] },
+        { key: "pause_enable", zh: "暂停", en: "Pause", desc: "每 CLIP 生成完自动暂停等待；无干预超时自动继续。" },
+        // v14.106: 全部 true/false 一键开关扩展（其余布尔参数全覆盖）
+        { key: "output_image_audio", zh: "预览", en: "Preview", desc: "每 CLIP 即时解码预览（图像+音频流出，可接超分等）。关闭则仅缓存、用 Final Decode 导出。" },
+        { key: "cache_dit", zh: "DiT缓存", en: "DiTCache", desc: "CacheDiT 步间缓存加速（H3 约1.4-1.5x，需装插件，未装自动回退）；与块缓存互斥。" },
+        { key: "clip_select_enable", zh: "CLIP选择", en: "ClipSel", desc: "仅渲染指定 CLIP（配合参数区 clip_select：如 1,3 / 2-5）；未选中的保留缓存不重生成。" },
+        { key: "upscale_fp16", zh: "超分FP16", en: "UpxFP16", desc: "像素超分半精度加速（N卡/XPU 支持时自动）。" },
+        { key: "upscale_face_restore", zh: "人脸修复", en: "FaceFix", desc: "超分后人脸修复（FaceRestore，需 GPFGAN/CodeFormer 权重，额外耗时）。" },
+        { key: "tiled_refine", zh: "分块二采", en: "Tiled", desc: "二采沿长空间轴分块采样（attention 显存线性下降，防 OOM 假死）；显存大保持关。" },
+        { key: "semantic_bridge_enable", zh: "语义桥", en: "SemBrg", desc: "Semantic-Bridge 语义桥（约11MB小MLP残差混合，让 H3 更听话：构图/空间/计数）。" },
+        { key: "semantic_bridge_magnitude_match", zh: "桥对齐", en: "MagMatch", desc: "语义桥向量模长对齐到原 hidden（原版默认开）。" },
+        { key: "face_lock_mode", zh: "保脸", en: "FaceLock", desc: "远景保脸模式（自动锁五官一致；@图1=全身，@图2.N=各人脸特写）。" },
+        // v14.127: restore_cache 已从 QUICK_DEFS 移除——后端 INPUT_TYPES 同步移除
+        // 该参数（1.55 toggle 行无法前端隐藏，根治：参数不存在则行不存在）。
+        // 恢复缓存功能由节点底部"恢复缓存"按钮（直调后端 /h3_extender/restore_cache
+        // API）承担，功能保留；执行链 kwargs 默认 False（不自动恢复），与按钮手动
+        // 恢复语义一致。
+    ];
+    const quickBar = document.createElement("div");
+    quickBar.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:5px 4px;border-top:1px solid rgba(255,255,255,.18);margin-bottom:2px;flex-shrink:0;background:#182838;";
+    const quickTitle = document.createElement("span");
+    quickTitle.textContent = "快捷";
+    quickTitle.title = "一键化快捷开关：点一下开/关(布尔)或循环下一档(枚举)；悬停按钮查看完整说明。不改变参数顺序，旧工作流零影响。";
+    quickTitle.style.cssText = "font-size:9px;color:#6a8ab8;white-space:nowrap;margin-right:2px;font-weight:bold;";
+    quickBar.append(quickTitle);
+    for (const def of QUICK_DEFS) {
+        const w = node.widgets.find((x) => x.name === def.key);
+        const btn = document.createElement("button");
+        btn.style.cssText = "font-size:9px;line-height:1.15;padding:2px 7px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;color:#cde;font-family:inherit;";
+        const lab = document.createElement("span");
+        const sub = document.createElement("span");
+        lab.textContent = def.zh;
+        sub.textContent = def.en;
+        sub.style.cssText = "font-size:7px;opacity:.7;";
+        btn.append(lab, sub);
+        btn.title = (def.zh + " / " + def.en) + "\n" + def.desc + "\n点击" + (def.cycle ? "循环下一档" : "开/关") + "。";
+        const refresh = () => {
+            let on = false;
+            if (w) {
+                if (def.cycle) {
+                    // v14.115: 枚举档位按钮——第一档（默认）灰色、其他档绿色，
+                    // 按钮下方实时显示当前档位名（不再恒绿"像点不动"）。
+                    const cur = def.cycle.indexOf(w.value);
+                    on = cur > 0;
+                    const curName = cur >= 0 ? def.cycle[cur] : String((w.value === undefined || w.value === null) ? "" : w.value);
+                    sub.textContent = curName;
+                    sub.style.cssText = "font-size:7px;opacity:.85;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                    btn.title = (def.zh + " / " + def.en) + "\n" + def.desc + "\n当前档位：" + curName + "\n点击循环下一档。";
+                } else {
+                    on = Boolean(w.value);
+                    sub.textContent = def.en;
+                    sub.style.cssText = "font-size:7px;opacity:.7;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                }
+            }
+            btn.style.border = on ? "1px solid #5a9a5a" : "1px solid #3a4a5a";
+            btn.style.background = on ? "rgba(50,110,60,.4)" : "rgba(28,38,48,.55)";
+        };
+        btn.addEventListener("click", () => {
+            if (!w) return;
+            if (def.cycle) {
+                const cur = def.cycle.indexOf(w.value);
+                w.value = def.cycle[(cur + 1) % def.cycle.length];
+            } else {
+                w.value = !w.value;
+            }
+            if (typeof w.callback === "function") { try { w.callback(w.value); } catch (e) {} }
+            refresh();
+            // v14.133: 超分模式切到「自定义」时，把 5 个超分高级参数行放回参数区。
+            try { if (def.key === "upscale_mode") refreshCustomUpscaleRows(node); } catch (e) {}
+            try { updateHidden(node, runtime); } catch (e) {}
+            try { node.setDirtyCanvas(true, true); } catch (e) {}
+        });
+        refresh();
+        quickBar.append(btn);
+    }
+
+    // v14.133: 被快捷按钮覆盖的参数在参数区隐藏（一键开关替代参数区设置栏）。
+    // 改走前端官方 visibility API（详见 hideNativeWidget 注释）：整行在画布
+    // 布局里被剔除、Vue 侧 v-if 直接不渲染，而不是"压成 0 高 + 涂黑"——
+    // 后者才是参数栏错位重叠（叠罗汉）的根因。
+    // widget 仍留在 widgets 数组中，widgets_values 顺序/长度不变
+    // → 零 NaN、零重连、旧版工作流加载正常。
+    //
+    // 隐藏清单 = QUICK_DEFS 全部快捷项 + 9 个「附属高级参数」。
+    // 附属参数由快捷条主开关/预设驱动，功能没丢，只是不在参数区重复出现：
+    //   upscale_engine~batch         → upscale_mode 预设（平衡/质量/速度）覆盖
+    //   tile_count / tile_overlap     → tiled_refine 主开关（快捷条「分块二采」）
+    //   semantic_bridge_adapter/alpha → semantic_bridge_enable（快捷条「语义桥」）
+    const HIDDEN_ROW_KEYS = QUICK_DEFS.map((d) => d.key).concat([
+        "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch",
+        "tile_count", "tile_overlap", "semantic_bridge_adapter", "semantic_bridge_alpha",
+    ]);
+    applyHiddenParamRows(node, HIDDEN_ROW_KEYS);
+    // upscale_mode=自定义 时把超分 5 参数放回来（否则用户没地方填倍率/引擎）。
+    try { refreshCustomUpscaleRows(node); } catch (e) {}
+
     // ── Draggable divider between global prompt and CLIP cards ──
     // Drag to fix the global prompt section height (px); double-click to
     // restore auto (content-height) mode.
@@ -6541,7 +6772,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         }
     }
 
-    root.append(toolbar, refsSection, globalPromptSection, gpResizer, cards, bottomBar, refFileInput);
+    root.append(toolbar, refsSection, globalPromptSection, gpResizer, cards, bottomBar, quickBar, refFileInput);
 
     const restoredValidatedPrefix = validatedPrefixFromState(state);
     const runtime = {
@@ -6906,33 +7137,19 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         },
     });
     runtime.domWidget = domWidget;
-    // v2.105 (fix): 批量隐藏所有非 DOM-widget 的原生 widget 的布局足迹。
-    // 此前只隐藏了 clips_json/refs_json 两个, 其余 43 个原生 widget
-    // (run_mode/width/height/steps 等) 的 last_y 足迹仍参与节点布局,
-    // 累计约 1194px, 把 DOM widget(CLIP 区域)挤出节点本体之外 ——
-    // 放大画布时偏移加剧导致"节点存在但 CLIP 区域消失"。
-    // 关键: LiteGraph 布局循环用 isWidgetVisible(widget) 判定, hidden=true
-    // 的 widget 完全不参与 last_y 累计; 单独改 computeSize 不够(多数原生
-    // widget 没有 computeSize 函数, 且 computedHeight 优先级更高)。
-    // 因此统一置 hidden=true + 清空 footprint, DOM widget 回到节点顶部。
-    // v2.69 fix: 只隐藏内部状态 widgets (clips_json/refs_json 是多行 JSON 不可见),
-    // 其他用户参数 (width/height/steps/cfg/sampler/denoise/resolution_mode 等) 正常显示。
-    // 之前 v2.105 把全部 43 个 widgets 都 hidden=true, 导致用户看不到任何参数。
+    // v14.133: 内部状态 widget（clips_json / refs_json / h3_extender_timeline）
+    // 与快捷条隐藏走同一套机制（前端官方 visibility API，见 hideNativeWidget）。
+    // 旧代码额外覆写 computeSize / computeLayoutSize / computedHeight 把行压成
+    // 0 高：行仍留在布局里、画布照样画边框 → 0 高行的圆角边框叠在一起
+    // （"叠罗汉"）。这些覆写全部撤销 —— hidden=true 之后
+    // LGraphNode.getLayoutWidgets() 会直接跳过该行，行是"消失"而不是"塌陷"。
+    // 注意只藏内部状态：用户参数（width/height/steps/cfg/sampler 等）保持可见。
     try {
         const _hideNames = new Set(["clips_json", "refs_json", "h3_extender_timeline"]);
         for (const _w of (node.widgets || [])) {
             if (!_w || _w === domWidget) continue;
             if (!_hideNames.has(_w.name)) continue;  // 只藏内部状态, 用户参数保留可见
-            _w.hidden = true;
-            if (typeof _w.computeSize === "function") {
-                _w.computeSize = () => [0, 0];
-            }
-            if (typeof _w.computeLayoutSize === "function") {
-                _w.computeLayoutSize = () => ({ minWidth: 0, minHeight: 0, maxWidth: 0, maxHeight: 0 });
-            }
-            if ("computedHeight" in _w) {
-                try { _w.computedHeight = 0; } catch (e) {}
-            }
+            setWidgetRowHidden(node, _w, true);
         }
     } catch (e) {}
     // v2.06 (2026-09-19 fix): 用 Object.defineProperty 定义为非可枚举属性,
@@ -6998,6 +7215,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 // 无条件按键名填充（键名唯一），缺失键跳过、多余值丢弃。
                 _tpl = _T43.slice(0, 33).concat(['refine_lipsync_mode','upscale_per_clip','upscale_final','upscale_mode','upscale_engine','upscale_factor','upscale_model','upscale_tile','upscale_batch','upscale_fp16','upscale_face_restore','tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match','env_audio_enable','env_audio_gain','face_lock_mode','restore_cache','h3_extender_timeline']);
             }
+            // v14.127: 58 键（restore_cache 已从后端移除后的新工作流键序）——
+            // 59 模板去掉 restore_cache；按键名填充，缺失键跳过、多余值丢弃。
+            else if (_L === 58) { _tpl = _T43.slice(0, 33).concat(['refine_lipsync_mode','upscale_per_clip','upscale_final','upscale_mode','upscale_engine','upscale_factor','upscale_model','upscale_tile','upscale_batch','upscale_fp16','upscale_face_restore','tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match','env_audio_enable','env_audio_gain','face_lock_mode','h3_extender_timeline']); }
             else if (_L === 47) { _tpl = _T43.concat(['env_audio_enable','env_audio_gain','restore_cache','h3_extender_timeline']); }
             else if (_L === 45) { _tpl = _T43.concat(['restore_cache','h3_extender_timeline']); }
             else if (_L === 43) { _tpl = _T43; }
@@ -7025,7 +7245,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
-        try { this.title = "BSAI ComfyUI H3 Film Factory v2.122·v14.99"; } catch (e) {}
+        try { this.title = "BSAI ComfyUI H3 Film Factory v2.122·v14.132"; } catch (e) {}
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -7064,6 +7284,12 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         if (fpWidget && (!fpWidget.value || fpWidget.value === "")) {
             setWidgetValue(this, "filename_prefix", "H3_Extender");
         }
+
+        // v14.133: 恢复工作流后再压一次被隐藏的参数行 —— configure 会重写
+        // widget.options，必须在写入完成之后重新置位，否则快捷条覆盖的行
+        // 会重新冒出来。applyHiddenParamRows 幂等，重复调用无副作用。
+        try { applyHiddenParamRows(this, this.__h3HiddenRowKeys); } catch (e) {}
+        try { refreshCustomUpscaleRows(this); } catch (e) {}
 
         // v2.111: 默认改为「展开CLIP」状态(之前默认收起)。这里只置标记 +
         // 保证宽度下限, 不再套用收起态的固定视口(v2.105 的默认行为);
@@ -7734,7 +7960,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.122·v14.99";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.122·v14.132";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not
