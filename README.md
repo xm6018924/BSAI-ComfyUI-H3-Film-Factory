@@ -108,17 +108,18 @@
 | `clip_select_enable` | CLIP 选择开关 | `false` | 启用后仅渲染指定 clip |
 | `clip_select` | CLIP 选择 | `all` | `all` 全部 / `1,3` 多选 / `2-5` 范围 / `3,5,7` 混合多选 / `7-10` 范围；支持中文逗号 `3，5，7` |
 | `pause_enable` | 每 clip 生成完暂停 | `false` | 等待用户操作 |
-| `pause_timeout` | 暂停超时（秒）| `120` | 超时自动继续 |
+| `pause_timeout` | 暂停超时（秒）| `5` | 超时自动继续（默认 5s 最佳出片节奏） |
 
 ### Sol-H3 Self-Lift 双采（v1.31）/ Dual-sample Refine (v1.31)
+> v14.138 起默认值已设为 5090 24G 实测最佳参数（8+2 双采）：开箱即用，新拉节点无需调整。
 | 参数 | 中文说明 | 默认 | 说明 |
 |---|---|---|---|
-| `refine_enable` | 双采开关 | `false` | 开启后执行 Sol-H3 双采：latent 放大 + CONST 重加噪 + 二采去噪 |
-| `refine_denoise` | CONST 重加噪目标强度 | `1.0` | **1.0=全量重噪重绘（官方极速版，画质最佳）**；0.55=保留 45% 底图；<0.5 会变脸 |
-| `refine_steps` | 二采步数 | `4` | turbo 模型 4 步足够；放大倍数大时建议 8-12 |
+| `refine_enable` | 双采开关 | `true` | 默认开启：一采潜空间直接放大 + CONST 重加噪 + 二采完整去噪，直出高清 |
+| `refine_denoise` | CONST 重加噪目标强度 | `0.45` | **默认 0.45=最佳质量与细节平衡（5090 24G 实测）**；1.0=全量重噪重绘；<0.5 有变脸风险 |
+| `refine_steps` | 二采步数 | `2` | **默认 2（8+2 双采实测最佳）**；步数越多细节越丰富但时间越长 |
 | `refine_upscale_factor` | 潜空间放大倍数 | `2.0` | 直出 1920×1088：一采 960×544 + 2.0x |
 | `refine_upscaler_model` | 放大方式 | `(bilinear插值, 无需模型)` | 选 3D latent upscaler 模型=神经网络语义放大（需插件+模型，细节更丰富） |
-| `refine_align_to` | 像素对齐步长 | `32` | H3 官方分辨率网格 32px；其他分辨率自动取整避免边缘色条 |
+| `refine_align_to` | 像素对齐步长 | `40` | **默认 40（H3 官方 40px 网格实测最佳）**；其他分辨率自动取整避免边缘色条 |
 | `refine_audio_denoise` | 音频重绘强度 | `0.0` | 0=锁定一采音频（推荐）；0.5-1.0=音频随视频重绘 |
 
 ### 对口型×二采预设（v14.83）/ Lip-sync × Dual-sample Preset
@@ -216,23 +217,24 @@ refine_enable=false
 steps=4, sampler=euler, scheduler=simple, denoise=1.0
 width=896, height=576, resolution_mode=manual
 block_cache=false, cache_dit=false, ref_cache=true
-refine_enable=true, refine_denoise=1.0, refine_steps=4, refine_upscale_factor=1.5
+refine_enable=true, refine_denoise=0.45, refine_steps=2, refine_upscale_factor=2.0
 ```
 
-### 直出 1920×1088 高清成片（Sol-H3 双采极速版）/ Direct 1920×1088 output
+### 直出 1920×1088 高清成片（Sol-H3 双采，默认配置）/ Direct 1920×1088 output
 ```
-steps=4, sampler=euler, scheduler=simple, denoise=1.0
+steps=8, sampler=euler, scheduler=simple, denoise=1.0
 width=960, height=544, resolution_mode=manual   # 一采小尺寸（960x544 = latent 60x34）
 block_cache=false, cache_dit=false, ref_cache=true
-refine_enable=true, refine_denoise=1.0, refine_steps=4
+refine_enable=true, refine_denoise=0.45, refine_steps=2
 refine_upscale_factor=2.0                       # 二采放大 2x → latent 120x68 = 1920x1088
 refine_audio_denoise=0.0                        # 音频锁定，保持一采语音/音效
 ```
+**以上即 v14.138 起全部默认值（8+2 双采最佳配置，5090 24G 实测），新拉节点开箱即用。**
 
 **双采流程示意 / Dual-sample flow diagram**：
 ![Sol-H3 Self-Lift 双采流程示意（直出 1920×1088）](docs/sol_h3_dual_sample_flow.svg)
 
-> 原理 / How it works: 一采 960×544 → latent 直接放大 2x 到 120×68（不经过 VAE，无编解码损失）→ CONST 重加噪到全量噪声 → 二采 4 步完整去噪 → VAE 解码直出 1920×1088。显存 24GB（RTX 4090/5090 Laptop）可流畅运行。/ First pass 960×544 → latent upscale ×2 to 120×68 (no VAE) → CONST re-noise → 4-step full denoise → decode to 1920×1088. Runs on 24GB VRAM.
+> 原理 / How it works: 一采 960×544 → latent 直接放大 2x 到 120×68（不经过 VAE，无编解码损失）→ CONST 重加噪 → 二采 2 步完整去噪 → VAE 解码直出 1920×1088。显存 24GB（RTX 4090/5090 Laptop）可流畅运行。/ First pass 960×544 → latent upscale ×2 to 120×68 (no VAE) → CONST re-noise → 2-step full denoise → decode to 1920×1088. Runs on 24GB VRAM.
 
 ### 原生 H3 模型（20-24 步）/ Native H3
 ```

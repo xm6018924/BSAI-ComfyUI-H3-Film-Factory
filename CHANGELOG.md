@@ -14,6 +14,23 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.138 (2026-10-12) — 最佳参数默认化（8+2 双采开箱即用）/ Best-Params as Defaults (8+2 Dual-sample Out-of-box)
+
+**核心：全部采样/双采/暂停参数默认值改为 RTX 5090 24G 实测最佳配置，新拉节点开箱即用，无需手动调整。** / All sampling/refine/pause defaults switched to RTX 5090 24G verified best config; new nodes work out-of-box.
+- `refine_enable`: `false → true`（双采默认开，直出高清）/ Dual-sample ON by default
+- `refine_denoise`: `1.0 → 0.45`（CONST 重加噪最佳强度实测）/ Best re-noise strength
+- `refine_steps`: `4 → 2`（8+2 双采实测最佳）/ 8+2 dual-sample verified best
+- `refine_upscale_factor`: `1.5 → 2.0`（直出 1920×1088）/ Direct 1920×1088
+- `refine_align_to`: `32 → 40`（H3 官方 40px 网格实测最佳）/ H3 40px grid verified
+- `pause_timeout`: `120 → 5`（暂停超时默认 5s，最佳出片节奏）/ 5s auto-resume
+- `speed_preset`: `均衡 → custom`（避免预设覆盖 8+2 显式值；按下方各 widget 显式值采样）/ custom so preset no longer overrides 8+2
+- 同步更新 `_sample_h3()` 函数默认参数与运行时 `kwargs.get` 兜底默认（三处一致）/ Function defaults & runtime fallbacks synced (3 places)
+- README 参数表 + 双采示例 + CHANGELOG 双语同步 / README tables & examples synced
+- 兼容性：默认值变更只影响"新拉节点无保存值"场景；旧工作流 widgets_values 有保存值 → 加载行为完全不变，零 NaN 零重连 / Old workflows unaffected (saved values take precedence), zero NaN.
+- 验证：py_compile ✓ / Verified: py_compile ✓
+- 依据 / Basis：《MiniMax-H3双日志对比分析报告 V1.0》(2026-10-12)，环境 5090 24G / 8+2 dual-sample report.
+
+---
 
 ### v14.104-121 (2026-10-12) — 一键化快捷开关条（全部布尔全覆盖）+ 参数区同步隐藏 / One-Click Quick Toggle Bar (all booleans) + Params Auto-Hidden
 

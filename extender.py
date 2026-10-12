@@ -2426,8 +2426,8 @@ def _drop_mismatched_adaln_patches(model):
 
 def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, scheduler: str, steps: int, denoise: float,
                owner_id=None, clip_index=-1,
-               refine_enable=False, refine_denoise=0.55, refine_steps=4, refine_upscale_factor=1.5,
-               refine_upscaler_model="", refine_align_to=32, refine_audio_denoise=0.0,
+               refine_enable=True, refine_denoise=0.45, refine_steps=2, refine_upscale_factor=2.0,
+               refine_upscaler_model="", refine_align_to=40, refine_audio_denoise=0.0,
                tiled_refine=False, tile_count=4, tile_overlap=128,
                temporal_chunk_tokens=0, temporal_overlap_tokens=8):
     if int(steps) < 1:
@@ -4722,37 +4722,37 @@ class BSAIH3FilmFactory:
             "pause_timeout": (
                 "FLOAT",
                 {
-                    "default": 120.0, "min": 5.0, "max": 3600.0, "step": 5.0,
-                    "tooltip": "暂停后无干预自动继续渲染的等待秒数。",
+                    "default": 5.0, "min": 5.0, "max": 3600.0, "step": 5.0,
+                    "tooltip": "暂停后无干预自动继续渲染的等待秒数（默认5s=最佳出片节奏，暂停关时无效）。",
                 },
             ),
             # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
             "refine_enable": (
                 "BOOLEAN",
                 {
-                    "default": False,
-                    "tooltip": "二采 Sol-H3 Self-Lift 双采：一采潜空间直接放大(不经过VAE)+CONST重加噪+二采完整去噪，直出高清视频（如1920x1088）。开启后每CLIP渲染时间约增加50%-100%。",
+                    "default": True,
+                    "tooltip": "二采 Sol-H3 Self-Lift 双采（最佳画质默认开）：一采潜空间直接放大(不经过VAE)+CONST重加噪+二采完整去噪，直出高清视频（如1920x1088）。开启后每CLIP渲染时间约增加50%-100%。",
                 },
             ),
             "refine_denoise": (
                 "FLOAT",
                 {
-                    "default": 1.0, "min": 0.05, "max": 1.0, "step": 0.01,
-                    "tooltip": "二采 CONST 重加噪目标强度（Sol-H3 双采语义）。1.0=全量重噪重绘（官方双采极速版，画质最佳）；0.55=保留45%底图信息（细节提升但保留原构图）；<0.5 会变脸/跑偏。仅 refine_enable 开启时生效。",
+                    "default": 0.45, "min": 0.05, "max": 1.0, "step": 0.01,
+                    "tooltip": "二采 CONST 重加噪目标强度（Sol-H3 双采语义，默认0.45=最佳质量与细节平衡，经 5090 24G 实测）。1.0=全量重噪重绘（官方双采极速版）；0.55=保留45%底图信息；<0.5 会变脸/跑偏风险升高。仅 refine_enable 开启时生效。",
                 },
             ),
             "refine_steps": (
                 "INT",
                 {
-                    "default": 4, "min": 1, "max": 20, "step": 1,
-                    "tooltip": "二采步数。turbo 模型 4 步足够；步数越多细节越丰富但时间越长。仅 refine_enable 开启时生效。",
+                    "default": 2, "min": 1, "max": 20, "step": 1,
+                    "tooltip": "二采步数（默认2=最佳速度质量平衡，5090 24G 实测 8+2 双采）。turbo 模型 2 步足够；步数越多细节越丰富但时间越长。仅 refine_enable 开启时生效。",
                 },
             ),
             "refine_upscale_factor": (
                 "FLOAT",
                 {
-                    "default": 1.5, "min": 1.0, "max": 2.0, "step": 0.1,
-                    "tooltip": "二采潜空间放大倍数（1.0=不放大）。直出 1920x1088 推荐：一采 960x544 + 2.0x；1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加。放大后自动 CONST 重加噪+二采。仅 refine_enable 开启时生效。",
+                    "default": 2.0, "min": 1.0, "max": 2.0, "step": 0.1,
+                    "tooltip": "二采潜空间放大倍数（默认2.0=直出1920x1088，一采960x544+2.0x）。1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加。放大后自动 CONST 重加噪+二采。仅 refine_enable 开启时生效。",
                 },
             ),
             "refine_upscaler_model": (
@@ -4765,8 +4765,8 @@ class BSAIH3FilmFactory:
             "refine_align_to": (
                 "INT",
                 {
-                    "default": 32, "min": 8, "max": 256, "step": 8,
-                    "tooltip": "二采放大后的像素对齐步长（H3 官方分辨率网格 32px）。1920x1088 已是 32 的倍数；其他分辨率会自动取整到该网格，避免边缘色条。",
+                    "default": 40, "min": 8, "max": 256, "step": 8,
+                    "tooltip": "二采放大后的像素对齐步长（默认40，H3 官方 40px 网格实测最佳；1920x1088 已是 40 的倍数）。其他分辨率会自动取整到该网格，避免边缘色条。",
                 },
             ),
             "refine_audio_denoise": (
@@ -4840,8 +4840,8 @@ class BSAIH3FilmFactory:
             "speed_preset": (
                 ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim"],
                 {
-                    "default": "均衡",
-                    "tooltip": "v1.86 速度预设。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(旧默认, ~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流(UNETLoader+ApplyVDNH3)使用：一采固定 VDN 8 步(蒸馏最优,质量≈dense 50 步)，二采 3/4/6 步。FastH3-Trim=搭配 fastvideo_fasth3_trim_8step_nvfp4 模型：42层剪枝比V2快15%，8步单采无二采，5s视频~39s。custom=按下方各widget显式值。",
+                    "default": "custom",
+                    "tooltip": "v1.86 速度预设（默认 custom=按下方各widget显式值，开箱即用最佳 8+2 双采）。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流(UNETLoader+ApplyVDNH3)使用：一采固定 VDN 8 步(蒸馏最优,质量≈dense 50 步)，二采 3/4/6 步。FastH3-Trim=搭配 fastvideo_fasth3_trim_8step_nvfp4 模型：42层剪枝比V2快15%，8步单采无二采，5s视频~39s。custom=按下方各widget显式值。",
                 },
             ),
             "temporal_chunk_tokens": (
@@ -5083,13 +5083,13 @@ class BSAIH3FilmFactory:
         clip_select = kwargs.get("clip_select", "all")
         restore_cache = kwargs.get("restore_cache", False)
         pause_enable = kwargs.get("pause_enable", False)
-        pause_timeout = kwargs.get("pause_timeout", 120.0)
-        refine_enable = kwargs.get("refine_enable", False)
-        refine_denoise = kwargs.get("refine_denoise", 0.55)
-        refine_steps = kwargs.get("refine_steps", 4)
-        refine_upscale_factor = kwargs.get("refine_upscale_factor", 1.5)
+        pause_timeout = kwargs.get("pause_timeout", 5.0)
+        refine_enable = kwargs.get("refine_enable", True)
+        refine_denoise = kwargs.get("refine_denoise", 0.45)
+        refine_steps = kwargs.get("refine_steps", 2)
+        refine_upscale_factor = kwargs.get("refine_upscale_factor", 2.0)
         refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear插值, 无需模型)")
-        refine_align_to = int(kwargs.get("refine_align_to", 32))
+        refine_align_to = int(kwargs.get("refine_align_to", 40))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
         # v14.83 对口型×二采组合预设（优先于 refine_audio_denoise 原始值）
         refine_lipsync_mode = str(kwargs.get("refine_lipsync_mode", "锁定保口型(推荐)"))
