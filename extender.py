@@ -4607,10 +4607,11 @@ class BSAIH3FilmFactory:
             "context_length": (["22", "5", "39", "56"], {"default": "39"}),
             "audio_context_length": ("INT", {"default": 0, "min": 0, "max": 240, "step": 1}),
             "clips_json": (
-                "hidden",
+                "STRING",
                 {
                     "default": _state_json([_default_clip(0)]),
-                    "tooltip": "内部状态：CLIP 剧本 JSON（官方 hidden 类型，不渲染不编辑）",
+                    "multiline": True,
+                    "tooltip": "内部状态：CLIP 剧本 JSON（前端隐藏，不渲染不编辑）—— v14.103: 由 hidden 改回 STRING。ComfyUI 1.55 前端不创建 hidden 类型的 widget，导致 buildUi 找不到 clips_json → CLIP 区/UI 整体丢失 + widgets 数组与保存数组错位(NaN)；改回 STRING 后前端正常创建 widget，再由 extender.js v2.105 隐藏逻辑置为不可见。",
                 },
             ),
             # Keep these AFTER clips_json so pre-v14.25 workflow widget arrays
@@ -4633,10 +4634,11 @@ class BSAIH3FilmFactory:
             # Internal image-reference manager state. Appended after the v14.25
             # widgets so older positional workflow widget arrays keep mapping.
             "refs_json": (
-                "hidden",
+                "STRING",
                 {
                     "default": _refs_json(_empty_refs()),
-                    "tooltip": "内部状态：参考图 JSON（官方 hidden 类型，不渲染不编辑）",
+                    "multiline": True,
+                    "tooltip": "内部状态：参考图 JSON（前端隐藏，不渲染不编辑）—— v14.103: 由 hidden 改回 STRING，理由同 clips_json（1.55 前端不创建 hidden widget）。",
                 },
             ),
             "output_mode": (

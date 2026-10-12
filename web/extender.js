@@ -7020,7 +7020,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
                 } catch (e) {}
             }
         }
-        if (oldConfigure) oldConfigure.apply(this, arguments);
+        // v14.102: 代理模式下跳过 oldConfigure（核心包装器）避免递归 ——
+        // 原型级代理已在外层调用原始 prototype.onConfigure。
+        if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
         try { this.title = "BSAI ComfyUI H3 Film Factory v2.122·v14.99"; } catch (e) {}
@@ -7269,6 +7271,14 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             });
         });
     };
+    // v14.102: 保存实例级 onConfigure 引用供原型级代理调用。核心 configure
+    // 会把 node.onConfigure 覆盖为核心包装器，此引用不受影响（非枚举防序列化）。
+    Object.defineProperty(node, '__h3OnConfigureFn', {
+        value: node.onConfigure,
+        enumerable: false,
+        writable: true,
+        configurable: true
+    });
 
     requestAnimationFrame(() => {
         requestAnimationFrame(() => {
@@ -7641,6 +7651,26 @@ app.registerExtension({
         }
 
         if (!ALL_TARGETS.has(nodeData.name)) return;
+
+        // v14.102: 1.55 核心 configure() 用包装器机制 —— bu 实测 configure 后
+        // node.onConfigure 被核心重置为核心包装器，buildUi 里的实例级直接赋值
+        // (node.onConfigure = fn) 从未被调用 → v14.99 重排/标题/CLIP 渲染全部
+        // 不执行（历史工作流 NaN / 尾部错位 / CLIP 区丢失的根因）。在节点注册
+        // 期挂原型级代理，使核心包装器经 prototype.onConfigure 链委托到
+        // buildUi 注入的实例级 __h3OnConfigureFn。
+        if (!nodeType.prototype.__h3MainCfgProxyInstalled) {
+            nodeType.prototype.__h3MainCfgProxyInstalled = true;
+            const oldMainConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function (info) {
+                if (oldMainConfigure) oldMainConfigure.apply(this, arguments);
+                const fn = this.__h3OnConfigureFn;
+                if (fn) {
+                    this.__h3InProxy = true;
+                    try { fn.call(this, info); } catch (e) {}
+                    finally { this.__h3InProxy = false; }
+                }
+            };
+        }
 
         const oldConnChange = nodeType.prototype.onConnectionsChange;
         nodeType.prototype.onConnectionsChange = function (side, slot, connected, link_info, ioSlot) {
