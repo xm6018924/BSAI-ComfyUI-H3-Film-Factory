@@ -18,6 +18,21 @@ Film Factory nodes (new):
   - BSAI_VideoCombiner/AudioCombiner: Media combining
 """
 
+# === BSAI H3 VAE 全量加载统一补丁（宿主 BSAI-ComfyUI-Sol-H3）===
+# 修复 0.39 + --enable-dynamic-vram 下 H3 AudioVAE/VideoVAE 走 DynamicVRAM
+# 权重量流导致的解码极慢（5s 音频 209~324s -> 全量加载约 1.6s）。
+# 统一逻辑见 Sol-H3/bsai_h3_vae_full.py；try/except 容错，宿主缺失则 no-op。
+try:
+    import sys as _sys, os as _os
+    _SOL = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                         "..", "BSAI-ComfyUI-Sol-H3")
+    if _SOL not in _sys.path:
+        _sys.path.insert(0, _SOL)
+    import bsai_h3_vae_full as _h3v
+    _h3v.apply_global_patch("BSAI-H3-Film-Factory")
+except Exception:
+    pass
+
 # === WinError 10054 noise suppression (Windows asyncio browser disconnect) ===
 # Browser refresh / tab close causes asyncio proactor to raise ConnectionResetError
 # when shutting down an already-dead socket. This patch swallows it silently.
