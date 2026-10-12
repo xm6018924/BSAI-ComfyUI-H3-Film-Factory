@@ -7379,6 +7379,139 @@ function h3QuickShades(C, levels) {
     // v2.76: onNodeCreated 不再初始 render — onConfigure 是唯一初始渲染。
     // 避免两套分片链并发(旧链被 replaceChildren 清空后仍在追加, 卡片缺失/重复)。
 
+    // ================= H3LegacyCompat: 历史工作流多布局兼容（v14.139）=================
+    // 替代 v14.99 按键名填充：该机制在 45A/45B(国庆版/永不失联) 布局会把
+    // refine_lipsync_mode 字符串灌进 tiled_refine 布尔位 → 尾部 NaN 错位。
+    // 新机制 = 布局检测(长度+锚点) → 位置映射 → 值归一化(选项外→默认/类型转换/
+    // batch≥1/布尔字符串语义化)。全程 try 保护，不落盘、不改 JSON、幂等。
+    // 设计依据: 对全部 115 个真实历史工作流(118 个 H3 节点, 14 种布局)全量模拟
+    // 映射+校验 0 失败(Python 原型 h3_legacy_mapper.py)。
+    const H3LegacyCompat = (() => {
+        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","prompt_pack"];
+        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.45,2,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",0,8,false,"",0.15,true,"global_inherit",0.15,false,""];
+        const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain"]);
+        const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match","face_lock_mode"]);
+        const OPTIONS = {
+            run_mode: ["clip_by_clip","full_batch"],
+            ref_image_size: ["match","max"],
+            context_length: ["22","5","39","56"],
+            resolution_mode: ["auto_from_ref","manual"],
+            output_mode: ["none","per_clip","merged","both"],
+            block_cache_device: ["cpu","gpu"],
+            refine_lipsync_mode: ["锁定保口型(推荐)","音频参与重绘0.7","音频全重绘1.0"],
+            upscale_mode: ["平衡(质量+速度)","质量优先","速度优先","自定义"],
+            upscale_engine: ["auto","dlss5","realesr","bicubic"],
+            speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN","FastH3-Trim"],
+            env_audio_enable: ["global_inherit","on","off"],
+        };
+        function detect(w) {
+            const n = w.length;
+            if (n === 58) return "CURRENT";
+            const b33 = n > 33 ? w[33] : null;
+            if (n === 59 && typeof b33 === "string") return "L59";
+            if (n === 45 && typeof b33 === "string") {
+                const v39 = n > 39 ? w[39] : null;
+                return (typeof v39 === "string" && (/\./.test(v39) || /\\/.test(v39))) ? "L45A" : "L45B";
+            }
+            if (typeof b33 === "boolean") {
+                if (n === 43) return "L43";
+                if (n === 44) return "L44";
+                if (n === 45) return "L45E";
+                if (n === 47) return "L47";
+                if (n === 52) return "L52";
+                if (n === 51) return "L51";
+                if (n === 40) return "L40";
+                if (n === 38) return "L38";
+            }
+            if (n === 31) return "L31";
+            if (n === 27) return "L27";
+            if (n === 17) return "L17";
+            return "UNKNOWN";
+        }
+        function norm(k, v, d) {
+            if (k === "upscale_mode" && typeof v === "string" && ["custom","手动","全手动"].includes(v.trim().toLowerCase())) return "自定义";
+            const o = OPTIONS[k];
+            if (o) {
+                if (typeof v !== "string") v = String(v);
+                return o.includes(v) ? v : d;
+            }
+            if (NUMERIC.has(k)) {
+                if (typeof v === "string") {
+                    const s = v.trim();
+                    if (s !== "" && !isNaN(Number(s))) return s.includes(".") ? Number(s) : parseInt(s, 10);
+                    return d;
+                }
+                if (typeof v !== "number" || isNaN(v)) return d;
+                if (k === "upscale_batch" && v < 1) return 4;
+                return v;
+            }
+            if (BOOLS.has(k)) {
+                if (typeof v === "string") {
+                    const s = v.trim().toLowerCase();
+                    if (["off","disabled","disable","关闭","0","no","false"].includes(s)) return false;
+                    if (["on","enabled","enable","开启","1","yes","true"].includes(s)) return true;
+                    return d;
+                }
+                return !!v;
+            }
+            return v;
+        }
+        function mapTo(w) {
+            const L = detect(w);
+            const out = new Array(58).fill(null);
+            if (L === "CURRENT") {
+                for (let i = 0; i < 58; i++) out[i] = i < w.length ? w[i] : null;
+            } else {
+                for (let i = 0; i < 33 && i < w.length; i++) out[i] = w[i];
+                if (L === "L59") {
+                    for (let i = 33; i < 57; i++) out[i] = w[i];
+                    out[57] = ""; // prompt_pack default; restore_cache/timeline dropped
+                } else if (L === "L45A") {
+                    out[33] = w[33]; out[39] = w[39];
+                    out[45] = w[34]; out[46] = w[35]; out[47] = w[36]; out[48] = w[37]; out[49] = w[38];
+                    out[51] = w[40]; out[52] = w[41]; out[53] = w[42];
+                } else if (L === "L45B") {
+                    out[33] = w[33];
+                    out[45] = w[34]; out[46] = w[35]; out[47] = w[36]; out[48] = w[37]; out[49] = w[38];
+                    out[50] = w[39]; out[51] = w[40]; out[52] = w[41]; out[53] = w[42]; out[54] = w[43];
+                } else if (L === "L43" || L === "L44" || L === "L45E" || L === "L47" || L === "L51" || L === "L52") {
+                    const base = {L43:43, L44:44, L45E:45, L47:47, L51:51, L52:52}[L];
+                    for (let off = 0; off < 10; off++) if (33 + off < w.length) out[44 + off] = w[33 + off];
+                    if (base >= 44 && w.length > 43) out[54] = w[43];
+                    if (base >= 45 && w.length > 44) out[55] = w[44];
+                    if (base >= 47 && w.length > 45) out[56] = w[45];
+                } else if (L === "L38") {
+                    for (let off = 0; off < 4; off++) if (33 + off < w.length) out[44 + off] = w[33 + off];
+                    if (w.length > 37) out[54] = w[37];
+                } else if (L === "L40") {
+                    for (let off = 0; off < 6; off++) if (33 + off < w.length) out[44 + off] = w[33 + off];
+                    if (w.length > 39) out[54] = w[39];
+                }
+                // L31/L27/L17/UNKNOWN: prefix only, rest defaults
+            }
+            for (let i = 0; i < 58; i++) {
+                let v = out[i];
+                if (v === null || v === undefined) v = DEFAULTS[i];
+                out[i] = norm(KEYS[i], v, DEFAULTS[i]);
+            }
+            return out;
+        }
+        return {
+            applyToNode(node, hist) {
+                if (!Array.isArray(hist) || !node.widgets) return;
+                let out;
+                try { out = mapTo(hist); } catch (e) { return; }
+                for (let i = 0; i < out.length && i < node.widgets.length; i++) {
+                    const w = node.widgets[i];
+                    if (!w) continue;
+                    const t = w.type || "";
+                    if (t === "dom" || t === "separator") continue;
+                    try { if (w.value !== out[i]) w.value = out[i]; } catch (e) {}
+                }
+            },
+        };
+    })();
+
     const oldConfigure = node.onConfigure;
     node.onConfigure = function (info) {
         // v14.99 历史工作流键序自适应（按键名填充）：
@@ -7387,11 +7520,16 @@ function h3QuickShades(C, levels) {
         // 不再做值类型判别重排：idx33/idx56 判别在标准 59a 上误命中会导致
         // 尾部错位 + NaN。重排全程 try 保护，标题/渲染在任何异常下仍执行。
         const _hist = info && info.widgets_values;
+        // v14.139: 多布局兼容层（替代 v14.99 按键名填充 —— 该机制在 45A/45B
+        // 布局会把 refine_lipsync_mode 字符串灌进 tiled_refine 布尔位 → NaN 错位）。
+        if (Array.isArray(_hist) && _hist.length) {
+            try { H3LegacyCompat.applyToNode(this, _hist); } catch (e) { console.warn("[H3] legacy remap failed", e); }
+        }
         // v14.99: 数组(59a)与后端 object_info 键序天然一致 —— 按键名填充即对齐。
         // 历史短数组(43/45/47)与 v14.91 尾部追加版(59)按键名模板补位。
         // 不再用 idx33/idx56 值类型判别模板：该判别在标准 59a 上误命中(face_lock 布尔)
         // 触发错误重排 → 尾部错位 + NaN。按名填充键名唯一, 缺失键跳过、多余值丢弃。
-        if (Array.isArray(_hist) && _hist.length) {
+        if (false && Array.isArray(_hist) && _hist.length) {
             const _cur = this.widgets.map(w => w.name);
             const _T43 = ['run_mode','width','height','ref_image_size','steps','sampler_name','scheduler','denoise','context_length','audio_context_length','clips_json','resolution_mode','megapixels','refs_json','output_mode','filename_prefix','output_image_audio','block_cache','block_cache_threshold','block_cache_device','ref_cache','cache_dit','clip_select_enable','clip_select','pause_enable','pause_timeout','refine_enable','refine_denoise','refine_steps','refine_upscale_factor','refine_upscaler_model','refine_align_to','refine_audio_denoise','tiled_refine','tile_count','tile_overlap','speed_preset','temporal_chunk_tokens','temporal_overlap_tokens','semantic_bridge_enable','semantic_bridge_adapter','semantic_bridge_alpha','semantic_bridge_magnitude_match'];
             let _tpl = null;
@@ -7431,7 +7569,7 @@ function h3QuickShades(C, levels) {
         if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
-        try { this.title = "BSAI ComfyUI H3 Film Factory v2.122·v14.132"; } catch (e) {}
+        try { this.title = "BSAI ComfyUI H3 Film Factory v2.123·v14.139"; } catch (e) {}
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -8146,7 +8284,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.122·v14.132";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.123·v14.139";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not
