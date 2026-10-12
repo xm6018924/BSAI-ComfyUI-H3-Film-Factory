@@ -6634,44 +6634,167 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // API）承担，功能保留；执行链 kwargs 默认 False（不自动恢复），与按钮手动
         // 恢复语义一致。
     ];
+// ── 颜色工具（快捷条分色用）──────────────────────────────────────────
+// 循环档位按钮（输出 none/per_clip/merged/both、速度 极速/均衡/精细…）
+// 原本所有非默认档都是同一个亮色，看不出现在停在第几档。这里按档位序号
+// 生成一条"同色系深浅渐变"：档位越靠后越浓、越亮、发光越强，第一档保持
+// 关闭态暗色 —— 同一个按钮一眼能读出"属于哪一类 + 现在第几档 + 开没开"。
+const __h3HexCache = new Map();
+function h3HexToRgb(hex) {
+    let h = String(hex || "").trim().replace("#", "");
+    if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+    const n = parseInt(h, 16);
+    if (!Number.isFinite(n) || h.length !== 6) return { r: 120, g: 160, b: 200 };
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+}
+function h3MixHex(a, b, t) {
+    const A = h3HexToRgb(a), B = h3HexToRgb(b);
+    const k = Math.max(0, Math.min(1, Number(t) || 0));
+    const r = Math.round(A.r + (B.r - A.r) * k);
+    const g = Math.round(A.g + (B.g - A.g) * k);
+    const bl = Math.round(A.b + (B.b - A.b) * k);
+    return "#" + ((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1);
+}
+function h3Rgba(hex, alpha) {
+    const c = h3HexToRgb(hex);
+    const a = Math.max(0, Math.min(1, Number(alpha) || 0));
+    return "rgba(" + c.r + "," + c.g + "," + c.b + "," + a.toFixed(3) + ")";
+}
+
+// 为一个分类生成 levels 档的深浅渐变（index 0 = 默认档 = 关闭态）
+const __h3ShadeCache = new Map();
+function h3QuickShades(C, levels) {
+    const n = Math.max(1, Math.min(8, levels | 0));
+    const ck = C.border + "|" + n;
+    if (__h3ShadeCache.has(ck)) return __h3ShadeCache.get(ck);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+        const t = n > 1 ? i / (n - 1) : 1;
+        // 底色：淡 → 浓（同时往 border 色偏，保证同一色系内可分辨）
+        const bg = h3MixHex(C.color, C.border, t * 0.9);
+        out.push({
+            t: t,
+            bg: h3Rgba(bg, 0.13 + 0.58 * t),
+            border: h3MixHex(C.border, C.color, t * 0.55),
+            stripe: h3MixHex(C.color, "#ffffff", t * 0.35),
+            glow: h3Rgba(h3MixHex(C.color, "#ffffff", t * 0.35), 0.18 + 0.62 * t),
+            // 文字再叠一层区分：第 1 档用分类色（暗），中间档提亮，末档纯白
+            text: t >= 0.66 ? "#ffffff" : (t >= 0.34 ? h3MixHex(C.color, "#ffffff", 0.55) : C.color),
+            textAlpha: 0.62 + 0.38 * t,
+            subText: C.color,
+        });
+    }
+    __h3ShadeCache.set(ck, out);
+    return out;
+}
+
+    // ── v14.135: 按功能分色（用户要求）─────────────────────────────────
+    // 颜色 = 功能分类；亮度/底色 = 当前状态（关=暗、 开=亮+发光）。
+    // 这样"属于哪一类"和"开没开"两个信息互不打架（旧版只用绿/灰表示状态，
+    // 19 个按钮挤在一起完全看不出功能分组）。
+    const QUICK_CATEGORIES = {
+        quality: { zh: "画质", color: "#c4b5fd", border: "#8b5cf6", off: "rgba(124,58,237,.14)", on: "rgba(139,92,246,.40)" },
+        speed:   { zh: "加速", color: "#5eead4", border: "#14b8a6", off: "rgba(20,184,166,.13)",  on: "rgba(20,184,166,.38)" },
+        upscale: { zh: "超分", color: "#fcd34d", border: "#d97706", off: "rgba(217,119,6,.15)",  on: "rgba(217,119,6,.40)" },
+        sema:    { zh: "语义", color: "#f9a8d4", border: "#db2777", off: "rgba(219,39,119,.15)", on: "rgba(219,39,119,.40)" },
+        flow:    { zh: "流程", color: "#7dd3fc", border: "#0ea5e9", off: "rgba(14,165,233,.14)",  on: "rgba(14,165,233,.38)" },
+    };
+    // 参数名 → 分类。刻意做成独立映射表：改分类不用动 QUICK_DEFS 本体，
+    // 也不会影响 H3_MANAGED_ROW_KEYS / 隐藏逻辑。
+    const QUICK_CAT = {
+        // 画质：二采 / 口型 / 人脸修复 / 分块二采 / 保脸
+        refine_enable: "quality", refine_lipsync_mode: "quality",
+        upscale_face_restore: "quality", tiled_refine: "quality", face_lock_mode: "quality",
+        // 加速：速度预设 + 三种缓存
+        speed_preset: "speed", block_cache: "speed", ref_cache: "speed", cache_dit: "speed",
+        // 超分：逐段 / 全片 / 模式 / FP16
+        upscale_per_clip: "upscale", upscale_final: "upscale",
+        upscale_mode: "upscale", upscale_fp16: "upscale",
+        // 语义：语义桥 / 桥对齐
+        semantic_bridge_enable: "sema", semantic_bridge_magnitude_match: "sema",
+        // 流程：输出 / 预览 / 暂停 / CLIP选择
+        output_mode: "flow", output_image_audio: "flow",
+        pause_enable: "flow", clip_select_enable: "flow",
+    };
     const quickBar = document.createElement("div");
     quickBar.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:5px 4px;border-top:1px solid rgba(255,255,255,.18);margin-bottom:2px;flex-shrink:0;background:#182838;";
     const quickTitle = document.createElement("span");
     quickTitle.textContent = "快捷";
-    quickTitle.title = "一键化快捷开关：点一下开/关(布尔)或循环下一档(枚举)；悬停按钮查看完整说明。不改变参数顺序，旧工作流零影响。";
-    quickTitle.style.cssText = "font-size:9px;color:#6a8ab8;white-space:nowrap;margin-right:2px;font-weight:bold;";
+    quickTitle.title = "一键化快捷开关：点一下开/关(布尔)或循环下一档(枚举)；悬停按钮查看完整说明。不改变参数顺序，旧工作流零影响。\n\n颜色 = 功能分类（紫=画质 / 青=加速 / 橙=超分 / 粉=语义 / 蓝=流程）。\n多档位按钮（如 输出 none→per_clip→merged→both）：同色系深浅渐变 + 底部档位进度条，越亮越靠后；第一档为关闭态暗色。";
+    quickTitle.style.cssText = "font-size:9px;color:#8ab4f8;white-space:nowrap;margin-right:2px;font-weight:bold;text-shadow:0 0 6px rgba(138,180,248,.45);";
     quickBar.append(quickTitle);
     for (const def of QUICK_DEFS) {
         const w = node.widgets.find((x) => x.name === def.key);
+        const C = QUICK_CATEGORIES[QUICK_CAT[def.key]] || QUICK_CATEGORIES.flow;
+        const shades = def.cycle ? h3QuickShades(C, def.cycle.length) : null;
         const btn = document.createElement("button");
-        btn.style.cssText = "font-size:9px;line-height:1.15;padding:2px 7px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;color:#cde;font-family:inherit;";
+        btn.style.cssText = "position:relative;overflow:hidden;font-size:9px;line-height:1.15;padding:2px 7px 3px 9px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;border:1px solid " + C.border + ";border-left:3px solid " + C.color + ";transition:background .12s,border-color .12s,box-shadow .12s;";
         const lab = document.createElement("span");
         const sub = document.createElement("span");
         lab.textContent = def.zh;
+        lab.style.cssText = "font-weight:700;color:" + C.color + ";white-space:nowrap;";
         sub.textContent = def.en;
-        sub.style.cssText = "font-size:7px;opacity:.7;";
+        sub.style.cssText = "font-size:7px;color:" + C.color + ";opacity:.6;";
         btn.append(lab, sub);
-        btn.title = (def.zh + " / " + def.en) + "\n" + def.desc + "\n点击" + (def.cycle ? "循环下一档" : "开/关") + "。";
+        // v14.136: 档位进度条（仅循环档位按钮）——底部细条按档位序号填充，
+        // 深浅渐变之外再加一条"位置"线索，双保险不怕看错。
+        let posBar = null;
+        if (def.cycle) {
+            posBar = document.createElement("i");
+            posBar.style.cssText = "position:absolute;left:0;bottom:0;height:3px;width:0;border-radius:0 3px 3px 0;pointer-events:none;";
+            btn.append(posBar);
+        }
+        const baseTitle = "【" + C.zh + "】" + def.zh + " / " + def.en + "\n" + def.desc;
+        btn.title = baseTitle + "\n点击" + (def.cycle ? "循环下一档" : "开/关") + "。";
         const refresh = () => {
             let on = false;
             if (w) {
                 if (def.cycle) {
                     // v14.115: 枚举档位按钮——第一档（默认）灰色、其他档绿色，
                     // 按钮下方实时显示当前档位名（不再恒绿"像点不动"）。
+                    // v14.136: 不再"非默认档一律同色"——按档位序号取深浅渐变，
+                    // 否则 none/per_clip/merged/both 看起来一模一样。
                     const cur = def.cycle.indexOf(w.value);
+                    const idx = cur >= 0 ? cur : 0;
                     on = cur > 0;
                     const curName = cur >= 0 ? def.cycle[cur] : String((w.value === undefined || w.value === null) ? "" : w.value);
                     sub.textContent = curName;
-                    sub.style.cssText = "font-size:7px;opacity:.85;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-                    btn.title = (def.zh + " / " + def.en) + "\n" + def.desc + "\n当前档位：" + curName + "\n点击循环下一档。";
+                    sub.style.cssText = "font-size:7px;color:" + C.color + ";opacity:" + (on ? "1" : ".55") + ";max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                    btn.title = baseTitle + "\n当前档位：" + curName + "（第 " + (idx + 1) + "/" + def.cycle.length + " 档）\n点击循环下一档。";
+                    if (posBar) {
+                        const pct = Math.round(((idx + 1) / def.cycle.length) * 100);
+                        posBar.style.width = pct + "%";
+                        posBar.style.background = on ? shades[idx].stripe : C.border;
+                        posBar.style.boxShadow = on ? "0 0 6px " + shades[idx].glow : "none";
+                        posBar.style.opacity = on ? "1" : ".45";
+                    }
                 } else {
                     on = Boolean(w.value);
                     sub.textContent = def.en;
-                    sub.style.cssText = "font-size:7px;opacity:.7;max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                    sub.style.cssText = "font-size:7px;color:" + C.color + ";opacity:" + (on ? "1" : ".55") + ";max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+                    if (posBar) { posBar.style.width = on ? "100%" : "0%"; }
                 }
             }
-            btn.style.border = on ? "1px solid #5a9a5a" : "1px solid #3a4a5a";
-            btn.style.background = on ? "rgba(50,110,60,.4)" : "rgba(28,38,48,.55)";
+            // 颜色=分类；循环按钮再按档位取深浅渐变；布尔按钮=开/关两态
+            if (def.cycle && w) {
+                const idx = Math.max(0, def.cycle.indexOf(w.value));
+                const S = shades[Math.min(idx, shades.length - 1)];
+                btn.style.background = S.bg;
+                btn.style.border = "1px solid " + S.border;
+                btn.style.borderLeft = "3px solid " + S.stripe;
+                btn.style.boxShadow = on ? "0 0 0 1px " + S.border + ", 0 0 8px " + S.glow : "none";
+                lab.style.color = S.text;
+                lab.style.opacity = String(S.textAlpha);
+                lab.style.textShadow = on ? "0 0 6px " + S.glow : "none";
+            } else {
+                btn.style.background = on ? C.on : C.off;
+                btn.style.border = "1px solid " + C.border;
+                btn.style.borderLeft = "3px solid " + C.color;
+                btn.style.boxShadow = on ? "0 0 0 1px " + C.border + ", 0 0 7px " + C.color + "66" : "none";
+                lab.style.color = on ? "#ffffff" : C.color;
+                lab.style.opacity = "1";
+                lab.style.textShadow = on ? "0 0 6px " + C.color + "cc" : "none";
+            }
         };
         btn.addEventListener("click", () => {
             if (!w) return;
@@ -6689,6 +6812,27 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         refresh();
         quickBar.append(btn);
     }
+
+    // v14.135: 颜色图例（放在按钮行末尾，自动换行时不挡按钮）
+    try {
+        const legend = document.createElement("span");
+        legend.title = "颜色 = 功能分类；按钮发亮 = 当前已开启。";
+        legend.style.cssText = "display:inline-flex;align-items:center;gap:7px;margin-left:3px;padding-left:7px;border-left:1px solid rgba(255,255,255,.14);font-size:8px;white-space:nowrap;flex-shrink:0;";
+        for (const _k of ["quality", "speed", "upscale", "sema", "flow"]) {
+            const _c = QUICK_CATEGORIES[_k];
+            if (!_c) continue;
+            const _item = document.createElement("span");
+            _item.style.cssText = "display:inline-flex;align-items:center;gap:3px;";
+            const _dot = document.createElement("i");
+            _dot.style.cssText = "width:7px;height:7px;border-radius:2px;display:inline-block;background:" + _c.color + ";box-shadow:0 0 5px " + _c.color + "aa;";
+            const _tx = document.createElement("span");
+            _tx.textContent = _c.zh;
+            _tx.style.cssText = "color:" + _c.color + ";opacity:.9;font-weight:bold;";
+            _item.append(_dot, _tx);
+            legend.append(_item);
+        }
+        quickBar.append(legend);
+    } catch (e) {}
 
     // v14.134: 被快捷按钮覆盖的参数在参数区隐藏（一键开关替代参数区设置栏）。
     // 走前端官方 visibility API（详见 hideNativeWidget 注释）：整行在画布
