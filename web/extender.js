@@ -1560,15 +1560,26 @@ function hideNativeWidget(node, widget) {
 // 只在本节点的参数区网格里做兜底（异常前端 / 渲染时序），绝不再扫描整个
 // document：只 display:none，绝不 remove / 不清空 textContent —— Vue 拥有的
 // 节点不能删，删了下一次重渲染就会插回错误位置。
+//
+// 参数名必须按"完整单词"匹配：block_cache 是 block_cache_threshold /
+// block_cache_device 的前缀，用 indexOf 会把这两行一起误藏（违反 1:1）。
+function rowBelongsToKey(text, key) {
+    const i = text.indexOf(key);
+    if (i < 0) return false;
+    const before = i === 0 ? "" : text[i - 1];
+    const after = text[i + key.length] || "";
+    return !/[\w]/.test(before) && !/[\w]/.test(after);
+}
+
 function nukeVisibleHiddenRows(node, keys) {
-    if (!node || !Array.isArray(keys)) return;
+    if (!node || !Array.isArray(keys) || !keys.length) return;
     const grid = node.element?.querySelector?.(".lg-node-widgets")
         || document.querySelector('[data-node-id="' + node.id + '"] .lg-node-widgets');
     if (!grid) return;
     for (const row of Array.from(grid.children)) {
         const t = row.textContent || "";
         if (!t || t.length > 200) continue;
-        if (!keys.some((k) => t.indexOf(k) >= 0)) continue;
+        if (!keys.some((k) => rowBelongsToKey(t, k))) continue;
         if (row.style.display === "none") continue;
         row.style.setProperty("display", "none", "important");
     }
@@ -1587,53 +1598,68 @@ function scheduleHiddenRowFallback(node, keys) {
     });
 }
 
-// 超分模式的 5 个"自定义"档参数：默认随快捷条隐藏，选「自定义」时必须放回来，
-// 否则后端 _ff_resolve_upscale_mode 的"自定义"分支拿不到用户填的倍率/引擎。
-const UPSCALE_ADV_ROW_KEYS = [
+// v14.134 —— 参数区隐藏清单，改为**严格 1:1**：
+//   有快捷按钮的参数 → 隐藏参数栏行；
+//   没有快捷按钮的参数 → 一律留在参数区可见（用户明确要求，不得多藏）。
+//
+// H3_MANAGED_ROW_KEYS = 本插件管理过可见性的全部行。
+//   前 19 项 = 快捷条 QUICK_DEFS 对应的参数 → hidden
+//   后 9 项  = v14.133 误藏的"附属高级参数" → 强制放回参数区（自愈）
+const H3_MANAGED_ROW_KEYS = [
+    // ── 快捷条 19 项 ──
+    "refine_enable", "upscale_per_clip", "upscale_final", "block_cache", "ref_cache",
+    "output_mode", "speed_preset", "refine_lipsync_mode", "upscale_mode", "pause_enable",
+    "output_image_audio", "cache_dit", "clip_select_enable", "upscale_fp16",
+    "upscale_face_restore", "tiled_refine", "semantic_bridge_enable",
+    "semantic_bridge_magnitude_match", "face_lock_mode",
+    // ── v14.133 误藏、v14.134 起必须显示 ──
     "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch",
+    "tile_count", "tile_overlap", "semantic_bridge_adapter", "semantic_bridge_alpha",
 ];
 
-function refreshCustomUpscaleRows(node) {
+// 只有"真的接了连线"的参数才不隐藏。
+// 注意：ComfyUI 1.55 里 node.inputs 为**每个 widget** 都建了一条输入槽
+// （就是每行左侧那个 hover 才出现的 ◀ 圆点，LGraphNode.getSlotFromWidget
+// 按 widget.name 反查），所以"存在同名的 input 槽"根本不能作为判断依据 ——
+// v14.133 用它做守卫，结果 19 个快捷项一个都没藏成。
+function widgetSlotIsConnected(node, key) {
+    try {
+        const slot = typeof node.getSlotFromWidget === "function"
+            ? node.getSlotFromWidget(node.widgets?.find((w) => w && w.name === key))
+            : (node.inputs || []).find((s) => s && s.widget && s.widget.name === key);
+        if (!slot) return false;
+        if (slot.isConnected === true) return true;
+        return slot.link != null;
+    } catch (e) {
+        return false;
+    }
+}
+
+// applyHiddenParamRows(node, hideKeys)
+//   hideKeys 里的行 → 隐藏；H3_MANAGED_ROW_KEYS 里其余的行 → 强制显示。
+function applyHiddenParamRows(node, hideKeys) {
     if (!node) return;
-    const mode = String(getWidget(node, "upscale_mode")?.value || "");
-    const custom = mode === "自定义";
-    for (const key of UPSCALE_ADV_ROW_KEYS) {
-        const w = node.widgets?.find((x) => x && x.name === key);
-        if (!w) continue;
-        setWidgetRowHidden(node, w, !custom);
-    }
-    try { node._widgetSlotsDirty = true; } catch (e) {}
-    try { node.setDirtyCanvas?.(true, true); } catch (e) {}
-}
-
-// 用户把某个"本该隐藏"的参数接成了输入线（converted to input）——
-// 说明他就是要手动控制它，这时不能藏，否则连线没有落点。
-function widgetIsInputSlot(node, key) {
-    for (const inp of node.inputs || []) {
-        if (!inp) continue;
-        if (inp.widget && inp.widget.name === key) return true;
-        if (inp.widgetId !== undefined && inp.name === key) return true;
-        if (inp.link != null && (inp.name === key || inp.label === key)) return true;
-    }
-    return false;
-}
-
-// 参数区需要隐藏的行。keys 记在 node 上，onConfigure 恢复工作流后复用。
-function applyHiddenParamRows(node, keys) {
-    if (!node || !Array.isArray(keys) || !keys.length) return;
-    node.__h3HiddenRowKeys = keys;
+    const hide = new Set(Array.isArray(hideKeys) ? hideKeys : []);
+    const managed = H3_MANAGED_ROW_KEYS.slice();
+    for (const k of hide) if (!managed.includes(k)) managed.push(k);
+    node.__h3HiddenRowKeys = Array.from(hide);
     let touched = 0;
-    for (const key of keys) {
+    for (const key of managed) {
         const w = node.widgets?.find((x) => x && x.name === key);
         if (!w) continue;
-        try { if (widgetIsInputSlot(node, key)) continue; } catch (e) {}
-        if (setWidgetRowHidden(node, w, true)) touched++;
+        if (hide.has(key)) {
+            if (widgetSlotIsConnected(node, key)) continue;
+            if (setWidgetRowHidden(node, w, true)) touched++;
+        } else {
+            // 没快捷按钮 → 一定放回参数区
+            if (setWidgetRowHidden(node, w, false)) touched++;
+        }
     }
     if (!touched) return;
     // 让 _arrangeWidgets 重算行位置，画布节点高度随之收缩。
     try { node._widgetSlotsDirty = true; } catch (e) {}
     try { node.setDirtyCanvas?.(true, true); } catch (e) {}
-    scheduleHiddenRowFallback(node, keys);
+    scheduleHiddenRowFallback(node, Array.from(hide));
 }
 
 function domWidgetRenderMode(element) {
@@ -6657,8 +6683,6 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             }
             if (typeof w.callback === "function") { try { w.callback(w.value); } catch (e) {} }
             refresh();
-            // v14.133: 超分模式切到「自定义」时，把 5 个超分高级参数行放回参数区。
-            try { if (def.key === "upscale_mode") refreshCustomUpscaleRows(node); } catch (e) {}
             try { updateHidden(node, runtime); } catch (e) {}
             try { node.setDirtyCanvas(true, true); } catch (e) {}
         });
@@ -6666,25 +6690,34 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         quickBar.append(btn);
     }
 
-    // v14.133: 被快捷按钮覆盖的参数在参数区隐藏（一键开关替代参数区设置栏）。
-    // 改走前端官方 visibility API（详见 hideNativeWidget 注释）：整行在画布
+    // v14.134: 被快捷按钮覆盖的参数在参数区隐藏（一键开关替代参数区设置栏）。
+    // 走前端官方 visibility API（详见 hideNativeWidget 注释）：整行在画布
     // 布局里被剔除、Vue 侧 v-if 直接不渲染，而不是"压成 0 高 + 涂黑"——
     // 后者才是参数栏错位重叠（叠罗汉）的根因。
+    //
+    // 严格 1:1：快捷条上每一个按钮 → 藏它对应的那一行；**没有按钮的一律不藏**。
+    //   19 项 = QUICK_DEFS，逐字对应底部快捷条的 19 个按钮：
+    //   二采 refine_enable / 逐段超分 upscale_per_clip / 全片超分 upscale_final /
+    //   块缓存 block_cache / 参考缓存 ref_cache / 输出 output_mode /
+    //   速度 speed_preset / 口型 refine_lipsync_mode / 超分模式 upscale_mode /
+    //   暂停 pause_enable / 预览 output_image_audio / DiT缓存 cache_dit /
+    //   CLIP选择 clip_select_enable / 超分FP16 upscale_fp16 /
+    //   人脸修复 upscale_face_restore / 分块二采 tiled_refine /
+    //   语义桥 semantic_bridge_enable / 桥对齐 semantic_bridge_magnitude_match /
+    //   保脸 face_lock_mode
+    // 保持可见（无快捷按钮，v14.133 误藏、v14.134 起强制放回）：
+    //   upscale_engine / upscale_factor / upscale_model / upscale_tile /
+    //   upscale_batch / tile_count / tile_overlap /
+    //   semantic_bridge_adapter / semantic_bridge_alpha
+    //   以及 clip_select、pause_timeout、refine_denoise、refine_steps、
+    //   refine_upscale_factor、refine_upscaler_model、refine_align_to、
+    //   refine_audio_denoise、temporal_chunk_tokens、temporal_overlap_tokens、
+    //   env_audio_enable、env_audio_gain 等从未被纳管的行。
+    //
     // widget 仍留在 widgets 数组中，widgets_values 顺序/长度不变
     // → 零 NaN、零重连、旧版工作流加载正常。
-    //
-    // 隐藏清单 = QUICK_DEFS 全部快捷项 + 9 个「附属高级参数」。
-    // 附属参数由快捷条主开关/预设驱动，功能没丢，只是不在参数区重复出现：
-    //   upscale_engine~batch         → upscale_mode 预设（平衡/质量/速度）覆盖
-    //   tile_count / tile_overlap     → tiled_refine 主开关（快捷条「分块二采」）
-    //   semantic_bridge_adapter/alpha → semantic_bridge_enable（快捷条「语义桥」）
-    const HIDDEN_ROW_KEYS = QUICK_DEFS.map((d) => d.key).concat([
-        "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch",
-        "tile_count", "tile_overlap", "semantic_bridge_adapter", "semantic_bridge_alpha",
-    ]);
+    const HIDDEN_ROW_KEYS = QUICK_DEFS.map((d) => d.key);
     applyHiddenParamRows(node, HIDDEN_ROW_KEYS);
-    // upscale_mode=自定义 时把超分 5 参数放回来（否则用户没地方填倍率/引擎）。
-    try { refreshCustomUpscaleRows(node); } catch (e) {}
 
     // ── Draggable divider between global prompt and CLIP cards ──
     // Drag to fix the global prompt section height (px); double-click to
@@ -7285,11 +7318,11 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
             setWidgetValue(this, "filename_prefix", "H3_Extender");
         }
 
-        // v14.133: 恢复工作流后再压一次被隐藏的参数行 —— configure 会重写
+        // v14.134: 恢复工作流后再压一次被隐藏的参数行 —— configure 会重写
         // widget.options，必须在写入完成之后重新置位，否则快捷条覆盖的行
-        // 会重新冒出来。applyHiddenParamRows 幂等，重复调用无副作用。
+        // 会重新冒出来。applyHiddenParamRows 幂等（同时把不该藏的行放回），
+        // 重复调用无副作用。
         try { applyHiddenParamRows(this, this.__h3HiddenRowKeys); } catch (e) {}
-        try { refreshCustomUpscaleRows(this); } catch (e) {}
 
         // v2.111: 默认改为「展开CLIP」状态(之前默认收起)。这里只置标记 +
         // 保证宽度下限, 不再套用收起态的固定视口(v2.105 的默认行为);
