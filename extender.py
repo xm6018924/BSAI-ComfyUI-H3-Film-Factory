@@ -3002,6 +3002,23 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                     _r_to2.pop("sol_take_forward", None)
                             except Exception:
                                 pass
+                            # v14.144 (2026-10-13): Sol-Attn workspace 让位——
+                            # delegate 驻留 14.4GB 时二采 Sol-Attn 申请 6.33GB workspace
+                            # 失败(allocated 18.05 + 6.33 = 24.38 > 23.86, 仅差 0.5GB),
+                            # 依次降级 sage/pytorch attention, 二采失去稀疏加速。
+                            # 检测 Sol-Attn 挂载键(optimized_attention_override / sol_compose)
+                            # 存在时把 reserve 上调 2.5GB(驻留降到 ~12.4GB, workspace 预算
+                            # 4.5GB -> ~7GB), 给 workspace 让位, 保住二采稀疏加速。
+                            # 换页量 6.9->9.4GB(仍比全流式 21.8GB 减 57%), 二采仅 2 步,
+                            # 稀疏加速收益 >> 换页损失。
+                            try:
+                                _r_to3 = _r_delegate_dyn.model_options.get("transformer_options", {})
+                                if isinstance(_r_to3, dict) and (
+                                        _r_to3.get("optimized_attention_override") or _r_to3.get("sol_compose")):
+                                    _r_resv_dyn = _r_resv_dyn + 2.5
+                                    _r_resv_dyn = max(3.0, min(10.0, _r_resv_dyn))
+                            except Exception:
+                                pass
                             try:
                                 _ext_resv_orig = _mm3.EXTRA_RESERVED_VRAM
                             except Exception:
@@ -3011,7 +3028,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _torch3.cuda.synchronize()
                             try:
                                 _res2d = _r_delegate_dyn.loaded_size() / 1024 ** 3
-                                print(f"[H3 Extender] v14.143 DynamicVRAM 二采改用 non-dynamic delegate 驻留(原生forward): "
+                                print(f"[H3 Extender] v14.144 DynamicVRAM 二采改用 non-dynamic delegate 驻留(原生forward): "
                                       f"resident={_res2d:.1f}GB / total={_r_delegate_dyn.model_size()/1024**3:.1f}GB "
                                       f"reserve={_r_resv_dyn:.1f}GB")
                             except Exception:
@@ -3019,7 +3036,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _refine_model = _r_delegate_dyn
                         except Exception as _de142:
                             _refine_model = model
-                            print(f"[H3 Extender] v14.143 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
+                            print(f"[H3 Extender] v14.144 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
                         if _refine_model is model:
                             print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
                     else:
@@ -7129,8 +7146,8 @@ NODE_CLASS_MAPPINGS = {
     "BSAIH3FilmFactoryFinalDecode": MiniMaxH3MotionContextDiskFinalDecode,
 }
 
-# v14.143 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.143 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate native-forward)")
+# v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
+print("[BSAI-H3-Film-Factory] v14.144 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate native-forward + Sol-Attn workspace headroom)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
