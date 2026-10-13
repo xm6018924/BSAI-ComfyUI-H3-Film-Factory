@@ -1493,19 +1493,27 @@ def _nvenc_available(ffmpeg, codec="h264"):
 
 
 def _h264_enc_args(ffmpeg, preset="fast", crf=17):
+    # v14.140: 显式 GOP=48 帧(2s@24fps)。旧默认 GOP=250(10.4s)导致 15s 预览
+    # 尾部 4.6s 无 IDR(P帧链)，播放器 seek/播放尾部花屏雪花；2s IDR 间隔后
+    # 任意位置解码/拖拽均正常。编码效率损失 <2%，可忽略。
     if _nvenc_available(ffmpeg, "h264"):
         p = _NVENC_PRESET.get(str(preset), "p4")
         return ["-c:v", "h264_nvenc", "-preset", p, "-cq", str(int(crf)),
-                "-rc", "vbr", "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx264", "-preset", str(preset), "-crf", str(int(crf)), "-pix_fmt", "yuv420p"]
+                "-rc", "vbr", "-g", "48",
+                "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", str(preset), "-crf", str(int(crf)),
+            "-g", "48", "-keyint_min", "48", "-pix_fmt", "yuv420p"]
 
 
 def _hevc_enc_args(ffmpeg, preset="fast", crf=17):
+    # v14.140: 同 h264，GOP=48 帧(2s) 防止长片/预览尾部无 IDR 花屏。
     if _nvenc_available(ffmpeg, "hevc"):
         p = _NVENC_PRESET.get(str(preset), "p4")
         return ["-c:v", "hevc_nvenc", "-preset", p, "-cq", str(int(crf)),
-                "-rc", "vbr", "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx265", "-preset", str(preset), "-crf", str(int(crf)), "-pix_fmt", "yuv420p"]
+                "-rc", "vbr", "-g", "48",
+                "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx265", "-preset", str(preset), "-crf", str(int(crf)),
+            "-g", "48", "-pix_fmt", "yuv420p"]
 
 
 def _start_video_encoder(ffmpeg, temp_video, width, height, fps, codec, crf, preset, log_path):

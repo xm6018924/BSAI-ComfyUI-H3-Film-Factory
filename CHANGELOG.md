@@ -14,6 +14,14 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.140 (2026-10-13) — 修复视频尾部雪花/花屏（关键帧 GOP 修复）/ Fix Tail Snow/Noise (Keyframe GOP Fix)
+
+**核心：视频编码默认 GOP=250（10.4s）导致 15s 预览尾部 4.6s 无 IDR 关键帧（纯 P 帧链），播放器播放/拖拽到尾部时花屏雪花；统一改为显式 GOP=48（2s）关键帧间隔。** / Root cause: default GOP=250 (10.4s) left the last 4.6s of a 15s preview with zero IDR keyframes (pure P-frame chain), so players show snow/artifacts when playing or seeking the tail; now forced GOP=48 (2s) keyframe interval.
+- `_h264_enc_args` / `_hevc_enc_args`：NVENC 与 libx264/x265 全部分支显式加 `-g 48`（每 2 秒一个 IDR，任意 seek 位置 ≤2s 内可寻址解码）/ Explicit `-g 48` on NVENC and libx264/x265 branches (IDR every 2s; any seek position decodes within ≤2s)
+- 覆盖全部编码入口：per-CLIP 预览、progressive 全片预览、最终成片 export、色彩校正 / Covers all encode entry points: per-CLIP preview, full progressive preview, final export, color correction
+- 验证：libx264 与 h264_nvenc 实测 362 帧 1920×1088，IDR 间隔精确 2s，尾部最后 IDR 位于 13.9–14.0s（距片尾仅 ~1s）/ Verified on both libx264 & h264_nvenc (362 frames): IDR every 2s, last IDR at 13.9–14.0s (~1s from end)
+- 编码效率损失 <2%，画质与码率不变 / <2% encoding overhead; same quality & bitrate
+
 ### v14.138 (2026-10-12) — 最佳参数默认化（8+2 双采开箱即用）/ Best-Params as Defaults (8+2 Dual-sample Out-of-box)
 
 **核心：全部采样/双采/暂停参数默认值改为 RTX 5090 24G 实测最佳配置，新拉节点开箱即用，无需手动调整。** / All sampling/refine/pause defaults switched to RTX 5090 24G verified best config; new nodes work out-of-box.
