@@ -6624,7 +6624,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "block_cache", zh: "块缓存", en: "BlkCache", desc: "H3 Block Cache(F1B0 残差)加速，需 T8 插件；顺序画面稳定时显著提速。" },
         { key: "ref_cache", zh: "参考缓存", en: "RefCache", desc: "Ref2VA 参考图编码磁盘缓存，调参重跑跳过重复编码。" },
         { key: "output_mode", zh: "输出", en: "Output", desc: "输出模式循环：none(仅缓存)→per_clip(分段)→merged(合并)→both(两者)。", cycle: ["none", "per_clip", "merged", "both"] },
-        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环（8档全）：custom(按下方手动参数)→极速(一采4+二采3步/denoise0.5)→均衡(6+4)→精细(8+6)→极速-VDN(8+3)→均衡-VDN(8+4)→精细-VDN(8+6)→FastH3-Trim(8步单采无二采)。VDN档需配VDN工作流；Trim档需配fastvideo_fasth3_trim模型。颜色：灰=custom手动档 / 青=FastH3标准档 / 紫=VDN档 / 橙=Trim单采档。", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }, { color: "#fdba74", border: "#ea580c" }] },
+        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环（9档全）：custom(按下方手动参数)→极速(一采4+二采3步)→均衡(6+4)→精细(8+6)→极速-VDN(8+3)→均衡-VDN(8+4)→精细-VDN(8+6)→FastH3-Trim(8步+2二采)→FastH3-4步VSA(4步VSA+2二采)。颜色：灰=custom / 青=FastH3标准 / 紫=VDN / 橙=Trim / 红=4步VSA最快档。", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }] },
         { key: "refine_lipsync_mode", zh: "口型", en: "Lipsync", desc: "对口型×二采预设循环：锁定保口型→音频参与重绘0.7→音频全重绘1.0。", cycle: ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"] },
         { key: "upscale_mode", zh: "超分模式", en: "UpxMode", desc: "超分模式循环：平衡(质量+速度)→质量优先→速度优先→自定义。", cycle: ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"] },
         { key: "pause_enable", zh: "暂停", en: "Pause", desc: "每 CLIP 生成完自动暂停等待；无干预超时自动继续。" },
@@ -7495,7 +7495,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             refine_lipsync_mode: ["锁定保口型(推荐)","音频参与重绘0.7","音频全重绘1.0"],
             upscale_mode: ["平衡(质量+速度)","质量优先","速度优先","自定义"],
             upscale_engine: ["auto","dlss5","realesr","bicubic"],
-            speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN","FastH3-Trim"],
+            speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN","FastH3-Trim","FastH3-4步VSA"],
             env_audio_enable: ["global_inherit","on","off"],
         };
         function detect(w) {
