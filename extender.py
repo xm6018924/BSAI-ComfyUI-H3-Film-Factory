@@ -4971,10 +4971,10 @@ class BSAIH3FilmFactory:
             # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
             # 24G 跑 15s 208wpx(1920x1088) 极速模式预计 ~10-12 分钟/clip.
             "speed_preset": (
-                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim"],
+                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA"],
                 {
                     "default": "custom",
-                    "tooltip": "v1.86 速度预设（默认 custom=按下方各widget显式值，开箱即用最佳 8+2 双采）。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流(UNETLoader+ApplyVDNH3)使用：一采固定 VDN 8 步(蒸馏最优,质量≈dense 50 步)，二采 3/4/6 步。FastH3-Trim=搭配 fastvideo_fasth3_trim_8step_nvfp4 模型：42层剪枝比V2快15%，8步单采无二采，5s视频~39s。custom=按下方各widget显式值。",
+                    "tooltip": "v1.86 速度预设（默认 custom=按下方各widget显式值，开箱即用最佳 8+2 双采）。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流使用。FastH3-Trim=nvfp4剪枝模型8步+2二采。FastH3-4步VSA=4步VSA蒸馏LoRA+2步二采，最快速度。custom=按下方各widget显式值。",
                 },
             ),
             "temporal_chunk_tokens": (
@@ -5310,6 +5310,10 @@ class BSAIH3FilmFactory:
             # FastH3 Trim: 42层剪枝模型(nvfp4), 8步一采+2步二采双采.
             # 比V2模型一采快15%, 配合二采保画质.
             steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.45
+        elif speed_preset == "FastH3-4步VSA":
+            # FastH3 4步VSA: 4步DMD2蒸馏+VSA稀疏注意力LoRA, 配2步二采.
+            # 最快速度, 质量略低于8步但远快于50步base.
+            steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.45
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
