@@ -1,4 +1,4 @@
-﻿import { app } from "../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 // extender.js v2.4.0 — cache-bust marker (2026-08-22-clean-break-from-original)
 import { api } from "../../scripts/api.js";
 
@@ -6615,7 +6615,8 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
     // ── v14.104: 一键化快捷开关条（底部按钮栏后面；纯前端 DOM，不参与
     //    widgets_values 序列化、不改变后端参数顺序 → 旧工作流零 NaN 零错位）──
-    //    布尔: 点一下开/关；枚举: 点一下循环下一档。按钮状态实时读 widget.value。
+    //    布尔: 点一下开/关；枚举: 点一下弹出下拉菜单直接选档（v14.147 起不再循环点击）。
+    //    按钮状态实时读 widget.value。
     const QUICK_DEFS = [
         { key: "refine_enable", zh: "二采", en: "Refine", desc: "Sol-H3 双采：latent 放大 + CONST 重噪 + 二采去噪，直出高清(1920×1088)。" },
         { key: "upscale_per_clip", zh: "逐段超分", en: "Upx/Clip", desc: "每 CLIP 解码后逐段像素超分（单段显存可控）。" },
@@ -6644,10 +6645,12 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // 恢复语义一致。
     ];
 // ── 颜色工具（快捷条分色用）──────────────────────────────────────────
-// 循环档位按钮（输出 none/per_clip/merged/both、速度 极速/均衡/精细…）
-// 原本所有非默认档都是同一个亮色，看不出现在停在第几档。这里按档位序号
-// 生成一条"同色系深浅渐变"：档位越靠后越浓、越亮、发光越强，第一档保持
-// 关闭态暗色 —— 同一个按钮一眼能读出"属于哪一类 + 现在第几档 + 开没开"。
+// 多档位按钮（输出 none/per_clip/merged/both、速度 custom/极速/均衡/精细/
+// VDN×3/FastH3-Trim、口型 3 档、超分模式 4 档）原本所有非默认档都是同一个
+// 亮色，看不出现在停在第几档。这里按档位序号生成一条"同色系深浅渐变"：
+// 档位越靠后越浓、越亮、发光越强，第一档保持关闭态暗色 —— 同一个按钮
+// 一眼能读出"属于哪一类 + 现在第几档 + 开没开"。v14.147 起点击按钮改为
+// 弹出下拉菜单直接选择（不再循环点击），菜单项同样按档位渐变着色。
 const __h3HexCache = new Map();
 function h3HexToRgb(hex) {
     let h = String(hex || "").trim().replace("#", "");
@@ -6725,6 +6728,38 @@ function h3QuickTintedShades(tints) {
     return out;
 }
 
+// v14.147: 循环档位按钮改为下拉菜单直接选择（不再循环点击）。
+// 全局仅允许一个打开的下拉菜单；点击外部/打开新菜单时自动关闭。
+let _h3qkOpenMenu = null;
+function _h3qkCloseMenu() {
+    if (_h3qkOpenMenu) {
+        try { _h3qkOpenMenu.remove(); } catch (e) {}
+        _h3qkOpenMenu = null;
+    }
+}
+// 在按钮正下方生成下拉面板：列出 cycle 全部档位，每项按该档位的深浅渐变着色，
+// 当前档位高亮；点击任意项直接选中（立即回调 refresh/updateHidden）。
+function _h3qkMakeMenu(def, C, w, shades, onPick) {
+    const menu = document.createElement("div");
+    menu.style.cssText = "position:fixed;z-index:99999;min-width:130px;background:rgba(15,23,42,.97);border:1px solid " + C.border + ";border-radius:4px;box-shadow:0 6px 18px rgba(0,0,0,.55);padding:3px;";
+    for (let i = 0; i < def.cycle.length; i++) {
+        const opt = def.cycle[i];
+        const S = shades ? shades[Math.min(i, shades.length - 1)] : null;
+        const cur = (w && w.value === opt);
+        const item = document.createElement("div");
+        item.textContent = opt;
+        item.style.cssText = "font-size:9px;line-height:1.5;padding:3px 9px;border-radius:3px;cursor:pointer;white-space:nowrap;";
+        item.style.color = S ? (cur ? "#ffffff" : S.text) : "#dbeafe";
+        item.style.background = cur ? (S ? S.bg : C.on) : "transparent";
+        if (cur) item.style.fontWeight = "bold";
+        item.addEventListener("mouseenter", () => { item.style.background = cur ? (S ? S.bg : C.on) : (S ? S.stripe : "rgba(255,255,255,.12)"); });
+        item.addEventListener("mouseleave", () => { item.style.background = cur ? (S ? S.bg : C.on) : "transparent"; });
+        item.addEventListener("click", (ev) => { ev.stopPropagation(); _h3qkCloseMenu(); onPick(opt); });
+        menu.append(item);
+    }
+    return menu;
+}
+
     // ── v14.135: 按功能分色（用户要求）─────────────────────────────────
     // 颜色 = 功能分类；亮度/底色 = 当前状态（关=暗、 开=亮+发光）。
     // 这样"属于哪一类"和"开没开"两个信息互不打架（旧版只用绿/灰表示状态，
@@ -6757,7 +6792,7 @@ function h3QuickTintedShades(tints) {
     quickBar.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:5px 4px;border-top:1px solid rgba(255,255,255,.18);margin-bottom:2px;flex-shrink:0;background:#182838;";
     const quickTitle = document.createElement("span");
     quickTitle.textContent = "快捷";
-    quickTitle.title = "一键化快捷开关：点一下开/关(布尔)或循环下一档(枚举)；悬停按钮查看完整说明。不改变参数顺序，旧工作流零影响。\n\n颜色 = 功能分类（紫=画质 / 青=加速 / 橙=超分 / 粉=语义 / 蓝=流程）。\n多档位按钮（如 输出 none→per_clip→merged→both）：同色系深浅渐变 + 底部档位进度条，越亮越靠后；第一档为关闭态暗色。\n速度档位（8档）：灰=custom手动档 / 青=FastH3标准档(极速/均衡/精细) / 紫=VDN档 / 橙=FastH3-Trim单采档；同链路内越亮越靠后。";
+    quickTitle.title = "一键化快捷开关：点一下开/关(布尔)；枚举档位按钮点击弹出下拉菜单直接选择档位。不改变参数顺序，旧工作流零影响。\n\n颜色 = 功能分类（紫=画质 / 青=加速 / 橙=超分 / 粉=语义 / 蓝=流程）。\n多档位按钮（如 输出 none/per_clip/merged/both）：同色系深浅渐变 + 底部档位进度条，越亮越靠后；第一档为关闭态暗色。点击按钮弹出下拉菜单，直接点选任意档位。\n速度档位（8档）：灰=custom手动档 / 青=FastH3标准档(极速/均衡/精细) / 紫=VDN档 / 橙=FastH3-Trim单采档；同链路内越亮越靠后。";
     quickTitle.style.cssText = "font-size:9px;color:#8ab4f8;white-space:nowrap;margin-right:2px;font-weight:bold;text-shadow:0 0 6px rgba(138,180,248,.45);";
     quickBar.append(quickTitle);
     for (const def of QUICK_DEFS) {
@@ -6782,7 +6817,7 @@ function h3QuickTintedShades(tints) {
             btn.append(posBar);
         }
         const baseTitle = "【" + C.zh + "】" + def.zh + " / " + def.en + "\n" + def.desc;
-        btn.title = baseTitle + "\n点击" + (def.cycle ? "循环下一档" : "开/关") + "。";
+        btn.title = baseTitle + "\n点击" + (def.cycle ? "打开下拉菜单直接选择档位" : "开/关") + "。";
         const refresh = () => {
             let on = false;
             if (w) {
@@ -6797,7 +6832,7 @@ function h3QuickTintedShades(tints) {
                     const curName = cur >= 0 ? def.cycle[cur] : String((w.value === undefined || w.value === null) ? "" : w.value);
                     sub.textContent = curName;
                     sub.style.cssText = "font-size:7px;color:" + C.color + ";opacity:" + (on ? "1" : ".55") + ";max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-                    btn.title = baseTitle + "\n当前档位：" + curName + "（第 " + (idx + 1) + "/" + def.cycle.length + " 档）\n点击循环下一档。";
+                    btn.title = baseTitle + "\n当前档位：" + curName + "（第 " + (idx + 1) + "/" + def.cycle.length + " 档）\n点击打开下拉菜单直接选择。";
                     if (posBar) {
                         const pct = Math.round(((idx + 1) / def.cycle.length) * 100);
                         posBar.style.width = pct + "%";
@@ -6833,18 +6868,42 @@ function h3QuickTintedShades(tints) {
                 lab.style.textShadow = on ? "0 0 6px " + C.color + "cc" : "none";
             }
         };
-        btn.addEventListener("click", () => {
+        btn.addEventListener("click", (ev) => {
             if (!w) return;
             if (def.cycle) {
-                const cur = def.cycle.indexOf(w.value);
-                w.value = def.cycle[(cur + 1) % def.cycle.length];
+                // v14.147: 循环档位按钮 → 下拉菜单直接选择（不再循环点击）。
+                // 点击按钮：若已打开本按钮的下拉菜单则关闭（toggle），否则关闭旧的、
+                // 在按钮正下方打开本档位下拉菜单。
+                ev.stopPropagation();
+                if (_h3qkOpenMenu && _h3qkOpenMenu.__h3qkForBtn === btn) {
+                    _h3qkCloseMenu();
+                    return;
+                }
+                _h3qkCloseMenu();
+                const apply = (val) => {
+                    w.value = val;
+                    if (typeof w.callback === "function") { try { w.callback(w.value); } catch (e) {} }
+                    refresh();
+                    try { updateHidden(node, runtime); } catch (e) {}
+                    try { node.setDirtyCanvas(true, true); } catch (e) {}
+                };
+                const menu = _h3qkMakeMenu(def, C, w, shades, apply);
+                menu.__h3qkForBtn = btn;
+                const r = btn.getBoundingClientRect();
+                // 下拉面板定位：默认在按钮下方；空间不足（接近视口底部）时翻转到上方
+                const mh = 24 + def.cycle.length * 22;
+                const top = (r.bottom + mh < (window.innerHeight || 800)) ? r.bottom + 2 : (r.top - mh);
+                menu.style.left = Math.max(4, r.left) + "px";
+                menu.style.top = Math.max(4, top) + "px";
+                document.body.append(menu);
+                _h3qkOpenMenu = menu;
             } else {
                 w.value = !w.value;
+                if (typeof w.callback === "function") { try { w.callback(w.value); } catch (e) {} }
+                refresh();
+                try { updateHidden(node, runtime); } catch (e) {}
+                try { node.setDirtyCanvas(true, true); } catch (e) {}
             }
-            if (typeof w.callback === "function") { try { w.callback(w.value); } catch (e) {} }
-            refresh();
-            try { updateHidden(node, runtime); } catch (e) {}
-            try { node.setDirtyCanvas(true, true); } catch (e) {}
         });
         refresh();
         quickBar.append(btn);
@@ -6869,6 +6928,13 @@ function h3QuickTintedShades(tints) {
             legend.append(_item);
         }
         quickBar.append(legend);
+    } catch (e) {}
+
+    // v14.147: 下拉菜单全局关闭——点击菜单以外的任何区域（含画布空白、其他节点、
+    // 其他按钮）自动收起当前打开的下拉菜单；菜单项自身点击已 stopPropagation。
+    try {
+        document.addEventListener("click", () => { _h3qkCloseMenu(); });
+        document.addEventListener("wheel", () => { _h3qkCloseMenu(); }, { passive: true });
     } catch (e) {}
 
     // v14.134: 被快捷按钮覆盖的参数在参数区隐藏（一键开关替代参数区设置栏）。
@@ -7597,7 +7663,7 @@ function h3QuickTintedShades(tints) {
         if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
-        try { this.title = "BSAI ComfyUI H3 Film Factory v2.128·v14.146"; } catch (e) {}
+        try { this.title = "BSAI ComfyUI H3 Film Factory v2.129·v14.147"; } catch (e) {}
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -8312,7 +8378,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.128·v14.146";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.129·v14.147";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not

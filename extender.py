@@ -7181,7 +7181,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.146 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全)")
+print("[BSAI-H3-Film-Factory] v14.147 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
