@@ -14,6 +14,14 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.141 (2026-10-13) — 强制旧雪花 blob 失效重编（GOP 修复真正生效）/ Force Re-encode of Legacy Snow Blobs (GOP Fix Now Effective)
+
+**核心：v14.140 的 GOP=48 只对新编码生效——`_decode_single_clip_to_blob` 的缓存（`decoded_mp4_version>=2`）让旧 GOP=250 雪花 blob 被直接复用，用户重渲染仍见尾部雪花。本轮把缓存版本升至 3，旧雪花 blob 全部失效并按 GOP=48 重编，per-CLIP 预览 / 渐进全片 / 最终成片全链路生效。** / Root cause: v14.140's GOP=48 only applied to NEW encodes — the blob cache (`decoded_mp4_version>=2`) re-served legacy GOP=250 snow blobs, so re-render still showed tail snow. This round bumps cache version to 3, invalidating all legacy snow blobs and re-encoding with GOP=48 across per-CLIP preview, progressive full preview and final export.
+- `motion_context_disk.py`：缓存判定 `>=2 → >=3`，写入 `decoded_mp4_version = 3`；旧 v2 blob 全部重编 / Cache gate `>=2 → >=3`; writer sets version 3; all v2 blobs re-encoded
+- 验证：渲染实际使用的 imageio_ffmpeg v7.1 实测 `-g 48`，362 帧 IDR 每 2s、尾部最后 IDR 14.0s / Verified on the actual runtime ffmpeg (imageio v7.1): IDR every 2s, last IDR at 14.0s
+- 配套：v14.140 `_h264_enc_args`/`_hevc_enc_args` 全分支 `-g 48`（本版本号内已含）/ Bundled with v14.140's `-g 48` on all encode branches
+- 注意：已渲染的旧 mp4 文件不受影响，需触发一次重渲染（blob 自动重编）后生效 / Already-rendered files unaffected; one re-render (auto re-encode) makes it effective
+
 ### v14.140 (2026-10-13) — 修复视频尾部雪花/花屏（关键帧 GOP 修复）/ Fix Tail Snow/Noise (Keyframe GOP Fix)
 
 **核心：视频编码默认 GOP=250（10.4s）导致 15s 预览尾部 4.6s 无 IDR 关键帧（纯 P 帧链），播放器播放/拖拽到尾部时花屏雪花；统一改为显式 GOP=48（2s）关键帧间隔。** / Root cause: default GOP=250 (10.4s) left the last 4.6s of a 15s preview with zero IDR keyframes (pure P-frame chain), so players show snow/artifacts when playing or seeking the tail; now forced GOP=48 (2s) keyframe interval.

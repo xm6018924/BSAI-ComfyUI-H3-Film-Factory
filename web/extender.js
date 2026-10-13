@@ -7569,7 +7569,7 @@ function h3QuickShades(C, levels) {
         if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
-        try { this.title = "BSAI ComfyUI H3 Film Factory v2.124·v14.140"; } catch (e) {}
+        try { this.title = "BSAI ComfyUI H3 Film Factory v2.125·v14.141"; } catch (e) {}
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -8284,7 +8284,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.124·v14.140";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.125·v14.141";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not

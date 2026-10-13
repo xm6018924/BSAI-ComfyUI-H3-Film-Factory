@@ -2355,7 +2355,10 @@ def _decode_single_clip_to_blob(
     # If already decoded with the current version, skip.
     # v2 = trimmed overlap + audio included.  Old blobs (no version marker)
     # contained full frames (with overlap) and no audio, so we must rebuild.
-    if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 2:
+    # v14.141: decoded_mp4_version 升到 3 —— v2 blob 的编码 GOP=250(10.4s) 导致
+    # 预览/成片尾部无 IDR 关键帧而雪花；升版后旧 blob 全部失效、按 GOP=48(2s)
+    # 重新编码，预览/渐进全片/最终成片尾部均可独立解码。
+    if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 3:
         return curr
 
     print(f"[H3 Extender] _decode_single_clip_to_blob: clip={i} data_path={data_path} ffmpeg={ffmpeg}")
@@ -2630,7 +2633,7 @@ def _decode_single_clip_to_blob(
         # Update manifest
         curr["latent_end"] = latent_end
         curr["decoded_mp4_blob"] = render_spec
-        curr["decoded_mp4_version"] = 2
+        curr["decoded_mp4_version"] = 3  # v14.141: v3 = GOP=48(2s IDR) 编码，旧 v2 雪花 blob 不再复用
         curr["decoded_mp4_has_audio"] = has_audio
         curr["decoded_audio"] = {
             "waveform": audio_spec,
