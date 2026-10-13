@@ -2981,42 +2981,74 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                 _r_delegate_dyn = None
                             if _r_delegate_dyn is None:
                                 _r_delegate_dyn = model.clone(disable_dynamic=True)
-                            # v14.143 (2026-10-13): delegate 是 cached_patcher_init 重新加载的
-                            # 全新模型对象, 而 KJNodes 的 block/attn 低显存补丁是
-                            # MethodType 绑定【原模型 block 实例】的 —— 被 clone 复制过来后
-                            # 必然错位: block 走 minimax_block_lowmem_forward 把 h 包成 list,
-                            # attn 却落回原生 forward(期望 tensor) -> 'list' object has no
-                            # attribute 'shape' 二采首步崩溃(用户实机复现)。
-                            # delegate 已按 reserve 预算部分驻留(~14GB), 不再需要低显存
-                            # 补丁, 直接清除 blocks.* 级 object_patches 与 KJNodes 写入的
-                            # minimax_head_chunks / sol_take_forward, 让 delegate 走原生
-                            # block/attn forward(权重补丁 self.patches 保留, 语义不变)。
+                            # v14.143 (2026-10-13): 曾以为 delegate 是 cached_patcher_init 重新
+                            # 加载的全新模型对象, KJNodes 补丁(MethodType 绑定原模型 block 实例)
+                            # 被 clone 复制后必然错位 -> 删掉补丁走原生 forward。实机证明这是
+                            # 错误方向(v14.144 实测): 全幅 latent 中间激活暴涨到 6.35GB
+                            # (allocated 18.05GB = 驻留 11.7 + 中间 6.35), Sol-Attn workspace
+                            # 6.33GB 挤不下(24.38 > 23.86, 差 0.5GB), 连 sage 3.03GB 也失败,
+                            # 依次降级到 pytorch attention, 二采失去稀疏加速。
+                            # 参考插件(v14.82, 用户实测二采 240s/步 无雪花)恰恰是【保留
+                            # KJNodes lowmem 分块 + Sol-Attn 的原 model 重驻留】: qkv GEMM 后
+                            # 立即释放 h/qkv 缓冲 + minimax_head_chunks 按 head 分组, 中间
+                            # 激活被压到 ~1GB 级, Sol-Attn workspace 才有空间。
+                            # v14.145 正确修法: 不是删除补丁, 而是在 delegate 上【重新绑定】
+                            # KJNodes 补丁到 delegate 自己的 block/attn 实例(MethodType 的
+                            # self 指向 delegate 对象, 消除 clone 复制导致的错位), 并从原
+                            # model 恢复 minimax_head_chunks / sol_take_forward。
                             try:
-                                _r_delegate_dyn.object_patches = {
-                                    _k2: _v2 for _k2, _v2 in _r_delegate_dyn.object_patches.items()
-                                    if not _k2.startswith("diffusion_model.blocks.")
-                                }
-                                _r_to2 = _r_delegate_dyn.model_options.get("transformer_options", {})
-                                if isinstance(_r_to2, dict):
-                                    _r_to2.pop("minimax_head_chunks", None)
-                                    _r_to2.pop("sol_take_forward", None)
-                            except Exception:
-                                pass
-                            # v14.144 (2026-10-13): Sol-Attn workspace 让位——
-                            # delegate 驻留 14.4GB 时二采 Sol-Attn 申请 6.33GB workspace
-                            # 失败(allocated 18.05 + 6.33 = 24.38 > 23.86, 仅差 0.5GB),
-                            # 依次降级 sage/pytorch attention, 二采失去稀疏加速。
-                            # 检测 Sol-Attn 挂载键(optimized_attention_override / sol_compose)
-                            # 存在时把 reserve 上调 2.5GB(驻留降到 ~12.4GB, workspace 预算
-                            # 4.5GB -> ~7GB), 给 workspace 让位, 保住二采稀疏加速。
-                            # 换页量 6.9->9.4GB(仍比全流式 21.8GB 减 57%), 二采仅 2 步,
-                            # 稀疏加速收益 >> 换页损失。
+                                import sys as _sys_kn145
+                                import types as _types_kn145
+                                _kj_mod145 = None
+                                for _m145 in list(_sys_kn145.modules.values()):
+                                    _mf145 = getattr(_m145, "__file__", "") or ""
+                                    if _mf145.replace("\\", "/").endswith("nodes/minimax_nodes.py"):
+                                        _kj_mod145 = _m145
+                                        break
+                                if _kj_mod145 is None:
+                                    import importlib.util as _ilu_kn145
+                                    _kj_path145 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                "..", "ComfyUI-KJNodes", "nodes", "minimax_nodes.py")
+                                    if os.path.exists(_kj_path145):
+                                        _kj_spec145 = _ilu_kn145.spec_from_file_location("bsai_kj_minimax145", _kj_path145)
+                                        _kj_mod145 = _ilu_kn145.module_from_spec(_kj_spec145)
+                                        _kj_spec145.loader.exec_module(_kj_mod145)
+                                _r_deleg_diff145 = _r_delegate_dyn.get_model_object("diffusion_model")
+                                _r_deleg_blocks145 = getattr(_r_deleg_diff145, "blocks", None)
+                                if (_kj_mod145 is not None
+                                        and getattr(_kj_mod145, "minimax_block_lowmem_forward", None)
+                                        and _r_deleg_blocks145):
+                                    for _bi145, _blk145 in enumerate(_r_deleg_blocks145):
+                                        _r_delegate_dyn.object_patches[f"diffusion_model.blocks.{_bi145}.forward"] = \
+                                            _types_kn145.MethodType(_kj_mod145.minimax_block_lowmem_forward, _blk145)
+                                        _attn145 = getattr(_blk145, "attn", None)
+                                        if _attn145 is not None and hasattr(_attn145, "qkv_proj"):
+                                            _r_delegate_dyn.object_patches[f"diffusion_model.blocks.{_bi145}.attn.forward"] = \
+                                                _types_kn145.MethodType(_kj_mod145.minimax_attn_lowmem_forward, _attn145)
+                                    # 从原 model 恢复 KJNodes 写入的 transformer_options 键
+                                    _r_to145 = _r_delegate_dyn.model_options.get("transformer_options", {})
+                                    _r_to_orig145 = model.model_options.get("transformer_options", {})
+                                    if isinstance(_r_to145, dict) and isinstance(_r_to_orig145, dict):
+                                        if "minimax_head_chunks" in _r_to_orig145:
+                                            _r_to145["minimax_head_chunks"] = _r_to_orig145["minimax_head_chunks"]
+                                        if "sol_take_forward" in _r_to_orig145:
+                                            _r_to145["sol_take_forward"] = _r_to_orig145["sol_take_forward"]
+                                    print(f"[H3 Extender] v14.145 KJNodes 低显存补丁已重建绑定到 delegate({len(_r_deleg_blocks145)} blocks)")
+                                else:
+                                    print(f"[H3 Extender] v14.145 KJNodes 补丁重建跳过(模块/blocks 不可用), 走原生 forward")
+                            except Exception as _re145:
+                                print(f"[H3 Extender] v14.145 KJNodes 补丁重建失败(回退原生 forward): {_re145}")
+                            # v14.144 (2026-10-13): Sol-Attn workspace 让位——曾因原生 forward
+                            # 中间激活 6.35GB 挤爆, 临时把 reserve 上调 2.5GB。v14.145 恢复
+                            # KJNodes lowmem 分块(head 分组)后中间激活与 Sol-Attn workspace
+                            # 同步缩小(minimax_head_chunks 使 kernel 内部暂存随 head 组缩水),
+                            # 还原为参考插件标准 reserve 公式(与 v14.82 逐行一致, 实测 240s/步)。
+                            # 检测 Sol-Attn 挂载键仅用于日志提示, 不再额外让位。
                             try:
                                 _r_to3 = _r_delegate_dyn.model_options.get("transformer_options", {})
                                 if isinstance(_r_to3, dict) and (
                                         _r_to3.get("optimized_attention_override") or _r_to3.get("sol_compose")):
-                                    _r_resv_dyn = _r_resv_dyn + 2.5
-                                    _r_resv_dyn = max(3.0, min(10.0, _r_resv_dyn))
+                                    print(f"[H3 Extender] v14.145 Sol-Attn 已挂载, 走 KJNodes head 分组稀疏路径")
                             except Exception:
                                 pass
                             try:
@@ -3028,7 +3060,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _torch3.cuda.synchronize()
                             try:
                                 _res2d = _r_delegate_dyn.loaded_size() / 1024 ** 3
-                                print(f"[H3 Extender] v14.144 DynamicVRAM 二采改用 non-dynamic delegate 驻留(原生forward): "
+                                print(f"[H3 Extender] v14.145 DynamicVRAM 二采改用 non-dynamic delegate 驻留(KJNodes补丁重建): "
                                       f"resident={_res2d:.1f}GB / total={_r_delegate_dyn.model_size()/1024**3:.1f}GB "
                                       f"reserve={_r_resv_dyn:.1f}GB")
                             except Exception:
@@ -3036,9 +3068,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _refine_model = _r_delegate_dyn
                         except Exception as _de142:
                             _refine_model = model
-                            print(f"[H3 Extender] v14.144 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
+                            print(f"[H3 Extender] v14.145 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
                         if _refine_model is model:
                             print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
+                        else:
+                            print(f"[H3 Extender] v14.145 delegate 已接管二采采样模型(非 DynamicVRAM 驻留路径)")
                     else:
                         # v1.87: 分块二采也走重驻留。v1.68 曾对 tile_count>1 跳过重载
                         # 导致二采 0 loaded + 20GB 全流式换页(实测 313s/it, 极速-VDN
