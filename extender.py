@@ -5307,9 +5307,9 @@ class BSAIH3FilmFactory:
             # 一采 VDN 8 步 + 二采 6 步: 与 FastH3 精细同画质, 一采更快更稳.
             steps, refine_steps, tile_count, refine_denoise = 8, 6, 4, 0.55
         elif speed_preset == "FastH3-Trim":
-            # FastH3 Trim: 42层剪枝模型(nvfp4), 8步单采无二采.
-            # 5s视频~39s(RTX 4090), 5090更快. 参数容错高, 不易崩.
-            steps, refine_steps, tile_count, refine_denoise = 8, 0, 4, 0.45
+            # FastH3 Trim: 42层剪枝模型(nvfp4), 8步一采+2步二采双采.
+            # 比V2模型一采快15%, 配合二采保画质.
+            steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.45
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
