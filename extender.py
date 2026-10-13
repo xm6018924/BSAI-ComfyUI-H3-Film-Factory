@@ -2930,6 +2930,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 模式下模型一采后会被完全释放(allocated≈0GB), 若依赖按需重载,
             # 21.8GB 全量加载在 24GB 卡上会假死(见 v1.47 预算注释).
             # load_model_gpu 同步加载, OOM 抛异常可走下方 fallback, 不静默卡死.
+            _refine_model = model  # v14.142: 二采用模型（DynamicVRAM 时替换为 non-dynamic delegate）
+            _ext_resv_orig = None  # v14.142: delegate 路径进入前的 EXTRA_RESERVED_VRAM 原值
             try:
                 import torch as _torch3
                 import comfy.model_management as _mm3
@@ -2956,7 +2958,49 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     except Exception:
                         _is_dyn = False
                     if _is_dyn:
-                        print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
+                        # v14.142 (2026-10-13): DynamicVRAM 二采 0 驻留全流式换页根治。
+                        # 根因: DynamicVRAM 开启时一采后模型被完全卸载(allocated≈0GB),
+                        # 二采交 staged 调度 = 每步 21.8GB CPU↔GPU 逐层换页 → 实测 637s/it
+                        # (历史同根因: v1.54 209s、v1.87 313s、v1.90 分块 900s/步)。
+                        # 修复: 用官方 get_non_dynamic_delegate()/clone(disable_dynamic=True)
+                        # 生成非 dynamic delegate, 对 delegate 走标准 load_models_gpu 部分驻留
+                        # (reserve 预算内驻留 + offload 尾部, 换页量减 2/3, 提速 2-3 倍)。
+                        # delegate 与原 model 共享底层权重(模型缓存命中), 采样语义不变;
+                        # 失败回退原路径(维持现状, 不会更糟)。
+                        try:
+                            _r_ws_dyn = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                            _r_resv_dyn = _model_gb2 - (_gpu_total_gb2 - _r_ws_dyn - 3.0 - 1.5)
+                            _r_resv_dyn = max(3.0, min(8.0, _r_resv_dyn))
+                            if tiled_refine:
+                                _r_resv_dyn = max(_r_resv_dyn, 7.5)
+                            _r_delegate_dyn = None
+                            try:
+                                if hasattr(model, "get_non_dynamic_delegate"):
+                                    _r_delegate_dyn = model.get_non_dynamic_delegate()
+                            except Exception:
+                                _r_delegate_dyn = None
+                            if _r_delegate_dyn is None:
+                                _r_delegate_dyn = model.clone(disable_dynamic=True)
+                            try:
+                                _ext_resv_orig = _mm3.EXTRA_RESERVED_VRAM
+                            except Exception:
+                                _ext_resv_orig = None
+                            _mm3.EXTRA_RESERVED_VRAM = int(_r_resv_dyn * 1024 ** 3)
+                            _mm3.load_models_gpu([_r_delegate_dyn])
+                            _torch3.cuda.synchronize()
+                            try:
+                                _res2d = _r_delegate_dyn.loaded_size() / 1024 ** 3
+                                print(f"[H3 Extender] v14.142 DynamicVRAM 二采改用 non-dynamic delegate 驻留: "
+                                      f"resident={_res2d:.1f}GB / total={_r_delegate_dyn.model_size()/1024**3:.1f}GB "
+                                      f"reserve={_r_resv_dyn:.1f}GB")
+                            except Exception:
+                                pass
+                            _refine_model = _r_delegate_dyn
+                        except Exception as _de142:
+                            _refine_model = model
+                            print(f"[H3 Extender] v14.142 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
+                        if _refine_model is model:
+                            print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
                     else:
                         # v1.87: 分块二采也走重驻留。v1.68 曾对 tile_count>1 跳过重载
                         # 导致二采 0 loaded + 20GB 全流式换页(实测 313s/it, 极速-VDN
@@ -3050,7 +3094,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # v1.62: Sol-Attn sigma 门修复(工作流 end_percent 0.9->1.0)已验证:
                 # step4 428s -> 134s. 原 sol_attn 计数诊断因模块以 spec 方式加载
                 # 无法共享 _stats, 移除, 保留耗时诊断即可.
-            _r_guider = _BasicGuider(model)
+            _r_guider = _BasicGuider(_refine_model)
             _r_guider.set_conds(conditioning)
             # v1.64: 恢复 v1.59 驻留补丁(v1.61 改诊断时误删)——二采采样前
             # 跳过 sampler_helpers._prepare_sampling 的 load_models_gpu/free_memory,
@@ -3149,7 +3193,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _lock_n = 0
                         _chunk_base = comfy.nested_tensor.NestedTensor((_cv, _ca))
                         _chunk_noise = comfy.sample.prepare_noise(_chunk_base, int(seed) + 1 + _ki, None)
-                        _chunk_latent = _ff_const_add_noise(model, _chunk_noise, _r_sigmas,
+                        _chunk_latent = _ff_const_add_noise(_refine_model, _chunk_noise, _r_sigmas,
                                                             {"samples": _chunk_base}, _r_audio)
                         # 加噪后把锁区重填为上一段干净结果(mask=0 时采样器保持该值, 不能保留加噪值)
                         if _lock_n > 0:
@@ -3198,6 +3242,23 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         _r_restore_tiles()
                     except Exception:
                         pass
+                # v14.142: 二采完成后卸载 non-dynamic delegate, 恢复 EXTRA_RESERVED_VRAM
+                # 到进入前原值, 避免 delegate 驻留残留挤压下一 CLIP 一采的 DynamicVRAM
+                # staged 空间. 原 dynamic model 交给 DynamicVRAM 自身调度.
+                try:
+                    if _refine_model is not model:
+                        try:
+                            _mm3.unload_model(_refine_model)
+                        except Exception:
+                            pass
+                        _refine_model = model
+                    if _ext_resv_orig is not None:
+                        try:
+                            _mm3.EXTRA_RESERVED_VRAM = _ext_resv_orig
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             samples = _r_samples.to(comfy.model_management.intermediate_device())
             print(f"[H3 Extender] Refine 双采完成: clip={clip_index}")
         except torch.cuda.OutOfMemoryError as _oom:
@@ -3290,11 +3351,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     pass
             _gc.collect()
             _torch.cuda.empty_cache()
-            _r2_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
+            _r2_sigmas = _sigmas(_refine_model, "beta", _r_steps, _r_denoise)
             _r2_noise = comfy.sample.prepare_noise(_fb_use, int(seed) + 1, None)
-            _r2_latent = _ff_const_add_noise(model, _r2_noise, _r2_sigmas, {"samples": _fb_use}, _r_audio)
+            _r2_latent = _ff_const_add_noise(_refine_model, _r2_noise, _r2_sigmas, {"samples": _fb_use}, _r_audio)
             _r2_sampler = comfy.samplers.sampler_object(str(sampler_name))
-            _r2_guider = _BasicGuider(model)
+            _r2_guider = _BasicGuider(_refine_model)
             _r2_guider.set_conds(conditioning)
             import comfy.sampler_helpers as _sh_fb
             _bsai_orig_prepare_fb = _sh_fb._prepare_sampling
@@ -7047,8 +7108,8 @@ NODE_CLASS_MAPPINGS = {
     "BSAIH3FilmFactoryFinalDecode": MiniMaxH3MotionContextDiskFinalDecode,
 }
 
-# v14.95 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.95 backend loaded (59-widget mid-insert layout, history-key remap supported)")
+# v14.142 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
+print("[BSAI-H3-Film-Factory] v14.142 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
