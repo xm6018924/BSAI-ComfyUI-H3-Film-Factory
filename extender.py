@@ -3196,6 +3196,32 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             else:
                 print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} <= "
                       f"{_REFINE_MAX_SOL_TOKENS:,}, Sol-Attn 稀疏保留(健康区)")
+            # v14.149 (2026-10-13): 方案A 补全——参考插件实测(二采每步 240s 量级、
+            # 画质清晰无雪花)的核心机制是 spatial tiles 分块二采:
+            #   [H3 Extender] Refine 分块二采已启用: n_tiles=4 overlap=128px
+            #   [INFO] spatial tiles: axis=W size=120 n=4 overlap=128px/8 latent
+            #          ranges=[(0, 46), (22, 68), (52, 98), (82, 120)]
+            # 每块 W≈46 latent -> token ≈ 46x68x107 = 334,696 < 440k 病态线,
+            # Sol-Attn 稀疏/head 分组在健康区稳定跑, 无 kernel 病态卡死.
+            # 我们工作流 tiled_refine=False 导致整段 873,120 tokens 命中病态区.
+            # 修正: 二采 latent token 超阈值且未启用 tiled_refine 时, 自动按
+            # 参考插件参数启用分块(n_tiles=4, overlap=128px); 分块后每块 token
+            # ~334k < 350k 门阈值, Sol-Attn 稀疏保留(参考插件同款路径). 分块
+            # 包装失败时维持 v14.148 dense 回退门, 双保险.
+            if _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None:
+                try:
+                    import os as _os_t3, importlib.util as _ilu_t3
+                    _tiles_path3 = _os_t3.path.join(_os_t3.path.dirname(_os_t3.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
+                    _tiles_spec3 = _ilu_t3.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path3)
+                    _tiles_mod3 = _ilu_t3.module_from_spec(_tiles_spec3)
+                    _tiles_spec3.loader.exec_module(_tiles_mod3)
+                    _r_restore_tiles = _tiles_mod3.wrap_sampler_spatial_tiles(
+                        _r_sampler, n_tiles=4, overlap_pixels=128)
+                    print(f"[H3 Extender] v14.149 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
+                          f"自动启用分块二采 n_tiles=4 overlap=128px "
+                          f"(参考插件实测 240s/步 无雪花路径, 每块 ~334k token 健康区)")
+                except Exception as _te_t3:
+                    print(f"[H3 Extender] v14.149 自动分块失败(维持 v14.148 dense 回退门): {_te_t3}")
             _r_guider = _BasicGuider(_refine_model)
             _r_guider.set_conds(conditioning)
             # v1.64: 恢复 v1.59 驻留补丁(v1.61 改诊断时误删)——二采采样前
@@ -7223,7 +7249,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.148 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k dense回退)")
+print("[BSAI-H3-Film-Factory] v14.149 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k + 自动分块n4保稳)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
