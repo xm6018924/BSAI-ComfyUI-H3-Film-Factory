@@ -3166,6 +3166,36 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # v1.62: Sol-Attn sigma 门修复(工作流 end_percent 0.9->1.0)已验证:
                 # step4 428s -> 134s. 原 sol_attn 计数诊断因模块以 spec 方式加载
                 # 无法共享 _stats, 移除, 保留耗时诊断即可.
+            # v14.148 (2026-10-13): 方案A —— Sol-Attn kernel 病态规模门。
+            # 独立基准实测(comfy_kitchen ck.sol_attn, RTX 5090 24GB, 与实机同参):
+            #   n=218,280 -> 0.97s / n=293,760 -> 0.70s (健康)
+            #   n=440,640 -> >45s / n=873,120 topk -> >600s / n=873,120 dense -> >60s (病态)
+            # 病态与 topk routing 无关, 是 kernel 在 n>=~440k 时超线性恶化.
+            # 二采整段 latent 120x68x107 = 873,120 tokens 必命中病态区 -> 第1步 75min 未完成.
+            # 门: 单段 latent token > 阈值时向 transformer_options 注入 sol_max_tokens,
+            # Sol-Attn make_override 读取后直接 dense 回退(KJNodes 分组+SageAttention,
+            # 对齐参考插件 v14.82 实测 240s/步 无雪花). 一采 218k 低于阈值不受影响.
+            _REFINE_MAX_SOL_TOKENS = 350000
+            try:
+                _r_tok_gate = 0
+                _r_m_gate, _ = _ff_extract_members(samples)
+                if _r_m_gate is not None and getattr(_r_m_gate[0], "ndim", 0) >= 4:
+                    _r_tok_gate = int(_r_m_gate[0].shape[2]) * int(_r_m_gate[0].shape[-2]) * int(_r_m_gate[0].shape[-1])
+            except Exception:
+                _r_tok_gate = 0
+            if _r_tok_gate > _REFINE_MAX_SOL_TOKENS:
+                try:
+                    _r_to_gate = _refine_model.model_options.get("transformer_options", {})
+                    if isinstance(_r_to_gate, dict):
+                        _r_to_gate["sol_max_tokens"] = _REFINE_MAX_SOL_TOKENS
+                        print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} > "
+                              f"{_REFINE_MAX_SOL_TOKENS:,}, Sol-Attn 已降级 dense(KJNodes 分组+SageAttention), "
+                              f"绕开病态 kernel(基准: 293k=0.7s 健康 / 440k>45s / 873k>600s)")
+                except Exception as _eg:
+                    print(f"[H3 Extender] v14.148 方案A 注入 sol_max_tokens 失败(可忽略): {_eg}")
+            else:
+                print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} <= "
+                      f"{_REFINE_MAX_SOL_TOKENS:,}, Sol-Attn 稀疏保留(健康区)")
             _r_guider = _BasicGuider(_refine_model)
             _r_guider.set_conds(conditioning)
             # v1.64: 恢复 v1.59 驻留补丁(v1.61 改诊断时误删)——二采采样前
@@ -3329,6 +3359,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _mm3.EXTRA_RESERVED_VRAM = _ext_resv_orig
                         except Exception:
                             pass
+                except Exception:
+                    pass
+                # v14.148: 清理二采注入的 sol_max_tokens 门, 防止残留影响后续 CLIP 一采
+                # (一采 218k 本就不会触发, 但保持模型状态干净).
+                try:
+                    _r_to_clean = model.model_options.get("transformer_options", {})
+                    if isinstance(_r_to_clean, dict) and "sol_max_tokens" in _r_to_clean:
+                        _r_to_clean.pop("sol_max_tokens", None)
                 except Exception:
                     pass
             samples = _r_samples.to(comfy.model_management.intermediate_device())
@@ -7185,7 +7223,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.147 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown)")
+print("[BSAI-H3-Film-Factory] v14.148 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k dense回退)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
