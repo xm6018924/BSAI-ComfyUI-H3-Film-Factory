@@ -2981,6 +2981,27 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                 _r_delegate_dyn = None
                             if _r_delegate_dyn is None:
                                 _r_delegate_dyn = model.clone(disable_dynamic=True)
+                            # v14.143 (2026-10-13): delegate 是 cached_patcher_init 重新加载的
+                            # 全新模型对象, 而 KJNodes 的 block/attn 低显存补丁是
+                            # MethodType 绑定【原模型 block 实例】的 —— 被 clone 复制过来后
+                            # 必然错位: block 走 minimax_block_lowmem_forward 把 h 包成 list,
+                            # attn 却落回原生 forward(期望 tensor) -> 'list' object has no
+                            # attribute 'shape' 二采首步崩溃(用户实机复现)。
+                            # delegate 已按 reserve 预算部分驻留(~14GB), 不再需要低显存
+                            # 补丁, 直接清除 blocks.* 级 object_patches 与 KJNodes 写入的
+                            # minimax_head_chunks / sol_take_forward, 让 delegate 走原生
+                            # block/attn forward(权重补丁 self.patches 保留, 语义不变)。
+                            try:
+                                _r_delegate_dyn.object_patches = {
+                                    _k2: _v2 for _k2, _v2 in _r_delegate_dyn.object_patches.items()
+                                    if not _k2.startswith("diffusion_model.blocks.")
+                                }
+                                _r_to2 = _r_delegate_dyn.model_options.get("transformer_options", {})
+                                if isinstance(_r_to2, dict):
+                                    _r_to2.pop("minimax_head_chunks", None)
+                                    _r_to2.pop("sol_take_forward", None)
+                            except Exception:
+                                pass
                             try:
                                 _ext_resv_orig = _mm3.EXTRA_RESERVED_VRAM
                             except Exception:
@@ -2990,7 +3011,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _torch3.cuda.synchronize()
                             try:
                                 _res2d = _r_delegate_dyn.loaded_size() / 1024 ** 3
-                                print(f"[H3 Extender] v14.142 DynamicVRAM 二采改用 non-dynamic delegate 驻留: "
+                                print(f"[H3 Extender] v14.143 DynamicVRAM 二采改用 non-dynamic delegate 驻留(原生forward): "
                                       f"resident={_res2d:.1f}GB / total={_r_delegate_dyn.model_size()/1024**3:.1f}GB "
                                       f"reserve={_r_resv_dyn:.1f}GB")
                             except Exception:
@@ -2998,7 +3019,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _refine_model = _r_delegate_dyn
                         except Exception as _de142:
                             _refine_model = model
-                            print(f"[H3 Extender] v14.142 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
+                            print(f"[H3 Extender] v14.143 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
                         if _refine_model is model:
                             print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
                     else:
@@ -7108,8 +7129,8 @@ NODE_CLASS_MAPPINGS = {
     "BSAIH3FilmFactoryFinalDecode": MiniMaxH3MotionContextDiskFinalDecode,
 }
 
-# v14.142 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.142 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate)")
+# v14.143 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
+print("[BSAI-H3-Film-Factory] v14.143 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate native-forward)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
