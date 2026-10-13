@@ -6623,7 +6623,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "block_cache", zh: "块缓存", en: "BlkCache", desc: "H3 Block Cache(F1B0 残差)加速，需 T8 插件；顺序画面稳定时显著提速。" },
         { key: "ref_cache", zh: "参考缓存", en: "RefCache", desc: "Ref2VA 参考图编码磁盘缓存，调参重跑跳过重复编码。" },
         { key: "output_mode", zh: "输出", en: "Output", desc: "输出模式循环：none(仅缓存)→per_clip(分段)→merged(合并)→both(两者)。", cycle: ["none", "per_clip", "merged", "both"] },
-        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环：极速(一采4+二采3步/denoise0.5)→均衡(6+4步)→精细(8+6步)。", cycle: ["极速", "均衡", "精细"] },
+        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环（8档全）：custom(按下方手动参数)→极速(一采4+二采3步/denoise0.5)→均衡(6+4)→精细(8+6)→极速-VDN(8+3)→均衡-VDN(8+4)→精细-VDN(8+6)→FastH3-Trim(8步单采无二采)。VDN档需配VDN工作流；Trim档需配fastvideo_fasth3_trim模型。颜色：灰=custom手动档 / 青=FastH3标准档 / 紫=VDN档 / 橙=Trim单采档。", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }, { color: "#fdba74", border: "#ea580c" }] },
         { key: "refine_lipsync_mode", zh: "口型", en: "Lipsync", desc: "对口型×二采预设循环：锁定保口型→音频参与重绘0.7→音频全重绘1.0。", cycle: ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"] },
         { key: "upscale_mode", zh: "超分模式", en: "UpxMode", desc: "超分模式循环：平衡(质量+速度)→质量优先→速度优先→自定义。", cycle: ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"] },
         { key: "pause_enable", zh: "暂停", en: "Pause", desc: "每 CLIP 生成完自动暂停等待；无干预超时自动继续。" },
@@ -6697,6 +6697,34 @@ function h3QuickShades(C, levels) {
     return out;
 }
 
+// v14.146: 分档独立配色（tints 每档一组 color/border）——同档位内仍按序号
+// 深浅渐变（第0档=默认档=关闭态暗色），档与档之间用不同色相区分链路：
+// 灰=custom / 青=FastH3标准 / 紫=VDN / 橙=Trim。
+const __h3TintCache = new Map();
+function h3QuickTintedShades(tints) {
+    const n = Math.max(1, Math.min(8, tints.length | 0));
+    const ck = "t|" + n + "|" + tints.map((t) => t.color + t.border).join(",");
+    if (__h3TintCache.has(ck)) return __h3TintCache.get(ck);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+        const t = n > 1 ? i / (n - 1) : 1;
+        const T = tints[Math.min(i, tints.length - 1)];
+        const bg = h3MixHex(T.color, T.border, t * 0.9);
+        out.push({
+            t: t,
+            bg: h3Rgba(bg, 0.13 + 0.58 * t),
+            border: h3MixHex(T.border, T.color, t * 0.55),
+            stripe: h3MixHex(T.color, "#ffffff", t * 0.35),
+            glow: h3Rgba(h3MixHex(T.color, "#ffffff", t * 0.35), 0.18 + 0.62 * t),
+            text: t >= 0.66 ? "#ffffff" : (t >= 0.34 ? h3MixHex(T.color, "#ffffff", 0.55) : T.color),
+            textAlpha: 0.62 + 0.38 * t,
+            subText: T.color,
+        });
+    }
+    __h3TintCache.set(ck, out);
+    return out;
+}
+
     // ── v14.135: 按功能分色（用户要求）─────────────────────────────────
     // 颜色 = 功能分类；亮度/底色 = 当前状态（关=暗、 开=亮+发光）。
     // 这样"属于哪一类"和"开没开"两个信息互不打架（旧版只用绿/灰表示状态，
@@ -6729,13 +6757,13 @@ function h3QuickShades(C, levels) {
     quickBar.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:5px 4px;border-top:1px solid rgba(255,255,255,.18);margin-bottom:2px;flex-shrink:0;background:#182838;";
     const quickTitle = document.createElement("span");
     quickTitle.textContent = "快捷";
-    quickTitle.title = "一键化快捷开关：点一下开/关(布尔)或循环下一档(枚举)；悬停按钮查看完整说明。不改变参数顺序，旧工作流零影响。\n\n颜色 = 功能分类（紫=画质 / 青=加速 / 橙=超分 / 粉=语义 / 蓝=流程）。\n多档位按钮（如 输出 none→per_clip→merged→both）：同色系深浅渐变 + 底部档位进度条，越亮越靠后；第一档为关闭态暗色。";
+    quickTitle.title = "一键化快捷开关：点一下开/关(布尔)或循环下一档(枚举)；悬停按钮查看完整说明。不改变参数顺序，旧工作流零影响。\n\n颜色 = 功能分类（紫=画质 / 青=加速 / 橙=超分 / 粉=语义 / 蓝=流程）。\n多档位按钮（如 输出 none→per_clip→merged→both）：同色系深浅渐变 + 底部档位进度条，越亮越靠后；第一档为关闭态暗色。\n速度档位（8档）：灰=custom手动档 / 青=FastH3标准档(极速/均衡/精细) / 紫=VDN档 / 橙=FastH3-Trim单采档；同链路内越亮越靠后。";
     quickTitle.style.cssText = "font-size:9px;color:#8ab4f8;white-space:nowrap;margin-right:2px;font-weight:bold;text-shadow:0 0 6px rgba(138,180,248,.45);";
     quickBar.append(quickTitle);
     for (const def of QUICK_DEFS) {
         const w = node.widgets.find((x) => x.name === def.key);
         const C = QUICK_CATEGORIES[QUICK_CAT[def.key]] || QUICK_CATEGORIES.flow;
-        const shades = def.cycle ? h3QuickShades(C, def.cycle.length) : null;
+        const shades = def.cycle ? (def.tints ? h3QuickTintedShades(def.tints) : h3QuickShades(C, def.cycle.length)) : null;
         const btn = document.createElement("button");
         btn.style.cssText = "position:relative;overflow:hidden;font-size:9px;line-height:1.15;padding:2px 7px 3px 9px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;border:1px solid " + C.border + ";border-left:3px solid " + C.color + ";transition:background .12s,border-color .12s,box-shadow .12s;";
         const lab = document.createElement("span");
@@ -7569,7 +7597,7 @@ function h3QuickShades(C, levels) {
         if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
-        try { this.title = "BSAI ComfyUI H3 Film Factory v2.127·v14.145"; } catch (e) {}
+        try { this.title = "BSAI ComfyUI H3 Film Factory v2.128·v14.146"; } catch (e) {}
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -8284,7 +8312,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.127·v14.145";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.128·v14.146";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not
