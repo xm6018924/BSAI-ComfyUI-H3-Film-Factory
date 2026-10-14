@@ -458,6 +458,26 @@ def _concat_clip_av(images_list, audios_list):
     imgs = [im for im in images_list if im is not None and int(im.shape[0]) > 0]
     if imgs:
         try:
+            # v2.119: 尺寸统一兜底 — 若各 clip 帧尺寸不一致(如 1080 vs 1088,
+            # 来源: 参考图分辨率污染 / 损坏缓存 / ffmpeg 异步编码异常写出畸形容器),
+            # torch.cat 会直接报尺寸不匹配。检测到不一致时统一 resize 到最大
+            # WxH 再拼接(保留完整预览); 尺寸一致时零开销走原路径。
+            _sp = {(int(im.shape[1]), int(im.shape[2])) for im in imgs}
+            if len(_sp) > 1:
+                _max_h = max(int(im.shape[1]) for im in imgs)
+                _max_w = max(int(im.shape[2]) for im in imgs)
+                _norm = []
+                for _im in imgs:
+                    if int(_im.shape[1]) == _max_h and int(_im.shape[2]) == _max_w:
+                        _norm.append(_im)
+                    else:
+                        _imf = _im.float().permute(0, 3, 1, 2).contiguous()
+                        _imf = torch.nn.functional.interpolate(
+                            _imf, size=(_max_h, _max_w), mode="bilinear", align_corners=False
+                        )
+                        _norm.append(_imf.permute(0, 2, 3, 1).contiguous())
+                print(f"[H3 Extender] _concat_clip_av 尺寸统一: {sorted(_sp)} -> ({_max_h}, {_max_w})")
+                imgs = _norm
             images = torch.cat(imgs, dim=0).float().cpu().contiguous()
         except Exception as _cat_err:
             # v2.118: 22 段 1080p 全分辨率 concat 会要 ~157GB 内存(OOM 崩节点)。
