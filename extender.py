@@ -5038,7 +5038,7 @@ class BSAIH3FilmFactory:
                 ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA"],
                 {
                     "default": "custom",
-                    "tooltip": "v1.86 速度预设（默认 custom=按下方各widget显式值，开箱即用最佳 8+2 双采）。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流使用。FastH3-Trim=nvfp4剪枝模型8步+2二采。FastH3-4步VSA=4步VSA蒸馏LoRA+2步二采，最快速度。custom=按下方各widget显式值。",
+                    "tooltip": "v1.86 速度预设（默认 custom=按下方各widget显式值，开箱即用最佳 8+2 双采）。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流使用。FastH3-Trim=nvfp4剪枝模型8步+4二采。FastH3-4步VSA=4步VSA蒸馏LoRA+2步二采，最快速度。custom=按下方各widget显式值。",
                 },
             ),
             "temporal_chunk_tokens": (
@@ -5371,9 +5371,9 @@ class BSAIH3FilmFactory:
             # 一采 VDN 8 步 + 二采 6 步: 与 FastH3 精细同画质, 一采更快更稳.
             steps, refine_steps, tile_count, refine_denoise = 8, 6, 4, 0.55
         elif speed_preset == "FastH3-Trim":
-            # FastH3 Trim: 42层剪枝模型(nvfp4), 8步一采+2步二采双采.
-            # 比V2模型一采快15%, 配合二采保画质.
-            steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.45
+            # FastH3 Trim: 42层剪枝模型(nvfp4), 8步一采+4步二采双采.
+            # 比V2模型一采快15%, 二采4步细节更丰富(2026-10-13 用户要求 8+4 档).
+            steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
         elif speed_preset == "FastH3-4步VSA":
             # FastH3 4步VSA: 4步DMD2蒸馏+VSA稀疏注意力LoRA, 配2步二采.
             # 最快速度, 质量略低于8步但远快于50步base.

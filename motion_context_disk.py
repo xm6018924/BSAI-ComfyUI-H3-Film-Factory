@@ -2394,7 +2394,24 @@ def _decode_single_clip_to_blob(
 
     v = _load_segment_video(data_path, curr)
     print(f"[H3 Extender]   step 2: vae.decode (shape={tuple(v.shape)})...")
-    video = vae.decode(v)
+    # v1.82b: 覆盖 VAE output_device 到 GPU —— lowvram/dynamic 模式下 ComfyUI
+    # intermediate_device() 会把整段 1920x1088 float32 视频直接输出到 CPU
+    # (8.5GB/段), 渲染进程内存压力下 alloc_cpu OOM. 强制 GPU 输出, 配合下方
+    # 分批 uint8 转换, 彻底消除 CPU 侧大分配. decode 为单线程调用, try/finally
+    # 立即恢复原值, 不影响后续路径.
+    _od_prev = getattr(vae, "output_device", None)
+    _od_overridden = bool(
+        _od_prev is not None
+        and getattr(getattr(vae, "device", None), "type", None) == "cuda"
+        and getattr(_od_prev, "type", None) != "cuda"
+    )
+    if _od_overridden:
+        vae.output_device = vae.device
+    try:
+        video = vae.decode(v)
+    finally:
+        if _od_overridden:
+            vae.output_device = _od_prev
     if video.ndim == 5:
         video = video.reshape(-1, video.shape[-3], video.shape[-2], video.shape[-1])
     print(f"[H3 Extender]   step 2 done: video shape={tuple(video.shape)}")
@@ -2498,10 +2515,20 @@ def _decode_single_clip_to_blob(
     # 拷贝); async_encode=True 时在后台线程执行(encode ~55s 与下一段 GPU 工作
     # 并行, 省 ~55s/段), 主线程立即继续; encode 只占 CPU pipe + NVENC, 与主
     # 线程 GPU 无显存冲突. 同步路径(安全回退)行为与 v1.69 完全一致.
-    video_cpu = (
-        video.detach().float().clamp(0.0, 1.0).mul(255.0).add_(0.5)
-        .to(torch.uint8).cpu().contiguous()
-    )
+    # v1.82: 高清档(1920x1088)整段 float32 转换峰值 8.5GB(340帧*1088*1920*3*4B),
+    # 渲染进程内存压力下 OOM(alloc_cpu.cpp:117)。改为逐批 float->uint8:
+    # GPU 输入在 GPU 上逐批算, 仅 uint8 分批拷 CPU; CPU 输入逐批转。
+    # 每批峰值 <= _BS 帧 float32(= _BS*H*W*3*4B) + _BS 帧 uint8, 16帧约 0.6GB。
+    _BS = 16
+    _vid = video.detach()
+    _parts = []
+    for _s in range(0, int(_vid.shape[0]), _BS):
+        _parts.append(
+            _vid[_s:_s + _BS].float().clamp(0.0, 1.0).mul(255.0).add_(0.5)
+            .to(torch.uint8).cpu()
+        )
+    video_cpu = torch.cat(_parts, dim=0).contiguous()
+    del _parts, _vid
     del video
 
     def _encode_and_store(video_u8, audio_in):
