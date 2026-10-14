@@ -1077,6 +1077,12 @@ function parseState(raw) {
                     clip.replace_mode = c?.replace_mode !== undefined ? Boolean(c.replace_mode) : false;
                     // v14.85 CLIP 级超分三态：仅 true/false 保留，其余（含缺失）归一为 null=跟随总开关
                     clip.upscale = c?.upscale === true ? true : c?.upscale === false ? false : null;
+                    // v2.72: 外部提示词(clip_prompt_N 端口驱动)与 builtin_prompt 备份
+                    // 由 serializeState 写入 clips_json, 但 parseState 之前不恢复 →
+                    // 刷新/另存后 external_prompt 丢失, 需要重新输入外部提示词。
+                    // 此处补全恢复, 保持端口断开/清空时的回退语义。
+                    if (c?.external_prompt !== undefined) clip.external_prompt = String(c.external_prompt);
+                    if (c?.builtin_prompt !== undefined) clip.builtin_prompt = String(c.builtin_prompt);
                     return clip;
                 }),
             };
@@ -1137,7 +1143,11 @@ async function restoreCacheState(node, runtime) {
 
         // v1.100: 刷新/另存后从缓存恢复全局提示词(若前端 state 丢失), 资产链接
         // (@图N)自动恢复, 无需重新输入全局提示词。
-        if (payload?.global_prompt && !runtime.state?.global_prompt) {
+        // v2.72: 条件从「state.global_prompt 为空」放宽为「textarea 显示值与缓存
+        // 不一致」——onConfigure 恢复 state 后 state 非空, 但 textarea 可能仍是
+        // constructRuntime 阶段的空白, 必须在这里兜底同步, 否则用户看不到外部
+        // 提示词、被迫重新输入。
+        if (payload?.global_prompt && String(runtime.globalPromptTextarea?.value || "") !== String(payload.global_prompt)) {
             runtime.state.global_prompt = String(payload.global_prompt);
             if (runtime.globalPromptTextarea && runtime.globalPromptTextarea.value !== String(payload.global_prompt)) {
                 runtime.globalPromptTextarea.value = String(payload.global_prompt);
@@ -3608,11 +3618,18 @@ function syncGlobalPromptFromInput(node, runtime) {
                         runtime.state.clips.splice(segments.length);
                     }
                     runtime._sourceClipsDirty = true;
+                    // v2.72: storyboard 解析填充 CLIP prompt(含 @图N)后必须立即写回
+                    // clips_json widget —— 否则保存工作流时 json 里 CLIP prompt 仍是
+                    // 旧值, 刷新/另存后 @图N 引用丢失, 用户被迫"清空再重输外部提示词"
+                    // 才能重新自动@资产库。updateHidden 只写 widget + 打脏, 不 render,
+                    // 不会与 poller 的 render 递归。
+                    updateHidden(node, runtime);
                 } else if (!fullText || !fullText.trim()) {
                     // v2.53: 外部提示词完全清空时, 把所有 CLIP 也清空
                     if (runtime.state.clips.length > 0) {
                         runtime.state.clips.splice(0);
                         runtime._sourceClipsDirty = true;
+                        updateHidden(node, runtime);
                     }
                 }
             }
@@ -6094,7 +6111,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 	restoreCacheBtn.classList.add("bsai-tb-btn");
 	restoreCacheBtn.addEventListener("click", (e) => {
 		e.preventDefault();
-		if (!confirm("确定要恢复最近一次渲染的所有缓存吗？\n\n会恢复：\n- 链缓存（h3cache）\n- 已渲染完成的 CLIP 成品\n\n恢复后可以直接继续渲染后面的 CLIP，不用从 CLIP1 重新开始。")) return;
+		if (!confirm("确定要恢复最近一次渲染的所有缓存吗？\n\n会恢复：\n- 链缓存（h3cache）\n- 已渲染完成的 CLIP 成品\n\n恢复后可直接继续渲染后面的 CLIP，不用从 CLIP1 重新开始。\n\n（不会刷新页面，外部提示词与 @资产引用不受影响；建议先 Ctrl+S 保存工作流，刷新/另存后也会自动保留。）")) return;
 		fetch(api.apiURL("/h3_extender/restore_cache"), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -6116,62 +6133,62 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 						}));
 					} catch (_) {}
 
-					if (confirm("恢复成功！\n\n已恢复：" + clipsRestored + " 个 CLIP\n\n点击「确定」刷新页面以挂载新的缓存；点击「取消」留在当前页面继续渲染（缓存文件已就绪，状态栏会显示已恢复数量）。")) {
-						// v2.61: 刷新页面这一步会被浏览器原生 beforeunload 拦截
-						// ("是否离开网站? 你所做的更改可能未保存"). 该拦截来自 ComfyUI
-						// 注册的 onbeforeunload, 我们无法 removeEventListener 已添加
-						// 的匿名 handler. 这里直接 window.location.reload(); 若浏览器
-						// 弹出拦截框, 用户按"离开"即可继续 (按"取消"则留在当前页,
-						// 状态栏已经写入 "已恢复 N 个 CLIP" 提示, 不影响功能).
-						//
-						// 在重载前先把 LiteGraph 图标记为 clean, 减少浏览器拦截概率.
-						try {
-							const graph = (window.app && window.app.graph) || (app && app.graph);
-							if (graph && typeof graph.setDirty === "function") {
-								graph.setDirty(false, false);
-							}
-						} catch (_) {}
-
-						// 用 location.reload(); ComfyUI 的 onbeforeunload 在画布真的
-						// dirty 时仍会拦截, 那是浏览器规范行为, 我们只能提示用户.
-						window.location.reload();
-					} else {
-						// 用户选择留在当前页面 (默认分支): 把状态写到面板上.
-						// v2.61: 主动调 /h3_extender/rendered_clips 拿到磁盘上确实有
-						// h3_clip_<owner>_<idx>_<ts>.mp4 的 idx 列表, 把 cachedCount
-						// 调到 max(现状, max(rendered)), 重新触发 fetchClipPreview,
-						// 让右侧预览立刻恢复缩略图.
-						fetch(api.apiURL("/h3_extender/rendered_clips?owner_id=" + encodeURIComponent(String(node.id))))
-							.then((r) => r.json())
-							.then((info) => {
-								if (!info || !info.ok) return;
+					// v2.72: 不再弹「刷新页面」——刷新会被浏览器 beforeunload 拦截
+					// ("重新加载站点? 更改可能未保存"), 且丢失未保存的外部提示词/
+					// @资产引用。缓存文件已由后端落盘, 后端靠 .restored_marker 在
+					// 下次渲染时自动同步 validated 续渲染; 前端只需把已恢复 clip
+					// 标记 validated 并重新挂载缩略图, 用户直接点 Run 即可续渲染。
+					fetch(api.apiURL("/h3_extender/rendered_clips?owner_id=" + encodeURIComponent(String(node.id))))
+						.then((r) => r.json())
+						.then((info) => {
+							if (info && info.ok) {
 								const rendered = Array.isArray(info.rendered) ? info.rendered : [];
 								const newCached = rendered.length > 0 ? Math.max(...rendered) : 0;
 								runtime.cachedCount = Math.max(Number(runtime.cachedCount || 0), newCached);
-								const stateClips = (runtime.state && runtime.state.clips) || [];
-								stateClips.forEach((c) => {
-									c._previewLoaded = false;
-									c._previewVideoUrl = null;
-									c._latentPreviewUrl = null;
-								});
-								// v2.61: 重画节点所有 CLIP 卡片 —— render(node, runtime) 会清空
-								// cards 容器并重新构建每个卡片的 renderPreviewPanel. 新的
-								// cachedCount 会让 cached=true, fetchClipPreview 自动调, 走
-								// 400 → fetchClipPreviewFromDisk fallback 拿到 mp4 文件名,
-								// 走 /view 实际 stream 视频流.
-								try {
-									if (typeof render === "function") {
-										render(node, runtime);
-									}
-								} catch (e) { console.warn("[H3] restore-render failed", e); }
-								try { node.setDirtyCanvas(true, true); } catch (_) {}
-								if (runtime.status) {
-									runtime.status.textContent = "♻️ 已恢复 " + clipsRestored + " 个 CLIP 缓存（磁盘 mp4 重新挂载: " + rendered.length + " 个）";
-									runtime.status.style.color = "#fdf";
+							}
+							// 把已恢复的 CLIP 标记 validated（与后端 restored_marker 同步一致）
+							const stateClips = (runtime.state && runtime.state.clips) || [];
+							for (let ci = 0; ci < Math.min(clipsRestored, stateClips.length); ci++) {
+								stateClips[ci].validated = true;
+							}
+							stateClips.forEach((c) => {
+								c._previewLoaded = false;
+								c._previewVideoUrl = null;
+								c._latentPreviewUrl = null;
+							});
+							// 同步写回 clips_json widget（用户随后 Ctrl+S 也会持久化 validated）
+							try {
+								if (runtime.jsonWidget && runtime.jsonWidget.value !== undefined) {
+									runtime.jsonWidget.value = String(serializeState(runtime.state));
 								}
-							})
-							.catch(() => {});
-					}
+							} catch (_) {}
+							try {
+								if (typeof render === "function") {
+									render(node, runtime);
+								}
+							} catch (e) { console.warn("[H3] restore-render failed", e); }
+							try { node.setDirtyCanvas(true, true); } catch (_) {}
+							if (runtime.status) {
+								runtime.status.textContent = "♻️ 已恢复 " + clipsRestored + " 个 CLIP，无需刷新，直接点 Run 从下一个 CLIP 续渲染；建议 Ctrl+S 保存工作流（外部提示词与 @资产引用自动保留）";
+								runtime.status.style.color = "#fdf";
+							}
+						})
+						.catch(() => {
+							// rendered_clips 失败也至少完成 validated 标记
+							const stateClips = (runtime.state && runtime.state.clips) || [];
+							for (let ci = 0; ci < Math.min(clipsRestored, stateClips.length); ci++) {
+								stateClips[ci].validated = true;
+							}
+							try {
+								if (typeof render === "function") {
+									render(node, runtime);
+								}
+							} catch (e) {}
+							if (runtime.status) {
+								runtime.status.textContent = "♻️ 已恢复 " + clipsRestored + " 个 CLIP，无需刷新，直接点 Run 续渲染";
+								runtime.status.style.color = "#fdf";
+							}
+						});
 				} else {
 					alert("恢复失败：" + (res && res.error ? res.error : "未知错误"));
 				}
@@ -7739,6 +7756,17 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             try { removedLegacyRefs = removeLegacyImageRefInputs(this); } catch (e) {}
             try { runtime.state = parseState(runtime.jsonWidget.value); } catch (e) {}
             try { runtime.refsState = parseRefsState(runtime.refsWidget.value); } catch (e) {}
+            // v2.72: onConfigure 恢复 state 后必须把 global_prompt 同步回 textarea。
+            // constructRuntime(onNodeCreated) 在 configure 应用 widgets_values 之前
+            // 执行, textarea 初始化用的是默认空 state; 若这里不同步, 刷新/另存后
+            // 全局提示词区显示空白, 用户以为外部提示词丢了被迫重新输入。
+            // (state 里其实已恢复, 但用户看到的是 textarea 空白。)
+            try {
+                if (runtime.globalPromptTextarea && runtime.state?.global_prompt) {
+                    runtime.globalPromptTextarea.value = String(runtime.state.global_prompt);
+                    autoResizeTextarea(runtime.globalPromptTextarea);
+                }
+            } catch (e) {}
             try { updateRefsHidden(this, runtime); } catch (e) {}
             const restoredValidatedPrefix = validatedPrefixFromState(runtime.state);
             runtime.cachedCount = restoredValidatedPrefix;

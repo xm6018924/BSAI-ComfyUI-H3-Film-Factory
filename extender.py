@@ -4072,6 +4072,19 @@ async def restore_cache(request):
             if json_src is not None and json_src.exists():
                 dst_json = chain_cache_dir / f"{target_stem}.json"
                 shutil.copy2(json_src, dst_json)
+            # v2.72: 写「续渲染标记」——恢复按钮只复制文件, 无法把 validated
+            # 标记写进工作流 json。下次渲染主循环检测到该标记后, 以磁盘 manifest
+            # 为准同步已渲染段 validated, 跳过已恢复的 CLIP、从下一个继续渲染,
+            # 不再从 clip1 全量重渲。标记随本次渲染消费后自动清除。
+            try:
+                _mk = Path(dst_h3).with_suffix(".restored_marker")
+                _mk.write_text(
+                    f"restored={h3_src.name}\nnode={node_id}\ntime={time.time()}",
+                    encoding="utf-8",
+                )
+                print(f"[H3 Extender] v2.72 续渲染标记已写入: {_mk.name}")
+            except Exception as _me:
+                print(f"[H3 Extender] v2.72 续渲染标记写入失败: {_me}")
             print(f"[H3 Extender] v2.62 恢复链缓存: {h3_src.name} ({h3_src.stat().st_size // (1024*1024)} MB) "
                   f"-> {dst_h3.name} (来自 {found_dir}, node={node_id})")
         else:
@@ -5463,6 +5476,31 @@ class BSAIH3FilmFactory:
         if external_prompt_pack is None:
             active_prompt_pack_signature = ""
         data_path, manifest_path, manifest = _manifest_for_extender(owner, FPS)
+
+        # v2.72: 恢复缓存续渲染——前端「恢复缓存」按钮只复制快照文件, 无法把
+        # validated 标记写进工作流 json。按钮已写 .restored_marker 标记文件,
+        # 本次渲染以磁盘 manifest(快照内已渲染段 validated=True) 为准同步 clips,
+        # 跳过已恢复的 CLIP 从下一个继续渲染; 消费后清除标记, 下次无标记则按
+        # 正常全量流程(不改变既有语义)。
+        _marker = Path(manifest_path).with_suffix(".restored_marker")
+        if _marker.exists():
+            try:
+                _rm = _load_manifest_from_paths(data_path, manifest_path) or manifest
+                _rm_segs = _rm.get("segments", []) if isinstance(_rm, dict) else []
+                _synced = 0
+                for _i in range(min(len(clips), len(_rm_segs))):
+                    if bool(_rm_segs[_i].get("validated", False)) and not clips[_i].get("validated", False):
+                        clips[_i]["validated"] = True
+                        _synced += 1
+                if _synced:
+                    print(f"[H3 Extender] v2.72 恢复缓存续渲染: 同步 {_synced} 段 validated, "
+                          f"跳过已渲染 CLIP, 从 CLIP {_synced + 1} 继续")
+                else:
+                    print(f"[H3 Extender] v2.72 恢复缓存续渲染: 磁盘 manifest 无已渲染段, "
+                          f"本次按正常全量渲染")
+                _marker.unlink(missing_ok=True)
+            except Exception as _re:
+                print(f"[H3 Extender] v2.72 恢复标记处理失败: {_re}")
 
         # v1.98: 一键恢复缓存——从最近一次自动快照恢复主链，
         # 已渲染的 CLIP 无需从 clip1 重新渲染补链；执行完成后前端自动复位开关。
