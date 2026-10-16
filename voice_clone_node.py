@@ -22,17 +22,17 @@ class BSAIVoiceClone:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "text": ("STRING", {"multiline": True, "default": "你好，这是一段声音克隆测试。",
-                                    "tooltip": "要合成的文本内容"}),
-                "reference_audio": ("AUDIO", {"tooltip": "参考人声样本（3-10秒清晰干声，无背景音乐）"}),
+                "text": ("STRING", {"multiline": True, "default": "Hello, this is a voice clone test.",
+                                    "tooltip": "Text content to synthesize"}),
+                "reference_audio": ("AUDIO", {"tooltip": "Reference voice sample (3-10s clean dry voice, no background music)"}),
                 "speed": ("FLOAT", {"default": 1.0, "min": 0.5, "max": 2.0, "step": 0.1,
-                                    "tooltip": "语速，1.0为正常"}),
+                                    "tooltip": "Speech rate, 1.0 is normal"}),
             },
             "optional": {
                 "language": (["auto", "zh", "en", "ja", "ko"], {"default": "auto",
-                                "tooltip": "语言，auto自动检测"}),
+                                "tooltip": "Language, auto-detect"}),
                 "effect_mode": (["nothing", "vocoder", "constant"], {"default": "nothing",
-                                "tooltip": "效果模式"}),
+                                "tooltip": "Effect mode"}),
             }
         }
 
@@ -40,7 +40,7 @@ class BSAIVoiceClone:
     RETURN_NAMES = ("audio",)
     FUNCTION = "clone"
     CATEGORY = "BSAI/Voice"
-    DESCRIPTION = "一键声音克隆：上传参考人声，输入文本，生成同款音色的语音。输出可直接接到 Film Factory 的 lip_audio 端口做对口型。"
+    DESCRIPTION = "One-click voice cloning: upload a reference voice, enter text, and generate speech in the same timbre. The output can be connected directly to the Film Factory lip_audio port for lip-sync."
 
     def clone(self, text, reference_audio, speed=1.0, language="auto", effect_mode="nothing"):
         # 延迟导入 IndexTTS
@@ -100,4 +100,4 @@ class BSAIVoiceClone:
 
 # 注册
 NODE_CLASS_MAPPINGS = {"BSAIVoiceClone": BSAIVoiceClone}
-NODE_DISPLAY_NAME_MAPPINGS = {"BSAIVoiceClone": "BSAI 声音克隆 (Voice Clone)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"BSAIVoiceClone": "BSAI Voice Clone"}

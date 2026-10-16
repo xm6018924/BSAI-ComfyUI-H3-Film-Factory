@@ -1,12 +1,12 @@
 /**
- * BSAI H3 Film Factory - 电影提示词模板库
+ * BSAI H3 Film Factory - Film Prompt Template Library
  * v2.40 (2026-09-20)
- * 
- * 分类：
- * 1. 电影运镜 (Camera Movement)
- * 2. 电影调色 (Color Grading)
- * 3. 电影画面分割 (Aspect Ratio / Composition)
- * 4. 电影感 (Cinematic Feel)
+ *
+ * Categories:
+ * 1. Camera Movement
+ * 2. Color Grading
+ * 3. Aspect Ratio / Composition
+ * 4. Cinematic Feel
  */
 
 window.H3_FILM_TEMPLATES = {
@@ -14,223 +14,223 @@ window.H3_FILM_TEMPLATES = {
   categories: [
     {
       id: "camera",
-      name: "电影运镜",
+      name: "Camera Movement",
       name_en: "Camera Movement",
       icon: "🎥",
       templates: [
         {
           id: "cam_push_in",
-          name: "缓推镜头",
-          prompt: "【电影运镜·缓推】镜头缓慢向前推进，从全景逐渐聚焦到主体面部，营造紧张感与亲密感，焦点逐渐收紧，背景逐渐虚化。",
+          name: "Slow Push-In",
+          prompt: "[Cinematic Camera - Slow Push-In] The camera slowly pushes forward, moving from a wide shot to a close-up of the subject face, building tension and intimacy; focus tightens gradually and the background blurs.",
         },
         {
           id: "cam_pull_back",
-          name: "拉远镜头",
-          prompt: "【电影运镜·拉远】镜头缓慢向后拉远，从主体特写逐渐展现全景环境，营造孤独感与宏大叙事感，画面信息逐渐丰富。",
+          name: "Pull Back",
+          prompt: "[Cinematic Camera - Pull Back] The camera slowly pulls back from a close-up to reveal the full environment, evoking loneliness and grand narrative scale as the frame fills with information.",
         },
         {
           id: "cam_pan_left",
-          name: "左摇镜头",
-          prompt: "【电影运镜·左摇】镜头从右向左水平摇动，流畅自然地扫过场景，引导观众视线跟随主体移动，营造探索感。",
+          name: "Pan Left",
+          prompt: "[Cinematic Camera - Pan Left] The camera pans horizontally from right to left, smoothly sweeping the scene and guiding the viewer eye after the subject, creating a sense of exploration.",
         },
         {
           id: "cam_pan_right",
-          name: "右摇镜头",
-          prompt: "【电影运镜·右摇】镜头从左向右水平摇动，流畅自然地扫过场景，引导观众视线跟随主体移动，营造追踪感。",
+          name: "Pan Right",
+          prompt: "[Cinematic Camera - Pan Right] The camera pans horizontally from left to right, smoothly sweeping the scene and following the subject, creating a sense of pursuit.",
         },
         {
           id: "cam_tilt_up",
-          name: "上摇镜头",
-          prompt: "【电影运镜·上摇】镜头从下向上垂直摇动，从脚部/地面逐渐摇到面部/天空，营造崇高感与仰视的压迫感。",
+          name: "Tilt Up",
+          prompt: "[Cinematic Camera - Tilt Up] The camera tilts vertically from bottom to top, moving from feet/ground up to the face/sky, evoking grandeur and the pressure of looking up.",
         },
         {
           id: "cam_tilt_down",
-          name: "下摇镜头",
-          prompt: "【电影运镜·下摇】镜头从上向下垂直摇动，从面部/天空逐渐摇到脚部/地面，营造审视感与宿命感。",
+          name: "Tilt Down",
+          prompt: "[Cinematic Camera - Tilt Down] The camera tilts vertically from top to bottom, moving from face/sky down to feet/ground, evoking scrutiny and fatefulness.",
         },
         {
           id: "cam_tracking",
-          name: "跟拍镜头",
-          prompt: "【电影运镜·跟拍】镜头平稳跟随主体移动，保持主体在画面中心，轻微手持晃动增加真实感与沉浸感，如同旁观者视角。",
+          name: "Tracking Shot",
+          prompt: "[Cinematic Camera - Tracking Shot] The camera smoothly follows the subject, keeping it centered; slight handheld shake adds realism and immersion, like a bystander viewpoint.",
         },
         {
           id: "cam_dolly",
-          name: "轨道推拉",
-          prompt: "【电影运镜·轨道推拉】镜头沿轨道平滑移动，背景呈现视差滚动效果，画面稳定流畅，如同专业电影级运镜。",
+          name: "Dolly In/Out",
+          prompt: "[Cinematic Camera - Dolly] The camera moves smoothly along a track with parallax background scrolling, stable and fluid like professional cinematography.",
         },
         {
           id: "cam_crane",
-          name: "升降镜头",
-          prompt: "【电影运镜·升降】镜头缓慢上升或下降，视角从平视逐渐变为俯视或仰视，营造史诗感与场面调度感。",
+          name: "Crane Shot",
+          prompt: "[Cinematic Camera - Crane] The camera slowly rises or falls, shifting from eye level to high or low angle, evoking epic scale and choreographed staging.",
         },
         {
           id: "cam_orbit",
-          name: "环绕镜头",
-          prompt: "【电影运镜·环绕】镜头围绕主体做360度或半圆弧线运动，多角度展现主体与环境关系，营造沉浸式展示感。",
+          name: "Orbit Shot",
+          prompt: "[Cinematic Camera - Orbit] The camera circles the subject in a 360-degree or semicircular arc, revealing the subject-environment relationship from multiple angles in an immersive showcase.",
         },
         {
           id: "cam_handheld",
-          name: "手持晃动",
-          prompt: "【电影运镜·手持】镜头带有自然的手持晃动，节奏紧凑，营造纪实感与紧张感，如同现场实拍。",
+          name: "Handheld",
+          prompt: "[Cinematic Camera - Handheld] The camera has natural handheld shake with tight pacing, creating documentary realism and tension like on-site footage.",
         },
         {
           id: "cam_stedicam",
-          name: "斯坦尼康",
-          prompt: "【电影运镜·斯坦尼康】镜头平稳流畅，如同斯坦尼康拍摄，穿越复杂场景无卡顿，主体跟随自然，画面如丝般顺滑。",
+          name: "Steadicam",
+          prompt: "[Cinematic Camera - Steadicam] The camera is smooth and fluid like a Steadicam shot, moving through complex scenes without stutter, following the subject naturally with silk-smooth footage.",
         },
       ],
     },
     {
       id: "color",
-      name: "电影调色",
+      name: "Color Grading",
       name_en: "Color Grading",
       icon: "🎨",
       templates: [
         {
           id: "color_warm",
-          name: "暖色调",
-          prompt: "【电影调色·暖调】整体画面偏暖，金色与橙色为主色调，肤色温暖红润，阴影带棕褐色调，营造温馨怀旧的氛围。",
+          name: "Warm Tone",
+          prompt: "[Cinematic Color - Warm] Overall warm color grade dominated by gold and orange; skin tones warm and ruddy, shadows with brown hues, evoking warmth and nostalgia.",
         },
         {
           id: "color_cool",
-          name: "冷色调",
-          prompt: "【电影调色·冷调】整体画面偏冷，蓝色与青色为主色调，肤色偏苍白，阴影带深蓝灰色调，营造清冷孤寂的氛围。",
+          name: "Cool Tone",
+          prompt: "[Cinematic Color - Cool] Overall cool color grade dominated by blue and cyan; pale skin tones, shadows with deep blue-gray hues, evoking cold isolation.",
         },
         {
           id: "color_teal_orange",
-          name: "青橙对比",
-          prompt: "【电影调色·青橙对比】经典好莱坞调色风格，阴影偏青蓝色，高光偏橙黄色，对比强烈，视觉冲击力强，商业大片质感。",
+          name: "Teal & Orange",
+          prompt: "[Cinematic Color - Teal and Orange] Classic Hollywood grade: teal-blue shadows and orange highlights, strong contrast, high visual impact, blockbuster quality.",
         },
         {
           id: "color_film_noir",
-          name: "黑白电影",
-          prompt: "【电影调色·黑白电影】经典黑白电影质感，高对比度，深黑与纯白层次丰富，灰阶过渡自然，如同老胶片电影。",
+          name: "Film Noir B&W",
+          prompt: "[Cinematic Color - B&W Film] Classic black-and-white film look with high contrast, rich deep-black and pure-white tones and natural gray transitions, like vintage cinema.",
         },
         {
           id: "color_pastel",
-          name: "粉彩马卡龙",
-          prompt: "【电影调色·粉彩】低饱和度马卡龙色调，柔和粉嫩，色彩淡雅清新，营造梦幻甜美氛围，日系清新风格。",
+          name: "Pastel Macaron",
+          prompt: "[Cinematic Color - Pastel] Low-saturation macaron palette, soft and delicate, fresh and elegant, creating a dreamy sweet mood in a Japanese clean style.",
         },
         {
           id: "color_high_contrast",
-          name: "高对比度",
-          prompt: "【电影调色·高对比】高对比度调色，明暗反差强烈，暗部深邃，亮部通透，营造戏剧化与张力感。",
+          name: "High Contrast",
+          prompt: "[Cinematic Color - High Contrast] High-contrast grade with strong light/dark opposition, deep shadows and clear highlights, creating drama and tension.",
         },
         {
           id: "color_muted",
-          name: "低饱和莫兰迪",
-          prompt: "【电影调色·莫兰迪】低饱和度莫兰迪色调，灰调柔和，色彩克制内敛，营造高级感与文艺片氛围。",
+          name: "Low-Sat Morandi",
+          prompt: "[Cinematic Color - Morandi] Low-saturation Morandi palette with soft gray tones and restrained colors, evoking refinement and an arthouse-film mood.",
         },
         {
           id: "color_neon",
-          name: "霓虹赛博",
-          prompt: "【电影调色·霓虹】赛博朋克风格，高饱和霓虹色，粉红与青蓝碰撞，夜间发光效果强烈，未来感十足。",
+          name: "Neon Cyberpunk",
+          prompt: "[Cinematic Color - Neon Cyberpunk] Cyberpunk style with high-saturation neon, pink against cyan, strong night glow, deeply futuristic.",
         },
         {
           id: "color_sepia",
-          name: "复古棕褐",
-          prompt: "【电影调色·棕褐】复古棕褐色调，如同老照片与老电影，泛黄怀旧，营造历史感与年代感。",
+          name: "Vintage Sepia",
+          prompt: "[Cinematic Color - Sepia] Vintage sepia grade like old photographs and films, yellowed and nostalgic, evoking history and bygone eras.",
         },
         {
           id: "color_natural",
-          name: "自然真实",
-          prompt: "【电影调色·自然】自然真实色彩，还原物体本色，肤色自然通透，光影写实，如同纪录片质感。",
+          name: "Natural Realism",
+          prompt: "[Cinematic Color - Natural] Natural true-to-life colors restoring original object hues; skin tones clear and natural, realistic lighting like a documentary.",
         },
       ],
     },
     {
       id: "composition",
-      name: "画面分割",
+      name: "Aspect / Composition",
       name_en: "Aspect / Composition",
       icon: "🎬",
       templates: [
         {
           id: "comp_widescreen",
-          name: "宽屏电影感",
-          prompt: "【画面分割·宽屏】2.39:1 宽屏电影比例，上下黑色遮幅，经典电影画幅，营造史诗感与影院体验。",
+          name: "Widescreen 2.39:1",
+          prompt: "[Composition - Widescreen] 2.39:1 widescreen cinematic ratio with black bars top and bottom, classic film framing, epic and theatrical.",
         },
         {
           id: "comp_letterbox",
-          name: "上下黑边",
-          prompt: "【画面分割·黑边】上下适度黑色遮幅，营造电影感，同时保留足够垂直空间展示主体。",
+          name: "Letterbox",
+          prompt: "[Composition - Letterbox] Moderate black bars top and bottom for a cinematic feel while keeping enough vertical space for the subject.",
         },
         {
           id: "comp_rule_thirds",
-          name: "三分构图",
-          prompt: "【画面分割·三分】经典三分法构图，主体位于画面三分之一线交点，视觉平衡稳定，电影感十足。",
+          name: "Rule of Thirds",
+          prompt: "[Composition - Rule of Thirds] Classic rule-of-thirds composition with the subject at third-line intersections, visually balanced and stable, very cinematic.",
         },
         {
           id: "comp_center",
-          name: "中心构图",
-          prompt: "【画面分割·中心】主体居中对称构图，营造庄重感与仪式感，适合人物特写与正式场景。",
+          name: "Centered Symmetry",
+          prompt: "[Composition - Centered] Symmetrical centered composition, solemn and ceremonial, ideal for close-ups and formal scenes.",
         },
         {
           id: "comp_leading",
-          name: "引导线构图",
-          prompt: "【画面分割·引导线】利用环境元素形成引导线，视线自然汇聚到主体，画面有深度感与纵深感。",
+          name: "Leading Lines",
+          prompt: "[Composition - Leading Lines] Environmental elements form leading lines that draw the eye naturally to the subject, adding depth and dimensionality.",
         },
         {
           id: "comp_frame_in_frame",
-          name: "框中框",
-          prompt: "【画面分割·框中框】利用门窗、镜子等元素形成框中框构图，增加画面层次与视觉趣味性。",
+          name: "Frame in Frame",
+          prompt: "[Composition - Frame in Frame] Use doors, windows, mirrors, etc. to create a frame-within-frame composition, adding layers and visual interest.",
         },
       ],
     },
     {
       id: "cinematic",
-      name: "电影感",
+      name: "Cinematic Feel",
       name_en: "Cinematic Feel",
       icon: "✨",
       templates: [
         {
           id: "feel_cinematic",
-          name: "电影级画质",
-          prompt: "【电影感·画质】电影级画质，8K超高清，细节丰富，光影层次细腻，景深自然，胶片颗粒感适中。",
+          name: "Cinematic Quality",
+          prompt: "[Cinematic Feel - Quality] Cinematic 8K ultra-HD quality with rich detail, fine light-and-shadow layering, natural depth of field, and moderate film grain.",
         },
         {
           id: "feel_dramatic_light",
-          name: "戏剧化光影",
-          prompt: "【电影感·光影】戏剧化布光，伦勃朗光效，明暗对比强烈，光影层次丰富，营造戏剧张力与氛围。",
+          name: "Dramatic Lighting",
+          prompt: "[Cinematic Feel - Dramatic Lighting] Dramatic lighting with Rembrandt effects, strong contrast and rich light/shadow layering, full of theatrical tension.",
         },
         {
           id: "feel_soft_light",
-          name: "柔和柔光",
-          prompt: "【电影感·柔光】柔和漫射光线，阴影边缘模糊，肤色细腻通透，营造温柔氛围与治愈感。",
+          name: "Soft Diffused Light",
+          prompt: "[Cinematic Feel - Soft Light] Soft diffused light with blurred shadow edges, fine translucent skin tones, gentle and healing.",
         },
         {
           id: "feel_backlight",
-          name: "逆光轮廓",
-          prompt: "【电影感·逆光】逆光拍摄，主体边缘有金色轮廓光，背景过曝形成光晕，营造唯美感与梦幻感。",
+          name: "Backlit Silhouette",
+          prompt: "[Cinematic Feel - Backlight] Backlit shot with a golden rim light on the subject edges and a blown-out halo in the background, ethereal and dreamlike.",
         },
         {
           id: "feel_rainy",
-          name: "雨夜氛围",
-          prompt: "【电影感·雨夜】雨夜场景，地面反射灯光，雨滴清晰可见，雾气弥漫，营造忧郁浪漫的氛围。",
+          name: "Rainy Night",
+          prompt: "[Cinematic Feel - Rainy Night] Rainy night scene with light reflecting on wet ground, visible raindrops and drifting mist, melancholic and romantic.",
         },
         {
           id: "feel_sunset",
-          name: "黄金时刻",
-          prompt: "【电影感·黄金时刻】日落黄金时刻光线，暖金色侧光，长投影，天空渐变色彩，营造温暖怀旧氛围。",
+          name: "Golden Hour",
+          prompt: "[Cinematic Feel - Golden Hour] Sunset golden-hour light with warm golden side light, long shadows and gradient sky colors, warm and nostalgic.",
         },
         {
           id: "feel_night_neon",
-          name: "夜景霓虹",
-          prompt: "【电影感·夜景】夜晚都市场景，霓虹灯光闪烁，灯光散景效果，湿滑路面反射，赛博朋克氛围。",
+          name: "Night Neon",
+          prompt: "[Cinematic Feel - Night Neon] Night urban scene with flickering neon, bokeh light effects and reflections on wet streets, cyberpunk mood.",
         },
         {
           id: "feel_misty",
-          name: "雾气朦胧",
-          prompt: "【电影感·雾气】雾气弥漫场景，远景朦胧模糊，空气透视明显，营造神秘氛围与诗意感。",
+          name: "Misty Atmosphere",
+          prompt: "[Cinematic Feel - Mist] Mist-filled scene with hazy distant background and strong aerial perspective, mysterious and poetic.",
         },
         {
           id: "feel_tense",
-          name: "紧张悬疑",
-          prompt: "【电影感·紧张】低照度悬疑氛围，明暗对比强烈，阴影浓重，画面压抑，营造紧张与悬念感。",
+          name: "Tense Suspense",
+          prompt: "[Cinematic Feel - Tense] Low-light suspense atmosphere with strong contrast, heavy shadows and oppressive framing, tense and suspenseful.",
         },
         {
           id: "feel_epic",
-          name: "史诗宏大",
-          prompt: "【电影感·史诗】史诗级宏大场面，广角镜头，开阔空间，人物渺小，营造历史感与命运感。",
+          name: "Epic Scale",
+          prompt: "[Cinematic Feel - Epic] Epic grand scenes with wide-angle lenses, vast open spaces and tiny figures, evoking history and destiny.",
         },
       ],
     },

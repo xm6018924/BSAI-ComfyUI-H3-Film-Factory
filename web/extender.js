@@ -719,7 +719,7 @@ function renderPreviewPanel(panel, clip, index, node, runtime) {
         const closeBtn = document.createElement("button");
         closeBtn.type = "button";
         closeBtn.textContent = "✕";
-        closeBtn.title = "关闭预览";
+        closeBtn.title = "Close preview";
         closeBtn.style.cssText = "width:22px;height:22px;padding:0;border-radius:4px;border:1px solid rgba(255,255,255,.15);background:rgba(40,40,40,.8);color:rgba(255,255,255,.7);cursor:pointer;font-size:12px;line-height:1;flex:0 0 auto;";
         closeBtn.addEventListener("click", (e) => {
             e.preventDefault();
@@ -757,7 +757,7 @@ function renderPreviewPanel(panel, clip, index, node, runtime) {
         const stepInfo = clip._latentStep && clip._latentTotal
             ? ` (${clip._latentStep}/${clip._latentTotal})`
             : "";
-        label.textContent = "渲染中" + stepInfo;
+        label.textContent = "Rendering" + stepInfo;
         contentWrap.appendChild(label);
 
         panel.appendChild(contentWrap);
@@ -791,7 +791,7 @@ function renderPreviewPanel(panel, clip, index, node, runtime) {
     if (cached) {
         const loading = document.createElement("div");
         loading.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#555;font-size:11px;gap:6px;padding:8px;";
-        loading.innerHTML = '<div style="font-size:18px;opacity:.6;animation:h3spin 1s linear infinite;">&#10227;</div><div>加载预览...</div>';
+        loading.innerHTML = '<div style="font-size:18px;opacity:.6;animation:h3spin 1s linear infinite;">&#10227;</div><div>Loading preview...</div>';
         contentWrap.appendChild(loading);
         panel.appendChild(contentWrap);
 
@@ -800,7 +800,7 @@ function renderPreviewPanel(panel, clip, index, node, runtime) {
                 contentWrap.replaceChildren();
                 const err = document.createElement("div");
                 err.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#555;font-size:11px;text-align:center;gap:6px;padding:8px;";
-                err.innerHTML = '<div style="font-size:22px;opacity:.5;">&#128249;</div><div>预览不可用</div>';
+                err.innerHTML = '<div style="font-size:22px;opacity:.5;">&#128249;</div><div>Preview unavailable</div>';
                 contentWrap.appendChild(err);
                 return;
             }
@@ -823,9 +823,9 @@ function renderPreviewPanel(panel, clip, index, node, runtime) {
     const ph = document.createElement("div");
     ph.style.cssText = "display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;color:#555;font-size:11px;text-align:center;gap:6px;padding:8px;";
     if (clip._previewError) {
-        ph.innerHTML = '<div style="font-size:18px;opacity:.5;">&#9888;</div><div style="color:#a55;">预览解码失败</div><div style="color:#777;font-size:9px;word-break:break-all;">' + clip._previewError.substring(0, 80) + '</div>';
+        ph.innerHTML = '<div style="font-size:18px;opacity:.5;">&#9888;</div><div style="color:#a55;">Preview decode failed</div><div style="color:#777;font-size:9px;word-break:break-all;">' + clip._previewError.substring(0, 80) + '</div>';
     } else {
-        ph.innerHTML = '<div style="font-size:22px;opacity:.5;">&#128249;</div><div>等待渲染</div>';
+        ph.innerHTML = '<div style="font-size:22px;opacity:.5;">&#128249;</div><div>Waiting to render</div>';
     }
     contentWrap.appendChild(ph);
     panel.appendChild(contentWrap);
@@ -2044,11 +2044,11 @@ function openReferenceEditor(node, runtime, slotIndex, ref) {
     buttons.style.gap = "7px";
 
     const reset = document.createElement("button");
-    reset.textContent = "重置 / Reset";
+    reset.textContent = "Reset";
     const cancel = document.createElement("button");
-    cancel.textContent = "取消 / Cancel";
+    cancel.textContent = "Cancel";
     const apply = document.createElement("button");
-    apply.textContent = "应用 / Apply";
+    apply.textContent = "Apply";
     apply.style.gridColumn = "1 / -1";
     apply.style.fontWeight = "650";
     buttons.append(reset, cancel, apply);
@@ -2464,7 +2464,7 @@ async function openClipColorEditor(node, runtime, clipIndex) {
     buttons.style.marginTop = "12px";
 
     const reset = document.createElement("button");
-    reset.textContent = "重置 / Reset";
+    reset.textContent = "Reset";
     reset.title = "Return this clip to neutral 100 / 100 / 100";
     reset.addEventListener("click", () => {
         adjustment = normalizeColorAdjustment();
@@ -2476,16 +2476,16 @@ async function openClipColorEditor(node, runtime, clipIndex) {
     });
 
     const cancel = document.createElement("button");
-    cancel.textContent = "取消 / Cancel";
+    cancel.textContent = "Cancel";
     cancel.addEventListener("click", () => closeColorEditor(overlay));
 
     const apply = document.createElement("button");
-    apply.textContent = "应用 / Apply";
+    apply.textContent = "Apply";
     apply.style.fontWeight = "700";
     apply.style.minWidth = "84px";
     apply.addEventListener("click", async () => {
         apply.disabled = true;
-        apply.textContent = "应用中... / Applying...";
+        apply.textContent = "Applying...";
         try {
             const response = await fetch(api.apiURL("/h3_extender/color_adjust"), {
                 method: "POST",
@@ -2517,7 +2517,7 @@ async function openClipColorEditor(node, runtime, clipIndex) {
         } catch (error) {
             alert(`Color adjustment failed:\n${error?.message || error}`);
             apply.disabled = false;
-            apply.textContent = "应用 / Apply";
+            apply.textContent = "Apply";
         }
     });
 
@@ -3230,13 +3230,13 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
     const hdr = document.createElement("div");
     hdr.style.cssText = "display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;font-size:11px;color:#888;";
     const title = document.createElement("span");
-    title.textContent = "已引用资产";
+    title.textContent = "Referenced Assets";
     hdr.appendChild(title);
 
     const refreshBtn = document.createElement("button");
     refreshBtn.textContent = "↻";
     refreshBtn.style.cssText = "background:#333;color:#aaa;border:1px solid #444;border-radius:2px;cursor:pointer;font-size:12px;padding:0 4px;";
-    refreshBtn.title = "刷新资产库";
+    refreshBtn.title = "Refresh asset library";
     refreshBtn.addEventListener("click", () => { h3FetchAssets(); clip._assetPanelRefsKey = null; renderAssetPanel(leftPanel, clip, node, runtime, textarea); });
     hdr.appendChild(refreshBtn);
     leftPanel.appendChild(hdr);
@@ -3249,7 +3249,7 @@ function renderAssetPanel(leftPanel, clip, node, runtime, textarea) {
     if (refs.length === 0) {
         const empty = document.createElement("div");
         empty.style.cssText = "color:#555;font-size:11px;text-align:center;padding:8px;";
-        empty.textContent = "暂无引用";
+        empty.textContent = "No references";
         leftPanel.appendChild(empty);
     } else {
         const assetList = runtime._h3_assetCache;
@@ -3349,9 +3349,9 @@ function showAssetPicker(parentEl, clip, node, runtime, textarea) {
 
     const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
     const groups = [
-        { label: "图片 / Images", items: assetList.images || [], type: "images", prefix: "图" },
-        { label: "视频 / Videos", items: assetList.videos || [], type: "videos", prefix: "视频" },
-        { label: "音频 / Audio", items: assetList.audios || [], type: "audios", prefix: "音频" },
+        { label: "Images", items: assetList.images || [], type: "images", prefix: "图" },
+        { label: "Videos", items: assetList.videos || [], type: "videos", prefix: "视频" },
+        { label: "Audio", items: assetList.audios || [], type: "audios", prefix: "音频" },
     ];
 
     groups.forEach(function(g) {
@@ -3426,12 +3426,12 @@ function showAssetPicker(parentEl, clip, node, runtime, textarea) {
     });
 
     if (!popup.children.length) {
-        popup.innerHTML = '<div style="color:#555;font-size:11px;text-align:center;padding:12px;">资产库为空</div>';
+        popup.innerHTML = '<div style="color:#555;font-size:11px;text-align:center;padding:12px;">Asset library is empty</div>';
     }
 
     // Close button
     const closeBtn = document.createElement("div");
-    closeBtn.textContent = "✕ 关闭";
+    closeBtn.textContent = "✕ Close";
     closeBtn.style.cssText = "text-align:center;padding:4px;margin-top:4px;color:#a44;cursor:pointer;font-size:11px;border-top:1px solid #333;";
     closeBtn.addEventListener("click", function() { popup.remove(); });
     popup.appendChild(closeBtn);
@@ -3461,9 +3461,9 @@ function showAssetPickerForTextarea(parentEl, clipOrState, node, runtime, textar
 
     const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
     const groups = [
-        { label: "图片 / Images", items: assetList.images || [], type: "images", prefix: "图" },
-        { label: "视频 / Videos", items: assetList.videos || [], type: "videos", prefix: "视频" },
-        { label: "音频 / Audio", items: assetList.audios || [], type: "audios", prefix: "音频" },
+        { label: "Images", items: assetList.images || [], type: "images", prefix: "图" },
+        { label: "Videos", items: assetList.videos || [], type: "videos", prefix: "视频" },
+        { label: "Audio", items: assetList.audios || [], type: "audios", prefix: "音频" },
     ];
 
     // Filter by keyword
@@ -3563,7 +3563,7 @@ function showAssetPickerForTextarea(parentEl, clipOrState, node, runtime, textar
     });
 
     if (!popup.children.length) {
-        popup.innerHTML = '<div style="color:#555;font-size:11px;text-align:center;padding:12px;">无匹配资产</div>';
+        popup.innerHTML = '<div style="color:#555;font-size:11px;text-align:center;padding:12px;">No matching assets</div>';
     }
 
     // Close on click outside
@@ -3886,7 +3886,7 @@ function buildClipCard(node, runtime, clip, index) {
         const clipRenderBtn = document.createElement("button");
         clipRenderBtn.type = "button";
         clipRenderBtn.textContent = "▶";
-        clipRenderBtn.title = "独立渲染此CLIP / Render this CLIP only (others unaffected)";
+        clipRenderBtn.title = "Render this CLIP only (others unaffected)";
         clipRenderBtn.style.cssText = "width:26px;height:22px;padding:0;font-size:12px;border-radius:4px;border:1px solid rgba(80,200,80,.6);background:rgba(30,100,40,.6);color:#8f8;cursor:pointer;flex:0 0 auto;margin-left:4px;font-weight:bold;";
         clipRenderBtn.addEventListener("click", (e) => {
             e.preventDefault();
@@ -3916,7 +3916,7 @@ function buildClipCard(node, runtime, clip, index) {
         const delBtn = document.createElement("button");
         delBtn.type = "button";
         delBtn.textContent = "✕";
-        delBtn.title = "删除此CLIP / Delete this CLIP";
+        delBtn.title = "Delete this CLIP";
         delBtn.style.cssText = "width:26px;height:22px;padding:0;font-size:13px;font-weight:bold;border-radius:4px;border:1px solid rgba(255,80,80,.7);background:rgba(180,30,30,.55);color:rgba(255,210,210,.95);cursor:pointer;flex:0 0 auto;margin-left:4px;";
 
         head.append(toggle, title, name, colorWrap, clipActions, badge, clipRenderBtn, delBtn);
@@ -3957,10 +3957,10 @@ function buildClipCard(node, runtime, clip, index) {
         const leftTabs = document.createElement("div");
         leftTabs.style.cssText = "display:flex;gap:2px;margin-bottom:6px;border-bottom:1px solid rgba(255,255,255,.1);padding-bottom:4px;";
         const tabAsset = document.createElement("button");
-        tabAsset.textContent = "资产";
+        tabAsset.textContent = "Assets";
         tabAsset.style.cssText = "flex:1;padding:3px 0;border:1px solid #444;background:#3a3a4a;color:#ccc;border-radius:3px;cursor:pointer;font-size:10px;";
         const tabTemplate = document.createElement("button");
-        tabTemplate.textContent = "模板";
+        tabTemplate.textContent = "Templates";
         tabTemplate.style.cssText = "flex:1;padding:3px 0;border:1px solid #444;background:#2a2a3a;color:#999;border-radius:3px;cursor:pointer;font-size:10px;";
         leftTabs.append(tabAsset, tabTemplate);
         leftPanel.appendChild(leftTabs);
@@ -4030,7 +4030,7 @@ function buildClipCard(node, runtime, clip, index) {
 
         const promptExpandBtn = document.createElement("button");
         promptExpandBtn.textContent = "⤢";
-        promptExpandBtn.title = "放大提示词窗口";
+        promptExpandBtn.title = "Enlarge prompt window";
         promptExpandBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;font-size:12px;background:rgba(40,40,40,.8);border:1px solid rgba(255,255,255,.15);border-radius:4px;color:#aaa;cursor:pointer;align-self:flex-start;margin-top:0;";
         let promptExpanded = false;
         promptExpandBtn.addEventListener("click", (e) => {
@@ -4227,10 +4227,10 @@ function buildClipCard(node, runtime, clip, index) {
         const subModeRow = document.createElement("div");
         subModeRow.style.cssText = "display:flex;gap:4px;margin-bottom:4px;";
         const subManualBtn = document.createElement("button");
-        subManualBtn.textContent = "手动字幕 / Manual";
+        subManualBtn.textContent = "Manual Subtitles";
         subManualBtn.style.cssText = "flex:1;font-size:10px;padding:2px 4px;border-radius:3px;cursor:pointer;";
         const subAutoBtn = document.createElement("button");
-        subAutoBtn.textContent = "自动提取 / Auto Extract";
+        subAutoBtn.textContent = "Auto Extract";
         subAutoBtn.style.cssText = "flex:1;font-size:10px;padding:2px 4px;border-radius:3px;cursor:pointer;";
         subModeRow.append(subManualBtn, subAutoBtn);
         rightPanel.appendChild(subModeRow);
@@ -4270,7 +4270,7 @@ function buildClipCard(node, runtime, clip, index) {
         // Manual subtitle input
         const subtitleInput = document.createElement("textarea");
         subtitleInput.value = clip.subtitle || "";
-        subtitleInput.placeholder = "输入字幕文本 / Enter subtitle text";
+        subtitleInput.placeholder = "Enter subtitle text";
         subtitleInput.style.cssText = "width:100%;height:36px;min-height:24px;resize:vertical;background:#1a1a1a;color:#c8c8c8;border:1px solid #333;border-radius:3px;padding:4px 6px;font-size:12px;margin-bottom:4px;";
         subtitleInput.addEventListener("input", () => {
             clip.subtitle = subtitleInput.value;
@@ -4374,12 +4374,12 @@ function buildClipCard(node, runtime, clip, index) {
 
         // Font selector
         const fontLabel = document.createElement("span");
-        fontLabel.textContent = "字体";
+        fontLabel.textContent = "Font";
         fontLabel.style.cssText = "color:#888;margin-right:2px;";
         subCtrlRow.appendChild(fontLabel);
         const fontSelect = document.createElement("select");
         fontSelect.style.cssText = "background:#1a1a1a;color:#c8c8c8;border:1px solid #333;border-radius:3px;padding:1px 3px;font-size:11px;max-width:100px;";
-        fontSelect.innerHTML = '<option value="msyh.ttc">微软雅黑</option><option value="simhei.ttf">黑体</option><option value="simsun.ttc">宋体</option><option value="arial.ttf">Arial</option>';
+        fontSelect.innerHTML = '<option value="msyh.ttc">Microsoft YaHei</option><option value="simhei.ttf">SimHei</option><option value="simsun.ttc">SimSun</option><option value="arial.ttf">Arial</option>';
         fontSelect.value = clip.subtitle_font || "msyh.ttc";
         fontSelect.addEventListener("change", () => {
             clip.subtitle_font = fontSelect.value;
@@ -4389,7 +4389,7 @@ function buildClipCard(node, runtime, clip, index) {
 
         // Font size
         const sizeLabel = document.createElement("span");
-        sizeLabel.textContent = "字号";
+        sizeLabel.textContent = "Size";
         sizeLabel.style.cssText = "color:#888;margin-left:4px;margin-right:2px;";
         subCtrlRow.appendChild(sizeLabel);
         const sizeInput = document.createElement("input");
@@ -4406,7 +4406,7 @@ function buildClipCard(node, runtime, clip, index) {
 
         // Color
         const colorLabel = document.createElement("span");
-        colorLabel.textContent = "颜色";
+        colorLabel.textContent = "Color";
         colorLabel.style.cssText = "color:#888;margin-left:4px;margin-right:2px;";
         subCtrlRow.appendChild(colorLabel);
         const colorInput = document.createElement("input");
@@ -4427,7 +4427,7 @@ function buildClipCard(node, runtime, clip, index) {
         boxCheck.checked = clip.subtitle_box || false;
         boxCheck.style.cssText = "width:12px;height:12px;";
         const boxText = document.createElement("span");
-        boxText.textContent = "加框";
+        boxText.textContent = "Box";
         boxLabel.appendChild(boxCheck);
         boxLabel.appendChild(boxText);
         subCtrlRow.appendChild(boxLabel);
@@ -4445,7 +4445,7 @@ function buildClipCard(node, runtime, clip, index) {
 
         // Box width
         const boxWLabel = document.createElement("span");
-        boxWLabel.textContent = "框粗";
+        boxWLabel.textContent = "Thickness";
         boxWLabel.style.cssText = "color:#888;margin-left:2px;margin-right:2px;display:none;";
         const boxWInput = document.createElement("input");
         boxWInput.type = "number";
@@ -4486,7 +4486,7 @@ function buildClipCard(node, runtime, clip, index) {
         ctxCheck.style.cssText = "cursor:pointer;accent-color:#4a8;";
         const ctxLabel = document.createElement("label");
         ctxLabel.htmlFor = ctxCheck.id;
-        ctxLabel.textContent = "上下文参考 / Context Reference";
+        ctxLabel.textContent = "Context Reference";
         ctxLabel.style.cssText = "color:#aaa;cursor:pointer;user-select:none;";
         ctxLabel.addEventListener("click", (e) => { e.preventDefault(); ctxCheck.click(); });
         ctxCheck.addEventListener("change", () => {
@@ -4506,7 +4506,7 @@ function buildClipCard(node, runtime, clip, index) {
         const rfeToggle = document.createElement("div");
         rfeToggle.id = `rfe_toggle_${clip.id}`;
         rfeToggle.style.cssText = "cursor:pointer;font-size:11px;color:#888;margin-top:6px;margin-bottom:3px;user-select:none;";
-        rfeToggle.textContent = "▶ 参考帧提取 / Ref Frame Extract";
+        rfeToggle.textContent = "▶ Ref Frame Extract";
         if (!ctxCheck.checked) rfeToggle.style.opacity = "0.5";
         let rfeExpanded = false;
         const rfeContent = document.createElement("div");
@@ -5782,7 +5782,7 @@ function buildUi(node) {
     });
 
     const batchDurLabel = document.createElement("span");
-    batchDurLabel.textContent = "时长(s) / Dur:";
+    batchDurLabel.textContent = "Duration(s):";
     batchDurLabel.style.cssText = "font-size:11px;color:#aaa;margin-left:6px;";
 
     const batchDurInput = document.createElement("input");
@@ -5795,7 +5795,7 @@ function buildUi(node) {
 
     const batchDurBtn = document.createElement("button");
     setBtnText(batchDurBtn, "应用全部", "Apply All", { bg: "#2a4a6a", border: "#3a5a7a", color: "#cde" });
-    batchDurBtn.title = "批量设置所有CLIP的时长";
+    batchDurBtn.title = "Batch-set duration of all CLIPs";
     batchDurBtn.classList.add("bsai-tb-btn");
     batchDurBtn.addEventListener("click", (e) => {
         e.preventDefault();
@@ -5811,12 +5811,12 @@ function buildUi(node) {
     });
 
     const batchCtxLabel = document.createElement("span");
-    batchCtxLabel.textContent = "上下文 / Context:";
+    batchCtxLabel.textContent = "Context:";
     batchCtxLabel.style.cssText = "font-size:11px;color:#aaa;margin-left:6px;";
 
     const batchCtxBtn = document.createElement("button");
     setBtnText(batchCtxBtn, "全部开启", "Enable All", { bg: "#2a6a4a", border: "#3a7a5a", color: "#cde" });
-    batchCtxBtn.title = "批量开启/关闭所有CLIP的上下文参考";
+    batchCtxBtn.title = "Batch enable/disable context reference for all CLIPs";
     batchCtxBtn.classList.add("bsai-tb-btn");
     let batchCtxOn = true;
     batchCtxBtn.addEventListener("click", (e) => {
@@ -5852,19 +5852,19 @@ counter.style.marginLeft = "6px";
 
 const mergeOutputBtn = document.createElement("button");
     setBtnText(mergeOutputBtn, "合并输出", "Merge Output", { bg: "#2a6a3a", border: "#3a7a4a", color: "#cde" });
-    mergeOutputBtn.title = "将所有已生成好的CLIP合并为一个视频输出（不会重新生成任何CLIP）";
+    mergeOutputBtn.title = "Merge all finished CLIPs into one video output (does not re-render any CLIP)";
     mergeOutputBtn.classList.add("bsai-tb-btn");
 
     // Unified sync button: re-sync ALL clips from external prompt_source
     // 统一刷新按钮：从外部输入源重新同步所有CLIP
     const syncAllClipsBtn = document.createElement("button");
     setBtnText(syncAllClipsBtn, "统一刷新", "Sync All", { icon: "🔄", bg: "#8a4a2a", border: "#aa5a3a", color: "#fcd" });
-    syncAllClipsBtn.title = "从外部输入源重新同步全局提示词和所有CLIP\nRe-sync global prompt and all CLIPs from external source";
+    syncAllClipsBtn.title = "Re-sync global prompt and all CLIPs from external source";
     syncAllClipsBtn.classList.add("bsai-tb-btn");
     // v2.40: 电影模板按钮 (全局应用)
     const filmTemplateBtn = document.createElement("button");
     setBtnText(filmTemplateBtn, "模板", "Template", { icon: "✨", bg: "#6a4a8a", border: "#7a5a9a", color: "#eef" });
-    filmTemplateBtn.title = "打开电影提示词模板库 (全局应用到所有CLIP)";
+    filmTemplateBtn.title = "Open film prompt template library (applies globally to all CLIPs)";
     filmTemplateBtn.classList.add("bsai-tb-btn");
     filmTemplateBtn.addEventListener("click", (e) => {
         e.preventDefault();
@@ -5954,11 +5954,11 @@ mergeOutputBtn.addEventListener("click", (e) => {
 // ── v1.16 打开缓存目录按钮（Latent缓存 / Clip输出） ──
 const openCacheBtn = document.createElement("button");
 setBtnText(openCacheBtn, "Latent缓存", "Latent Cache", { icon: "📂", bg: "#3a4a6a", border: "#4a5a8a", color: "#cde" });
-openCacheBtn.title = "打开 latent 缓存目录（chain_extender_*.h3cache 等文件），点击自动在系统文件管理器中打开该目录，随时查看缓存文件";
+openCacheBtn.title = "Open the latent cache directory (chain_extender_*.h3cache etc.) in the system file manager";
 openCacheBtn.classList.add("bsai-tb-btn");
 const openClipsBtn = document.createElement("button");
 setBtnText(openClipsBtn, "Clip输出", "Clip Output", { icon: "📂", bg: "#3a4a6a", border: "#4a5a8a", color: "#cde" });
-openClipsBtn.title = "打开 CLIP 视频输出目录（h3_clip_*.mp4，即 BSAI Premiere Pro 接收端口读取的文件目录）";
+openClipsBtn.title = "Open the CLIP video output directory (h3_clip_*.mp4, the folder BSAI Premiere Pro reads as its receive port)";
 openClipsBtn.classList.add("bsai-tb-btn");
 const openCacheDir = (kind, label) => {
     fetch(api.apiURL("/h3_extender/cache/open?kind=" + encodeURIComponent(kind)))
@@ -5990,19 +5990,19 @@ const pauseBar = document.createElement("span");
 pauseBar.style.cssText = "display:none;align-items:center;gap:4px;margin-left:6px;";
 const pauseBtn = document.createElement("button");
 setBtnText(pauseBtn, "暂停", "Pause", { icon: "⏸", bg: "#6a5a2a", border: "#8a7a3a", color: "#fcd" });
-pauseBtn.title = "暂停键始终可用：当前CLIP生成完、下一个开始前暂停。暂停后可选择「继续/仅当前/中止」；无干预则停止后续渲染（不再自动继续、不再自动合并，仅保留已生成 CLIP，可手动「合并输出」）。节点 pause_enable 开启时则每个CLIP生成完自动暂停等待。";
+pauseBtn.title = "Pause is always available: it pauses after the current CLIP finishes and before the next one starts. After pausing you can choose Resume / Current Only / Abort; without intervention, further rendering stops (no auto-resume, no auto-merge; finished CLIPs are kept and can be merged manually via Merge Output). When the node pause_enable is on, it pauses automatically after each CLIP.";
 pauseBtn.classList.add("bsai-tb-btn");
 const resumeBtn = document.createElement("button");
-resumeBtn.textContent = "▶ 继续";
-resumeBtn.title = "继续渲染剩余 CLIP";
+resumeBtn.textContent = "▶ Resume";
+resumeBtn.title = "Resume rendering remaining CLIPs";
 resumeBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a6a4a;border:1px solid #3a7a5a;border-radius:4px;color:#cde;cursor:pointer;font-weight:bold;display:none;";
 const stopAfterBtn = document.createElement("button");
-stopAfterBtn.textContent = "⏹ 仅当前/停止";
-stopAfterBtn.title = "停止后续渲染，仅保留已生成的 CLIP（可点「合并输出」合成）";
+stopAfterBtn.textContent = "⏹ Current Only/Stop";
+stopAfterBtn.title = "Stop further rendering; keep only finished CLIPs (use Merge Output to combine)";
 stopAfterBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#7a3a3a;border:1px solid #9a5a5a;border-radius:4px;color:#fdd;cursor:pointer;font-weight:bold;display:none;";
 const abortBtn = document.createElement("button");
-abortBtn.textContent = "✖ 中止";
-abortBtn.title = "中止整个渲染";
+abortBtn.textContent = "✖ Abort";
+abortBtn.title = "Abort the whole render";
 abortBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#5a2a2a;border:1px solid #7a4a4a;border-radius:4px;color:#fbb;cursor:pointer;font-weight:bold;display:none;";
 const sendRenderControl = (action) => {
 	fetch(api.apiURL("/h3_extender/render_control"), {
@@ -6029,7 +6029,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 	// v2.111: 默认「展开CLIP」状态(与 runtime._h3CollapsedAll = false 一致)。
 	// 按钮显示的是"下一步可点的动作", 所以展开态显示「📦 收起CLIP」。
 	setBtnText(collapseAllBtn, "收起CLIP", "Collapse", { icon: "📦", bg: "#2a5a3a", border: "#3a7a4a", color: "#dfd" });
-		collapseAllBtn.title = "当前展开(显示全部 CLIP)。点击收起只显示 CLIP1; 再点展开恢复。";
+		collapseAllBtn.title = "Currently expanded (shows all CLIPs). Click to collapse to CLIP1 only; click again to expand.";
 		collapseAllBtn.classList.add("bsai-tb-btn");
 	let clipsCollapsed = false; // v2.111: 默认展开(与 runtime._h3CollapsedAll 一致)
 	collapseAllBtn.addEventListener("click", (e) => {
@@ -6107,7 +6107,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 	// v2.60: 恢复缓存按钮
 	const restoreCacheBtn = document.createElement("button");
 	setBtnText(restoreCacheBtn, "恢复缓存", "Restore Cache", { icon: "♻️", bg: "#6a3a6a", border: "#8a5a8a", color: "#fdf" });
-	restoreCacheBtn.title = "点一下恢复最近一次渲染的所有缓存和CLIP成品，不用重新从CLIP1渲染";
+	restoreCacheBtn.title = "Restore all caches and finished CLIPs from the last render with one click, without re-rendering from CLIP1";
 	restoreCacheBtn.classList.add("bsai-tb-btn");
 	restoreCacheBtn.addEventListener("click", (e) => {
 		e.preventDefault();
@@ -6169,7 +6169,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 							} catch (e) { console.warn("[H3] restore-render failed", e); }
 							try { node.setDirtyCanvas(true, true); } catch (_) {}
 							if (runtime.status) {
-								runtime.status.textContent = "♻️ 已恢复 " + clipsRestored + " 个 CLIP，无需刷新，直接点 Run 从下一个 CLIP 续渲染；建议 Ctrl+S 保存工作流（外部提示词与 @资产引用自动保留）";
+								runtime.status.textContent = "♻️ Restored " + clipsRestored + " CLIP(s); no refresh needed — click Run to continue from the next CLIP. Ctrl+S to save the workflow (external prompt and @ asset references are kept automatically)";
 								runtime.status.style.color = "#fdf";
 							}
 						})
@@ -6185,7 +6185,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 								}
 							} catch (e) {}
 							if (runtime.status) {
-								runtime.status.textContent = "♻️ 已恢复 " + clipsRestored + " 个 CLIP，无需刷新，直接点 Run 续渲染";
+								runtime.status.textContent = "♻️ Restored " + clipsRestored + " CLIP(s); no refresh needed — click Run to continue rendering";
 								runtime.status.style.color = "#fdf";
 							}
 						});
@@ -6199,12 +6199,12 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 	// ── 清空缓存按钮（删除上一版缓存，重新渲染新缓存用） ──
 	const clearCacheBtn = document.createElement("button");
 	setBtnText(clearCacheBtn, "清空缓存", "Clear Cache", { icon: "🗑", bg: "#5a3a1a", border: "#7a5a3a", color: "#fda" });
-	clearCacheBtn.title = "删除上一版生成的链缓存、ref2va缓存、预览缓存、CLIP成片等，重新渲染新缓存用。\n点击后会弹出确认框。";
+	clearCacheBtn.title = "Delete the chain cache, ref2va cache, preview cache, and finished CLIPs from the previous run so new caches can be rebuilt.\nA confirmation dialog will appear.";
 	clearCacheBtn.classList.add("bsai-tb-btn");
 	clearCacheBtn.addEventListener("click", (e) => {
 		e.preventDefault();
 		if (!confirm("确定要清空所有缓存吗？\n\n将删除：\n- 链缓存（chain_*.h3cache）\n- 参考图VAE编码缓存（_ref2va_cache）\n- 参考图缓存（_refs）\n- 预览缓存（_preview）\n- CLIP成片（h3_clip_*.mp4）\n- 临时预览（_clippv_*）\n\n清空后需重新渲染所有CLIP。")) return;
-		clearCacheBtn.textContent = "⏳ 清空中...";
+		clearCacheBtn.textContent = "⏳ Clearing...";
 		clearCacheBtn.disabled = true;
 		fetch(api.apiURL("/h3_extender/clear_chain_cache"), {
 			method: "POST",
@@ -6273,7 +6273,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     refsSection.style.marginBottom = "7px";
 
     const refsHeader = document.createElement("div");
-    refsHeader.textContent = "参考图片 — 双击缩略图编辑 / REFERENCE IMAGES — double-click to edit";
+    refsHeader.textContent = "REFERENCE IMAGES — double-click a thumbnail to edit";
     refsHeader.style.fontSize = "10px";
     refsHeader.style.fontWeight = "600";
     refsHeader.style.opacity = ".75";
@@ -6313,18 +6313,18 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     gpLeftPanel.style.cssText = "width:140px;min-width:140px;flex-shrink:0;border-right:1px solid rgba(255,255,255,.08);background:rgba(0,0,0,.15);padding:6px;display:flex;flex-direction:column;overflow-y:auto;min-height:0;flex:0 0 auto;box-sizing:border-box;";
 
     const gpLabel = document.createElement("div");
-    gpLabel.textContent = "全局提示词";
+    gpLabel.textContent = "Global Prompt";
     gpLabel.style.cssText = "font-size:10px;color:#888;flex-shrink:0;width:60px;padding-top:5px;";
     // v2.108: 手动折叠/展开全局提示词区。默认展开(收起 CLIP 态也可见),
     // 用户点这个按钮可以单独收起提示词区, 换取 CLIP 卡片更多可视高度。
     const gpCollapseBtn = document.createElement("button");
     gpCollapseBtn.textContent = "▲";
-    gpCollapseBtn.title = "折叠全局提示词区(收起后 CLIP 卡片可视区更大); 再点展开";
+    gpCollapseBtn.title = "Collapse the global prompt area (more room for CLIP cards); click again to expand";
     gpCollapseBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;font-size:10px;background:rgba(40,40,40,.8);border:1px solid rgba(255,255,255,.15);border-radius:4px;color:#aaa;cursor:pointer;align-self:flex-start;";
     const gpTextarea = document.createElement("textarea");
     gpTextarea.value = state.global_prompt || "";
     gpTextarea.spellcheck = false;
-    gpTextarea.placeholder = "全局提示词 (Global Prompt) — 将添加到每个CLIP提示词前\n连接外部输入源后自动同步内容";
+    gpTextarea.placeholder = "Global Prompt — prepended to every CLIP prompt\nContent syncs automatically when an external input source is connected";
     gpTextarea.style.cssText = "flex:1 1 auto;min-height:180px;max-height:none;height:auto;resize:vertical;overflow-y:hidden;font-size:11px;background:rgba(0,0,0,.27);border:1px solid rgba(255,255,255,.15);color:inherit;border-radius:5px;padding:4px 6px;box-sizing:border-box;align-self:stretch;";
     autoResizeTextarea(gpTextarea);
     gpTextarea.addEventListener("input", () => {
@@ -6367,7 +6367,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
     const gpExpandBtn = document.createElement("button");
     gpExpandBtn.textContent = "⤢";
-    gpExpandBtn.title = "放大全局提示词窗口";
+    gpExpandBtn.title = "Enlarge global prompt window";
     gpExpandBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;font-size:12px;background:rgba(40,40,40,.8);border:1px solid rgba(255,255,255,.15);border-radius:4px;color:#aaa;cursor:pointer;align-self:flex-start;";
     let gpExpanded = false;
     gpExpandBtn.addEventListener("click", (e) => {
@@ -6431,7 +6431,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
     const gpRefreshBtn = document.createElement("button");
     gpRefreshBtn.textContent = "↻";
-    gpRefreshBtn.title = "刷新：立即同步外部输入源内容";
+    gpRefreshBtn.title = "Refresh: immediately sync content from the external input source";
     gpRefreshBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;font-size:12px;background:rgba(40,40,40,.8);border:1px solid rgba(255,255,255,.15);border-radius:4px;color:#8cf;cursor:pointer;align-self:flex-start;";
     gpRefreshBtn.addEventListener("click", (e) => {
         e.preventDefault();
@@ -6549,7 +6549,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     }
     const gpFontMinusBtn = document.createElement("button");
     gpFontMinusBtn.textContent = "A−";
-    gpFontMinusBtn.title = "减小全局提示词字号";
+    gpFontMinusBtn.title = "Decrease global prompt font size";
     gpFontMinusBtn.style.cssText = "flex-shrink:0;width:22px;height:22px;font-size:10px;background:rgba(40,40,40,.8);border:1px solid rgba(255,255,255,.15);border-radius:4px;color:#aaa;cursor:pointer;align-self:flex-start;";
     gpFontMinusBtn.addEventListener("click", (e) => {
         e.preventDefault();
@@ -6559,7 +6559,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     });
     const gpFontPlusBtn = document.createElement("button");
     gpFontPlusBtn.textContent = "A+";
-    gpFontPlusBtn.title = "增大全局提示词字号";
+    gpFontPlusBtn.title = "Increase global prompt font size";
     gpFontPlusBtn.style.cssText = gpFontMinusBtn.style.cssText;
     gpFontPlusBtn.addEventListener("click", (e) => {
         e.preventDefault();
@@ -6620,11 +6620,11 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     bottomBtnGroup.style.cssText = "display:flex;align-items:center;gap:6px;";
 
     const addClipBtn = document.createElement("button");
-    addClipBtn.textContent = "添加CLIP / Add CLIP";
+    addClipBtn.textContent = "Add CLIP";
     addClipBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#2a5a8a;border:1px solid #3a6a9a;border-radius:4px;color:#cde;cursor:pointer;font-weight:bold;";
 
     const delAllClipsBtn = document.createElement("button");
-    delAllClipsBtn.textContent = "全部删除CLIP / DEL ALL CLIP";
+    delAllClipsBtn.textContent = "Delete All CLIPs";
     delAllClipsBtn.style.cssText = "font-size:11px;padding:2px 10px;background:#6a2a2a;border:1px solid #7a3a3a;border-radius:4px;color:#fcd;cursor:pointer;font-weight:bold;";
 
     bottomBtnGroup.append(addClipBtn, delAllClipsBtn);
@@ -6808,8 +6808,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     const quickBar = document.createElement("div");
     quickBar.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:5px 4px;border-top:1px solid rgba(255,255,255,.18);margin-bottom:2px;flex-shrink:0;background:#182838;";
     const quickTitle = document.createElement("span");
-    quickTitle.textContent = "快捷";
-    quickTitle.title = "一键化快捷开关：点一下开/关(布尔)；枚举档位按钮点击弹出下拉菜单直接选择档位。不改变参数顺序，旧工作流零影响。\n\n颜色 = 功能分类（紫=画质 / 青=加速 / 橙=超分 / 粉=语义 / 蓝=流程）。\n多档位按钮（如 输出 none/per_clip/merged/both）：同色系深浅渐变 + 底部档位进度条，越亮越靠后；第一档为关闭态暗色。点击按钮弹出下拉菜单，直接点选任意档位。\n速度档位（8档）：灰=custom手动档 / 青=FastH3标准档(极速/均衡/精细) / 紫=VDN档 / 橙=FastH3-Trim档(8步+4二采)；同链路内越亮越靠后。";
+    quickTitle.textContent = "Quick";
+    quickTitle.title = "One-click quick toggles: click to toggle (boolean); enum buttons open a dropdown to pick a tier directly. Parameter order is unchanged — zero impact on old workflows.\n\nColor = function category (purple=quality / cyan=acceleration / orange=upscale / pink=semantic / blue=workflow).\nMulti-tier buttons (e.g. output none/per_clip/merged/both): same-hue gradient + tier progress bar at the bottom, brighter = further tier; first tier is dim/off. Click the button to open a dropdown and pick any tier.\nSpeed tiers (8): gray=custom manual / cyan=FastH3 standard (Turbo/Balanced/Fine) / purple=VDN / orange=FastH3-Trim (8 steps + 4 refine); within a chain, brighter = further tier.";
     quickTitle.style.cssText = "font-size:9px;color:#8ab4f8;white-space:nowrap;margin-right:2px;font-weight:bold;text-shadow:0 0 6px rgba(138,180,248,.45);";
     quickBar.append(quickTitle);
     for (const def of QUICK_DEFS) {
@@ -6929,7 +6929,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     // v14.135: 颜色图例（放在按钮行末尾，自动换行时不挡按钮）
     try {
         const legend = document.createElement("span");
-        legend.title = "颜色 = 功能分类；按钮发亮 = 当前已开启。";
+        legend.title = "Color = function category; lit button = currently enabled.";
         legend.style.cssText = "display:inline-flex;align-items:center;gap:7px;margin-left:3px;padding-left:7px;border-left:1px solid rgba(255,255,255,.14);font-size:8px;white-space:nowrap;flex-shrink:0;";
         for (const _k of ["quality", "speed", "upscale", "sema", "flow"]) {
             const _c = QUICK_CATEGORIES[_k];
@@ -6988,7 +6988,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     // restore auto (content-height) mode.
     let gpDragHeight = null; // null = auto; number = fixed px
     const gpResizer = document.createElement("div");
-    gpResizer.title = "拖动调整全局提示词区高度；双击恢复自动高度";
+    gpResizer.title = "Drag to resize the global prompt area; double-click to restore auto height";
     gpResizer.style.cssText = "height:7px;flex:0 0 7px;cursor:row-resize;background:transparent;margin:1px 0;position:relative;z-index:5;";
     const gpResizerInner = document.createElement("div");
     gpResizerInner.style.cssText = "position:absolute;left:10px;right:10px;top:2px;height:3px;border-radius:2px;background:rgba(255,255,255,.12);transition:background .15s;";
@@ -8743,14 +8743,14 @@ function renderClipTemplatePanel(container, clip, node, runtime, textarea, clipI
     container.innerHTML = "";
     const templates = window.H3_FILM_TEMPLATES;
     if (!templates) {
-        container.innerHTML = '<div style="color:#666;font-size:11px;text-align:center;padding:8px;">模板库未加载</div>';
+        container.innerHTML = '<div style="color:#666;font-size:11px;text-align:center;padding:8px;">Template library not loaded</div>';
         return;
     }
 
     // 标题
     const hdr = document.createElement("div");
     hdr.style.cssText = "font-size:11px;color:#888;margin-bottom:6px;";
-    hdr.textContent = "电影模板 (点选应用到本CLIP)";
+    hdr.textContent = "Film Templates (click to apply to this CLIP)";
     container.appendChild(hdr);
 
     // 分类 + 模板

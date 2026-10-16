@@ -2049,7 +2049,7 @@ except Exception:
 
 def _ff_get_upscaler_models():
     """获取可用的 3D latent upscaler 模型列表; 不可用时返回仅插值选项。"""
-    opts = ["(bilinear插值, 无需模型)"]
+    opts = ["(bilinear interpolation, no model)"]
     if _FF_UPSCALER_MOD is not None:
         try:
             names = _FF_UPSCALER_MOD.scan_models()
@@ -2148,12 +2148,12 @@ def _ff_clip_upscale_enabled(clip, master):
 
 
 def _ff_resolve_upscale_mode(mode, factor, engine):
-    """v14.84 超分模式预设 → (factor, engine)。默认『平衡(质量+速度)』。"""
-    if mode == "质量优先":
+    """v14.84 upscale mode preset -> (factor, engine). Default: Balanced (quality+speed)."""
+    if mode in ("Quality first", "质量优先"):
         return 3.0, "realesr"
-    if mode == "速度优先":
+    if mode in ("Speed first", "速度优先"):
         return 1.5, "auto"
-    if mode == "自定义":
+    if mode in ("Custom", "自定义"):
         return float(factor), str(engine)
     return 2.0, "auto"
 
@@ -4885,7 +4885,7 @@ class BSAIH3FilmFactory:
                 {
                     "default": _state_json([_default_clip(0)]),
                     "multiline": True,
-                    "tooltip": "内部状态：CLIP 剧本 JSON（前端隐藏，不渲染不编辑）—— v14.103: 由 hidden 改回 STRING。ComfyUI 1.55 前端不创建 hidden 类型的 widget，导致 buildUi 找不到 clips_json → CLIP 区/UI 整体丢失 + widgets 数组与保存数组错位(NaN)；改回 STRING 后前端正常创建 widget，再由 extender.js v2.105 隐藏逻辑置为不可见。",
+                    "tooltip": "Internal state: CLIP script JSON (hidden from the UI, not rendered or edited). v14.103: changed from hidden back to STRING. The ComfyUI 1.55 frontend does not create widgets of type hidden, which made buildUi miss clips_json and caused the CLIP area/UI to disappear plus a widgets-array/save-array misalignment (NaN); as a STRING the widget is created normally and extender.js v2.105 hides it.",
                 },
             ),
             # Keep these AFTER clips_json so pre-v14.25 workflow widget arrays
@@ -4912,70 +4912,70 @@ class BSAIH3FilmFactory:
                 {
                     "default": _refs_json(_empty_refs()),
                     "multiline": True,
-                    "tooltip": "内部状态：参考图 JSON（前端隐藏，不渲染不编辑）—— v14.103: 由 hidden 改回 STRING，理由同 clips_json（1.55 前端不创建 hidden widget）。",
+                    "tooltip": "Internal state: reference image JSON (hidden from the UI, not rendered or edited). v14.103: changed from hidden back to STRING for the same reason as clips_json (the 1.55 frontend does not create hidden widgets).",
                 },
             ),
             "output_mode": (
                 ["none", "per_clip", "merged", "both"],
                 {
                     "default": "none",
-                    "tooltip": "none: 仅缓存，使用Final Decode节点输出。per_clip: 按CLIP分段保存MP4。merged: 合并所有CLIP为一个MP4。both: 同时保存分段和合并。",
+                    "tooltip": "none: cache only, use the Final Decode node for output. per_clip: save one MP4 per CLIP segment. merged: merge all CLIPs into a single MP4. both: save per-clip and merged outputs.",
                 },
             ),
             "filename_prefix": (
                 "STRING",
                 {
                     "default": "H3_Extender",
-                    "tooltip": "输出文件名前缀。分段输出时自动追加_clipN.mp4。",
+                    "tooltip": "Output filename prefix. Per-segment output appends _clipN.mp4 automatically.",
                 },
             ),
             "output_image_audio": (
                 "BOOLEAN",
                 {
                     "default": True,
-                    "tooltip": "每个CLIP生成好立即解码为IMAGE+AUDIO，经image/audio输出端口流出（可接超分放大节点）。关闭则仅缓存、用Final Decode导出。",
+                    "tooltip": "Decode each finished CLIP to IMAGE+AUDIO immediately and stream it through the image/audio output ports (e.g. into an upscale node). When off, only the cache is kept and Final Decode exports the result.",
                 },
             ),
             "block_cache": (
                 "BOOLEAN",
                 {
                     "default": False,
-                    "tooltip": "启用MiniMax H3 Block Cache（F1B0残差缓存）加速：顺序CLIP画面稳定时跳过大部分DiT块，多CLIP连续生成显著提速。依赖已安装的comfyui-minimax-h3-blockcache-T8插件。",
+                    "tooltip": "Enable MiniMax H3 Block Cache (F1B0 residual cache) acceleration: when consecutive CLIP frames are stable, most DiT blocks are skipped, significantly speeding up multi-CLIP generation. Requires the comfyui-minimax-h3-blockcache-T8 plugin.",
                 },
             ),
             "block_cache_threshold": (
                 "FLOAT",
                 {
                     "default": 0.12, "min": 0.0, "max": 1.0, "step": 0.01,
-                    "tooltip": "Block Cache命中阈值。越高越容易命中、加速越多，但结果可能变化。",
+                    "tooltip": "Block Cache hit threshold. Higher values hit more often and speed up more, but the result may change.",
                 },
             ),
             "block_cache_device": (
                 ["cpu", "gpu"],
                 {
                     "default": "cpu",
-                    "tooltip": "Block Cache缓存设备。cpu省显存，gpu减少传输但占显存。",
+                    "tooltip": "Block Cache device. cpu saves VRAM; gpu reduces transfers but uses VRAM.",
                 },
             ),
             "ref_cache": (
                 "BOOLEAN",
                 {
                     "default": True,
-                    "tooltip": "Ref2VA 参考图VAE编码磁盘缓存（CLIPCached同款，2026.09）：参考图内容未变时复用已编码的Image Latent，跳过每次重复编码——调提示词/换种子重跑显著提速；参考图变化自动失效。",
+                    "tooltip": "Ref2VA reference-image VAE encode disk cache (same as CLIPCached, 2026.09): when reference images are unchanged, the encoded image latent is reused and repeated encoding is skipped — prompt/seed changes re-run much faster; cache auto-invalidates when references change.",
                 },
             ),
             "cache_dit": (
                 "BOOLEAN",
                 {
                     "default": False,
-                    "tooltip": "CacheDiT 步间缓存加速（ComfyUI-CacheDiT，H3 约1.4-1.5x，2026.08新增H3支持）：自动检测并应用，需已安装 ComfyUI-CacheDiT 插件（未装自动回退）。与 Block Cache 互斥，开启时优先使用 CacheDiT。",
+                    "tooltip": "CacheDiT inter-step cache acceleration (ComfyUI-CacheDiT, H3 ~1.4-1.5x, H3 support added 2026.08): auto-detected and applied; requires the ComfyUI-CacheDiT plugin (falls back automatically if not installed). Mutually exclusive with Block Cache; when both are on, CacheDiT takes priority.",
                 },
             ),
             "clip_select_enable": (
                 "BOOLEAN",
                 {
                     "default": False,
-                    "tooltip": "CLIP 选择生成开关：开启后仅渲染 clip_select 指定的 CLIP，未选中的保留缓存、不重新生成。",
+                    "tooltip": "CLIP selection switch: when enabled, only the CLIPs listed in clip_select are rendered; unselected ones keep their cache and are not regenerated.",
                 },
             ),
             "clip_select": (
@@ -4983,21 +4983,21 @@ class BSAIH3FilmFactory:
                 {
                     "default": "all",
                     "multiline": False,
-                    "tooltip": "要渲染的 CLIP（1 起）：all=全部；单个如 1；多选如 1,3 / 3,5,7；范围如 2-5 / 7-10；混合如 1,3-5。仅 clip_select_enable 开启时生效。",
+                    "tooltip": "CLIPs to render (1-based): all=everything; single e.g. 1; multiple e.g. 1,3 / 3,5,7; ranges e.g. 2-5 / 7-10; mixed e.g. 1,3-5. Only effective when clip_select_enable is on.",
                 },
             ),
             "pause_enable": (
                 "BOOLEAN",
                 {
                     "default": False,
-                    "tooltip": "暂停渲染开关：开启后每个 CLIP 生成完、开始下一个前可暂停。前端提供「暂停/继续/仅当前/中止」，用户无干预则超时自动继续。",
+                    "tooltip": "Pause switch: when enabled, rendering pauses after each CLIP before starting the next one. The frontend offers pause/continue/current-only/abort; it auto-resumes after a timeout when the user does not intervene.",
                 },
             ),
             "pause_timeout": (
                 "FLOAT",
                 {
                     "default": 5.0, "min": 5.0, "max": 3600.0, "step": 5.0,
-                    "tooltip": "暂停后无干预自动继续渲染的等待秒数（默认5s=最佳出片节奏，暂停关时无效）。",
+                    "tooltip": "Seconds to wait before auto-resuming after a pause (default 5s = best output pacing; ignored when pause is off).",
                 },
             ),
             # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
@@ -5005,108 +5005,108 @@ class BSAIH3FilmFactory:
                 "BOOLEAN",
                 {
                     "default": True,
-                    "tooltip": "二采 Sol-H3 Self-Lift 双采（最佳画质默认开）：一采潜空间直接放大(不经过VAE)+CONST重加噪+二采完整去噪，直出高清视频（如1920x1088）。开启后每CLIP渲染时间约增加50%-100%。",
+                    "tooltip": "Refine (Sol-H3 Self-Lift) dual-pass, best quality, on by default: the first-pass latent is upscaled directly (no VAE) + CONST re-noise + a second full-denoise pass, producing HD video directly (e.g. 1920x1088). When enabled, per-CLIP render time increases by about 50%-100%.",
                 },
             ),
             "refine_denoise": (
                 "FLOAT",
                 {
                     "default": 0.45, "min": 0.05, "max": 1.0, "step": 0.01,
-                    "tooltip": "二采 CONST 重加噪目标强度（Sol-H3 双采语义，默认0.45=最佳质量与细节平衡，经 5090 24G 实测）。1.0=全量重噪重绘（官方双采极速版）；0.55=保留45%底图信息；<0.5 会变脸/跑偏风险升高。仅 refine_enable 开启时生效。",
+                    "tooltip": "Refine CONST re-noise strength (Sol-H3 dual-pass semantics; default 0.45 = best quality/detail balance, validated on a 5090 24G). 1.0 = full re-noise redraw (official fast dual-pass); 0.55 = keeps 45% of the base image; <0.5 raises the risk of face drift. Only effective when refine_enable is on.",
                 },
             ),
             "refine_steps": (
                 "INT",
                 {
                     "default": 2, "min": 1, "max": 20, "step": 1,
-                    "tooltip": "二采步数（默认2=最佳速度质量平衡，5090 24G 实测 8+2 双采）。turbo 模型 2 步足够；步数越多细节越丰富但时间越长。仅 refine_enable 开启时生效。",
+                    "tooltip": "Refine steps (default 2 = best speed/quality balance; validated 8+2 dual-pass on a 5090 24G). 2 steps are enough for turbo models; more steps add detail but take longer. Only effective when refine_enable is on.",
                 },
             ),
             "refine_upscale_factor": (
                 "FLOAT",
                 {
                     "default": 2.0, "min": 1.0, "max": 2.0, "step": 0.1,
-                    "tooltip": "二采潜空间放大倍数（默认2.0=直出1920x1088，一采960x544+2.0x）。1.3-1.5x 可输出接近 1080P；>1.5x 显存需求显著增加。放大后自动 CONST 重加噪+二采。仅 refine_enable 开启时生效。",
+                    "tooltip": "Refine latent upscale factor (default 2.0 = direct 1920x1088 from a 960x544 first pass). 1.3-1.5x outputs close to 1080P; >1.5x significantly increases VRAM demand. After upscaling, CONST re-noise + refine run automatically. Only effective when refine_enable is on.",
                 },
             ),
             "refine_upscaler_model": (
                 _ff_get_upscaler_models(),
                 {
-                    "default": "(bilinear插值, 无需模型)",
-                    "tooltip": "二采潜空间放大方式：3D latent upscaler 神经网络语义放大（细节更丰富，需 Comfyui_Minimax_h3_latent_Upscaler 插件+模型）；默认 bilinear 插值（无需模型，画质损失小）。",
+                    "default": "(bilinear interpolation, no model)",
+                    "tooltip": "Refine latent upscale method: 3D latent upscaler neural semantic upscale (richer detail; requires the Comfyui_Minimax_h3_latent_Upscaler plugin + model) or bilinear interpolation (no model needed, small quality loss) — the default.",
                 },
             ),
             "refine_align_to": (
                 "INT",
                 {
                     "default": 40, "min": 8, "max": 256, "step": 8,
-                    "tooltip": "二采放大后的像素对齐步长（默认40，H3 官方 40px 网格实测最佳；1920x1088 已是 40 的倍数）。其他分辨率会自动取整到该网格，避免边缘色条。",
+                    "tooltip": "Pixel alignment step after refine upscale (default 40, the H3-official 40px grid validated as optimal; 1920x1088 is already a multiple of 40). Other resolutions are rounded to this grid automatically to avoid edge color fringes.",
                 },
             ),
             "refine_audio_denoise": (
                 "FLOAT",
                 {
                     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                    "tooltip": "二采音频重绘强度：0=锁定一采音频（推荐，音频不重噪、不重绘，保持语音/音效一致）；0.5-1.0=音频随视频一起重噪重绘（可能改变声音）。仅 refine_enable 开启时生效。",
+                    "tooltip": "Refine audio redraw strength: 0 = keep the first-pass audio locked (recommended: no audio re-noise/redraw, keeps voice/effects consistent); 0.5-1.0 = audio is re-noised and redrawn together with the video (sound may change). Only effective when refine_enable is on.",
                 },
             ),
             # v14.83 对口型×二采组合预设（一采注入 lip_audio → 二采音频锁定保口型 / 二采音频参与重绘）
             "refine_lipsync_mode": (
-                ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"],
-                {"default": "锁定保口型(推荐)", "tooltip": "对口型×二采预设：锁定保口型=二采音频锁定一采音频不重绘(refine_audio_denoise=0)；音频参与重绘0.7=refine_audio_denoise=0.7；音频全重绘1.0=refine_audio_denoise=1.0。仅 refine_enable 开启时生效。"},
+                ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"],
+                {"default": "Lock lip-sync (recommended)", "tooltip": "Lip-sync × refine preset: Lock lip-sync = keep first-pass audio, no redraw (refine_audio_denoise=0); Audio redraw 0.7 = refine_audio_denoise=0.7; Full audio redraw 1.0 = refine_audio_denoise=1.0. Only effective when refine_enable is on."},
             ),
             # v14.83 像素超分旁支：per-clip 逐段超分 + final 全片超分（双开关，默认关）
             "upscale_per_clip": (
                 "BOOLEAN",
-                {"default": False, "tooltip": "每CLIP解码后逐段像素超分（单段显存可控；CLIP卡片 H 按钮优先于此总开关）。默认关。"},
+                {"default": False, "tooltip": "Per-CLIP pixel upscale after decode, segment by segment (per-segment VRAM stays manageable; the CLIP card H button takes priority over this master switch). Default off."},
             ),
             "upscale_final": (
                 "BOOLEAN",
-                {"default": False, "tooltip": "全片合并后一次性像素超分（出片前统一处理，更快更省）。默认关。"},
+                {"default": False, "tooltip": "One-shot pixel upscale of the full merged film (processed once before final output; faster and cheaper). Default off."},
             ),
             "upscale_mode": (
-                ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"],
-                {"default": "平衡(质量+速度)", "tooltip": "超分模式预设：平衡=2.0x auto(DLSS5可用则DLSS5否则REALESR)；质量优先=3.0x REALESR；速度优先=1.5x auto；自定义=按下方各参数显式值。"},
+                ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"],
+                {"default": "Balanced (quality+speed)", "tooltip": "Upscale mode preset: Balanced = 2.0x auto (DLSS5 if available, else REALESR); Quality first = 3.0x REALESR; Speed first = 1.5x auto; Custom = explicit values from the widgets below."},
             ),
             "upscale_engine": (
                 ["auto", "dlss5", "realesr", "bicubic"],
-                {"default": "auto", "tooltip": "超分引擎：auto=自动选择；dlss5=NVIDIA DLSS5(需N卡驱动+库)；realesr=RealESRGAN(upscale_models)；bicubic=内置插值(最快无模型依赖)。"},
+                {"default": "auto", "tooltip": "Upscale engine: auto = automatic; dlss5 = NVIDIA DLSS5 (requires an NVIDIA driver + library); realesr = RealESRGAN (upscale_models); bicubic = built-in interpolation (fastest, no model dependency)."},
             ),
             "upscale_factor": (
                 "FLOAT",
-                {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5, "tooltip": "像素超分倍率（相对二采输出分辨率）。默认2.0x。"},
+                {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5, "tooltip": "Pixel upscale factor (relative to the refine output resolution). Default 2.0x."},
             ),
             "upscale_model": (
                 _bsai_list_upscale_models(),
-                {"default": "realesr-general-x4v3.pth", "tooltip": "REALESR 超分模型（models/upscale_models/）。仅 upscale_engine=realesr 时使用。"},
+                {"default": "realesr-general-x4v3.pth", "tooltip": "REALESR upscale model (models/upscale_models/). Only used when upscale_engine=realesr."},
             ),
             "upscale_tile": (
                 "INT",
-                {"default": 0, "min": 0, "max": 4096, "step": 1, "tooltip": "超分分块像素（0=整幅；显存不足时设 512~1024）。"},
+                {"default": 0, "min": 0, "max": 4096, "step": 1, "tooltip": "Upscale tile pixels (0 = full frame; set 512~1024 when VRAM is tight)."},
             ),
             "upscale_batch": (
                 "INT",
-                {"default": 4, "min": 1, "max": 32, "step": 1, "tooltip": "超分批量帧数（显存换速度，越大越快越吃显存）。"},
+                {"default": 4, "min": 1, "max": 32, "step": 1, "tooltip": "Upscale batch frame count (trades VRAM for speed; larger = faster but more VRAM)."},
             ),
             "upscale_fp16": (
                 "BOOLEAN",
-                {"default": True, "tooltip": "超分 FP16 半精度加速（N卡/XPU均支持时自动）。"},
+                {"default": True, "tooltip": "Upscale FP16 half-precision acceleration (auto when both NVIDIA and XPU support it)."},
             ),
             "upscale_face_restore": (
                 "BOOLEAN",
-                {"default": False, "tooltip": "超分后人脸修复（FaceRestore，需 GPFGAN/CodeFormer 权重且额外耗时）。默认关。"},
+                {"default": False, "tooltip": "Face restore after upscale (FaceRestore; requires GPFGAN/CodeFormer weights and adds time). Default off."},
             ),
             "tiled_refine": (
                 "BOOLEAN",
-                {"default": False, "tooltip": "v1.48 分块二采(默认关)。开启后二采沿长空间轴分块采样，激活/attention workspace 随 tile_count 线性下降，根治外部进程挤占显存后 21.8GB 模型 + 全幅 workspace OOM/假死。算法移植自 MiniMaxH3 Director spatial tiling (Apache-2.0)。显存大时保持关。仅 refine_enable 开启时生效。"},
+                {"default": False, "tooltip": "v1.48 tiled refine (default off). When enabled, refine samples along the long spatial axis in tiles, so activation/attention workspace drops linearly with tile_count, fixing OOM/hang caused by a 21.8GB model + full-frame workspace when external processes squeeze VRAM. Ported from MiniMaxH3 Director spatial tiling (Apache-2.0). Keep off when VRAM is large. Only effective when refine_enable is on."},
             ),
             "tile_count": (
                 "INT",
-                {"default": 4, "min": 1, "max": 8, "step": 1, "tooltip": "二采空间分块数。越大显存越低、速度越慢(Director 演示 4)。仅 tiled_refine 开启时生效。"},
+                {"default": 4, "min": 1, "max": 8, "step": 1, "tooltip": "Refine spatial tile count. Larger = less VRAM but slower (Director demo uses 4). Only effective when tiled_refine is on."},
             ),
             "tile_overlap": (
                 "INT",
-                {"default": 128, "min": 0, "max": 512, "step": 16, "tooltip": "相邻块重叠像素(raised-cosine 融合)。Director 演示 128。仅 tiled_refine 开启时生效。"},
+                {"default": 128, "min": 0, "max": 512, "step": 16, "tooltip": "Adjacent tile overlap pixels (raised-cosine blend). Director demo uses 128. Only effective when tiled_refine is on."},
             ),
             # v1.83: 速度预设 - 落地 B站 MiniMax急速工作流(comfyu-Selflift)技术:
             # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
@@ -5115,46 +5115,46 @@ class BSAIH3FilmFactory:
                 ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA"],
                 {
                     "default": "custom",
-                    "tooltip": "v1.86 速度预设（默认 custom=按下方各widget显式值，开箱即用最佳 8+2 双采）。极速=一采4步+二采3步+denoise0.5(~20min/clip)；均衡=一采6步+二采4步(~28min)；精细=一采8步+二采6步(~40min)。VDN 档=搭配 VDN 版工作流使用。FastH3-Trim=nvfp4剪枝模型8步+4二采。FastH3-4步VSA=4步VSA蒸馏LoRA+2步二采，最快速度。custom=按下方各widget显式值。",
+                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. FastH3-Trim = nvfp4 pruned model, 8 + 4 refine. FastH3-4step VSA = 4-step VSA distilled LoRA + 2 refine steps, fastest. custom = explicit widget values below.",
                 },
             ),
             "temporal_chunk_tokens": (
                 "INT",
-                {"default": 0, "min": 0, "max": 200, "step": 1, "tooltip": "v2.02 时间分块(沿 T 轴, 区别于 tile_count 沿 H/W)。0=关闭(默认整段二采); >0 时把二采 latent 沿 T 切成该长度 token 段, 段间重叠, 逐段走已有(空间分块)采样器, 重叠区冻结+smoothstep接管。降 attention/激活峰值防 OOM。T~107 时建议 40~60。"},
+                {"default": 0, "min": 0, "max": 200, "step": 1, "tooltip": "v2.02 temporal chunking (along the T axis, unlike tile_count which is along H/W). 0 = off (default full-segment refine); >0 splits the refine latent along T into token segments of that length with overlap, each run through the existing (spatial-tiled) sampler, with the overlap zones frozen and taken over by smoothstep. Lowers attention/activation peaks to prevent OOM. For T~107, 40~60 is recommended."},
             ),
             "temporal_overlap_tokens": (
                 "INT",
-                {"default": 8, "min": 0, "max": 40, "step": 1, "tooltip": "相邻时间段重叠 token 数。越大越稳但越慢; 一般 8~12。仅 temporal_chunk_tokens>0 时生效。"},
+                {"default": 8, "min": 0, "max": 40, "step": 1, "tooltip": "Overlap tokens between adjacent temporal chunks. Larger = more stable but slower; typically 8~12. Only effective when temporal_chunk_tokens>0."},
             ),
             # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 权重放 models/semantic_bridge/.
             "semantic_bridge_enable": (
                 "BOOLEAN",
-                {"default": False, "tooltip": "Semantic-Bridge 语义桥开关。开启后用一个约11MB的小MLP对文本编码器token做残差混合, 让H3更听话(构图/空间/计数等)。原版蒸馏于FL2VA; 本插件Ref2VA为强制兼容。默认关, 不影响旧工作流。"},
+                {"default": False, "tooltip": "Semantic Bridge switch. When enabled, a small ~11MB MLP applies residual mixing to the text-encoder tokens so H3 follows instructions better (composition/spatial/counting, etc.). The original is distilled from FL2VA; this plugin forces Ref2VA compatibility. Default off; does not affect existing workflows."},
             ),
             "semantic_bridge_adapter": (
                 _bsai_list_semantic_bridge_adapters(),
-                {"tooltip": "语义桥权重文件(约11MB), 放到 ComfyUI/models/semantic_bridge/。下载: speach1sdef178/MiniMax-H3-Semantic-Bridge 或 JOKER141/BUNNY_H3_Conditioning_Bridge(偏动作/多人)。选(关闭)则不启用。"},
+                {"tooltip": "Semantic Bridge weight file (~11MB), place in ComfyUI/models/semantic_bridge/. Downloads: speach1sdef178/MiniMax-H3-Semantic-Bridge or JOKER141/BUNNY_H3_Conditioning_Bridge (action/multi-person oriented). Choose (Off) to disable."},
             ),
             "semantic_bridge_alpha": (
                 "FLOAT",
-                {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "残差混合强度 C=H+alpha*(S'-H)。原版默认0.15; 越大越贴桥, 过大会漂。"},
+                {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Residual mix strength C=H+alpha*(S'-H). Original default 0.15; larger = tighter to the bridge, too large drifts."},
             ),
             "semantic_bridge_magnitude_match": (
                 "BOOLEAN",
-                {"default": True, "tooltip": "把小MLP输出的向量模长对齐到原hidden。原版默认开。"},
+                {"default": True, "tooltip": "Align the small MLP output vector norm to the original hidden. Original default on."},
             ),
             # v2.24 模型环境音开关（对口型时是否混入H3自生成环境音；关=只留主唱/克隆语音）
             "env_audio_enable": (
                 ["global_inherit", "on", "off"],
-                {"default": "global_inherit", "tooltip": "模型环境音开关：global_inherit=跟随全局默认；on=混入H3自生成环境音；off=只留主唱/克隆语音。"},
+                {"default": "global_inherit", "tooltip": "Model ambient sound switch: global_inherit = follow the global default; on = mix in H3-generated ambient sound; off = keep only the main vocals/cloned voice."},
             ),
             "env_audio_gain": (
                 "FLOAT",
-                {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "模型环境音音量（0=无声，1=满音量，默认0.15垫底）。"},
+                {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Model ambient volume (0 = silent, 1 = full, default 0.15 as a floor)."},
             ),
             "face_lock_mode": (
                 "BOOLEAN",
-                {"default": False, "tooltip": "远景保脸模式（自动锁五官一致；@图1=全身，@图2.N=各人物脸特写）。"},
+                {"default": False, "tooltip": "Far-shot face preservation mode (automatically locks facial-feature consistency; @图1=full body, @图2.N=each person's face close-up)."},
             ),
         }
 
@@ -5163,10 +5163,10 @@ class BSAIH3FilmFactory:
         # by the Extender itself and embedded in portable .ext projects.
         optional = {
             "audio_vae": ("VAE", {"forceInput": True}),
-            "ref_audio": ("AUDIO", {"forceInput": True, "tooltip": "【音色参考】参考音频。连接后告诉H3模型：人物的声音/音色/音乐风格应该像这个参考。可以与lip_audio同时连接——lip_audio驱动口型，ref_audio提供音色参考。"}),
-            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "【唯一歌曲源】完整歌曲/对白音频。一旦连接：①所有CLIP及@图N角色的口型完全由这首歌对应片段驱动；②自动忽略ref_audio端口与@音频N；③模型自生成音频全部丢弃；④出片听到的就是这里接入的这首歌。按各CLIP时长自动切段，最终输出与视频等长。"}),
+            "ref_audio": ("AUDIO", {"forceInput": True, "tooltip": "Voice reference audio. When connected, it tells the H3 model that the character's voice/timbre/music style should follow this reference. Can be connected together with lip_audio — lip_audio drives the lip-sync while ref_audio provides the timbre reference."}),
+            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "Single song source: the complete song/dialogue audio. Once connected: (1) the lip-sync of every CLIP and @图N character is driven entirely by the matching segment of this song; (2) the ref_audio port and @音频N are ignored automatically; (3) all model-generated audio is discarded; (4) the output sound is exactly this song. It is auto-sliced per CLIP duration and the final output matches the video length."}),
             # v14.101: 回退 18:35(v14.84) — lip_voice 位置与 v2.7.json 一致（lip_audio 之后）
-            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "全局角色声线参考(AUDIO, 3~10s 干净人声)。speech 模式 TTS 克隆用；也可在 CLIP 卡片 lip_voice 填 @音频N(逐 CLIP 覆盖)。"}),
+            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "Global character voice-line reference (AUDIO, 3~10s clean voice). Used for TTS cloning in speech mode; can also be overridden per CLIP by putting @音频N in the CLIP card lip_voice field."}),
             "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [分镜N] marker: text before → global prompt, text from [分镜N] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
@@ -5193,7 +5193,7 @@ class BSAIH3FilmFactory:
         # v14.101: 回退 18:35(v14.84) — tts_model_TTS模型 在 optional 末尾（v2.7.json 一致）
         optional["tts_model_TTS模型"] = (
             "INDEX_TTS_MODEL",
-            {"forceInput": True, "tooltip": "IndexTTS-2.5 模型(接 BSAI_IndexTTS2_5Loader 的 tts_model 输出)。speech 模式必连。"},
+            {"forceInput": True, "tooltip": "IndexTTS-2.5 model (connect to the tts_model output of BSAI_IndexTTS2_5Loader). Required in speech mode."},
         )
 
 
@@ -5362,21 +5362,21 @@ class BSAIH3FilmFactory:
         refine_denoise = kwargs.get("refine_denoise", 0.45)
         refine_steps = kwargs.get("refine_steps", 2)
         refine_upscale_factor = kwargs.get("refine_upscale_factor", 2.0)
-        refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear插值, 无需模型)")
+        refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear interpolation, no model)")
         refine_align_to = int(kwargs.get("refine_align_to", 40))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
         # v14.83 对口型×二采组合预设（优先于 refine_audio_denoise 原始值）
-        refine_lipsync_mode = str(kwargs.get("refine_lipsync_mode", "锁定保口型(推荐)"))
-        if refine_lipsync_mode == "音频参与重绘0.7":
+        refine_lipsync_mode = str(kwargs.get("refine_lipsync_mode", "Lock lip-sync (recommended)"))
+        if refine_lipsync_mode in ("Audio redraw 0.7", "音频参与重绘0.7"):
             refine_audio_denoise = 0.7
-        elif refine_lipsync_mode == "音频全重绘1.0":
+        elif refine_lipsync_mode in ("Full audio redraw 1.0", "音频全重绘1.0"):
             refine_audio_denoise = 1.0
         else:
             refine_audio_denoise = 0.0
         # v14.83 像素超分旁支（双开关，默认关）+ v14.84 模式预设
         upscale_per_clip = bool(kwargs.get("upscale_per_clip", False))
         upscale_final = bool(kwargs.get("upscale_final", False))
-        upscale_mode = str(kwargs.get("upscale_mode", "平衡(质量+速度)"))
+        upscale_mode = str(kwargs.get("upscale_mode", "Balanced (quality+speed)"))
         upscale_engine = str(kwargs.get("upscale_engine", "auto"))
         upscale_factor = float(kwargs.get("upscale_factor", 2.0))
         upscale_model = str(kwargs.get("upscale_model", "realesr-general-x4v3.pth"))
@@ -7357,7 +7357,7 @@ print("[BSAI-H3-Film-Factory] v14.149 backend loaded (59-widget mid-insert layou
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
-    "BSAIMiniMaxH3Extender": "BSAI H3 Extender (旧版兼容别名)",
+    "BSAIMiniMaxH3Extender": "BSAI H3 Extender (Legacy Alias)",
     "BSAIH3FilmFactoryFinalDecode": "BSAI H3 Final Decode & Export",
 }
 

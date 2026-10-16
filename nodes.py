@@ -326,6 +326,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "BSAI_ContextualSeriesExtract": "BSAI Contextual Extract | 上下文帧提取",
-    "BSAI_ContextualSeriesLoad": "BSAI Contextual Load | 上下文帧加载",
+    "BSAI_ContextualSeriesExtract": "BSAI Contextual Extract | Context Frame Extraction",
+    "BSAI_ContextualSeriesLoad": "BSAI Contextual Load | Context Frame Loading",
 }

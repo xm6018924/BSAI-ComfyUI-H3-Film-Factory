@@ -511,21 +511,21 @@ class BSAI_H3_3DLatentUpscale:
                     "INT",
                     {
                         "default": 136, "min": 34, "max": 680, "step": 17,
-                        "tooltip": "二采时间分块长度（帧，17的倍数，136≈5.7s）。越大越省缝、越占显存。",
+                        "tooltip": "Refine temporal chunk length (frames, multiple of 17; 136≈5.7s). Larger = fewer seams but more VRAM.",
                     },
                 ),
                 "temporal_overlap": (
                     "INT",
                     {
                         "default": 17, "min": 17, "max": 170, "step": 17,
-                        "tooltip": "时间分块重叠帧数（17的倍数）。越大接缝越平滑、重复采样越多。",
+                        "tooltip": "Temporal chunk overlap frames (multiple of 17). Larger = smoother seams but more repeated sampling.",
                     },
                 ),
                 "resample_second_pass": (
                     "BOOLEAN",
                     {
                         "default": True,
-                        "tooltip": "二采：放大后逐块用扩散模型 re-sample 补细节（一采->3D Latent放大->二采）。关闭则仅做3D Latent放大。",
+                        "tooltip": "Refine: after upscaling, re-sample each tile with a diffusion model to add detail (first pass -> 3D Latent upscale -> refine). When off, only the 3D Latent upscale is done.",
                     },
                 ),
                 "denoise": ("FLOAT", {"default": 0.45, "min": 0.01, "max": 1.0, "step": 0.01}),
@@ -536,14 +536,14 @@ class BSAI_H3_3DLatentUpscale:
                     "INT",
                     {
                         "default": 512, "min": 128, "max": 4096, "step": 32,
-                        "tooltip": "空间分块 tile 边长（像素）。二采时每块切成tile逐块处理，显存峰值=单tile。8G卡用320-384，12G用384-512，16G用512-576。",
+                        "tooltip": "Spatial tile side length (pixels). During refine, each chunk is split into tiles processed one by one; peak VRAM = a single tile. 8G cards: 320-384; 12G: 384-512; 16G: 512-576.",
                     },
                 ),
                 "spatial_overlap": (
                     "INT",
                     {
                         "default": 128, "min": 0, "max": 1024, "step": 32,
-                        "tooltip": "空间分块重叠（像素）。越大接缝越平滑、重复计算越多。",
+                        "tooltip": "Spatial tile overlap (pixels). Larger = smoother seams but more redundant computation.",
                     },
                 ),
                 "seed": ("INT", {"default": 0, "min": 0, "max": (1 << 53) - 1}),
@@ -551,7 +551,7 @@ class BSAI_H3_3DLatentUpscale:
                     ["both", "image_audio", "latent"],
                     {
                         "default": "both",
-                        "tooltip": "both: 同时输出latent与image/audio。image_audio: 仅解码输出。latent: 仅输出放大后的AV latent。",
+                        "tooltip": "both: output latent and image/audio. image_audio: decode-only output. latent: output only the upscaled AV latent.",
                     },
                 ),
             },
@@ -717,5 +717,5 @@ NODE_CLASS_MAPPINGS = {
     "BSAI_H3_3DLatentUpscale": BSAI_H3_3DLatentUpscale,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "BSAI_H3_3DLatentUpscale": "BSAI H3 3D Latent 分块超清 (Chunked HD Upscale)",
+    "BSAI_H3_3DLatentUpscale": "BSAI H3 3D Latent Chunked HD Upscale",
 }

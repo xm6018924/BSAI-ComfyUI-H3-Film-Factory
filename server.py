@@ -37,16 +37,47 @@ except Exception:
 _IMG_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
 _VID_EXTS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')
 _AUD_EXTS = ('.wav', '.mp3', '.flac', '.ogg', '.aac', '.m4a')
+# Security: only these asset types may be addressed by name from HTTP handlers.
+_ASSET_TYPE_WHITELIST = ('images', 'videos', 'audios', 'audio')
+
+
+def _get_asset_base():
+    if _HAS_FOLDER_PATHS:
+        return os.path.realpath(folder_paths.get_input_directory())
+    return os.path.realpath(os.path.join(os.path.dirname(__file__), '..', '..', 'input'))
 
 
 def _get_asset_dir(asset_type):
-    if _HAS_FOLDER_PATHS:
-        base = folder_paths.get_input_directory()
-    else:
-        base = os.path.join(os.path.dirname(__file__), '..', '..', 'input')
+    # Confine asset_type to the whitelist; a caller-supplied path (e.g. "../../..")
+    # must never be able to redirect writes outside the asset base.
+    if asset_type not in _ASSET_TYPE_WHITELIST:
+        asset_type = 'images'
+    base = _get_asset_base()
     d = os.path.join(base, 'bsai_assets', asset_type)
     os.makedirs(d, exist_ok=True)
-    return d
+    return os.path.realpath(d)
+
+
+def _get_asset_root():
+    """Base asset directory (bsai_assets/) without a type subdir — used for the manifest."""
+    root = os.path.join(_get_asset_base(), 'bsai_assets')
+    os.makedirs(root, exist_ok=True)
+    return os.path.realpath(root)
+
+
+def _confine_path(base_dir, name):
+    """Join `name` under base_dir and reject absolute paths / '..' escapes.
+
+    Returns the real, confined absolute path, or None when the candidate
+    would escape base_dir.
+    """
+    if not name:
+        return None
+    base_real = os.path.realpath(base_dir)
+    cand = os.path.realpath(os.path.join(base_real, os.path.basename(str(name))))
+    if os.path.commonpath([base_real, cand]) != base_real:
+        return None
+    return cand
 
 
 def _make_thumbnail(path, size=80):
@@ -78,6 +109,8 @@ if _HAS_SERVER:
     async def upload_asset(request):
         asset_type = request.query.get('type', 'images')
         target_dir = _get_asset_dir(asset_type)
+        if _confine_path(target_dir, asset_type) is None:
+            return web.json_response({"error": "Invalid asset type"}, status=400)
 
         reader = await request.multipart()
         async for field in reader:
@@ -114,8 +147,8 @@ if _HAS_SERVER:
         if not filename:
             return web.json_response({"error": "Missing filename"}, status=400)
         target_dir = _get_asset_dir(asset_type)
-        filepath = os.path.join(target_dir, filename)
-        if not os.path.exists(filepath):
+        filepath = _confine_path(target_dir, filename)
+        if not filepath or not os.path.exists(filepath):
             return web.json_response({"error": "File not found"}, status=404)
         return web.FileResponse(filepath)
 
@@ -126,8 +159,8 @@ if _HAS_SERVER:
         if not filename:
             return web.json_response({"error": "Missing filename"}, status=400)
         target_dir = _get_asset_dir('videos')
-        filepath = os.path.join(target_dir, filename)
-        if not os.path.exists(filepath):
+        filepath = _confine_path(target_dir, filename)
+        if not filepath or not os.path.exists(filepath):
             return web.json_response({"error": "File not found"}, status=404)
         if _HAS_CV2:
             try:
@@ -191,7 +224,9 @@ if _HAS_SERVER:
             return web.json_response({"error": "Missing filename"}, status=400)
 
         target_dir = _get_asset_dir(asset_type)
-        filepath = os.path.join(target_dir, filename)
+        filepath = _confine_path(target_dir, filename)
+        if not filepath:
+            return web.json_response({"error": "File not found", "thumbnail": None}, status=404)
 
         if not os.path.exists(filepath):
             return web.json_response({"error": "File not found", "thumbnail": None}, status=404)
@@ -203,7 +238,7 @@ if _HAS_SERVER:
     async def list_all_assets(request):
         """Return all assets from default bsai_assets directories with thumbnails.
         Uses asset_order.json manifest for correct ordering (matches Asset Library UI)."""
-        manifest_path = os.path.join(_get_asset_dir(""), "asset_order.json")
+        manifest_path = os.path.join(_get_asset_root(), "asset_order.json")
         manifest = {}
         try:
             if os.path.isfile(manifest_path):
@@ -247,7 +282,7 @@ if _HAS_SERVER:
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
-        manifest_path = os.path.join(_get_asset_dir(""), "asset_order.json")
+        manifest_path = os.path.join(_get_asset_root(), "asset_order.json")
         try:
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(post, f, ensure_ascii=False, indent=2)
@@ -282,7 +317,7 @@ if _HAS_SERVER:
             except OSError as e:
                 failed.append({"name": fname, "error": str(e)})
 
-        manifest_path = os.path.join(_get_asset_dir(""), "asset_order.json")
+        manifest_path = os.path.join(_get_asset_root(), "asset_order.json")
         try:
             manifest = {}
             if os.path.isfile(manifest_path):
@@ -327,13 +362,22 @@ if _HAS_SERVER:
             if not path:
                 return None
             p = path.strip().strip('"').strip("'")
+            if _HAS_FOLDER_PATHS:
+                # Security: only allow paths inside the ComfyUI input/output dirs.
+                allowed_bases = [os.path.realpath(folder_paths.get_input_directory()),
+                                 os.path.realpath(folder_paths.get_output_directory())]
+                if os.path.isabs(p):
+                    real = os.path.realpath(p)
+                    if any(os.path.commonpath([b, real]) == b for b in allowed_bases) and os.path.isdir(real):
+                        return real
+                    return None
+                for base_func in [folder_paths.get_input_directory, folder_paths.get_output_directory]:
+                    full = os.path.realpath(os.path.join(os.path.realpath(base_func()), p))
+                    if os.path.isdir(full) and any(os.path.commonpath([b, full]) == b for b in allowed_bases):
+                        return full
+                return None
             if os.path.isabs(p) and os.path.isdir(p):
                 return p
-            if _HAS_FOLDER_PATHS:
-                for base_func in [folder_paths.get_input_directory, folder_paths.get_output_directory]:
-                    full = os.path.join(base_func(), p)
-                    if os.path.isdir(full):
-                        return full
             return p if os.path.isdir(p) else None
 
         result = {"images": [], "videos": [], "audios": []}

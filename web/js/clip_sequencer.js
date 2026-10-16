@@ -83,7 +83,7 @@ if (!document.getElementById(STYLE_ID)) {
 .bsai-asset-list::-webkit-scrollbar-track { background: #111; }
 .bsai-asset-list::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 .bsai-asset-list:empty::after {
-    content: "无资产/No assets"; color: #444; font-size: 9px;
+    content: "No assets"; color: #444; font-size: 9px;
     padding: 8px; text-align: center;
 }
 .bsai-asset-item {
@@ -374,25 +374,25 @@ function setupSequencer(node) {
     // === Multi-select toolbar ===
     var toolbar = document.createElement("div");
     toolbar.className = "bsai-seq-toolbar";
-    toolbar.innerHTML = '<span class="bsai-seq-toolbar-label">批量选择:</span>';
+    toolbar.innerHTML = '<span class="bsai-seq-toolbar-label">Batch select:</span>';
     var btnAll = document.createElement("button");
-    btnAll.textContent = "全选";
+    btnAll.textContent = "Select All";
     btnAll.title = "Select all clips";
     btnAll.addEventListener("click", function () { setAllSelected(cardsWrapper, true); });
     toolbar.appendChild(btnAll);
     var btnNone = document.createElement("button");
-    btnNone.textContent = "全不选";
+    btnNone.textContent = "Select None";
     btnNone.title = "Deselect all clips";
     btnNone.addEventListener("click", function () { setAllSelected(cardsWrapper, false); });
     toolbar.appendChild(btnNone);
     var btnInvert = document.createElement("button");
-    btnInvert.textContent = "反选";
+    btnInvert.textContent = "Invert";
     btnInvert.title = "Invert selection";
     btnInvert.addEventListener("click", function () { invertSelection(cardsWrapper); });
     toolbar.appendChild(btnInvert);
     var toolbarInfo = document.createElement("span");
     toolbarInfo.className = "bsai-seq-toolbar-info";
-    toolbarInfo.innerHTML = '已选 <span data-sel-count>0</span>/<span data-total-count>0</span>';
+    toolbarInfo.innerHTML = 'Selected <span data-sel-count>0</span>/<span data-total-count>0</span>';
     toolbar.appendChild(toolbarInfo);
     container.appendChild(toolbar);
 
@@ -404,12 +404,12 @@ function setupSequencer(node) {
 
     var summary = document.createElement("div");
     summary.className = "bsai-seq-summary";
-    summary.innerHTML = '<span data-sum-clips>0</span> CLIPs &nbsp;|&nbsp; 总时长 <span data-sum-dur>0.0</span>s';
+    summary.innerHTML = '<span data-sum-clips>0</span> CLIPs &nbsp;|&nbsp; Total <span data-sum-dur>0.0</span>s';
     container.appendChild(summary);
 
     var addBtn = document.createElement("div");
     addBtn.className = "bsai-seq-add";
-    addBtn.textContent = "+ 添加 CLIP / Add CLIP";
+    addBtn.textContent = "+ Add CLIP";
     addBtn.addEventListener("click", function () {
         addClipCard(node, cardsWrapper, null);
         serializeClips(node, cardsWrapper);
@@ -481,7 +481,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     numWrap.className = "bsai-clip-num";
     var checkBox = document.createElement("div");
     checkBox.className = "bsai-clip-check";
-    checkBox.title = "勾选后参与渲染 / Check to include in render";
+    checkBox.title = "Check to include in render";
     if (data.selected !== false) {
         card.classList.add("selected");
     }
@@ -504,7 +504,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     var delBtn = document.createElement("div");
     delBtn.className = "bsai-clip-del";
     delBtn.textContent = "✕";
-    delBtn.title = "删除此 CLIP / Delete this clip";
+    delBtn.title = "Delete this clip";
     delBtn.addEventListener("click", function () {
         card.remove();
         renumberCards(cardsWrapper);
@@ -524,7 +524,7 @@ function addClipCard(node, cardsWrapper, clipData) {
 
     var leftHdr = document.createElement("div");
     leftHdr.className = "bsai-clip-left-hdr";
-    leftHdr.innerHTML = '资产引用 <span class="bsai-clip-left-hint">点击选择</span>';
+    leftHdr.innerHTML = 'Asset References <span class="bsai-clip-left-hint">click to select</span>';
     leftPanel.appendChild(leftHdr);
 
     var assetList = document.createElement("div");
@@ -533,7 +533,7 @@ function addClipCard(node, cardsWrapper, clipData) {
 
     var refreshBtn = document.createElement("div");
     refreshBtn.className = "bsai-asset-refresh";
-    refreshBtn.textContent = "↻ 刷新资产库";
+    refreshBtn.textContent = "↻ Refresh Asset Library";
     refreshBtn.addEventListener("click", function () {
         _assetCache = null;
         renderAssetList(assetList, data.asset_refs || "", function (newRefs) {
@@ -553,14 +553,14 @@ function addClipCard(node, cardsWrapper, clipData) {
     // Prompt
     var promptLbl = document.createElement("div");
     promptLbl.className = "bsai-clip-lbl";
-    promptLbl.innerHTML = '提示词 / Prompt <span class="bsai-clip-lbl-hint">【旁白】【对白】 + @图N</span>';
+    promptLbl.innerHTML = 'Prompt <span class="bsai-clip-lbl-hint">【旁白】【对白】 + @图N</span>';
     rightPanel.appendChild(promptLbl);
 
     var promptInput = document.createElement("textarea");
     promptInput.className = "bsai-clip-prompt";
     promptInput.rows = 2;
     promptInput.value = data.prompt || "";
-    promptInput.placeholder = "输入生成提示词...\n可用 【旁白】/【对白】 标记字幕\n可用 @图1 @视频1 @音频1 引用资产";
+    promptInput.placeholder = "Enter generation prompt...\nUse 【旁白】/【对白】 for subtitles\nUse @图1 @视频1 @音频1 to reference assets";
     promptInput.addEventListener("input", function () { serializeClips(node, cardsWrapper); });
     rightPanel.appendChild(promptInput);
 
@@ -572,7 +572,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     durWrap.className = "bsai-clip-field";
     durWrap.dataset.field = "duration";
     var durLbl = document.createElement("label");
-    durLbl.textContent = "时长/秒";
+    durLbl.textContent = "Duration (s)";
     durWrap.appendChild(durLbl);
     var durInput = document.createElement("input");
     durInput.type = "number";
@@ -589,7 +589,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     audWrap.className = "bsai-clip-field";
     audWrap.dataset.field = "audio_mode";
     var audLbl = document.createElement("label");
-    audLbl.textContent = "音频模式";
+    audLbl.textContent = "Audio Mode";
     audWrap.appendChild(audLbl);
     var audSel = document.createElement("select");
     [["H3_auto", "H3 自动"], ["custom", "自定义"]].forEach(function (pair) {
@@ -606,7 +606,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     subWrap.className = "bsai-clip-field";
     subWrap.dataset.field = "subtitle_source";
     var subLbl = document.createElement("label");
-    subLbl.textContent = "字幕来源";
+    subLbl.textContent = "Subtitle Source";
     subWrap.appendChild(subLbl);
     var subSel = document.createElement("select");
     [["manual", "手动输入"], ["extract_from_prompt", "从提示词提取"]].forEach(function (pair) {
@@ -624,7 +624,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     // ---- Collapsible advanced section ----
     var advToggle = document.createElement("div");
     advToggle.className = "bsai-clip-adv-toggle";
-    advToggle.textContent = "▶ 字幕/高级设置 / Subtitle & Advanced";
+    advToggle.textContent = "▶ Subtitle & Advanced";
     advToggle.dataset.expanded = "false";
 
     var advContent = document.createElement("div");
@@ -641,27 +641,27 @@ function addClipCard(node, cardsWrapper, clipData) {
 
     var narrLbl = document.createElement("div");
     narrLbl.className = "bsai-clip-lbl";
-    narrLbl.textContent = "旁白 / Narration";
+    narrLbl.textContent = "Narration";
     advContent.appendChild(narrLbl);
 
     var narrInput = document.createElement("textarea");
     narrInput.className = "bsai-clip-narr";
     narrInput.rows = 2;
     narrInput.value = data.narration || "";
-    narrInput.placeholder = "旁白字幕文本...";
+    narrInput.placeholder = "Narration subtitle text...";
     narrInput.addEventListener("input", function () { serializeClips(node, cardsWrapper); });
     advContent.appendChild(narrInput);
 
     var dialLbl = document.createElement("div");
     dialLbl.className = "bsai-clip-lbl";
-    dialLbl.textContent = "对白 / Dialogue";
+    dialLbl.textContent = "Dialogue";
     advContent.appendChild(dialLbl);
 
     var dialInput = document.createElement("textarea");
     dialInput.className = "bsai-clip-dial";
     dialInput.rows = 2;
     dialInput.value = data.dialogue || "";
-    dialInput.placeholder = "对白字幕文本...";
+    dialInput.placeholder = "Dialogue subtitle text...";
     dialInput.addEventListener("input", function () { serializeClips(node, cardsWrapper); });
     advContent.appendChild(dialInput);
 
@@ -672,7 +672,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     wWrap.className = "bsai-clip-field";
     wWrap.dataset.field = "width";
     var wLbl = document.createElement("label");
-    wLbl.textContent = "宽度 Width";
+    wLbl.textContent = "Width";
     wWrap.appendChild(wLbl);
     var wInput = document.createElement("input");
     wInput.type = "number";
@@ -686,7 +686,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     hWrap.className = "bsai-clip-field";
     hWrap.dataset.field = "height";
     var hLbl = document.createElement("label");
-    hLbl.textContent = "高度 Height";
+    hLbl.textContent = "Height";
     hWrap.appendChild(hLbl);
     var hInput = document.createElement("input");
     hInput.type = "number";
@@ -700,7 +700,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     sWrap.className = "bsai-clip-field";
     sWrap.dataset.field = "seed";
     var sLbl = document.createElement("label");
-    sLbl.textContent = "种子 Seed";
+    sLbl.textContent = "Seed";
     sWrap.appendChild(sLbl);
     var sInput = document.createElement("input");
     sInput.type = "number";

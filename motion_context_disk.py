@@ -4152,7 +4152,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                     "STRING",
                     {
                         "default": "all",
-                        "tooltip": "选择导出的CLIP编号(从1开始)。all=导出全部并合并; 2=仅导出第2个; 2,3=导出第2和第3个; 2-5=导出第2至第5个。非all时按选择范围导出分段MP4。",
+                        "tooltip": "CLIP numbers to export (1-based). all = export all and merge; 2 = only the 2nd; 2,3 = 2nd and 3rd; 2-5 = 2nd through 5th. When not all, per-segment MP4s are exported for the selected range.",
                     },
                 ),
             },
@@ -4216,12 +4216,31 @@ class MiniMaxH3MotionContextDiskFinalDecode:
 
         ffmpeg = _find_ffmpeg()
 
-        if str(output_directory).strip():
-            out_dir = Path(str(output_directory).strip()).expanduser().resolve()
-        elif folder_paths is not None:
-            out_dir = Path(folder_paths.get_output_directory()).resolve()
+        if folder_paths is not None:
+            default_out = Path(folder_paths.get_output_directory()).resolve()
         else:
-            out_dir = (Path.cwd() / "output").resolve()
+            default_out = (Path.cwd() / "output").resolve()
+        # Security: confine the FinalDecode output_directory widget to the
+        # ComfyUI output directory. Absolute paths and '..' escapes outside it
+        # are rejected (fall back to the default output dir).
+        out_dir = default_out
+        custom_out = str(output_directory or "").strip()
+        if custom_out:
+            cand = Path(custom_out).expanduser().resolve()
+            try:
+                if os.path.commonpath([str(default_out), str(cand)]) == str(default_out):
+                    out_dir = cand
+                else:
+                    _LOG.warning(
+                        "H3 Final Decode: output_directory %r escapes the output dir; "
+                        "falling back to %s",
+                        custom_out, default_out,
+                    )
+            except Exception:
+                _LOG.warning(
+                    "H3 Final Decode: output_directory %r invalid; falling back to %s",
+                    custom_out, default_out,
+                )
         out_dir.mkdir(parents=True, exist_ok=True)
 
         # ── Selective clip export ─────────────────────────────────────

@@ -145,7 +145,7 @@ class BSAI_AssetLibraryInput:
     RETURN_TYPES = ("ASSET_LIBRARY",)
     RETURN_NAMES = ("asset_library",)
     FUNCTION = "load_assets"
-    DESCRIPTION = "Upload images/videos/audio via node UI. Assets indexed: 图1,图2,... / 视频1,... / 音频1,..."
+    DESCRIPTION = "Upload images/videos/audio via the node UI. Assets are indexed as @图1,@图2,... (images) / @视频1,... (videos) / @音频1,... (audio)."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -245,7 +245,7 @@ class BSAI_AssetRefSelector:
         "formatted_prompt",
     )
     FUNCTION = "select_assets"
-    DESCRIPTION = "Parse @图N/@视频N/@音频N in prompt, load referenced assets, output for MiniMaxH3ReferenceToVideo."
+    DESCRIPTION = "Parse @图N/@视频N/@音频N tokens in the prompt, load the referenced assets, and output for MiniMaxH3ReferenceToVideo."
 
     @classmethod
     def INPUT_TYPES(cls):
