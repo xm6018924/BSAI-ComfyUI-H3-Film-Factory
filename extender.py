@@ -299,6 +299,26 @@ def _read_frames_from_mp4(path, ffmpeg, total_frames, trim, width, height):
     return torch.from_numpy(arr.copy()).float().div_(255.0)
 
 
+def _mp_has_ck_quant_weights(model):
+    """检测 ModelPatcher 是否携带 comfy_kitchen 量化权重（QuantizedTensor 参数）。
+
+    partially_unload(offload_device, 1e32) 会对 comfy_patched_weights 的模块执行
+    m.to(cpu)，QuantizedTensor._handle_to 在该路径下原生 access violation 崩溃
+    （Python try/except 无法捕获，直接杀进程）。此类模型必须跳过强制卸载循环，
+    交由 DynamicVRAM 调度 / delegate 收尾 / unload_all_models()（detach 路径）卸载。
+    """
+    try:
+        raw = getattr(model, "model", None)
+        if raw is None:
+            return False
+        for _p in raw.parameters():
+            if "comfy_kitchen" in (type(_p).__module__ or ""):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
     """Decode one cached clip to (IMAGE tensor, AUDIO dict), trimmed of the
     leading context overlap so downstream concatenation matches the Final
@@ -320,6 +340,8 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
         import torch as _torch
         for _lm in list(_mm.current_loaded_models):
             try:
+                if _mp_has_ck_quant_weights(_lm.model):
+                    continue
                 _lm.model.partially_unload(_lm.model.offload_device, 1e32)
             except Exception:
                 pass
@@ -338,6 +360,8 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
         import torch as _torch
         for _lm in list(_mm.current_loaded_models):
             try:
+                if _mp_has_ck_quant_weights(_lm.model):
+                    continue
                 _lm.model.partially_unload(_lm.model.offload_device, 1e32)
             except Exception:
                 pass
@@ -1841,7 +1865,7 @@ def _make_ref2va_conditioning(
         _cmm.cleanup_models_gc()
         for _lm in list(_cmm.current_loaded_models):
             try:
-                if _lm.model is not getattr(clip, "patcher", None):
+                if _lm.model is not getattr(clip, "patcher", None) and not _mp_has_ck_quant_weights(_lm.model):
                     _lm.model.partially_unload(_lm.model.offload_device, 1e32)
             except Exception:
                 pass
@@ -1906,6 +1930,8 @@ def _make_ref2va_conditioning(
             # 二采复用已编码 conditioning(不重 encode), 此处卸 TE 不影响二采/VAE/3D upscaler。
             for _lm2 in list(_cmm2.current_loaded_models):
                 try:
+                    if _mp_has_ck_quant_weights(_lm2.model):
+                        continue
                     _lm2.model.partially_unload(_lm2.model.offload_device, 1e32)
                 except Exception:
                     pass
@@ -3393,13 +3419,31 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # v14.142: 二采完成后卸载 non-dynamic delegate, 恢复 EXTRA_RESERVED_VRAM
                 # 到进入前原值, 避免 delegate 驻留残留挤压下一 CLIP 一采的 DynamicVRAM
                 # staged 空间. 原 dynamic model 交给 DynamicVRAM 自身调度.
+                # v2.55c: ComfyUI 无 unload_model() API (仅 unload_model_and_clones, 且会
+                # 连带卸载同 clone_base_uuid 的原 dynamic DiT, 不可用), 旧调用静默 no-op,
+                # delegate 的 GPU 驻留量化权重跨 clip 泄漏(二采前 device_free 逐 clip
+                # 下滑), 最终 TE 加载时 ComfyUI 标准路径对 delegate 执行
+                # partially_load->unpatch_model->self.model.to(cpu) 触发 QuantizedTensor
+                # 原生 access violation。修复: 直接从 current_loaded_models 摘除 delegate
+                # 的 LoadedModel, 释放本地引用 + GC, 让 GPU 量化权重真正回收, 不再触碰 .to()。
                 try:
                     if _refine_model is not model:
                         try:
-                            _mm3.unload_model(_refine_model)
+                            from comfy.model_management import current_loaded_models as _r_clm
+                            for _ri in range(len(_r_clm) - 1, -1, -1):
+                                if getattr(_r_clm[_ri], "model", None) is _refine_model:
+                                    _r_clm.pop(_ri)
+                                    break
                         except Exception:
                             pass
                         _refine_model = model
+                        _r_delegate_dyn = None
+                        try:
+                            import gc as _gc
+                            _gc.collect()
+                            _mm3.soft_empty_cache(force=True)
+                        except Exception:
+                            pass
                     if _ext_resv_orig is not None:
                         try:
                             _mm3.EXTRA_RESERVED_VRAM = _ext_resv_orig
@@ -6528,6 +6572,8 @@ class BSAIH3FilmFactory:
                     import torch as _torch
                     for _lm in list(_mm.current_loaded_models):
                         try:
+                            if _mp_has_ck_quant_weights(_lm.model):
+                                continue
                             _lm.model.partially_unload(_lm.model.offload_device, 1e32)
                         except Exception:
                             pass

@@ -2319,6 +2319,26 @@ def _cache_candidate_render(
     return updated, desc
 
 
+def _mp_has_ck_quant_weights(model):
+    """检测 ModelPatcher 是否携带 comfy_kitchen 量化权重（QuantizedTensor 参数）。
+
+    partially_unload(offload_device, 1e32) 会对 comfy_patched_weights 的模块执行
+    m.to(cpu)，QuantizedTensor._handle_to 在该路径下原生 access violation 崩溃
+    （Python try/except 无法捕获，直接杀进程）。此类模型必须跳过强制卸载循环，
+    交由 DynamicVRAM 调度 / delegate 收尾 / unload_all_models()（detach 路径）卸载。
+    """
+    try:
+        raw = getattr(model, "model", None)
+        if raw is None:
+            return False
+        for _p in raw.parameters():
+            if "comfy_kitchen" in (type(_p).__module__ or ""):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _decode_single_clip_to_blob(
     owner_id,
     clip_index,
@@ -2381,6 +2401,8 @@ def _decode_single_clip_to_blob(
         import torch as _torch
         for _lm in list(_mm.current_loaded_models):
             try:
+                if _mp_has_ck_quant_weights(_lm.model):
+                    continue
                 _lm.model.partially_unload(_lm.model.offload_device, 1e32)
             except Exception:
                 pass
