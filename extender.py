@@ -1908,16 +1908,26 @@ def _make_ref2va_conditioning(
         _gc.collect()
         import comfy.model_management as _cmm
         _cmm.cleanup_models_gc()
+        # v2.121 (round4): TE 编码期间 ComfyUI 内部 free_memory 会扫描 current_loaded_models
+        # 腾显存。若量化 DiT/delegate 仍在列表里(哪怕 loaded_size<1MB), 内部路径会走
+        # detach->unpatch_model->to(cpu) 触发 comfy_kitchen _handle_to 原生 access violation。
+        # 修复: 对所有带 ck 量化权重的模型, 一律直接从 current_loaded_models 摘除,
+        # 不走 partially_unload(二采 delegate 与 DiT 共享权重, partially_unload 卸不干净),
+        # 摘完 gc+empty_cache 让 GPU 权重物理回收。这样 ComfyUI 内部 free_memory 扫不到量化模型。
         for _lm in list(_cmm.current_loaded_models):
             try:
                 if _lm.model is getattr(clip, "patcher", None):
                     continue
                 if _mp_has_ck_quant_weights(_lm.model):
-                    _mp_ck_offload_or_pop(_lm, _cmm)
+                    try:
+                        _cmm.current_loaded_models.remove(_lm)
+                    except Exception:
+                        pass
                     continue
                 _lm.model.partially_unload(_lm.model.offload_device, 1e32)
             except Exception:
                 pass
+        _gc.collect()
         _cmm.soft_empty_cache(force=True)
     except Exception:
         pass
@@ -6636,7 +6646,12 @@ class BSAIH3FilmFactory:
                     for _lm in list(_mm.current_loaded_models):
                         try:
                             if _mp_has_ck_quant_weights(_lm.model):
-                                _mp_ck_offload_or_pop(_lm, _mm)
+                                # v2.121 (round4): 同 _make_ref2va_conditioning 预编码清扫,
+                                # 量化模型直接摘除, 不走 partially_unload(共享权重卸不干净)。
+                                try:
+                                    _mm.current_loaded_models.remove(_lm)
+                                except Exception:
+                                    pass
                                 continue
                             _lm.model.partially_unload(_lm.model.offload_device, 1e32)
                         except Exception:
