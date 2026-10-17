@@ -335,6 +335,54 @@ if _HAS_SERVER:
             "failed": failed,
         })
 
+    @PromptServer.instance.routes.post("/bsai/remove_asset")
+    async def remove_asset(request):
+        """Delete a single asset file from disk and prune it from the manifest.
+        Backs the per-thumbnail X button: previously the X only removed the
+        DOM element, so the file stayed on disk and 'resurrected' on reload."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Invalid JSON"}, status=400)
+        asset_type = str(body.get("asset_type", ""))
+        filename = str(body.get("filename", "")).strip()
+        # Canonical directory name is "audios"; accept legacy "audio".
+        dir_type = "audios" if asset_type == "audio" else asset_type
+        manifest_key = "audios" if dir_type == "audio" else dir_type
+        if manifest_key not in ("images", "videos", "audios"):
+            return web.json_response({"error": "Invalid asset_type"}, status=400)
+        if not filename:
+            return web.json_response({"error": "Missing filename"}, status=400)
+        d = _get_asset_dir(dir_type)
+        filepath = _confine_path(d, filename)
+        if not filepath:
+            return web.json_response({"error": "Invalid filename"}, status=400)
+        err = None
+        existed = False
+        if os.path.isfile(filepath):
+            existed = True
+            try:
+                os.remove(filepath)
+            except OSError as e:
+                err = str(e)
+        # Authoritatively drop the name from the manifest entry (idempotent).
+        manifest_path = os.path.join(_get_asset_root(), "asset_order.json")
+        try:
+            manifest = {}
+            if os.path.isfile(manifest_path):
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest = json.load(f)
+            lst = manifest.get(manifest_key)
+            if isinstance(lst, list) and filename in lst:
+                manifest[manifest_key] = [x for x in lst if x != filename]
+                with open(manifest_path, "w", encoding="utf-8") as f:
+                    json.dump(manifest, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[BSAI AssetServer] Failed to prune manifest entry: {e}")
+        if err:
+            return web.json_response({"ok": False, "deleted": False, "error": err}, status=500)
+        return web.json_response({"ok": True, "deleted": filename, "existed": existed})
+
     @PromptServer.instance.routes.get("/bsai/list_fonts")
     async def list_fonts(request):
         """List system fonts from Windows Fonts folder."""

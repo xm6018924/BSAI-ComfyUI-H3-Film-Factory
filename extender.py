@@ -224,7 +224,11 @@ def _release_dynamic_vram(tag=""):
     try:
         import comfy.model_management as _mm81
         try:
-            _mm81.unload_all_models()
+            # v2.120b: unload_all_models() 会对注册中的 dynamic 量化 DiT 走 model_unload->
+            # detach->unpatch_model->self.model.to(cpu), 量化块 GPU→CPU 拷贝触发 comfy_kitchen
+            # _handle_to 原生 access violation(round3 崩溃链)。free_memory(..., for_dynamic=True)
+            # 对动态模型设 memory_to_free=0 跳过, 只卸载非量化模型, 动态模型交 DynamicVRAM 调度。
+            _mm81.free_memory(1e30, _mm81.get_torch_device(), for_dynamic=True)
         except Exception:
             pass
     except Exception:
@@ -319,6 +323,45 @@ def _mp_has_ck_quant_weights(model):
     return False
 
 
+def _mp_ck_offload_or_pop(_lm, _mm):
+    """量化模型安全卸载(round3 同类路径封堵)。
+
+    dynamic 量化模型(如 H3 量化 DiT): 走 ComfyUI 标准 partially_unload(1e32) 块级卸载,
+    该路径对本模型多次实测安全(日志 'Unloaded partially: 14719.41 MB freed, 0.00 MB
+    remains loaded'); 卸载后若仍有 GPU 驻留(loaded_size>1MB), 按身份从
+    current_loaded_models 摘除, 避免后续任何 detach/unpatch_model 的
+    self.model.to(cpu) 对量化块触发 comfy_kitchen _handle_to 原生崩溃。
+    非 dynamic 量化模型(如二采 delegate 克隆, round1 崩溃对象): 不触碰
+    partially_unload(其 m.to(cpu) 会原生崩溃), 直接摘除注册, 由 GC/empty_cache 回收。
+    """
+    try:
+        _m = getattr(_lm, "model", None)
+        if _m is None:
+            return
+        import torch as _t
+        if _m.is_dynamic():
+            try:
+                _m.partially_unload(_m.offload_device, 1e32)
+                try:
+                    _t.cuda.synchronize()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            try:
+                if _m.loaded_size() > 1024 * 1024:
+                    _mm.current_loaded_models.remove(_lm)
+            except Exception:
+                pass
+        else:
+            try:
+                _mm.current_loaded_models.remove(_lm)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
     """Decode one cached clip to (IMAGE tensor, AUDIO dict), trimmed of the
     leading context overlap so downstream concatenation matches the Final
@@ -341,6 +384,7 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
         for _lm in list(_mm.current_loaded_models):
             try:
                 if _mp_has_ck_quant_weights(_lm.model):
+                    _mp_ck_offload_or_pop(_lm, _mm)
                     continue
                 _lm.model.partially_unload(_lm.model.offload_device, 1e32)
             except Exception:
@@ -361,6 +405,7 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
         for _lm in list(_mm.current_loaded_models):
             try:
                 if _mp_has_ck_quant_weights(_lm.model):
+                    _mp_ck_offload_or_pop(_lm, _mm)
                     continue
                 _lm.model.partially_unload(_lm.model.offload_device, 1e32)
             except Exception:
@@ -1865,8 +1910,12 @@ def _make_ref2va_conditioning(
         _cmm.cleanup_models_gc()
         for _lm in list(_cmm.current_loaded_models):
             try:
-                if _lm.model is not getattr(clip, "patcher", None) and not _mp_has_ck_quant_weights(_lm.model):
-                    _lm.model.partially_unload(_lm.model.offload_device, 1e32)
+                if _lm.model is getattr(clip, "patcher", None):
+                    continue
+                if _mp_has_ck_quant_weights(_lm.model):
+                    _mp_ck_offload_or_pop(_lm, _cmm)
+                    continue
+                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
             except Exception:
                 pass
         _cmm.soft_empty_cache(force=True)
@@ -1935,7 +1984,16 @@ def _make_ref2va_conditioning(
                     _lm2.model.partially_unload(_lm2.model.offload_device, 1e32)
                 except Exception:
                     pass
-            _cmm2.unload_all_models()
+            # v2.120b (round3): 崩溃链 extender.py:1938 -> unload_all_models()->
+            # free_memory(1e30)->model_unload->detach->unpatch_model->self.model.to(cpu),
+            # 对 GPU 驻留量化块触发 comfy_kitchen _handle_to 原生 access violation
+            # (clip16→17 复现; 前 15 clip 未崩只因 DiT 恰好被 TE/VAE 加载挤成全 CPU)。
+            # 改为 free_memory(..., for_dynamic=True): 动态模型(量化 DiT)memory_to_free=0
+            # 跳过、不 detach, 非动态 TE/VAE 正常卸载, 量化权重不再走 GPU→CPU 拷贝。
+            try:
+                _cmm2.free_memory(1e30, _cmm2.get_torch_device(), for_dynamic=True)
+            except Exception:
+                pass
             _cmm2.cleanup_models()
             _cmm2.soft_empty_cache(force=True)
             import torch as _torch2
@@ -2049,7 +2107,7 @@ except Exception:
 
 def _ff_get_upscaler_models():
     """获取可用的 3D latent upscaler 模型列表; 不可用时返回仅插值选项。"""
-    opts = ["(bilinear interpolation, no model)"]
+    opts = ["(bilinear interpolation, no model)", "(bilinear插值, 无需模型)"]
     if _FF_UPSCALER_MOD is not None:
         try:
             names = _FF_UPSCALER_MOD.scan_models()
@@ -3610,7 +3668,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 import gc as _gc
                 _gc.collect()
                 try:
-                    _mm.unload_all_models()
+                    # v2.120b (round3): 同 1942 崩溃链, unload_all_models() 对量化 DiT
+                    # detach 时 .to(cpu) 原生崩溃; 改 for_dynamic=True 只卸非量化模型。
+                    _mm.free_memory(1e30, _mm.get_torch_device(), for_dynamic=True)
                 except Exception:
                     pass
                 if _FF_UPSCALER_MOD is not None:
@@ -5052,7 +5112,9 @@ class BSAIH3FilmFactory:
             ),
             # v14.83 对口型×二采组合预设（一采注入 lip_audio → 二采音频锁定保口型 / 二采音频参与重绘）
             "refine_lipsync_mode": (
-                ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"],
+                # v2.120c: 兼容 a78fa62 之前保存的旧工作流中文标签（运行期 5429-5432 已双语映射；
+                # 仅合法值列表需同时接受中英文，避免旧工作流校验失败输出被忽略）。
+                ["Lock lip-sync (recommended)", "锁定保口型(推荐)", "Audio redraw 0.7", "音频参与重绘0.7", "Full audio redraw 1.0", "音频全重绘1.0"],
                 {"default": "Lock lip-sync (recommended)", "tooltip": "Lip-sync × refine preset: Lock lip-sync = keep first-pass audio, no redraw (refine_audio_denoise=0); Audio redraw 0.7 = refine_audio_denoise=0.7; Full audio redraw 1.0 = refine_audio_denoise=1.0. Only effective when refine_enable is on."},
             ),
             # v14.83 像素超分旁支：per-clip 逐段超分 + final 全片超分（双开关，默认关）
@@ -5065,7 +5127,8 @@ class BSAIH3FilmFactory:
                 {"default": False, "tooltip": "One-shot pixel upscale of the full merged film (processed once before final output; faster and cheaper). Default off."},
             ),
             "upscale_mode": (
-                ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"],
+                # v2.120c: 兼容旧工作流中文标签（_ff_resolve_upscale_mode 2208-2216 已双语映射）。
+                ["Balanced (quality+speed)", "平衡(质量+速度)", "Quality first", "质量优先", "Speed first", "速度优先", "Custom", "自定义"],
                 {"default": "Balanced (quality+speed)", "tooltip": "Upscale mode preset: Balanced = 2.0x auto (DLSS5 if available, else REALESR); Quality first = 3.0x REALESR; Speed first = 1.5x auto; Custom = explicit values from the widgets below."},
             ),
             "upscale_engine": (
@@ -6573,6 +6636,7 @@ class BSAIH3FilmFactory:
                     for _lm in list(_mm.current_loaded_models):
                         try:
                             if _mp_has_ck_quant_weights(_lm.model):
+                                _mp_ck_offload_or_pop(_lm, _mm)
                                 continue
                             _lm.model.partially_unload(_lm.model.offload_device, 1e32)
                         except Exception:

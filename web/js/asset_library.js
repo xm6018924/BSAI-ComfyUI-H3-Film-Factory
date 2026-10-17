@@ -416,10 +416,7 @@ async function replaceAsset(sec, node, sectionEl, wrap) {
             del.title = "Delete";
             del.addEventListener("click", function (e) {
                 e.stopPropagation();
-                wrap.remove();
-                renumberThumbnails(sec, sectionEl);
-                updateCount(sec, sectionEl);
-                updateWidgetValue(sec, node, sectionEl);
+                removeOneAsset(sec, node, sectionEl, wrap);
             });
             thumbEl.appendChild(del);
 
@@ -584,10 +581,7 @@ function addThumbnail(sec, node, sectionEl, filename, thumbnail, displayName) {
     del.title = "Delete";
     del.addEventListener("click", function (e) {
         e.stopPropagation();
-        wrap.remove();
-        renumberThumbnails(sec, sectionEl);
-        updateCount(sec, sectionEl);
-        updateWidgetValue(sec, node, sectionEl);
+        removeOneAsset(sec, node, sectionEl, wrap);
     });
     thumb.appendChild(del);
 
@@ -674,6 +668,37 @@ function renumberThumbnails(sec, sectionEl) {
         wrap.dataset.assetIndex = String(i + 1);
         wrap.dataset.assetPrefix = sec.prefix;
     });
+}
+
+async function removeOneAsset(sec, node, sectionEl, wrap) {
+    // Actually delete the file on disk first — previously the X button only
+    // removed the DOM element, so the file survived on disk and the thumbnail
+    // "resurrected" on the next list/manifest reload (same class of bug as the
+    // old "assets reappear after Remove All" issue).
+    var filename = wrap.dataset.filename;
+    if (filename) {
+        try {
+            var resp = await fetch("/bsai/remove_asset", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ asset_type: sec.id, filename: filename }),
+            });
+            var result = await resp.json();
+            if (!result.ok) {
+                console.warn("[BSAI] Could not delete asset from disk:", filename, result);
+                alert("无法删除文件：" + filename + "\n（可能被其他程序占用）。关闭占用程序后重试。");
+                return;
+            }
+        } catch (e) {
+            console.warn("[BSAI] remove_asset request failed:", e);
+            alert("删除资产时网络/后端请求失败，请检查 ComfyUI 控制台后重试。");
+            return;
+        }
+    }
+    wrap.remove();
+    renumberThumbnails(sec, sectionEl);
+    updateCount(sec, sectionEl);
+    updateWidgetValue(sec, node, sectionEl);
 }
 
 async function removeAllInSection(sec, node, sectionEl) {
