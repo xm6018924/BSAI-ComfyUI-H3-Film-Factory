@@ -297,6 +297,24 @@ def _chain_paths(owner_id):
     return root / f"{stem}.h3cache", root / f"{stem}.json"
 
 
+def _rooted_chain_path(stored):
+    """Derive a chain file path strictly under the H3 cache root.
+
+    The cache handle dict is untrusted input: its stored data_path /
+    manifest_path values are re-derived from the cache root using only the
+    file's own name. An absolute path or '..' traversal embedded in the handle
+    therefore cannot read/write/delete files outside the cache directory."""
+    root = _ensure_cache_root()
+    name = os.path.basename(os.path.realpath(str(stored)))
+    if not name or name in (".", ".."):
+        raise ValueError("MiniMax H3 Disk Cache: invalid path in cache handle.")
+    final = os.path.realpath(str(root / name))
+    base = os.path.realpath(str(root))
+    if os.path.commonpath([base, final]) != base:
+        raise ValueError("MiniMax H3 Disk Cache: cache path escapes cache root.")
+    return Path(final)
+
+
 def _write_json_atomic(path, payload):
     """v1.79: 原子写 + .bak 双保险。manifest 丢失(0字节/损坏)会导致
     断点续跑失效(h3cache 有数据但段数只能从 json 读), 故每写一份主文件
@@ -516,8 +534,8 @@ def _load_manifest_from_paths(data_path, manifest_path):
 def _load_manifest(cache):
     if not isinstance(cache, dict):
         raise ValueError("MiniMax H3 Disk Cache: invalid cache handle.")
-    data_path = Path(cache["data_path"])
-    manifest_path = Path(cache["manifest_path"])
+    data_path = _rooted_chain_path(cache["data_path"])
+    manifest_path = _rooted_chain_path(cache["manifest_path"])
     manifest = _load_manifest_from_paths(data_path, manifest_path)
     if manifest is None:
         raise FileNotFoundError(f"H3 Disk Cache manifest not found: {manifest_path}")

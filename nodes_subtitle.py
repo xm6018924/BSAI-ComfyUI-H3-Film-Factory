@@ -243,6 +243,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "BSAI_SubtitleConfig": "BSAI Subtitle Config | 字幕配置",
-    "BSAI_SubtitleRenderer": "BSAI Subtitle Renderer | 字幕渲染器",
+    "BSAI_SubtitleConfig": "BSAI Subtitle Config",
+    "BSAI_SubtitleRenderer": "BSAI Subtitle Renderer",
 }

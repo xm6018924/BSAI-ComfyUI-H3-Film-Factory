@@ -137,9 +137,9 @@ if (!document.getElementById(STYLE_ID)) {
 }
 
 var SECTIONS = [
-    { id: "images", title: "图片资产 / Images", prefix: "图", accept: "image/*", widget: "image_files" },
-    { id: "videos", title: "视频资产 / Videos", prefix: "视频", accept: "video/*", widget: "video_files" },
-    { id: "audios", title: "音频资产 / Audio", prefix: "音频", accept: "audio/*", widget: "audio_files" },
+    { id: "images", title: "Images", prefix: "图", accept: "image/*", widget: "image_files" },
+    { id: "videos", title: "Videos", prefix: "视频", accept: "video/*", widget: "video_files" },
+    { id: "audios", title: "Audio", prefix: "音频", accept: "audio/*", widget: "audio_files" },
 ];
 
 app.registerExtension({
@@ -686,12 +686,12 @@ async function removeOneAsset(sec, node, sectionEl, wrap) {
             var result = await resp.json();
             if (!result.ok) {
                 console.warn("[BSAI] Could not delete asset from disk:", filename, result);
-                alert("无法删除文件：" + filename + "\n（可能被其他程序占用）。关闭占用程序后重试。");
+                alert("Unable to delete file: " + filename + "\n(it may be locked by another process). Close the locking program and retry.");
                 return;
             }
         } catch (e) {
             console.warn("[BSAI] remove_asset request failed:", e);
-            alert("删除资产时网络/后端请求失败，请检查 ComfyUI 控制台后重试。");
+            alert("Network/backend request failed while deleting the asset. Check the ComfyUI console and retry.");
             return;
         }
     }
@@ -717,14 +717,14 @@ async function removeAllInSection(sec, node, sectionEl) {
             var nFailed = (result.failed || []).length;
             if (nFailed > 0) {
                 console.warn("[BSAI] Could not fully delete assets:", result.failed);
-                alert("有 " + nFailed + " 个文件无法从磁盘删除（可能被其他程序占用）。\n" +
-                      "已从列表移除并清空清单，但磁盘上仍有残留文件。\n" +
-                      "请重启 ComfyUI 后再点一次“全部删除”，以彻底清除。");
+                alert(nFailed + " file(s) could not be deleted from disk (they may be locked by another process).\n" +
+                      "They were removed from the list and the widget was cleared, but residual files remain on disk.\n" +
+                      "Restart ComfyUI and click \"Remove All\" again to purge them completely.");
             }
         }
     } catch (e) {
         console.warn("[BSAI] Failed to remove assets from disk:", e);
-        alert("删除资产时网络/后端请求失败，请检查 ComfyUI 控制台后重试。");
+        alert("Network/backend request failed while deleting assets. Check the ComfyUI console and retry.");
     }
     var grid = sectionEl.querySelector('[data-grid="' + sec.id + '"]');
     grid.innerHTML = "";

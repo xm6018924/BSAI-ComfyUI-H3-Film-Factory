@@ -65,8 +65,9 @@ class BSAIVoiceClone:
                 )
             except Exception as e:
                 raise RuntimeError(
-                    f"声音克隆需要 IndexTTS-2.5 节点包。请确保 BSAI_ComfyUI_IndexTTS-2.5 已安装。\n"
-                    f"错误: {e}"
+                    f"Voice cloning requires the IndexTTS-2.5 node pack. "
+                    f"Ensure BSAI_ComfyUI_IndexTTS-2.5 is installed.\n"
+                    f"Error: {e}"
                 )
 
         # 如果直接导入成功

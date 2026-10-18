@@ -46,6 +46,17 @@ MAX_REF_VIDEOS = 3
 MAX_REF_AUDIOS = 3
 
 
+def _safe_asset_path(type_dir, fname):
+    """Resolve an uploaded filename strictly under its asset subfolder.
+    Reject absolute paths and any '..' traversal that would escape the asset
+    base directory. Returns the resolved path, or None if it escapes."""
+    base = os.path.realpath(type_dir)
+    candidate = os.path.realpath(os.path.join(base, str(fname or "")))
+    if os.path.commonpath([base, candidate]) != base:
+        return None
+    return candidate
+
+
 def _resolve_directory(path):
     if not path:
         return None
@@ -179,8 +190,8 @@ class BSAI_AssetLibraryInput:
 
         img_dir = os.path.join(asset_base, "images")
         for fname in img_list:
-            fpath = os.path.join(img_dir, fname)
-            if os.path.exists(fpath):
+            fpath = _safe_asset_path(img_dir, fname)
+            if fpath and os.path.exists(fpath):
                 library["images"].append({
                     "path": fpath,
                     "name": fname,
@@ -189,8 +200,8 @@ class BSAI_AssetLibraryInput:
 
         vid_dir = os.path.join(asset_base, "videos")
         for fname in vid_list:
-            fpath = os.path.join(vid_dir, fname)
-            if os.path.exists(fpath):
+            fpath = _safe_asset_path(vid_dir, fname)
+            if fpath and os.path.exists(fpath):
                 entry = {
                     "path": fpath,
                     "name": fname,
@@ -208,8 +219,8 @@ class BSAI_AssetLibraryInput:
 
         aud_dir = os.path.join(asset_base, "audios")
         for fname in aud_list:
-            fpath = os.path.join(aud_dir, fname)
-            if os.path.exists(fpath):
+            fpath = _safe_asset_path(aud_dir, fname)
+            if fpath and os.path.exists(fpath):
                 library["audios"].append({
                     "path": fpath,
                     "name": fname,
@@ -354,7 +365,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "BSAI_AssetLibraryInput": "BSAI Asset Library | 资产库",
-    "BSAI_AssetRefSelector": "BSAI Asset Ref Selector | 资产引用选择器",
-    "BSAI_ImageBatchSplitter": "BSAI Image Batch Splitter | 图像批次拆分器",
+    "BSAI_AssetLibraryInput": "BSAI Asset Library",
+    "BSAI_AssetRefSelector": "BSAI Asset Ref Selector",
+    "BSAI_ImageBatchSplitter": "BSAI Image Batch Splitter",
 }

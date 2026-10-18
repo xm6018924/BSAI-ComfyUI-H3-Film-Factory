@@ -3801,8 +3801,8 @@ function buildClipCard(node, runtime, clip, index) {
         const renderToggle = document.createElement("button");
         renderToggle.type = "button";
         renderToggle.title = clip.render_enabled
-            ? "生成开关：已启用（点击关闭此CLIP生成）"
-            : "生成开关：已关闭（点击启用此CLIP生成）";
+            ? "Render: enabled (click to disable rendering of this clip)"
+            : "Render: disabled (click to enable rendering of this clip)";
         renderToggle.textContent = clip.render_enabled ? "⚡" : "⊘";
         renderToggle.style.cssText = "width:24px;height:22px;padding:0;font-size:12px;border-radius:4px;border:1px solid rgba(255,255,255,.15);cursor:pointer;";
         renderToggle.style.background = clip.render_enabled
@@ -3820,8 +3820,8 @@ function buildClipCard(node, runtime, clip, index) {
         const replaceBtn = document.createElement("button");
         replaceBtn.type = "button";
         replaceBtn.title = clip.replace_mode
-            ? "重新生成：已选中（运行时仅重新生成此CLIP，不影响其他CLIP）"
-            : "点击选中此CLIP单独重新生成（不影响其他CLIP）";
+            ? "Regenerate: selected (only this clip is re-rendered at runtime, other clips are unaffected)"
+            : "Click to select this clip for standalone regeneration (other clips are unaffected)";
         replaceBtn.textContent = "↻";
         replaceBtn.style.cssText = "width:24px;height:22px;padding:0;font-size:13px;border-radius:4px;border:1px solid rgba(255,255,255,.15);cursor:pointer;";
         const isCached = index < Number(runtime.cachedCount || 0);
@@ -3855,10 +3855,10 @@ function buildClipCard(node, runtime, clip, index) {
         const _upState = clip.upscale; // null | true | false
         const _upLabel = _upState === true ? "H↑" : _upState === false ? "H↓" : "H·";
         const _upTip = _upState === true
-            ? "超分：强制开（本 CLIP 必逐段超分，无视总开关）"
+            ? "Upscale: forced on (this clip is always upscaled per-segment, ignoring the global switch)"
             : _upState === false
-                ? "超分：强制关（本 CLIP 必不逐段超分，无视总开关）"
-                : "超分：跟随（由节点总开关 upscale_per_clip 决定）";
+                ? "Upscale: forced off (this clip is never upscaled per-segment, ignoring the global switch)"
+                : "Upscale: follow (controlled by the node-level upscale_per_clip switch)";
         upscaleBtn.title = _upTip;
         upscaleBtn.textContent = _upLabel;
         upscaleBtn.style.cssText = "width:24px;height:22px;padding:0;font-size:11px;font-weight:bold;border-radius:4px;border:1px solid rgba(255,255,255,.15);cursor:pointer;";
@@ -3901,7 +3901,7 @@ function buildClipCard(node, runtime, clip, index) {
             });
 
             updateHidden(node, runtime);
-            runtime.statusText = `渲染 CLIP ${index + 1} / Rendering CLIP ${index + 1}`;
+            runtime.statusText = `Rendering CLIP ${index + 1}`;
             if (runtime.counter) runtime.counter.textContent = `${runtime.state.clips.length} clips • ${refCount(runtime)} refs`;
             if (runtime.status) runtime.status.textContent = runtime.statusText;
             try {
@@ -4220,7 +4220,7 @@ function buildClipCard(node, runtime, clip, index) {
         });
 
         // Subtitle section
-        rightPanel.appendChild(makeFieldLabel("字幕 / Subtitle"));
+        rightPanel.appendChild(makeFieldLabel("Subtitle"));
 
         // Subtitle mode selector: Manual vs Auto Extract
         // 字幕模式选择：手动 vs 自动提取
@@ -4244,21 +4244,21 @@ function buildClipCard(node, runtime, clip, index) {
         dlgCheck.type = "checkbox";
         dlgCheck.checked = clip.subtitle_auto_dialogue;
         dlgCheck.style.cssText = "width:12px;height:12px;";
-        dlgLabel.append(dlgCheck, document.createTextNode("对白 / Dialogue"));
+        dlgLabel.append(dlgCheck, document.createTextNode("Dialogue"));
         const narLabel = document.createElement("label");
         narLabel.style.cssText = "display:flex;align-items:center;gap:2px;color:#c8c8c8;";
         const narCheck = document.createElement("input");
         narCheck.type = "checkbox";
         narCheck.checked = clip.subtitle_auto_narration;
         narCheck.style.cssText = "width:12px;height:12px;";
-        narLabel.append(narCheck, document.createTextNode("旁白 / Narration"));
+        narLabel.append(narCheck, document.createTextNode("Narration"));
         const lyrLabel = document.createElement("label");
         lyrLabel.style.cssText = "display:flex;align-items:center;gap:2px;color:#c8c8c8;";
         const lyrCheck = document.createElement("input");
         lyrCheck.type = "checkbox";
         lyrCheck.checked = clip.subtitle_auto_lyrics;
         lyrCheck.style.cssText = "width:12px;height:12px;";
-        lyrLabel.append(lyrCheck, document.createTextNode("歌词 / Lyrics"));
+        lyrLabel.append(lyrCheck, document.createTextNode("Lyrics"));
         subAutoTypes.append(dlgLabel, narLabel, lyrLabel);
         rightPanel.appendChild(subAutoTypes);
 
@@ -4321,7 +4321,7 @@ function buildClipCard(node, runtime, clip, index) {
             const extracted = autoExtractSubtitles();
             clip.subtitle = extracted;
             subtitleInput.value = extracted;
-            subAutoPreview.textContent = extracted || "(无匹配内容 / No match)";
+            subAutoPreview.textContent = extracted || "(No match)";
             updateHidden(node, runtime);
         }
 
@@ -4521,7 +4521,7 @@ function buildClipCard(node, runtime, clip, index) {
             if (!ctxCheck.checked) return;
             rfeExpanded = !rfeExpanded;
             rfeContent.style.display = rfeExpanded ? "" : "none";
-            rfeToggle.textContent = (rfeExpanded ? "▼ " : "▶ ") + "参考帧提取 / Ref Frame Extract";
+            rfeToggle.textContent = (rfeExpanded ? "▼ " : "▶ ") + "Ref Frame Extract";
         });
 
         function makeRfeRow(labelText) {
@@ -4858,7 +4858,7 @@ function render(node, runtime, opts) {
             status.textContent = runtime.statusText || "Ready";
             if (runtime.clipsTotalLabel) {
                 const _td = state.clips.reduce((s2, c2) => s2 + (Number(c2.duration) || 0), 0);
-                runtime.clipsTotalLabel.textContent = `CLIPS | 总时长 ${_td}s (${state.clips.length} clip${state.clips.length > 1 ? "s" : ""})`;
+                runtime.clipsTotalLabel.textContent = `CLIPS | total ${_td}s (${state.clips.length} clip${state.clips.length > 1 ? "s" : ""})`;
             }
             syncDomHeight(node, runtime, true);
         } catch (e) {}
@@ -4875,7 +4875,7 @@ function render(node, runtime, opts) {
     if (runtime.clipsTotalLabel) {
         const totalDur = state.clips.reduce((sum, c) => sum + (Number(c.duration) || 0), 0);
         const n = state.clips.length;
-        runtime.clipsTotalLabel.textContent = `CLIPS | 总时长 ${totalDur}s (${n} clip${n > 1 ? "s" : ""})`;
+        runtime.clipsTotalLabel.textContent = `CLIPS | total ${totalDur}s (${n} clip${n > 1 ? "s" : ""})`;
     }
 
     // Highlight merge output button when a merge is pending
@@ -4885,12 +4885,12 @@ function render(node, runtime, opts) {
             runtime.mergeOutputBtn.style.background = "#4a8a4a";
             runtime.mergeOutputBtn.style.borderColor = "#5a9a5a";
             runtime.mergeOutputBtn.style.boxShadow = "0 0 8px rgba(80,200,80,.4)";
-            setBtnText(runtime.mergeOutputBtn, "合并输出", "Merge Output", { icon: "⚡", bg: "#4a8a4a", border: "#5a9a5a", color: "#cde" });
+            setBtnText(runtime.mergeOutputBtn, "Merge Output", "", { icon: "⚡", bg: "#4a8a4a", border: "#5a9a5a", color: "#cde" });
         } else {
             runtime.mergeOutputBtn.style.background = "#2a6a3a";
             runtime.mergeOutputBtn.style.borderColor = "#3a7a4a";
             runtime.mergeOutputBtn.style.boxShadow = "none";
-            setBtnText(runtime.mergeOutputBtn, "合并输出", "Merge Output", { bg: "#2a6a3a", border: "#3a7a4a", color: "#cde" });
+            setBtnText(runtime.mergeOutputBtn, "Merge Output", "", { bg: "#2a6a3a", border: "#3a7a4a", color: "#cde" });
         }
     }
 
@@ -5750,7 +5750,7 @@ function buildUi(node) {
     toolbar.style.marginBottom = "7px";
 
     const saveProjectButton = document.createElement("button");
-    setBtnText(saveProjectButton, "保存", "Save", { bg: "#4a3a6a", border: "#5a4a7a", color: "#dcc" });
+    setBtnText(saveProjectButton, "Save", "", { bg: "#4a3a6a", border: "#5a4a7a", color: "#dcc" });
     saveProjectButton.title = "Save settings + disk cache as a portable .ext project";
     saveProjectButton.classList.add("bsai-tb-btn");
     saveProjectButton.addEventListener("click", (e) => {
@@ -5759,7 +5759,7 @@ function buildUi(node) {
     });
 
     const loadProjectButton = document.createElement("button");
-    setBtnText(loadProjectButton, "加载", "Load", { bg: "#3a5a4a", border: "#4a6a5a", color: "#cdc" });
+    setBtnText(loadProjectButton, "Load", "", { bg: "#3a5a4a", border: "#4a6a5a", color: "#cdc" });
     loadProjectButton.title = "Load a .ext project into this Extender node";
     loadProjectButton.classList.add("bsai-tb-btn");
 
@@ -5794,7 +5794,7 @@ function buildUi(node) {
     batchDurInput.style.cssText = "width:48px;font-size:11px;padding:1px 4px;background:#1a1a1a;border:1px solid #444;border-radius:3px;color:#ddd;";
 
     const batchDurBtn = document.createElement("button");
-    setBtnText(batchDurBtn, "应用全部", "Apply All", { bg: "#2a4a6a", border: "#3a5a7a", color: "#cde" });
+    setBtnText(batchDurBtn, "Apply All", "", { bg: "#2a4a6a", border: "#3a5a7a", color: "#cde" });
     batchDurBtn.title = "Batch-set duration of all CLIPs";
     batchDurBtn.classList.add("bsai-tb-btn");
     batchDurBtn.addEventListener("click", (e) => {
@@ -5815,7 +5815,7 @@ function buildUi(node) {
     batchCtxLabel.style.cssText = "font-size:11px;color:#aaa;margin-left:6px;";
 
     const batchCtxBtn = document.createElement("button");
-    setBtnText(batchCtxBtn, "全部开启", "Enable All", { bg: "#2a6a4a", border: "#3a7a5a", color: "#cde" });
+    setBtnText(batchCtxBtn, "Enable All", "", { bg: "#2a6a4a", border: "#3a7a5a", color: "#cde" });
     batchCtxBtn.title = "Batch enable/disable context reference for all CLIPs";
     batchCtxBtn.classList.add("bsai-tb-btn");
     let batchCtxOn = true;
@@ -5835,15 +5835,15 @@ function buildUi(node) {
             if (ct) { ct.style.opacity = batchCtxOn ? "1" : "0.4"; ct.style.pointerEvents = batchCtxOn ? "" : "none"; }
         });
         if (batchCtxOn) {
-            setBtnText(batchCtxBtn, "全部关闭", "Disable All", { bg: "#6a3a3a", border: "#7a4a4a", color: "#cde" });
+            setBtnText(batchCtxBtn, "Disable All", "", { bg: "#6a3a3a", border: "#7a4a4a", color: "#cde" });
         } else {
-            setBtnText(batchCtxBtn, "全部开启", "Enable All", { bg: "#2a6a4a", border: "#3a7a5a", color: "#cde" });
+            setBtnText(batchCtxBtn, "Enable All", "", { bg: "#2a6a4a", border: "#3a7a5a", color: "#cde" });
         }
         invalidateFrom(runtime.state, 0);
         updateHidden(node, runtime);
         render(node, runtime);
     });
-    setBtnText(batchCtxBtn, "全部关闭", "Disable All", { bg: "#6a3a3a", border: "#7a4a4a", color: "#cde" });
+    setBtnText(batchCtxBtn, "Disable All", "", { bg: "#6a3a3a", border: "#7a4a4a", color: "#cde" });
 
     const counter = document.createElement("span");
 counter.style.fontSize = "11px";
@@ -5851,19 +5851,19 @@ counter.style.opacity = ".8";
 counter.style.marginLeft = "6px";
 
 const mergeOutputBtn = document.createElement("button");
-    setBtnText(mergeOutputBtn, "合并输出", "Merge Output", { bg: "#2a6a3a", border: "#3a7a4a", color: "#cde" });
+    setBtnText(mergeOutputBtn, "Merge Output", "", { bg: "#2a6a3a", border: "#3a7a4a", color: "#cde" });
     mergeOutputBtn.title = "Merge all finished CLIPs into one video output (does not re-render any CLIP)";
     mergeOutputBtn.classList.add("bsai-tb-btn");
 
     // Unified sync button: re-sync ALL clips from external prompt_source
     // 统一刷新按钮：从外部输入源重新同步所有CLIP
     const syncAllClipsBtn = document.createElement("button");
-    setBtnText(syncAllClipsBtn, "统一刷新", "Sync All", { icon: "🔄", bg: "#8a4a2a", border: "#aa5a3a", color: "#fcd" });
+    setBtnText(syncAllClipsBtn, "Sync All", "", { icon: "🔄", bg: "#8a4a2a", border: "#aa5a3a", color: "#fcd" });
     syncAllClipsBtn.title = "Re-sync global prompt and all CLIPs from external source";
     syncAllClipsBtn.classList.add("bsai-tb-btn");
     // v2.40: 电影模板按钮 (全局应用)
     const filmTemplateBtn = document.createElement("button");
-    setBtnText(filmTemplateBtn, "模板", "Template", { icon: "✨", bg: "#6a4a8a", border: "#7a5a9a", color: "#eef" });
+    setBtnText(filmTemplateBtn, "Template", "", { icon: "✨", bg: "#6a4a8a", border: "#7a5a9a", color: "#eef" });
     filmTemplateBtn.title = "Open film prompt template library (applies globally to all CLIPs)";
     filmTemplateBtn.classList.add("bsai-tb-btn");
     filmTemplateBtn.addEventListener("click", (e) => {
@@ -5878,7 +5878,7 @@ const mergeOutputBtn = document.createElement("button");
             setTimeout(() => { try { syncFromHistory(); } catch (e) {} }, 0);
             const text = _readPromptSourceText(node);
             if (text == null) {
-                runtime.statusText = "未连接外部输入源 / No external source";
+                runtime.statusText = "No external source";
                 status.textContent = runtime.statusText;
                 return;
             }
@@ -5916,10 +5916,10 @@ const mergeOutputBtn = document.createElement("button");
             if (typeof runtime.renderGlobalAssetPanel === "function") runtime.renderGlobalAssetPanel();
             render(node, runtime);
             autoGrowNodeToFitAllClips(node, runtime);
-            runtime.statusText = "已同步 / Synced";
+            runtime.statusText = "Synced";
             status.textContent = runtime.statusText;
         } catch(err) {
-            runtime.statusText = "同步失败 / Sync failed";
+            runtime.statusText = "Sync failed";
             status.textContent = runtime.statusText;
         }
     });
@@ -5928,7 +5928,7 @@ mergeOutputBtn.addEventListener("click", (e) => {
     // Check if any clip is selected for replacement
     const hasReplace = runtime.state.clips.some((c) => c.replace_mode);
     if (hasReplace) {
-        if (!confirm("当前有CLIP处于重新生成状态，点击合并输出将取消重新生成并直接合并已有结果。是否继续？")) {
+        if (!confirm("Some clips are currently marked for regeneration. Merging output will cancel regeneration and merge the existing results directly. Continue?")) {
             return;
         }
     }
@@ -5953,11 +5953,11 @@ mergeOutputBtn.addEventListener("click", (e) => {
 
 // ── v1.16 打开缓存目录按钮（Latent缓存 / Clip输出） ──
 const openCacheBtn = document.createElement("button");
-setBtnText(openCacheBtn, "Latent缓存", "Latent Cache", { icon: "📂", bg: "#3a4a6a", border: "#4a5a8a", color: "#cde" });
+setBtnText(openCacheBtn, "Latent Cache", "", { icon: "📂", bg: "#3a4a6a", border: "#4a5a8a", color: "#cde" });
 openCacheBtn.title = "Open the latent cache directory (chain_extender_*.h3cache etc.) in the system file manager";
 openCacheBtn.classList.add("bsai-tb-btn");
 const openClipsBtn = document.createElement("button");
-setBtnText(openClipsBtn, "Clip输出", "Clip Output", { icon: "📂", bg: "#3a4a6a", border: "#4a5a8a", color: "#cde" });
+setBtnText(openClipsBtn, "Clip Output", "", { icon: "📂", bg: "#3a4a6a", border: "#4a5a8a", color: "#cde" });
 openClipsBtn.title = "Open the CLIP video output directory (h3_clip_*.mp4, the folder BSAI Premiere Pro reads as its receive port)";
 openClipsBtn.classList.add("bsai-tb-btn");
 const openCacheDir = (kind, label) => {
@@ -5989,7 +5989,7 @@ status.style.maxWidth = "45%";
 const pauseBar = document.createElement("span");
 pauseBar.style.cssText = "display:none;align-items:center;gap:4px;margin-left:6px;";
 const pauseBtn = document.createElement("button");
-setBtnText(pauseBtn, "暂停", "Pause", { icon: "⏸", bg: "#6a5a2a", border: "#8a7a3a", color: "#fcd" });
+setBtnText(pauseBtn, "Pause", "", { icon: "⏸", bg: "#6a5a2a", border: "#8a7a3a", color: "#fcd" });
 pauseBtn.title = "Pause is always available: it pauses after the current CLIP finishes and before the next one starts. After pausing you can choose Resume / Current Only / Abort; without intervention, further rendering stops (no auto-resume, no auto-merge; finished CLIPs are kept and can be merged manually via Merge Output). When the node pause_enable is on, it pauses automatically after each CLIP.";
 pauseBtn.classList.add("bsai-tb-btn");
 const resumeBtn = document.createElement("button");
@@ -6028,7 +6028,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 	const collapseAllBtn = document.createElement("button");
 	// v2.111: 默认「展开CLIP」状态(与 runtime._h3CollapsedAll = false 一致)。
 	// 按钮显示的是"下一步可点的动作", 所以展开态显示「📦 收起CLIP」。
-	setBtnText(collapseAllBtn, "收起CLIP", "Collapse", { icon: "📦", bg: "#2a5a3a", border: "#3a7a4a", color: "#dfd" });
+	setBtnText(collapseAllBtn, "Collapse", "", { icon: "📦", bg: "#2a5a3a", border: "#3a7a4a", color: "#dfd" });
 		collapseAllBtn.title = "Currently expanded (shows all CLIPs). Click to collapse to CLIP1 only; click again to expand.";
 		collapseAllBtn.classList.add("bsai-tb-btn");
 	let clipsCollapsed = false; // v2.111: 默认展开(与 runtime._h3CollapsedAll 一致)
@@ -6038,7 +6038,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 		const w = Math.max(NODE_MIN_WIDTH, Number(node.size && node.size[0]) || NODE_MIN_WIDTH);
 		if (clipsCollapsed) {
 			// 收起: 只显示 CLIP1 高度的视口, cards 纵向滚动条可滚动查看全部
-			setBtnText(collapseAllBtn, "展开CLIP", "Expand", { icon: "📂", bg: "#2a5a3a", border: "#3a7a4a", color: "#dfd" });
+			setBtnText(collapseAllBtn, "Expand", "", { icon: "📂", bg: "#2a5a3a", border: "#3a7a4a", color: "#dfd" });
 			runtime._h3CollapsedAll = true;
 			try {
 				// v2.107 (fix): 收起按钮 click 必须用 _h3BtnResizeInFlight guard
@@ -6067,7 +6067,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 			} catch (e2) {}
 		} else {
 			// 展开: 一次性同步渲染全部 CLIP(保证点击必看到全部), 撑高到全量高度
-			setBtnText(collapseAllBtn, "收起CLIP", "Collapse", { icon: "📦", bg: "#2a5a3a", border: "#3a7a4a", color: "#dfd" });
+			setBtnText(collapseAllBtn, "Collapse", "", { icon: "📦", bg: "#2a5a3a", border: "#3a7a4a", color: "#dfd" });
 			runtime._h3CollapsedAll = false;
 			// v2.108: 全局提示词区显隐只由用户折叠标志决定, 展开 CLIP 不再强制显示。
 			applyGlobalPromptVisibility(runtime);
@@ -6106,12 +6106,12 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 
 	// v2.60: 恢复缓存按钮
 	const restoreCacheBtn = document.createElement("button");
-	setBtnText(restoreCacheBtn, "恢复缓存", "Restore Cache", { icon: "♻️", bg: "#6a3a6a", border: "#8a5a8a", color: "#fdf" });
+	setBtnText(restoreCacheBtn, "Restore Cache", "", { icon: "♻️", bg: "#6a3a6a", border: "#8a5a8a", color: "#fdf" });
 	restoreCacheBtn.title = "Restore all caches and finished CLIPs from the last render with one click, without re-rendering from CLIP1";
 	restoreCacheBtn.classList.add("bsai-tb-btn");
 	restoreCacheBtn.addEventListener("click", (e) => {
 		e.preventDefault();
-		if (!confirm("确定要恢复最近一次渲染的所有缓存吗？\n\n会恢复：\n- 链缓存（h3cache）\n- 已渲染完成的 CLIP 成品\n\n恢复后可直接继续渲染后面的 CLIP，不用从 CLIP1 重新开始。\n\n（不会刷新页面，外部提示词与 @资产引用不受影响；建议先 Ctrl+S 保存工作流，刷新/另存后也会自动保留。）")) return;
+		if (!confirm("Restore all caches from the last render?\n\nThis restores:\n- The chain cache (.h3cache)\n- Finished CLIP outputs\n\nAfter restoring you can continue rendering the remaining CLIPs without restarting from CLIP1.\n\n(The page is not reloaded; the external prompt and @ asset references are unaffected. Save the workflow with Ctrl+S first; it is preserved across reloads.)")) return;
 		fetch(api.apiURL("/h3_extender/restore_cache"), {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -6190,20 +6190,20 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 							}
 						});
 				} else {
-					alert("恢复失败：" + (res && res.error ? res.error : "未知错误"));
+					alert("Restore failed: " + (res && res.error ? res.error : "unknown error"));
 				}
 			})
-			.catch((err) => alert("恢复失败：" + err.message));
+			.catch((err) => alert("Restore failed: " + err.message));
 	});
 
 	// ── 清空缓存按钮（删除上一版缓存，重新渲染新缓存用） ──
 	const clearCacheBtn = document.createElement("button");
-	setBtnText(clearCacheBtn, "清空缓存", "Clear Cache", { icon: "🗑", bg: "#5a3a1a", border: "#7a5a3a", color: "#fda" });
+	setBtnText(clearCacheBtn, "Clear Cache", "", { icon: "🗑", bg: "#5a3a1a", border: "#7a5a3a", color: "#fda" });
 	clearCacheBtn.title = "Delete the chain cache, ref2va cache, preview cache, and finished CLIPs from the previous run so new caches can be rebuilt.\nA confirmation dialog will appear.";
 	clearCacheBtn.classList.add("bsai-tb-btn");
 	clearCacheBtn.addEventListener("click", (e) => {
 		e.preventDefault();
-		if (!confirm("确定要清空所有缓存吗？\n\n将删除：\n- 链缓存（chain_*.h3cache）\n- 参考图VAE编码缓存（_ref2va_cache）\n- 参考图缓存（_refs）\n- 预览缓存（_preview）\n- CLIP成片（h3_clip_*.mp4）\n- 临时预览（_clippv_*）\n\n清空后需重新渲染所有CLIP。")) return;
+		if (!confirm("Clear all caches?\n\nThis deletes:\n- Chain cache (chain_*.h3cache)\n- Reference VAE-encode cache (_ref2va_cache)\n- Reference image cache (_refs)\n- Preview cache (_preview)\n- Finished CLIPs (h3_clip_*.mp4)\n- Temporary previews (_clippv_*)\n\nAll CLIPs must be re-rendered afterwards.")) return;
 		clearCacheBtn.textContent = "⏳ Clearing...";
 		clearCacheBtn.disabled = true;
 		fetch(api.apiURL("/h3_extender/clear_chain_cache"), {
@@ -6218,13 +6218,13 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 					const freed = res.freed_mb || 0;
 					const d = res.details || {};
 					let detailStr = "";
-					if (d.chain_cache) detailStr += `链缓存: ${d.chain_cache}\n`;
+					if (d.chain_cache) detailStr += `Chain cache: ${d.chain_cache}\n`;
 					if (d.ref2va) detailStr += `ref2va: ${d.ref2va}\n`;
-					if (d.refs) detailStr += `参考图: ${d.refs}\n`;
-					if (d.preview) detailStr += `预览: ${d.preview}\n`;
-					if (d.clips) detailStr += `CLIP成片: ${d.clips}\n`;
-					if (d.temp_previews) detailStr += `临时预览: ${d.temp_previews}\n`;
-					alert("缓存已清空！\n\n共删除 " + removed + " 个文件\n释放 " + freed + " MB 磁盘空间\n\n" + detailStr + "\n请重新渲染。");
+					if (d.refs) detailStr += `Reference images: ${d.refs}\n`;
+					if (d.preview) detailStr += `Preview: ${d.preview}\n`;
+					if (d.clips) detailStr += `CLIP outputs: ${d.clips}\n`;
+					if (d.temp_previews) detailStr += `Temp previews: ${d.temp_previews}\n`;
+					alert("Cache cleared!\n\nDeleted " + removed + " file(s)\nFreed " + freed + " MB of disk space\n\n" + detailStr + "\nPlease re-render.");
 					// 重置节点渲染状态
 					try {
 						if (runtime) {
@@ -6242,14 +6242,14 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
 						}
 					} catch (e2) { console.warn("[H3] clear-cache render failed", e2); }
 				} else {
-					alert("清空缓存失败：" + ((res && res.error) || "未知错误"));
+					alert("Failed to clear cache: " + ((res && res.error) || "unknown error"));
 				}
 			})
 			.catch((err) => {
-				alert("清空缓存请求失败: " + err);
+				alert("Clear-cache request failed: " + err);
 			})
 			.finally(() => {
-				setBtnText(clearCacheBtn, "清空缓存", "Clear Cache", { icon: "🗑", bg: "#5a3a1a", border: "#7a5a3a", color: "#fda" });
+				setBtnText(clearCacheBtn, "Clear Cache", "", { icon: "🗑", bg: "#5a3a1a", border: "#7a5a3a", color: "#fda" });
 				clearCacheBtn.disabled = false;
 			});
 	});
@@ -6412,8 +6412,8 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         runtime._h3GpUserCollapsed = !runtime._h3GpUserCollapsed;
         gpCollapseBtn.textContent = runtime._h3GpUserCollapsed ? "▼" : "▲";
         gpCollapseBtn.title = runtime._h3GpUserCollapsed
-            ? "展开全局提示词区"
-            : "折叠全局提示词区(收起后 CLIP 卡片可视区更大); 再点展开";
+            ? "Expand the global prompt area"
+            : "Collapse the global prompt area (gives CLIP cards more visible space); click again to expand";
         gpCollapseBtn.style.color = runtime._h3GpUserCollapsed ? "#6cf" : "#aaa";
         applyGlobalPromptVisibility(runtime);
         try { updateHidden(node, runtime); } catch (e2) {}
@@ -7189,7 +7189,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     runtime.delAllClipsBtn.addEventListener("click", (e) => {
         e.preventDefault();
         if (runtime.state.clips.length <= 1) return;
-        if (!confirm("确定要删除所有CLIP并重置为一个默认CLIP吗？\nAre you sure you want to delete ALL clips and reset to one default clip?")) return;
+        if (!confirm("Are you sure you want to delete ALL clips and reset to one default clip?")) return;
         const freshClip = newClip(0);
         runtime.state.clips = [freshClip];
         updateHidden(node, runtime);
@@ -8087,7 +8087,7 @@ app.registerExtension({
                 // 给用户一个明显提示, 避免"以为又回到空状态"
                 setTimeout(() => {
                     try {
-                        alert("♻️ 缓存已恢复\n\n页面已刷新。" + (payload ? "本次恢复了 " + payload.clips_restored + " 个 CLIP。" : "") + "\n\n若状态栏仍显示 0/已渲染，请重新打开工作流后再尝试「♻️ 恢复缓存」。");
+                        alert("♻️ Cache restored\n\nThe page has been reloaded." + (payload ? " Restored " + payload.clips_restored + " CLIP(s) this time." : "") + "\n\nIf the status still shows 0/rendered, reopen the workflow and try \"♻️ Restore Cache\" again.");
                     } catch (_) {}
                 }, 600);
                 // 清掉 URL 参数, 避免 F5 再次触发
@@ -8599,7 +8599,7 @@ app.registerExtension({
 function openFilmTemplatePicker(node, runtime, mode, clipIdx) {
     const templates = window.H3_FILM_TEMPLATES;
     if (!templates) {
-        alert("模板库未加载");
+        alert("Template library not loaded");
         return;
     }
 
@@ -8615,7 +8615,7 @@ function openFilmTemplatePicker(node, runtime, mode, clipIdx) {
     const header = document.createElement("div");
     header.style.cssText = "padding:12px 16px;border-bottom:1px solid #333;display:flex;justify-content:space-between;align-items:center;";
     const title = document.createElement("h3");
-    title.textContent = mode === "global" ? "✨ 电影提示词模板 (全局应用)" : "✨ 电影提示词模板 (单CLIP应用)";
+    title.textContent = mode === "global" ? "✨ Film Prompt Templates (apply to all clips)" : "✨ Film Prompt Templates (apply to this clip)";
     title.style.cssText = "margin:0;font-size:14px;color:#eef;";
     const closeBtn = document.createElement("button");
     closeBtn.textContent = "✕";
@@ -8698,13 +8698,13 @@ function applyFilmTemplate(node, runtime, mode, clipIdx, tpl) {
             autoResizeTextarea(runtime.globalPromptTextarea);
             runtime.state.global_prompt = runtime.globalPromptTextarea.value;
         }
-        runtime.statusText = "已应用全局模板到所有CLIP: " + tpl.name;
+        runtime.statusText = "Applied global template to all clips: " + tpl.name;
     } else {
         // 单 CLIP 应用: 先弹窗选择
         const choice = confirm(
-            'CLIP' + (clipIdx + 1) + ' 模板应用方式：\n\n' +
-            '【确定】= 合并全局模板（保留全局模板，再加这个单CLIP模板）\n' +
-            '【取消】= 覆盖全局模板（移除全局模板，只保留这个单CLIP模板）'
+            'How to apply the template to CLIP ' + (clipIdx + 1) + '?\n\n' +
+            'OK = merge with the global template (keep the global template, add this clip template)\n' +
+            'Cancel = replace the global template (remove it, keep only this clip template)'
         );
         
         const wrapped = "[电影风格-单CLIP] " + tpl.prompt + " [/电影风格-单CLIP]";
@@ -8715,13 +8715,13 @@ function applyFilmTemplate(node, runtime, mode, clipIdx, tpl) {
             // 合并: 保留全局模板, 加单CLIP模板
             clip.prompt = removeFilmTemplateByTag(clip.prompt, "电影风格-单CLIP");
             clip.prompt = wrapped + "\n" + clip.prompt.trim();
-            runtime.statusText = "已合并模板到 CLIP" + (clipIdx + 1) + ": " + tpl.name;
+            runtime.statusText = "Merged template into CLIP " + (clipIdx + 1) + ": " + tpl.name;
         } else {
             // 覆盖: 移除全局模板, 加单CLIP模板
             clip.prompt = removeFilmTemplateByTag(clip.prompt, "电影风格-全局");
             clip.prompt = removeFilmTemplateByTag(clip.prompt, "电影风格-单CLIP");
             clip.prompt = wrapped + "\n" + clip.prompt.trim();
-            runtime.statusText = "已覆盖模板到 CLIP" + (clipIdx + 1) + ": " + tpl.name;
+            runtime.statusText = "Replaced template in CLIP " + (clipIdx + 1) + ": " + tpl.name;
         }
     }
 

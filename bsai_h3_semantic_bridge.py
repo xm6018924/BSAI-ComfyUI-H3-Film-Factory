@@ -28,7 +28,7 @@ import torch.nn.functional as F
 log = logging.getLogger("BSAI-H3-Film-Factory.semantic_bridge")
 
 SEMANTIC_BRIDGE_FOLDER = "semantic_bridge"
-MISSING_LABEL = "(关闭: 无权重)"
+MISSING_LABEL = "(off: no weights)"
 HIDDEN_DIM = 5120
 STUDENT_DIM = 512
 DEFAULT_ALPHA = 0.15
@@ -146,17 +146,17 @@ def apply(cond, adapter_name, alpha=DEFAULT_ALPHA, magnitude_match=True):
         return cond, None
     path = _resolve(adapter_name)
     if not path:
-        return cond, f"Semantic Bridge 跳过: 未找到权重 {adapter_name or '(空)'}, 请放到 models/semantic_bridge/"
+        return cond, f"Semantic Bridge skipped: adapter weights not found for {adapter_name or '(empty)'}. Place them in models/semantic_bridge/"
 
     item0 = cond[0]
     if not isinstance(item0, (list, tuple)) or not item0:
-        return cond, "Semantic Bridge 跳过: 条件结构异常"
+        return cond, "Semantic Bridge skipped: unexpected conditioning structure"
     hidden, meta = item0[0], (item0[1] if len(item0) > 1 else None)
     if not isinstance(hidden, torch.Tensor):
-        return cond, "Semantic Bridge 跳过: cond[0][0] 不是张量"
+        return cond, "Semantic Bridge skipped: cond[0][0] is not a tensor"
     if hidden.ndim != 3 or hidden.shape[-1] != HIDDEN_DIM:
-        return cond, (f"Semantic Bridge 跳过: 期望 [B,T,{HIDDEN_DIM}] 实际 {tuple(hidden.shape)}"
-                      f" (该 H3 文本编码器维度不匹配)")
+        return cond, (f"Semantic Bridge skipped: expected [B,T,{HIDDEN_DIM}], "
+                      f"got {tuple(hidden.shape)} (H3 text encoder dimension mismatch)")
 
     try:
         student = _load_student(path)
@@ -170,7 +170,7 @@ def apply(cond, adapter_name, alpha=DEFAULT_ALPHA, magnitude_match=True):
             out = x + float(alpha) * (s - x)
         rewritten = out.to(device=device, dtype=dtype)
     except Exception as exc:
-        return cond, f"Semantic Bridge 跳过: {exc}"
+        return cond, f"Semantic Bridge skipped: {exc}"
 
     new_meta = dict(meta) if isinstance(meta, dict) else {}
     new_meta[META_APPLIED_KEY] = True
@@ -179,5 +179,5 @@ def apply(cond, adapter_name, alpha=DEFAULT_ALPHA, magnitude_match=True):
         new_item.extend(item0[2:])
     out = list(cond)
     out[0] = new_item
-    return out, (f"Semantic Bridge 生效 (adapter={os.path.basename(adapter_name)}, "
+    return out, (f"Semantic Bridge active (adapter={os.path.basename(adapter_name)}, "
                  f"alpha={float(alpha):.3f}, tokens={int(rewritten.shape[1])})")

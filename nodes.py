@@ -1,4 +1,5 @@
 ﻿import os
+import re
 import torch
 import numpy as np
 from PIL import Image
@@ -178,10 +179,31 @@ class BSAI_ContextualSeriesExtract:
         return (selected, sel_count)
 
     @staticmethod
+    def _safe_output_dir(output_dir, subdir):
+        """Resolve subdir strictly inside the ComfyUI output directory.
+        Reject absolute paths and any '..' traversal that escapes output_dir."""
+        base = os.path.realpath(output_dir)
+        candidate = os.path.realpath(os.path.join(base, subdir or ""))
+        if os.path.commonpath([base, candidate]) != base:
+            raise ValueError(
+                f"BSAI ContextualSeries: output_subdir escapes output directory: {subdir!r}"
+            )
+        return candidate
+
+    @staticmethod
+    def _safe_filename_prefix(prefix):
+        """Reduce the filename prefix to a bare safe stem: strip any directory
+        components and '..' so it can never write outside the target folder."""
+        prefix = os.path.basename(str(prefix or "frame"))
+        prefix = re.sub(r"[^A-Za-z0-9_\-]+", "_", prefix).strip("_")
+        return prefix or "frame"
+
+    @staticmethod
     def _save_frames(images, output_subdir, filename_prefix):
         output_dir = folder_paths.get_output_directory()
-        save_dir = os.path.join(output_dir, output_subdir)
+        save_dir = BSAI_ContextualSeriesExtract._safe_output_dir(output_dir, output_subdir)
         os.makedirs(save_dir, exist_ok=True)
+        filename_prefix = BSAI_ContextualSeriesExtract._safe_filename_prefix(filename_prefix)
 
         for i in range(images.shape[0]):
             img_np = (images[i].cpu().numpy() * 255.0).astype(np.uint8)

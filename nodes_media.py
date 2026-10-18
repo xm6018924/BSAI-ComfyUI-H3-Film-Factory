@@ -140,6 +140,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "BSAI_VideoCombiner": "BSAI Video Combiner | 视频拼接器",
-    "BSAI_AudioCombiner": "BSAI Audio Combiner | 音频拼接器",
+    "BSAI_VideoCombiner": "BSAI Video Combiner",
+    "BSAI_AudioCombiner": "BSAI Audio Combiner",
 }

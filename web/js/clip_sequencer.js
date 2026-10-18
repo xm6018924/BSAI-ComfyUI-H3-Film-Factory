@@ -592,7 +592,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     audLbl.textContent = "Audio Mode";
     audWrap.appendChild(audLbl);
     var audSel = document.createElement("select");
-    [["H3_auto", "H3 自动"], ["custom", "自定义"]].forEach(function (pair) {
+    [["H3_auto", "H3 Auto"], ["custom", "Custom"]].forEach(function (pair) {
         var opt = document.createElement("option");
         opt.value = pair[0]; opt.textContent = pair[1];
         audSel.appendChild(opt);
@@ -609,7 +609,7 @@ function addClipCard(node, cardsWrapper, clipData) {
     subLbl.textContent = "Subtitle Source";
     subWrap.appendChild(subLbl);
     var subSel = document.createElement("select");
-    [["manual", "手动输入"], ["extract_from_prompt", "从提示词提取"]].forEach(function (pair) {
+    [["manual", "Manual input"], ["extract_from_prompt", "Extract from prompt"]].forEach(function (pair) {
         var opt = document.createElement("option");
         opt.value = pair[0]; opt.textContent = pair[1];
         subSel.appendChild(opt);
@@ -635,8 +635,8 @@ function addClipCard(node, cardsWrapper, clipData) {
         var isHidden = advContent.style.display === "none";
         advContent.style.display = isHidden ? "flex" : "none";
         advToggle.textContent = isHidden
-            ? "▼ 字幕/高级设置 / Subtitle & Advanced"
-            : "▶ 字幕/高级设置 / Subtitle & Advanced";
+            ? "▼ Subtitle & Advanced"
+            : "▶ Subtitle & Advanced";
     });
 
     var narrLbl = document.createElement("div");
