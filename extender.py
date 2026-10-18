@@ -1,4 +1,4 @@
-﻿"""
+"""
 MiniMax H3 Extender
 ===================
 
@@ -2073,6 +2073,69 @@ class _BasicGuider(comfy.samplers.CFGGuider):
     # 让 ComfyUI 自动把权重驻留预算压到 ~16GB, 尾部 ~5.8GB offload, 留 ~6GB 给 conds/workspace.
 
 
+# ============================================================
+# P0 (2026-10-17): 官方双轨迹采样 —— MiniMaxH3SigmaShift 等效注入
+#   video shift 驱动采样器 sigma 调度 (ModelSamplingAV + CONST),
+#   audio schedule 由模型 forward 内部从共享 base grid 推导.
+#   与 comfy_extras.nodes_minimax_h3.MiniMaxH3SigmaShift 实现一致, 幂等.
+# ============================================================
+def _apply_h3_dual_track_shift(model, shift_video, shift_audio):
+    if model is None:
+        return model
+    try:
+        to = model.model_options.get("transformer_options", {}) or {}
+        if (to.get("minimax_h3_sigma_shift_video") == float(shift_video)
+                and to.get("minimax_h3_sigma_shift_audio") == float(shift_audio)
+                and model.model_options.get("_bsai_dual_track_applied")):
+            return model  # 幂等: 已注入同值 shift
+        import comfy.model_sampling as _cms
+        m = model.clone()
+        class _MSAV(_cms.ModelSamplingAV, _cms.CONST):
+            pass
+        original = m.get_model_object("model_sampling")
+        ms = _MSAV(m.model.model_config)
+        ms.set_parameters(shift=float(shift_video), audio_shift=float(shift_audio))
+        if hasattr(original, "noise_scale"):
+            try:
+                ms.set_noise_scale(original.noise_scale)
+            except Exception:
+                pass
+        m.add_object_patch("model_sampling", ms)
+        to2 = m.model_options.get("transformer_options", {}).copy()
+        to2["minimax_h3_sigma_shift_video"] = float(shift_video)
+        to2["minimax_h3_sigma_shift_audio"] = float(shift_audio)
+        m.model_options["transformer_options"] = to2
+        m.model_options["_bsai_dual_track_applied"] = True
+        print(f"[H3 Extender] P0 双轨迹采样注入: shift_video={shift_video} shift_audio={shift_audio}", flush=True)
+        return m
+    except Exception as _e:
+        print(f"[H3 Extender] P0 双轨迹注入失败(回退原模型): {_e}", flush=True)
+        return model
+
+
+# ============================================================
+# P2 (2026-10-17): SelfLift H3 TST 时间状态传输 —— 少步数画质补偿
+#   arXiv:2609.08505, 校正 H3 视频时间不平衡(闪烁/身份漂移/不合理运动).
+#   依赖 comfyui-SelfLift (facok) 已安装; 未安装自动跳过.
+# ============================================================
+def _apply_h3_tst(model, enable, tau):
+    if model is None or not enable:
+        return model
+    try:
+        import sys as _sys_tst, os as _os_tst
+        _sl_dir = _os_tst.join(_os_tst.path.dirname(_os_tst.path.dirname(_os_tst.path.abspath(__file__))), "comfyui-SelfLift")
+        if _sl_dir not in _sys_tst.path:
+            _sys_tst.path.insert(0, _sl_dir)
+        from h3_tst import patch_model as _tst_patch
+        m = model.clone()
+        patched = _tst_patch(m, float(tau), False)
+        print(f"[H3 Extender] P2 SelfLift H3 TST 注入: tau={tau}", flush=True)
+        return patched
+    except Exception as _e:
+        print(f"[H3 Extender] P2 TST 注入失败(继续无补偿; 需安装 comfyui-SelfLift): {_e}", flush=True)
+        return model
+
+
 def _sigmas(model, scheduler: str, steps: int, denoise: float):
     steps = max(1, int(steps))
     denoise = float(denoise)
@@ -2543,7 +2606,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                refine_enable=True, refine_denoise=0.45, refine_steps=2, refine_upscale_factor=2.0,
                refine_upscaler_model="", refine_align_to=40, refine_audio_denoise=0.0,
                tiled_refine=False, tile_count=4, tile_overlap=128,
-               temporal_chunk_tokens=0, temporal_overlap_tokens=8):
+               temporal_chunk_tokens=0, temporal_overlap_tokens=8,
+               dual_track_shift=True, shift_video=12.0, shift_audio=3.0,
+               tst_enable=True, tst_tau=0.2):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -2558,6 +2623,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     _n_dropped = _drop_mismatched_adaln_patches(model)
     if _n_dropped:
         print(f"[H3 Extender] shape-aware dropped {_n_dropped} adaln lora patches mismatched with base (pruned/full auto, attn/mlp kept)", flush=True)
+
+    # P0 (2026-10-17): 官方双轨迹采样注入 (MiniMaxH3SigmaShift 等效).
+    # 在 guider 创建前对 model clone+patch: ModelSamplingAV 驱动采样器 sigma,
+    # transformer_options 双 shift 让模型内部推导 audio schedule.
+    if dual_track_shift:
+        model = _apply_h3_dual_track_shift(model, float(shift_video), float(shift_audio))
+    # P2 (2026-10-17): SelfLift H3 TST 少步数画质补偿 (时间状态传输).
+    if tst_enable:
+        model = _apply_h3_tst(model, True, float(tst_tau))
 
     guider = _BasicGuider(model)
     guider.set_conds(conditioning)
@@ -5185,11 +5259,37 @@ class BSAIH3FilmFactory:
             # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
             # 24G 跑 15s 208wpx(1920x1088) 极速模式预计 ~10-12 分钟/clip.
             "speed_preset": (
-                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA"],
+                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步"],
                 {
                     "default": "custom",
-                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. FastH3-Trim = nvfp4 pruned model, 8 + 4 refine. FastH3-4step VSA = 4-step VSA distilled LoRA + 2 refine steps, fastest. custom = explicit widget values below.",
+                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. FastH3-Trim = nvfp4 pruned model, 8 + 4 refine. FastH3-4step VSA = 4-step VSA distilled LoRA + 2 refine steps, fastest. Turbo-v4 = Turbo LoRA v4 step600 EMA (6 + 4 refine, shift 12/3, res_multistep 建议). DMAD-4步 = DMAD 4-step distilled LoRA (4 + 2 refine, shift 12/2, lcm sampler, CFG~1, 无需 CFG). custom = explicit widget values below.",
                 },
+            ),
+            # P0 (2026-10-17): 官方双轨迹采样 —— MiniMaxH3SigmaShift 等效注入.
+            # video shift 驱动采样器 sigma 调度(ModelSamplingAV), audio schedule 由模型内部
+            # 从共享 base grid 推导. 默认开(12/3, 官方推荐), 关掉则回到旧行为.
+            "dual_track_shift": (
+                "BOOLEAN",
+                {"default": True, "tooltip": "P0: 官方双轨迹采样（MiniMaxH3SigmaShift 等效）。video/audio 各自 flow shift，改善音视频同步与少步数收敛。默认开。"},
+            ),
+            "shift_video": (
+                "FLOAT",
+                {"default": 12.0, "min": 0.01, "max": 100.0, "step": 0.1, "tooltip": "Video flow shift，驱动采样器 sigma 调度。官方默认 12；DMAD 配方 12；Turbo v4 12。"},
+            ),
+            "shift_audio": (
+                "FLOAT",
+                {"default": 3.0, "min": 0.01, "max": 100.0, "step": 0.1, "tooltip": "Audio flow shift。官方默认 3；DMAD 配方 2。"},
+            ),
+            # P2 (2026-10-17): SelfLift H3 TST 时间状态传输 —— 少步数画质补偿.
+            # 校正 H3 视频时间不平衡(闪烁/身份漂移/不合理运动), 运行时开销 1-2%.
+            # 依赖 comfyui-SelfLift (facok) 已安装; 未安装时自动跳过并提示.
+            "selflift_tst_enable": (
+                "BOOLEAN",
+                {"default": True, "tooltip": "P2: SelfLift H3 TST 少步数画质补偿（校正闪烁/身份漂移/不合理运动）。tau 默认 0.2。需已安装 comfyui-SelfLift。"},
+            ),
+            "selflift_tst_tau": (
+                "FLOAT",
+                {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "TST 校正强度，论文推荐 0.2；0.5 过强。0=仅诊断。"},
             ),
             "temporal_chunk_tokens": (
                 "INT",
@@ -5361,7 +5461,7 @@ class BSAIH3FilmFactory:
                     clip_asset_paths[clip_idx].append(img_path)
                 ref_num = resolved_image_paths.index(img_path) + 1
                 return f"<Picture {ref_num}>"
-            prompt = re.sub(r'@图(\d+)', _replace_image_tag, prompt)
+            prompt = re.sub(r'@(?:图|img)(\d+)', _replace_image_tag, prompt, flags=re.IGNORECASE)
 
             # Resolve @视频N -> <Video N>
             def _replace_video_tag(m):
@@ -5370,7 +5470,7 @@ class BSAIH3FilmFactory:
                 if vid_entry is None:
                     return m.group(0)
                 return f"<Video {tag_num}>"
-            prompt = re.sub(r'@视频(\d+)', _replace_video_tag, prompt)
+            prompt = re.sub(r'@(?:视频|vid)(\d+)', _replace_video_tag, prompt, flags=re.IGNORECASE)
 
             # Resolve @音频N -> load audio path
             def _replace_audio_tag(m):
@@ -5382,7 +5482,7 @@ class BSAIH3FilmFactory:
                 if aud_path and aud_path not in resolved_audio_paths:
                     resolved_audio_paths.append(aud_path)
                 return "<Audio 1>"
-            prompt = re.sub(r'@音频(\d+)', _replace_audio_tag, prompt)
+            prompt = re.sub(r'@(?:音频|aud)(\d+)', _replace_audio_tag, prompt, flags=re.IGNORECASE)
 
             if prompt != original_prompt:
                 print(f"[H3 Extender] clip[{clip_idx}] prompt resolved: '{original_prompt[:60]}' -> '{prompt[:60]}'")
@@ -5408,6 +5508,12 @@ class BSAIH3FilmFactory:
         steps = kwargs.get("steps")
         sampler_name = kwargs.get("sampler_name")
         scheduler = kwargs.get("scheduler")
+        # P0/P2 (2026-10-17): 双轨迹采样 + TST 少步数补偿参数
+        dual_track_shift = bool(kwargs.get("dual_track_shift", True))
+        shift_video = float(kwargs.get("shift_video", 12.0))
+        shift_audio = float(kwargs.get("shift_audio", 3.0))
+        selflift_tst_enable = bool(kwargs.get("selflift_tst_enable", True))
+        selflift_tst_tau = float(kwargs.get("selflift_tst_tau", 0.2))
         denoise = kwargs.get("denoise")
         context_length = kwargs.get("context_length")
         audio_context_length = kwargs.get("audio_context_length")
@@ -5528,6 +5634,19 @@ class BSAIH3FilmFactory:
             # FastH3 4步VSA: 4步DMD2蒸馏+VSA稀疏注意力LoRA, 配2步二采.
             # 最快速度, 质量略低于8步但远快于50步base.
             steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.45
+        elif speed_preset == "Turbo-v4":
+            # P1 (2026-10-17): Turbo LoRA v4 step600 EMA. 6步一采(v4 画质舒适区) + 4步二采.
+            # 双轨迹 shift 12/3 (官方 v4 参数); 建议手动把采样器切到 res_multistep 以贴合官方配方.
+            steps, refine_steps, tile_count, refine_denoise = 6, 4, 4, 0.55
+            shift_video, shift_audio = 12.0, 3.0
+        elif speed_preset == "DMAD-4步":
+            # P1 (2026-10-17): DMAD 4-step 蒸馏 LoRA. 4步一采 + 2步二采, shift 12/2,
+            # 强制 lcm 采样器(DMAD 官方配方: LCM + simple grid, 无 CFG≈1).
+            steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.5
+            shift_video, shift_audio = 12.0, 2.0
+            if str(sampler_name) != "lcm":
+                sampler_name = "lcm"
+                print(f"[H3 Extender] DMAD-4步: 采样器强制 lcm (DMAD 官方配方)")
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
@@ -6757,6 +6876,11 @@ class BSAIH3FilmFactory:
                     refine_upscaler_model=str(refine_upscaler_model),
                     refine_align_to=int(refine_align_to),
                     refine_audio_denoise=float(refine_audio_denoise),
+                    dual_track_shift=dual_track_shift,
+                    shift_video=shift_video,
+                    shift_audio=shift_audio,
+                    tst_enable=selflift_tst_enable,
+                    tst_tau=selflift_tst_tau,
                     tiled_refine=bool(tiled_refine),
                     tile_count=int(tile_count),
                     tile_overlap=int(tile_overlap),

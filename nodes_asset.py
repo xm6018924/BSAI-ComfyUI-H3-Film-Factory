@@ -1,4 +1,4 @@
-﻿"""
+"""
 BSAI Asset Library System
 - BSAI_AssetLibraryInput: Load images, videos, and audio from directories
 - BSAI_AssetRefSelector: Select assets via @图N/@视频N/@音频N notation in prompt
@@ -156,7 +156,7 @@ class BSAI_AssetLibraryInput:
     RETURN_TYPES = ("ASSET_LIBRARY",)
     RETURN_NAMES = ("asset_library",)
     FUNCTION = "load_assets"
-    DESCRIPTION = "Upload images/videos/audio via the node UI. Assets are indexed as @图1,@图2,... (images) / @视频1,... (videos) / @音频1,... (audio)."
+    DESCRIPTION = "Upload images/videos/audio via the node UI. Assets are indexed by tag: @img1, @img2,... (images) / @vid1,... (videos) / @aud1,... (audio). Legacy tags @图N/@视频N/@音频N are also accepted."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -256,14 +256,14 @@ class BSAI_AssetRefSelector:
         "formatted_prompt",
     )
     FUNCTION = "select_assets"
-    DESCRIPTION = "Parse @图N/@视频N/@音频N tokens in the prompt, load the referenced assets, and output for MiniMaxH3ReferenceToVideo."
+    DESCRIPTION = "Parse @imgN/@vidN/@audN tokens in the prompt (legacy @图N/@视频N/@音频N also accepted), load the referenced assets, and output for MiniMaxH3ReferenceToVideo."
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
                 "asset_library": ("ASSET_LIBRARY",),
-                "prompt": ("STRING", {"default": "", "multiline": True, "tooltip": "Use @图1 @图3 for images, @视频1 for videos, @音频1 for audio"}),
+                "prompt": ("STRING", {"default": "", "multiline": True, "tooltip": "Use @img1 @img3 for images, @vid1 for videos, @aud1 for audio (legacy @图N/@视频N/@音频N also accepted)"}),
             }
         }
 
@@ -272,9 +272,9 @@ class BSAI_AssetRefSelector:
         videos = asset_library.get("videos", [])
         audios = asset_library.get("audios", [])
 
-        img_refs = [int(x) for x in re.findall(r'@图(\d+)', prompt)]
-        vid_refs = [int(x) for x in re.findall(r'@视频(\d+)', prompt)]
-        aud_refs = [int(x) for x in re.findall(r'@音频(\d+)', prompt)]
+        img_refs = [int(x) for x in re.findall(r'@(?:图|img)(\d+)', prompt, re.IGNORECASE)]
+        vid_refs = [int(x) for x in re.findall(r'@(?:视频|vid)(\d+)', prompt, re.IGNORECASE)]
+        aud_refs = [int(x) for x in re.findall(r'@(?:音频|aud)(\d+)', prompt, re.IGNORECASE)]
 
         img_refs = img_refs[:MAX_REF_IMAGES]
         vid_refs = vid_refs[:MAX_REF_VIDEOS]

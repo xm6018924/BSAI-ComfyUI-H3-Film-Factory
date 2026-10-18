@@ -1,4 +1,4 @@
-﻿"""
+"""
 BSAI Clip Management System
 - BSAI_ClipComposer: Define a single clip with prompt, subtitles, audio settings, asset refs
 - BSAI_ClipSequencer: Self-contained storyboard with vertical CLIP cards, asset library @ notation
@@ -57,9 +57,9 @@ def _resolve_asset_refs(asset_library, prompt, asset_refs_str):
 
     combined = (prompt + " " + (asset_refs_str or "")).strip()
 
-    img_refs = [int(x) for x in re.findall(r'@图(\d+)', combined)]
-    vid_refs = [int(x) for x in re.findall(r'@视频(\d+)', combined)]
-    aud_refs = [int(x) for x in re.findall(r'@音频(\d+)', combined)]
+    img_refs = [int(x) for x in re.findall(r'@(?:图|img)(\d+)', combined, re.IGNORECASE)]
+    vid_refs = [int(x) for x in re.findall(r'@(?:视频|vid)(\d+)', combined, re.IGNORECASE)]
+    aud_refs = [int(x) for x in re.findall(r'@(?:音频|aud)(\d+)', combined, re.IGNORECASE)]
 
     img_refs = img_refs[:MAX_REF_IMAGES]
     vid_refs = vid_refs[:MAX_REF_VIDEOS]
@@ -107,14 +107,14 @@ class BSAI_ClipComposer:
     RETURN_TYPES = ("CLIP_INFO",)
     RETURN_NAMES = ("clip_info",)
     FUNCTION = "compose_clip"
-    DESCRIPTION = "Define a clip: prompt, subtitle (narration/dialogue), audio mode, duration, asset refs (@图N/@视频N/@音频N)."
+    DESCRIPTION = "Define a clip: prompt, subtitle (narration/dialogue), audio mode, duration, asset refs (@imgN/@vidN/@audN; legacy @图N/@视频N/@音频N also accepted)."
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt": ("STRING", {"default": "", "multiline": True, "tooltip": "Generation prompt. Use 【旁白】/【对白】 for subtitles, @图N/@视频N/@音频N for assets."}),
-                "asset_refs": ("STRING", {"default": "", "multiline": False, "tooltip": "Asset references: @图1 @图2 @视频1 @音频1"}),
+                "prompt": ("STRING", {"default": "", "multiline": True, "tooltip": "Generation prompt. Use [voiceover]/[dialogue] for subtitles, @imgN/@vidN/@audN for assets (legacy Chinese tags also accepted)."}),
+                "asset_refs": ("STRING", {"default": "", "multiline": False, "tooltip": "Asset references: @img1 @img2 @vid1 @aud1 (legacy @图1 @视频1 @音频1 also accepted)"}),
                 "narration": ("STRING", {"default": "", "multiline": True, "tooltip": "Narration subtitle text. Used when subtitle_source='manual'."}),
                 "dialogue": ("STRING", {"default": "", "multiline": True, "tooltip": "Dialogue subtitle text. Used when subtitle_source='manual'."}),
                 "subtitle_source": (["manual", "extract_from_prompt"], {"default": "manual", "tooltip": "manual: use narration/dialogue fields. extract_from_prompt: parse 【旁白】/【对白】 from prompt."}),
@@ -182,7 +182,7 @@ class BSAI_ClipSequencer:
     RETURN_TYPES = ("CLIP_SEQUENCE",)
     RETURN_NAMES = ("clip_sequence",)
     FUNCTION = "sequence_clips"
-    DESCRIPTION = "Storyboard sequencer: vertical CLIP cards, asset-library references (@图N/@视频N/@音频N), manual add/remove clips."
+    DESCRIPTION = "Storyboard sequencer: vertical CLIP cards, asset-library references (@imgN/@vidN/@audN; legacy @图N/@视频N/@音频N also accepted), manual add/remove clips."
 
     MAX_EXT_CLIPS = 4
 
