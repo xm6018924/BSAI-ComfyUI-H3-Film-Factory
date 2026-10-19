@@ -641,10 +641,12 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
         # (渲染时接了上一段 motion context) 才需要往前扩展重叠音频；
         # 关闭上下文参考时不再加重叠，切出的段与 lip_audio 原始音频精确对齐。
         _ctx_on = bool(clips[idx].get("context_enabled", True)) if idx < len(clips) else True
-        # v2.117b: lip_audio 一旦连接, 后端强制关闭所有 CLIP 的上下文参考 —
-        # 切分零重叠, 从源头保证 clip2+ 与 lip_audio 原始音频逐帧对齐。
-        if lip_audio is not None:
-            _ctx_on = False
+        # v2.122: 解除 v2.117b 的强制关闭 — 对口型模式下允许每个 CLIP 手动开启
+        # 上下文参考。音频同步链路(v2.111 机制本来就已具备, 只是此前被强关):
+        #   ctx_on  → 段头部切 overlap_samples 重叠并记入段 dict
+        #          → AV latent 音频注入时尾对齐(重叠头自动丢弃)
+        #          → 解码混音按 overlap_samples 精确跳过段头 → 输出与原始歌曲逐帧对齐
+        #   ctx_off → 纯净零重叠切分(与原曲直接对齐)
         _overlap = overlap_samples if (idx > 0 and _ctx_on) else 0
 
         if idx > 0 and _overlap > 0:
@@ -6813,9 +6815,19 @@ class BSAIH3FilmFactory:
                     if isinstance(_samples, comfy.nested_tensor.NestedTensor):
                         _video_t, _audio_t = _samples.tensors[0], _samples.tensors[1]
                         # 对齐时间轴长度
-                        _t_target = min(_audio_t.shape[-1], _lip_latent.shape[-1])
+                        # v2.122: 改为尾对齐注入。ctx_on 时段头部含 overlap_samples
+                        # 重叠(上一段的歌), 旧的头对齐会把这段歌灌进本段音频区 →
+                        # 口型整体提前 ~1.2s 错位。尾对齐使注入的本段 audio 行精确
+                        # 对应[段起点, 段终点], 多余重叠头自动丢弃, 与解码混音的
+                        # overlap 跳过互补; ctx_off(零重叠)时尾对齐==头对齐, 行为不变。
+                        _t_target = int(min(_audio_t.shape[-1], _lip_latent.shape[-1]))
+                        _lip_rows = int(_lip_latent.shape[-1])
+                        if _lip_rows >= _t_target:
+                            _lip_cut = _lip_latent[..., -_t_target:]
+                        else:
+                            _lip_cut = torch.nn.functional.pad(_lip_latent, (_t_target - _lip_rows, 0))
                         _audio_locked = _audio_t.clone()
-                        _audio_locked[..., :_t_target] = _lip_latent[..., :_t_target].to(_audio_t.device)
+                        _audio_locked[..., :_t_target] = _lip_cut.to(_audio_t.device)
                         latent["samples"] = comfy.nested_tensor.NestedTensor((_video_t, _audio_locked))
                         # noise_mask: video=1(全去噪), audio=0(锁定不修改)
                         _vmask = torch.ones_like(_video_t)
@@ -6830,11 +6842,14 @@ class BSAIH3FilmFactory:
             trim_frames = None
             # v1.14: previous_proxy 为 None（前段无缓存）时不再 raise，防御性跳过
             # motion context（从当前段独立渲染，链拼接由 disk_join 的 previous_cache 保证）。
-            # v2.117b: lip_audio 连接时后端强制不做 motion context(音频零重叠对齐)，
-            # 即使前端"上下文参考"开关仍开着也忽略。
-            if i > 0 and lip_audio is not None and cfg.get("context_enabled", True):
-                print(f"[H3 LipSync] clip[{i}] lip_audio 已连接, 自动忽略上下文参考(音频零重叠, 与原始歌曲对齐)")
-            if lip_audio is None and i > 0 and cfg.get("context_enabled", True) and previous_proxy is not None:
+            # v2.122: 解除 v2.117b 强制 — 对口型模式下"上下文参考"恢复用户手动控制。
+            # ctx_on 时上一段尾部通过 motion context keyframes 注入(视频块+音频尾部),
+            # 音频上下文终点精确对齐本段起点; 音频同步由三件套保证:
+            #   1) _split_lip_audio_by_clips: ctx_on 段头部切 1.2s 重叠并记录 overlap_samples
+            #   2) AV latent 音频注入: 尾对齐(本段行对应[起点,终点], 重叠头丢弃)
+            #   3) 解码混音: 按 overlap_samples 跳过段头重叠 → 输出与原始歌曲逐帧对齐
+            _applied_ctx = False
+            if i > 0 and cfg.get("context_enabled", True) and previous_proxy is not None:
                 positive, trim_frames, _, _, _ = motion.apply(
                     positive,
                     latent,
@@ -6842,10 +6857,17 @@ class BSAIH3FilmFactory:
                     str(context_length),
                     int(audio_context_length),
                 )
-            # v2.117d: lip_audio 模式模型独立渲染、无前导重叠, 显式 trim=0 —
+                _applied_ctx = True
+                if lip_audio is not None:
+                    print(f"[H3 LipSync] clip[{i}] 对口型+上下文参考: 前段尾部已注入, 音频重叠区解码时自动跳过(与原始歌曲对齐)")
+            elif i > 0 and cfg.get("context_enabled", True) and lip_audio is not None and previous_proxy is None:
+                print(f"[H3 LipSync] clip[{i}] 对口型+上下文参考: 前段缓存缺失, 本段独立渲染(trim=0)")
+            # v2.117d/v2.122: 本段未应用 motion context 时显式 trim=0 —
             # 绝不能让 disk_join.join 回退默认 22 帧 trim(那会把 clip2+ 自己的
-            # 开头裁掉 → clip2 尾巴少帧, 段与段之间累积出空白帧)。
-            if lip_audio is not None:
+            # 开头裁掉 → 段与段之间累积出空白帧)。ctx_on 且 motion.apply 已执行
+            # 时保留其返回的 trim(上下文帧数), 由 join 裁掉上下文头, 与音频
+            # overlap 跳过互补对齐。
+            if lip_audio is not None and not _applied_ctx:
                 trim_frames = 0
 
             _send_extender_progress(
@@ -7556,7 +7578,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.149 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k + 自动分块n4保稳)")
+print("[BSAI-H3-Film-Factory] v14.151 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k + 自动分块n4保稳, 对口型×上下文参考手动可控v2.122: 尾对齐注入+overlap跳过保音频同步)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",

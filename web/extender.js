@@ -5354,36 +5354,9 @@ function ensureGlobalSyncPoll() {
                         /* v2.25: 去掉 autoGrowNodeToFitAllClips, 防止自动撑大 */
                     }
                 } catch (e) {}
-                // v2.117e: 轮询兜底 — lip_audio 一连接就自动关闭所有 CLIP 的
-                // 上下文参考(onConnectionsChange 在某些拖线方式下不触发)。
-                // 改完数据直接刷新已渲染卡片的复选框 DOM, 不重建卡片。
-                try {
-                    const rtC = n.__h3Extender;
-                    if (rtC && rtC.state && rtC.state.clips) {
-                        const lipIn = n.inputs && n.inputs.find(inp => inp && inp.name === "lip_audio");
-                        const lipOn = !!(lipIn && lipIn.link !== null && lipIn.link !== undefined);
-                        if (lipOn) {
-                            let _ch = false;
-                            rtC.state.clips.forEach((clip) => {
-                                if (clip.context_enabled !== false) {
-                                    clip.context_enabled = false;
-                                    clip.validated = false;
-                                    _ch = true;
-                                }
-                            });
-                            if (_ch) {
-                                rtC.state.clips.forEach((clip) => {
-                                    const cb = document.getElementById(`ctx_${clip.id}`);
-                                    if (cb) cb.checked = false;
-                                    const tg = document.getElementById(`rfe_toggle_${clip.id}`);
-                                    if (tg) tg.style.opacity = "0.5";
-                                    const ct = document.getElementById(`rfe_content_${clip.id}`);
-                                    if (ct) { ct.style.opacity = "0.4"; ct.style.pointerEvents = "none"; }
-                                });
-                            }
-                        }
-                    }
-                } catch (e) {}
+                // v2.122: 移除 v2.117e 轮询兜底强制 — 对口型模式下"上下文参考"
+                // 恢复用户手动控制, 音频同步由后端三件套保证(切分重叠/尾对齐注入/
+                // 解码跳过重叠), 不再强制关闭所有 CLIP 的 context_enabled。
                 // Persist the user-adjusted node height so a page refresh or
                 // ComfyUI restart restores the exact last layout, including
                 // every CLIP card's share of the node body.
@@ -8363,36 +8336,11 @@ app.registerExtension({
                     syncExternalPrompts(this, runtime);
                 }
             } catch (e) {}
-            // v2.117b: lip_audio 一连接外部歌曲, 自动把所有 CLIP 的"上下文参考"关掉,
-            // UI 同步(卡片复选框 + 批量按钮), 保证渲染时音频零重叠、与原始歌曲对齐。
-            try {
-                const lipInput = this.inputs && this.inputs.find(inp => inp && inp.name === "lip_audio");
-                const lipConnected = !!(lipInput && lipInput.link !== null && lipInput.link !== undefined);
-                if (lipConnected) {
-                    let _changed = false;
-                    runtime.state.clips.forEach((clip) => {
-                        if (clip.context_enabled !== false) {
-                            clip.context_enabled = false;
-                            clip.validated = false;
-                            _changed = true;
-                        }
-                    });
-                    if (_changed) {
-                        // v2.117c: 直接刷新已存在卡片的复选框 DOM, 不依赖重建
-                        runtime.state.clips.forEach((clip) => {
-                            const cb = document.getElementById(`ctx_${clip.id}`);
-                            if (cb) cb.checked = false;
-                            const tg = document.getElementById(`rfe_toggle_${clip.id}`);
-                            if (tg) tg.style.opacity = "0.5";
-                            const ct = document.getElementById(`rfe_content_${clip.id}`);
-                            if (ct) { ct.style.opacity = "0.4"; ct.style.pointerEvents = "none"; }
-                        });
-                        invalidateFrom(runtime.state, 0);
-                        updateHidden(this, runtime);
-                        render(this, runtime);
-                    }
-                }
-            } catch (e) {}
+            // v2.122: 移除 v2.117b/c 连线强制 — lip_audio 连接时不再自动关闭
+            // 所有 CLIP 的"上下文参考", 每张卡片的 Context Reference 复选框
+            // 完全由用户控制(卡片级 + 批量按钮)。对口型+上下文的音频同步由后端
+            // 三件套保证: ctx_on 段头部切重叠 → AV latent 尾对齐注入 → 解码混音
+            // 按 overlap_samples 跳过段头, 输出与 lip_audio 原始歌曲逐帧对齐。
             // Sync from prompt_source (was incorrectly looking for "global_prompt")
             const psInput = this.inputs?.find(inp => inp.name === "prompt_source");
             if (psInput) {
