@@ -122,6 +122,22 @@
 | `refine_align_to` | 像素对齐步长 | `40` | **默认 40（H3 官方 40px 网格实测最佳）**；其他分辨率自动取整避免边缘色条 |
 | `refine_audio_denoise` | 音频重绘强度 | `0.0` | 0=锁定一采音频（推荐）；0.5-1.0=音频随视频重绘 |
 
+### 周报技术升级 P0-P2（v14.150）/ Weekly-Tech Upgrade P0-P2 (v14.150)
+> 2026-10-17 落地《H3加速与画质提升技术周报》：官方双轨迹采样、Turbo v4 / DMAD 档位、SelfLift TST 少步数补偿。/ Landing the 2026-10-17 H3 weekly tech report: official dual-track sampling, Turbo v4 / DMAD presets, SelfLift TST few-step compensation.
+| 参数 / Parameter | 中文说明 / Meaning | 默认 / Default | 说明 / Notes |
+|---|---|---|---|
+| `dual_track_shift` | P0 官方双轨迹采样 | `true` | MiniMaxH3SigmaShift 等效：video shift 驱动采样器 sigma 调度，audio schedule 由模型内部推导；改善音视频同步与少步数收敛。关=旧行为 |
+| `shift_video` | Video flow shift | `12.0` | 官方默认 12；DMAD 配方 12；Turbo v4 12 |
+| `shift_audio` | Audio flow shift | `3.0` | 官方默认 3；DMAD 配方 2 |
+| `selflift_tst_enable` | P2 SelfLift H3 TST 补偿 | `true` | 时间状态传输（arXiv:2609.08505）校正闪烁/身份漂移/不合理运动，开销 1-2%；需已安装 `comfyui-SelfLift`（随本版已装） |
+| `selflift_tst_tau` | TST 校正强度 | `0.2` | 论文推荐 0.2；0.5 过强；0=仅诊断 |
+| `speed_preset`（新增档）| 加速预设 | `custom` | **`Turbo-v4`**=6+4 步、shift 12/3（Turbo LoRA v4 step600 EMA 舒适区，建议手动切 `res_multistep` 采样器贴合官方配方）；**`DMAD-4步`**=4+2 步、shift 12/2、采样器强制 `lcm`（DMAD 官方配方 LCM+simple，无 CFG≈1，需挂 DMAD LoRA） |
+
+**配套 LoRA（已下载，loras/ 目录）** / Companion LoRAs (already downloaded):
+- `minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors`（Kijai 降秩版，DMAD-4步 档用）
+- `minimax_h3_turbo_v4_step600_ema_DasiwaREF2VAHybridV1_0_curveproj1025_compat_v001.safetensors`（Turbo v4 step600 EMA，Turbo-v4 档用）
+
+
 ### 对口型×二采预设（v14.83）/ Lip-sync × Dual-sample Preset
 | 参数 | 中文说明 | 默认 | 说明 |
 |---|---|---|---|
