@@ -14,6 +14,12 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.153 (2026-10-20) — 二采省显存模式：移植 selflift-Avatar global 全上下文路径（spatial 可切换）/ Refine memory-saving mode: ported selflift-Avatar global-context path (switchable with spatial)
+
+**核心：二采新增 `refine_mem_mode` 下拉（第 59 个 widget，required 末尾追加，老工作流零错位）。`global` 模式移植 selflift-Avatar (commit 5b93b6c) global-context 省显存路径（源码暂存 `vendor/selflift_avatar/`）：全序列 attention 一次跑（无空间分块、无接缝/背景膨胀），norm/proj/MLP 按 token_chunk=4096 分块压激活显存。与 KJNodes head 分组（object_patches attn.forward 层）、Sol-Attn override（v14.148 dense 门保持注入）、v14.145 delegate 三机制源码级兼容；检测到自制 override 时按上游语义自动回退全序列 global 纯 dense 分块路径。包装失败自动回退 spatial 分块保底。** / Core: new `refine_mem_mode` dropdown (59th widget, appended at the end of required so legacy workflows load without misalignment). The `global` mode ports the selflift-Avatar global-context memory-saving path (source staged in `vendor/selflift_avatar/`): full-sequence attention in one pass (no spatial tiles, no seams/background swelling) with norm/proj/MLP token-chunked at 4096 to bound activation VRAM. Source-level compatible with KJNodes head-grouping, the Sol-Attn override (v14.148 dense gate stays injected) and the v14.145 delegate; with a custom override detected it follows upstream semantics and falls back to the full-sequence global chunked path automatically. On wrapper failure it falls back to spatial tiling as a safety net.
+- **前端 `H3LegacyCompat`**：`detect` 新增 `L59G` 布局（判据 `w[58]` 为 spatial/global 开头的字符串，与历史 L59 不撞车），`mapTo`/norm 循环改为 out.length 动态长度。 / Frontend `H3LegacyCompat`: new `L59G` layout detection and dynamic out.length mapping.
+- **上游版权说明**：selflift-Avatar 仓库暂无 LICENSE，vendor 暂存保留 NOTICE.md/PROVENANCE.json 出处声明，致谢上游及 Fish4AI (comfyui-SelfLift-Fish)。 / Upstream has no LICENSE; vendor staging keeps NOTICE.md/PROVENANCE.json attribution.
+
 ### v14.152 (2026-10-19) — 旧工作流 4 参数容错：VALIDATE_INPUTS 跳过校验 + STRING 类型 + None 映射 / Legacy workflow 4-param tolerance: VALIDATE_INPUTS skip + STRING type + None mapping
 
 **核心：粉丝导入老版本分享的工作流时，4 个参数因历史遗留值（`'global_inherit'`、`''`、`False`、`0.0`）被 ComfyUI 前置校验拦截，节点根本无法执行。本轮加三层容错：VALIDATE_INPUTS 跳过 min/max/combo 校验、INT/FLOAT 改 STRING 类型绕开类型转换、函数内容错解析统一归一到默认最低档。** / Core: when importing a legacy workflow, 4 params were blocked by ComfyUI's pre-validation due to legacy values. This round adds three-layer tolerance: VALIDATE_INPUTS skips min/max/combo checks, INT/FLOAT→STRING bypasses type conversion, and in-function fallback normalizes everything to the default-lowest tier.

@@ -2598,6 +2598,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                refine_enable=True, refine_denoise=0.45, refine_steps=2, refine_upscale_factor=2.0,
                refine_upscaler_model="", refine_align_to=40, refine_audio_denoise=0.0,
                tiled_refine=False, tile_count=4, tile_overlap=128,
+               refine_mem_mode="spatial",
                temporal_chunk_tokens=0, temporal_overlap_tokens=8,
                dual_track_shift=True, shift_video=12.0, shift_audio=3.0,
                tst_enable=True, tst_tau=0.2):
@@ -3325,7 +3326,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 线性下降. 算法移植自 MiniMaxH3 Director spatial_tiled_sampling.py (Apache-2.0).
             # 包装器对非 packed latent / 小尺寸自动回退全帧, 不破坏既有流程.
             _r_restore_tiles = None
-            if tiled_refine:
+            if tiled_refine and refine_mem_mode != "global":
                 try:
                     import os as _os_t, importlib.util as _ilu_t
                     _tiles_path = _os_t.path.join(_os_t.path.dirname(_os_t.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -3395,7 +3396,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 参考插件参数启用分块(n_tiles=4, overlap=128px); 分块后每块 token
             # ~334k < 350k 门阈值, Sol-Attn 稀疏保留(参考插件同款路径). 分块
             # 包装失败时维持 v14.148 dense 回退门, 双保险.
-            if _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None:
+            if _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None and refine_mem_mode != "global":
                 try:
                     import os as _os_t3, importlib.util as _ilu_t3
                     _tiles_path3 = _os_t3.path.join(_os_t3.path.dirname(_os_t3.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -3409,6 +3410,51 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                           f"(参考插件实测 240s/步 无雪花路径, 每块 ~334k token 健康区)")
                 except Exception as _te_t3:
                     print(f"[H3 Extender] v14.149 自动分块失败(维持 v14.148 dense 回退门): {_te_t3}")
+            # v14.153 (2026-10-20): 二采省显存模式 global —— 移植 selflift-Avatar
+            # (commit 5b93b6c) global-context 路径, 暂存源码 vendor/selflift_avatar/。
+            # 与 spatial(v14.149 4 块分块)互斥: global 跳过空间分块, 对二采模型加
+            # tiled_model() 全序列包装 —— attention 全序列一次跑(无接缝/背景膨胀,
+            # query 永不见裁剪), norm/proj/MLP 按 token_chunk 分块压激活显存。
+            # 与本插件现有机制协同(已验证源码级兼容):
+            #   - KJNodes head 分组(object_patches ...attn.forward): vendor
+            #     _native_attention_chunked_mlp 调 block.attn(...) 仍走 KJNodes 路径;
+            #   - Sol-Attn override: vendor 判为 unknown override -> 自动回退 global
+            #     纯 dense 分块路径(use_stream/use_ram 强制关, 上游语义), v14.148
+            #     sol_max_tokens 门保持注入(全序列 873k 仍需 dense 回退防病态 kernel);
+            #   - v14.145 delegate(KJNodes 补丁重建): wrapper 在 DIFFUSION_MODEL 层,
+            #     object_patches 同为 block/attn 层, 叠加不冲突。
+            # 包装失败时打印警告并回退 spatial 行为(此时 v14.149 自动分块已因
+            # refine_mem_mode 被跳过, 需补一次分块包装保底)。
+            _r_global_fallback_tiles = False
+            if refine_mem_mode == "global":
+                try:
+                    import os as _os_g, importlib as _ilg
+                    import sys as _sys_g
+                    _venv_dir = _os_g.path.join(_os_g.path.dirname(_os_g.path.abspath(__file__)), "vendor")
+                    if _venv_dir not in _sys_g.path:
+                        _sys_g.path.insert(0, _venv_dir)
+                    _gt = _ilg.import_module("selflift_avatar.h3_global_tiling")
+                    _refine_model = _gt.tiled_model(_refine_model, 4096)
+                    _fb = getattr(_refine_model, "_selflift_global_fallback", None)
+                    print(f"[H3 Extender] v14.153 二采省显存模式: global 全上下文路径已包装 "
+                          f"(token_chunk=4096, 无空间分块)"
+                          + (f", 上游回退: {_fb}(检测到自制注意力 override, 走全序列 attention+分块 MLP)" if _fb else ""))
+                except Exception as _eg15:
+                    print(f"[H3 Extender] v14.153 global 包装失败, 回退 spatial 分块保底: {_eg15}")
+                    refine_mem_mode = "spatial"
+                    _r_global_fallback_tiles = True
+            if _r_global_fallback_tiles and _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None:
+                try:
+                    import os as _os_t4, importlib.util as _ilu_t4
+                    _tiles_path4 = _os_t4.path.join(_os_t4.path.dirname(_os_t4.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
+                    _tiles_spec4 = _ilu_t4.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path4)
+                    _tiles_mod4 = _ilu_t4.module_from_spec(_tiles_spec4)
+                    _tiles_spec4.loader.exec_module(_tiles_mod4)
+                    _r_restore_tiles = _tiles_mod4.wrap_sampler_spatial_tiles(
+                        _r_sampler, n_tiles=4, overlap_pixels=128)
+                    print(f"[H3 Extender] v14.153 回退保底: 已补启用 spatial 分块 n_tiles=4 overlap=128px")
+                except Exception as _te_t4:
+                    print(f"[H3 Extender] v14.153 回退补分块失败(仅 v14.148 dense 门兜底): {_te_t4}")
             _r_guider = _BasicGuider(_refine_model)
             _r_guider.set_conds(conditioning)
             # v1.64: 恢复 v1.59 驻留补丁(v1.61 改诊断时误删)——二采采样前
@@ -5334,6 +5380,11 @@ class BSAIH3FilmFactory:
                 "BOOLEAN",
                 {"default": False, "tooltip": "Far-shot face preservation mode (automatically locks facial-feature consistency; @图1=full body, @图2.N=each person's face close-up)."},
             ),
+            # v14.153: 二采省显存模式（widget 追加在 required 末尾 = 第 59 位，老工作流零错位）
+            "refine_mem_mode": (
+                ["spatial (分块,兼容)", "global (全上下文省显存)"],
+                {"default": "spatial (分块,兼容)", "tooltip": "Refine memory-saving mode. spatial (default) = current 4-tile spatial tiling (v14.149, may show background swelling/seams on some scenes). global = ported from selflift-Avatar global-context mode: full-sequence attention (no tiles, no seams) + token-chunked norm/MLP to bound VRAM; coexists with KJNodes head-grouping / Sol-Attn override (v14.148 dense gate stays active). Expect per-step time similar or better than 4-tile spatial."},
+            ),
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -5594,6 +5645,9 @@ class BSAIH3FilmFactory:
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
         tile_overlap = int(kwargs.get("tile_overlap", 128))
+        # v14.153: 二采省显存模式（spatial=v14.149 分块路径 / global=全上下文省显存）
+        refine_mem_mode = str(kwargs.get("refine_mem_mode", "spatial (分块,兼容)") or "spatial (分块,兼容)")
+        refine_mem_global = refine_mem_mode.startswith("global")
         # v2.02 (2026-09-19): 时间分块(沿 T 轴)二采, 区别于上面的空间分块(沿 H/W)。
         # chunk_tokens<=0 关闭(默认), 整段一次性二采; >0 时沿 T 切块逐段走已有(空间分块)采样器。
         # v2.56 (2026-09-21): 兼容旧工作流，新增参数空值容错
@@ -6951,6 +7005,7 @@ class BSAIH3FilmFactory:
                     tiled_refine=bool(tiled_refine),
                     tile_count=int(tile_count),
                     tile_overlap=int(tile_overlap),
+                    refine_mem_mode=("global" if refine_mem_global else "spatial"),
                     temporal_chunk_tokens=int(temporal_chunk_tokens),
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
                 )
