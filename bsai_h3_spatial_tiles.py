@@ -1,4 +1,4 @@
-﻿# BSAI-H3 分块二采（spatial tiling）模块
+# BSAI-H3 分块二采（spatial tiling）模块
 # 代码移植自 ComfyUI_MiniMaxH3_Director/director/spatial_tiled_sampling.py
 # 原作者: Copyright 2026 ComfyUI-Bernini Contributors, Apache License 2.0 (见 Director LICENSE).
 # 本文件按 Apache-2.0 第4节保留版权与许可声明, 仅做文件名/导入路径调整, 未改算法.
@@ -192,6 +192,15 @@ def _install_tile_payloads(cfg_guider, *, axis: str, start: int, end: int, tile_
         if shape_cond is not None and hasattr(shape_cond, "cond"):
             restorations.append((shape_cond, "cond", shape_cond.cond))
             shape_cond.cond = tile_shapes
+
+        # denoise_mask 在 process_conds 时按全幅一次性编码进 cond (model_base extra_conds),
+        # tile forward 必须同步裁剪, 否则 model.py out[0](tile W) * mask(full W) 维度不匹配。
+        # audio_denoise_mask 不随空间分块裁剪(audio 流整段保留), 无需处理。
+        mask_cond = model_conds.get("denoise_mask")
+        mask_val = getattr(mask_cond, "cond", None) if mask_cond is not None else None
+        if isinstance(mask_val, torch.Tensor) and mask_val.ndim == 5:
+            restorations.append((mask_cond, "cond", mask_val))
+            mask_cond.cond = _crop_matching_video(mask_val, full_h, full_w, axis, start, end)
 
         payload_cond = model_conds.get("minimax_payload")
         payload = getattr(payload_cond, "cond", None) if payload_cond is not None else None

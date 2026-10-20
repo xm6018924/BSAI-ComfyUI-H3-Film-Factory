@@ -1241,6 +1241,24 @@ const BSAI_BILINGUAL_LABELS = {
     "semantic_bridge_adapter": "语义桥权重（放models/semantic_bridge，约11MB）",
     "semantic_bridge_alpha": "语义桥强度（C=H+α*(S-H)，默认0.15）",
     "semantic_bridge_magnitude_match": "语义桥模长对齐（原版默认开）",
+    "dual_track_shift": "官方双轨迹采样（video/audio各自shift，默认开）",
+    "shift_video": "视频flow shift（官方默认12）",
+    "shift_audio": "音频flow shift（官方默认3，0=关闭）",
+    "selflift_tst_enable": "SelfLift TST时间状态传输（少步数画质补偿）",
+    "selflift_tst_tau": "TST校正强度（论文推荐0.2）",
+    "upscale_batch": "超分批次帧数（越大越快越吃显存，默认4）",
+    "upscale_tile": "超分分块像素（0=整帧，显存紧张设512~1024）",
+    "upscale_model": "超分模型（realesr模型，放models/upscale_models）",
+    "upscale_factor": "超分倍数（相对二采输出分辨率）",
+    "upscale_engine": "超分引擎（auto/dlss5/realesr/bicubic）",
+    "upscale_mode": "超分模式（平衡/质量优先/速度优先/自定义）",
+    "upscale_per_clip": "逐段超分开关（默认关）",
+    "upscale_final": "全片超分开关（默认关）",
+    "upscale_fp16": "超分FP16半精度加速",
+    "upscale_face_restore": "超分后人脸修复（需GPFGAN/CodeFormer）",
+    "env_audio_enable": "环境音开关（global_inherit=跟随全局，on=混入，off=只留人声）",
+    "env_audio_gain": "环境音音量（默认0.15）",
+    "face_lock_mode": "远景人脸锁定模式（@图1全身+@图2.N人脸特写）",
 };
 function bsaiApplyBilingualLabels(node) {
     if (!node || !node.widgets) return;
@@ -6614,7 +6632,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "block_cache", zh: "块缓存", en: "BlkCache", desc: "H3 Block Cache(F1B0 残差)加速，需 T8 插件；顺序画面稳定时显著提速。" },
         { key: "ref_cache", zh: "参考缓存", en: "RefCache", desc: "Ref2VA 参考图编码磁盘缓存，调参重跑跳过重复编码。" },
         { key: "output_mode", zh: "输出", en: "Output", desc: "输出模式循环：none(仅缓存)→per_clip(分段)→merged(合并)→both(两者)。", cycle: ["none", "per_clip", "merged", "both"] },
-        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环（9档全）：custom(按下方手动参数)→极速(一采4+二采3步)→均衡(6+4)→精细(8+6)→极速-VDN(8+3)→均衡-VDN(8+4)→精细-VDN(8+6)→FastH3-Trim(8步+4二采)→FastH3-4步VSA(4步VSA+2二采)。颜色：灰=custom / 青=FastH3标准 / 紫=VDN / 橙=Trim / 红=4步VSA最快档。", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }] },
+        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环（12档）：custom→极速→均衡→精细→极速-VDN→均衡-VDN→精细-VDN→FastH3-Trim→FastH3-4步VSA→Turbo-v4→DMAD-4步→武戏组合拳。", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }] },
         { key: "refine_lipsync_mode", zh: "口型", en: "Lipsync", desc: "对口型×二采预设循环：锁定保口型→音频参与重绘0.7→音频全重绘1.0。", cycle: ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"] },
         { key: "upscale_mode", zh: "超分模式", en: "UpxMode", desc: "超分模式循环：平衡(质量+速度)→质量优先→速度优先→自定义。", cycle: ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"] },
         { key: "pause_enable", zh: "暂停", en: "Pause", desc: "每 CLIP 生成完自动暂停等待；无干预超时自动继续。" },
@@ -7471,8 +7489,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     // 设计依据: 对全部 115 个真实历史工作流(118 个 H3 节点, 14 种布局)全量模拟
     // 映射+校验 0 失败(Python 原型 h3_legacy_mapper.py)。
     const H3LegacyCompat = (() => {
-        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","prompt_pack"];
-        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.45,2,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",0,8,false,"",0.15,true,"global_inherit",0.15,false,""];
+        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","prompt_pack"];
+        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.45,2,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"","0.15",true,"global_inherit",0.15,false,""];
         const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain"]);
         const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match","face_lock_mode"]);
         const OPTIONS = {
@@ -7485,7 +7503,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             refine_lipsync_mode: ["锁定保口型(推荐)","音频参与重绘0.7","音频全重绘1.0"],
             upscale_mode: ["平衡(质量+速度)","质量优先","速度优先","自定义"],
             upscale_engine: ["auto","dlss5","realesr","bicubic"],
-            speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN","FastH3-Trim","FastH3-4步VSA"],
+            speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳"],
             env_audio_enable: ["global_inherit","on","off"],
         };
         function detect(w) {

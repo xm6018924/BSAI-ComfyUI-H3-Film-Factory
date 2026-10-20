@@ -14,6 +14,18 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.152 (2026-10-19) — 旧工作流 4 参数容错：VALIDATE_INPUTS 跳过校验 + STRING 类型 + None 映射 / Legacy workflow 4-param tolerance: VALIDATE_INPUTS skip + STRING type + None mapping
+
+**核心：粉丝导入老版本分享的工作流时，4 个参数因历史遗留值（`'global_inherit'`、`''`、`False`、`0.0`）被 ComfyUI 前置校验拦截，节点根本无法执行。本轮加三层容错：VALIDATE_INPUTS 跳过 min/max/combo 校验、INT/FLOAT 改 STRING 类型绕开类型转换、函数内容错解析统一归一到默认最低档。** / Core: when importing a legacy workflow, 4 params were blocked by ComfyUI's pre-validation due to legacy values. This round adds three-layer tolerance: VALIDATE_INPUTS skips min/max/combo checks, INT/FLOAT→STRING bypasses type conversion, and in-function fallback normalizes everything to the default-lowest tier.
+- **`VALIDATE_INPUTS(**kwargs)`**：新增类方法，带 `**kwargs` 使 ComfyUI 跳过所有参数的 min/max 校验与 combo 选项校验（execution.py 1032/1060 行分支），让 `semantic_bridge_adapter=False`、超范围 float 等历史值能进入 extend()。 / New classmethod with `**kwargs` makes ComfyUI skip all min/max and combo-option checks, letting legacy values through to `extend()`.
+- **`temporal_overlap_tokens` INT→STRING**：`int('global_inherit')` 在类型转换阶段必炸，改 STRING 后 `str()` 永远不失败；函数内 `_safe_int` 对非数字取默认 8。 / `int('global_inherit')` always crashes at type-conversion; STRING's `str()` never fails, and `_safe_int` falls back to default 8 for non-numeric input.
+- **`semantic_bridge_alpha` FLOAT→STRING**：同理，`float('')` 必炸；改 STRING 后函数内 `_safe_float` 对空串取默认 0.15。 / Same rationale; `_safe_float` falls back to 0.15 for empty strings.
+- **`semantic_bridge_adapter` 容错**：`False`/`None`/空串一律视为关闭（最低档），`_sb_adapter.startswith("(")` 判断不受 `False` 影响（已提前转空串）。 / `False`/`None`/empty → treated as off (lowest tier); normalized to empty string before the `startswith` check.
+- **`shift_audio` min 0.01→0.0 + None 映射**：老工作流存 `0.0` 合法但被 min 0.01 拦截；min 降为 0.0 允许通过，函数内 `shift_audio<=0` 映射为 `None`（`ModelSamplingAV.audio_scale = shift/None → 1.0`，关闭音频 shift 即最低档），避免除零。`_apply_h3_dual_track_shift` 同步支持 `None`。 / Legacy `0.0` was blocked by min 0.01; min lowered to 0.0, and `<=0` maps to `None` (audio_scale=1.0, audio shift off) to prevent division by zero.
+- 验证：py_compile 通过；粉丝重跑老工作流时 4 个报错全部消失，参数自动取默认最低档（temporal_overlap=8, semantic_bridge=off/0.15, shift_audio=off） / Verified: py_compile pass; all 4 legacy errors resolved, params auto-fallback to default-lowest
+
+---
+
 ### v14.151 (2026-10-19) — 对口型×上下文参考手动可控：解除强制关闭 + 音频尾对齐注入保同步 / Lip-sync×Context manual control: un-force the auto-disable + tail-aligned audio injection for sync
 
 **核心：对口型（lip_audio 连接）模式下，"上下文参考"恢复用户手动控制（卡片级复选框 + 批量按钮），上下文带来的段间衔接由音频同步三件套保证，输出音频仍与 lip_audio 原始歌曲逐帧对齐。** / Core: in lip-sync mode (lip_audio connected), "Context Reference" returns to full manual control (per-card checkbox + batch button); inter-clip continuity is preserved while output audio stays frame-locked to the original song via the three-piece sync chain.

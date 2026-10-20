@@ -1,0 +1,226 @@
+{
+  "id": "bsai-h3-4k-selflift-003",
+  "revision": 0,
+  "last_node_id": 17,
+  "last_link_id": 16,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [50, 50],
+      "size": [320, 82],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [{"name": "MODEL", "type": "MODEL", "links": [1], "slot_index": 0}],
+      "properties": {"Node name for S&R": "UNETLoader"},
+      "widgets_values": ["H3/minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors", "default"]
+    },
+    {
+      "id": 2,
+      "type": "LoraLoader",
+      "pos": [400, 50],
+      "size": [320, 126],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 1},
+        {"name": "clip", "type": "CLIP", "link": 2}
+      ],
+      "outputs": [
+        {"name": "MODEL", "type": "MODEL", "links": [3, 15], "slot_index": 0},
+        {"name": "CLIP", "type": "CLIP", "links": [4], "slot_index": 1}
+      ],
+      "title": "Turbo v4 LoRA (加速+去油)",
+      "properties": {"Node name for S&R": "LoraLoader"},
+      "widgets_values": ["minimax_h3_turbo_v4_step600_ema_DasiwaREF2VAHybridV1_0_curveproj1025_compat_v001.safetensors", 1.0, 1.0]
+    },
+    {
+      "id": 3,
+      "type": "CLIPLoader",
+      "pos": [50, 200],
+      "size": [320, 82],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "outputs": [{"name": "CLIP", "type": "CLIP", "links": [2], "slot_index": 0}],
+      "properties": {"Node name for S&R": "CLIPLoader"},
+      "widgets_values": ["qwen3vl_32b_minimax_h3_int8_convrot.safetensors", "minimax_h3", "default"]
+    },
+    {
+      "id": 4,
+      "type": "VAELoader",
+      "pos": [50, 320],
+      "size": [320, 58],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "outputs": [{"name": "VAE", "type": "VAE", "links": [5, 6, 14], "slot_index": 0}],
+      "properties": {"Node name for S&R": "VAELoader"},
+      "widgets_values": ["minimax_h3_video_vae_fp16.safetensors"]
+    },
+    {
+      "id": 5,
+      "type": "MiniMaxH3ImageToVideo",
+      "pos": [760, 50],
+      "size": [400, 200],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {"name": "clip", "type": "CLIP", "link": 4},
+        {"name": "vae", "type": "VAE", "link": 5}
+      ],
+      "outputs": [
+        {"name": "positive", "type": "CONDITIONING", "links": [7, 16], "slot_index": 0},
+        {"name": "LATENT", "type": "LATENT", "links": [9], "slot_index": 1}
+      ],
+      "properties": {"Node name for S&R": "MiniMaxH3ImageToVideo"},
+      "widgets_values": ["A golden retriever wearing sunglasses lounging on a beach chair, tropical paradise, cinematic lighting, 4K quality", 1344, 768, 124, "image"]
+    },
+    {
+      "id": 6,
+      "type": "ConditioningZeroOut",
+      "pos": [760, 280],
+      "size": [220, 46],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [{"name": "conditioning", "type": "CONDITIONING", "link": 16}],
+      "outputs": [{"name": "CONDITIONING", "type": "CONDITIONING", "links": [8], "slot_index": 0}],
+      "properties": {"Node name for S&R": "ConditioningZeroOut"}
+    },
+    {
+      "id": 7,
+      "type": "KSamplerSelect",
+      "pos": [760, 360],
+      "size": [250, 58],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "outputs": [{"name": "SAMPLER", "type": "SAMPLER", "links": [10], "slot_index": 0}],
+      "properties": {"Node name for S&R": "KSamplerSelect"},
+      "widgets_values": ["euler"]
+    },
+    {
+      "id": 8,
+      "type": "BasicScheduler",
+      "pos": [760, 450],
+      "size": [250, 106],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [{"name": "model", "type": "MODEL", "link": 15}],
+      "outputs": [{"name": "SIGMAS", "type": "SIGMAS", "links": [11], "slot_index": 0}],
+      "properties": {"Node name for S&R": "BasicScheduler"},
+      "widgets_values": ["simple", 30, 1.0]
+    },
+    {
+      "id": 10,
+      "type": "SelfLiftH3Sampler",
+      "pos": [1050, 50],
+      "size": [420, 380],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "title": "SelfLift 渐进式采样",
+      "inputs": [
+        {"name": "model", "type": "MODEL", "link": 3},
+        {"name": "positive", "type": "CONDITIONING", "link": 7},
+        {"name": "negative", "type": "CONDITIONING", "link": 8},
+        {"name": "vae", "type": "VAE", "link": 6},
+        {"name": "latent_image", "type": "LATENT", "link": 9},
+        {"name": "sampler", "type": "SAMPLER", "link": 10},
+        {"name": "sigmas", "type": "SIGMAS", "link": 11}
+      ],
+      "outputs": [{"name": "LATENT", "type": "LATENT", "links": [12], "slot_index": 0}],
+      "properties": {"Node name for S&R": "SelfLiftH3Sampler"},
+      "widgets_values": [
+        42,
+        5.0,
+        6,
+        0.5,
+        0.0,
+        0.5,
+        1.0,
+        "h3_upscaler_lms_v0.1_fp32.safetensors",
+        false,
+        true
+      ]
+    },
+    {
+      "id": 11,
+      "type": "VAEDecode",
+      "pos": [1520, 50],
+      "size": [220, 46],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        {"name": "samples", "type": "LATENT", "link": 12},
+        {"name": "vae", "type": "VAE", "link": 14}
+      ],
+      "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [13], "slot_index": 0}],
+      "properties": {"Node name for S&R": "VAEDecode"}
+    },
+    {
+      "id": 13,
+      "type": "SaveAnimatedWEBP",
+      "pos": [1780, 50],
+      "size": [320, 270],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [{"name": "images", "type": "IMAGE", "link": 13}],
+      "properties": {"Node name for S&R": "SaveAnimatedWEBP"},
+      "widgets_values": ["BSAI_H3_4K_SelfLift", 24.0, false, "default"]
+    },
+    {
+      "id": 14,
+      "type": "Note",
+      "pos": [50, 420],
+      "size": [650, 280],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "properties": {"Node name for S&R": "Note"},
+      "widgets_values": ["BSAI H3 4K SelfLift + Turbo v4 工作流\n\n核心技术（来自B站教程 BV16SJ96TEXF）：\n1. SelfLift Progressive Sampler：前6步低分辨率(0.5x)快速构图，后24步全分辨率细化纹理\n2. Turbo v4 LoRA：加速+去油化\n3. DLSS5：可选后处理超采样到4K（接在VAEDecode后）\n\n关键参数：\n- transition_step=6: 低分辨率步数（总30步中前6步）\n- lowres_scale=0.5: 低分辨率比例\n- rho=0.0: 使用外部H3 latent upscaler (learned lift)\n- upscaler_model=h3_upscaler_lms_v0.1_fp32.safetensors\n- cfg=5.0, 30步, euler\n- 分辨率1344x768, 124帧(~5s@24fps)\n\n可选：SelfLiftH3TST节点patch model提升时序稳定\n可选：DLSS5EnhanceImages接IMAGE输出做4K超采样"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "MODEL"],
+    [2, 3, 0, 2, 1, "CLIP"],
+    [3, 2, 0, 10, 0, "MODEL"],
+    [4, 2, 1, 5, 0, "CLIP"],
+    [5, 4, 0, 5, 1, "VAE"],
+    [6, 4, 0, 10, 3, "VAE"],
+    [7, 5, 0, 10, 1, "CONDITIONING"],
+    [8, 6, 0, 10, 2, "CONDITIONING"],
+    [9, 5, 1, 10, 4, "LATENT"],
+    [10, 7, 0, 10, 5, "SAMPLER"],
+    [11, 8, 0, 10, 6, "SIGMAS"],
+    [12, 10, 0, 11, 0, "LATENT"],
+    [13, 11, 0, 13, 0, "IMAGE"],
+    [14, 4, 0, 11, 1, "VAE"],
+    [15, 2, 0, 8, 0, "MODEL"],
+    [16, 5, 0, 6, 0, "CONDITIONING"]
+  ],
+  "groups": [
+    {
+      "title": "模型加载",
+      "bounding": [30, 10, 350, 390],
+      "color": "#3f789e",
+      "font_size": 12
+    },
+    {
+      "title": "条件与采样",
+      "bounding": [740, 20, 750, 560],
+      "color": "#8e653f",
+      "font_size": 12
+    }
+  ],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

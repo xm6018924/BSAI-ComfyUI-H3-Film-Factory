@@ -376,45 +376,33 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
         return None, None
     curr = segments[i]
 
-    # v1.25: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
-    # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
+    # v1.25 + v14.153: free VRAM before decode - 终极清理:
+    # 二采(时间分块/delegate驻留)后模型注册残留会导致加载 VideoVAE 时竞态闪退,
+    # 这里摘除全部注册模型 + 标准卸载 + 双重清缓存, 给 VAE decode 干净显存。
     try:
         import comfy.model_management as _mm
         import torch as _torch
+        # 1) 摘除全部注册模型(含二采 delegate 驻留的量化 DiT)
+        _popped = 0
         for _lm in list(_mm.current_loaded_models):
             try:
-                if _mp_has_ck_quant_weights(_lm.model):
-                    _mp_ck_offload_or_pop(_lm, _mm)
-                    continue
-                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
+                _mm.current_loaded_models.remove(_lm)
+                _popped += 1
             except Exception:
                 pass
+        # 2) 标准卸载(对已摘除的为 no-op, 兜底仍有注册的)
+        try:
+            _mm.unload_all_models()
+        except Exception:
+            pass
+        # 3) 双重清缓存 + 同步
         _mm.soft_empty_cache(force=True)
         _torch.cuda.synchronize()
         _torch.cuda.empty_cache()
-        _a = _torch.cuda.memory_allocated() / 1024 ** 3
-        print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
-    except Exception as _e:
-        print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
-
-    # v1.25: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
-    # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
-    try:
-        import comfy.model_management as _mm
-        import torch as _torch
-        for _lm in list(_mm.current_loaded_models):
-            try:
-                if _mp_has_ck_quant_weights(_lm.model):
-                    _mp_ck_offload_or_pop(_lm, _mm)
-                    continue
-                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
-            except Exception:
-                pass
-        _mm.soft_empty_cache(force=True)
         _torch.cuda.synchronize()
         _torch.cuda.empty_cache()
         _a = _torch.cuda.memory_allocated() / 1024 ** 3
-        print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
+        print(f"[H3 Extender]   decode VRAM prepared (popped={_popped}): allocated={_a:.2f}GB")
     except Exception as _e:
         print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
 
@@ -623,7 +611,7 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
     #   - context_enabled=True  → 段头部含 overlap_samples 重叠(模型 latent 行需要)，
     #     同时把 overlap_samples 记进段 dict，解码混音时精确跳过 → 输出仍与原始对齐。
     #   - context_enabled=False → 纯净切分(零重叠)，输入/输出双侧都与原始音频对齐。
-    MOTION_CONTEXT_OVERLAP_SEC = 1.2  # a bit extra for safety
+    MOTION_CONTEXT_OVERLAP_SEC = 2.0  # v2.0: 1.2->2.0 更长上下文保持光照/色彩一致, 一镜到底无缝衔接
     overlap_samples = int(MOTION_CONTEXT_OVERLAP_SEC * sr)
 
     segments = []
@@ -2085,9 +2073,11 @@ def _apply_h3_dual_track_shift(model, shift_video, shift_audio):
     if model is None:
         return model
     try:
+        # v14.152: shift_audio 可为 None（老工作流 0.0 的映射）→ 关闭音频 shift
+        _sa = None if shift_audio is None else float(shift_audio)
         to = model.model_options.get("transformer_options", {}) or {}
         if (to.get("minimax_h3_sigma_shift_video") == float(shift_video)
-                and to.get("minimax_h3_sigma_shift_audio") == float(shift_audio)
+                and to.get("minimax_h3_sigma_shift_audio") == _sa
                 and model.model_options.get("_bsai_dual_track_applied")):
             return model  # 幂等: 已注入同值 shift
         import comfy.model_sampling as _cms
@@ -2096,7 +2086,7 @@ def _apply_h3_dual_track_shift(model, shift_video, shift_audio):
             pass
         original = m.get_model_object("model_sampling")
         ms = _MSAV(m.model.model_config)
-        ms.set_parameters(shift=float(shift_video), audio_shift=float(shift_audio))
+        ms.set_parameters(shift=float(shift_video), audio_shift=_sa)
         if hasattr(original, "noise_scale"):
             try:
                 ms.set_noise_scale(original.noise_scale)
@@ -2105,10 +2095,10 @@ def _apply_h3_dual_track_shift(model, shift_video, shift_audio):
         m.add_object_patch("model_sampling", ms)
         to2 = m.model_options.get("transformer_options", {}).copy()
         to2["minimax_h3_sigma_shift_video"] = float(shift_video)
-        to2["minimax_h3_sigma_shift_audio"] = float(shift_audio)
+        to2["minimax_h3_sigma_shift_audio"] = _sa
         m.model_options["transformer_options"] = to2
         m.model_options["_bsai_dual_track_applied"] = True
-        print(f"[H3 Extender] P0 双轨迹采样注入: shift_video={shift_video} shift_audio={shift_audio}", flush=True)
+        print(f"[H3 Extender] P0 双轨迹采样注入: shift_video={shift_video} shift_audio={_sa}", flush=True)
         return m
     except Exception as _e:
         print(f"[H3 Extender] P0 双轨迹注入失败(回退原模型): {_e}", flush=True)
@@ -2125,7 +2115,7 @@ def _apply_h3_tst(model, enable, tau):
         return model
     try:
         import sys as _sys_tst, os as _os_tst
-        _sl_dir = _os_tst.join(_os_tst.path.dirname(_os_tst.path.dirname(_os_tst.path.abspath(__file__))), "comfyui-SelfLift")
+        _sl_dir = _os_tst.path.join(_os_tst.path.dirname(_os_tst.path.dirname(_os_tst.path.abspath(__file__))), "comfyui-SelfLift")
         if _sl_dir not in _sys_tst.path:
             _sys_tst.path.insert(0, _sl_dir)
         from h3_tst import patch_model as _tst_patch
@@ -2630,7 +2620,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     # 在 guider 创建前对 model clone+patch: ModelSamplingAV 驱动采样器 sigma,
     # transformer_options 双 shift 让模型内部推导 audio schedule.
     if dual_track_shift:
-        model = _apply_h3_dual_track_shift(model, float(shift_video), float(shift_audio))
+        # v14.152: shift_audio 可能已是 None（0.0 的映射），不再 float()
+        model = _apply_h3_dual_track_shift(model, float(shift_video), shift_audio)
     # P2 (2026-10-17): SelfLift H3 TST 少步数画质补偿 (时间状态传输).
     if tst_enable:
         model = _apply_h3_tst(model, True, float(tst_tau))
@@ -3108,6 +3099,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             #   DisableNoise(Noise_EmptyNoise -> prepare_empty_noise 全零噪声) 走同一入口,
             #   此处完全对齐.
             _use_temporal = bool(temporal_chunk_tokens) and int(temporal_chunk_tokens) > 0
+            # v2.02b: chunk 过小(如当开关填 1)会切成大量单 token 段, 每段都要完整跑
+            # 4 步空间分块采样, 总耗时爆炸(T=107 时 107 段≈100 分钟). 低于 16 一律按 16 执行.
+            if _use_temporal and int(temporal_chunk_tokens) < 16:
+                print(f"[H3 Extender] v2.02 temporal_chunk_tokens={int(temporal_chunk_tokens)} 过小, "
+                      f"已按 16 执行 (T~107 建议 40~60, 0=关闭)", flush=True)
+                temporal_chunk_tokens = 16
             if not _use_temporal:
                 _r_noise = comfy.sample.prepare_noise(samples, int(seed) + 1, None)
                 _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
@@ -3513,14 +3510,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         _chunk_noise = comfy.sample.prepare_noise(_chunk_base, int(seed) + 1 + _ki, None)
                         _chunk_latent = _ff_const_add_noise(_refine_model, _chunk_noise, _r_sigmas,
                                                             {"samples": _chunk_base}, _r_audio)
-                        # 加噪后把锁区重填为上一段干净结果(mask=0 时采样器保持该值, 不能保留加噪值)
+                        # 加噪后把整个重叠区重填为上一段干净结果:
+                        # 锁区(mask=0)采样器原样保留; 过渡区(0<mask<1) KSamplerX0Inpaint
+                        # 按 out*m + latent_image*(1-m) 混合, 若保留加噪底则高比例噪声
+                        # 直接混进发布结果(VAE 解码后=马赛克横带), 必须同为干净内容。
                         if _lock_n > 0:
                             _cl_members, _ = _ff_extract_members(_chunk_latent["samples"])
-                            _cl_members[0][:, :, :_lock_n] = _acc_v[:, :, _st:_st + _lock_n]
+                            _cl_members[0][:, :, :_ov_here] = _acc_v[:, :, _st:_st + _ov_here]
                             _chunk_latent["samples"] = _ff_wrap_members(_cl_members, _was_nested_tc)
                             _a_part = _chunk_latent["samples"].tensors[1]
-                            _amask = torch.ones((1, 1, 1, int(_a_part.shape[-1])),
-                                                dtype=_mask_ki.dtype, device=_a_part.device)
+                            # 音频掩码必须为 0(锁定一采音频): _ff_const_add_noise 已按
+                            # refine_audio_denoise=0 置零音频噪声, 此处给 1 会把干净音频
+                            # 当生成行全权重绘, 联合注意力下污染视频上下文, 且与段 1 行为不一致。
+                            _amask = torch.zeros((1, 1, 1, int(_a_part.shape[-1])),
+                                                 dtype=_mask_ki.dtype, device=_a_part.device)
                             _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_ki, _amask))
                         with _aimdo_disabled():
                             _chunk_out = _r_guider.sample(
@@ -3533,8 +3536,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                 disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
                                 seed=int(seed) + 1 + _ki,
                             )
-                        _out_v, _ = _ff_extract_members(_chunk_out)
-                        _acc_v = _tc.merge_guarded(_acc_v, _out_v, _st, _lock_n)
+                        _out_mem, _ = _ff_extract_members(_chunk_out)
+                        _acc_v = _tc.merge_guarded(_acc_v, _out_mem[0], _st, _lock_n)
                         print(f"[H3 Extender] v2.02 时间分块: 段 {_ki+1}/{len(_segs)} "
                               f"[{_st},{_et}) 完成, 累计 T={_acc_v.shape[2]}", flush=True)
                     _r_samples = _ff_wrap_members([_acc_v, _aud_full], _was_nested_tc)
@@ -5261,10 +5264,10 @@ class BSAIH3FilmFactory:
             # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
             # 24G 跑 15s 208wpx(1920x1088) 极速模式预计 ~10-12 分钟/clip.
             "speed_preset": (
-                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步"],
+                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳"],
                 {
                     "default": "custom",
-                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. FastH3-Trim = nvfp4 pruned model, 8 + 4 refine. FastH3-4step VSA = 4-step VSA distilled LoRA + 2 refine steps, fastest. Turbo-v4 = Turbo LoRA v4 step600 EMA (6 + 4 refine, shift 12/3, res_multistep 建议). DMAD-4步 = DMAD 4-step distilled LoRA (4 + 2 refine, shift 12/2, lcm sampler, CFG~1, 无需 CFG). custom = explicit widget values below.",
+                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. FastH3-Trim = nvfp4 pruned model, 8 + 4 refine. FastH3-4step VSA = 4-step VSA distilled LoRA + 2 refine steps, fastest. Turbo-v4 = Turbo LoRA v4 step600 EMA (6 + 4 refine, shift 12/3, res_multistep 建议). DMAD-4步 = DMAD 4-step distilled LoRA (4 + 2 refine, shift 12/2, lcm sampler, CFG~1, 无需 CFG). 武戏组合拳 = 参考B站 Liao_2049 配方: 8步一采(均衡) + 4步二采(SelfLift), euler, 一采无LoRA, 武戏/DMAD LoRA 由 H3LoraStack 注入. custom = explicit widget values below.",
                 },
             ),
             # P0 (2026-10-17): 官方双轨迹采样 —— MiniMaxH3SigmaShift 等效注入.
@@ -5280,7 +5283,7 @@ class BSAIH3FilmFactory:
             ),
             "shift_audio": (
                 "FLOAT",
-                {"default": 3.0, "min": 0.01, "max": 100.0, "step": 0.1, "tooltip": "Audio flow shift。官方默认 3；DMAD 配方 2。"},
+                {"default": 3.0, "min": 0.0, "max": 100.0, "step": 0.1, "tooltip": "Audio flow shift。官方默认 3；DMAD 配方 2。0.0=关闭音频 shift（兼容旧工作流）。"},
             ),
             # P2 (2026-10-17): SelfLift H3 TST 时间状态传输 —— 少步数画质补偿.
             # 校正 H3 视频时间不平衡(闪烁/身份漂移/不合理运动), 运行时开销 1-2%.
@@ -5298,8 +5301,8 @@ class BSAIH3FilmFactory:
                 {"default": 0, "min": 0, "max": 200, "step": 1, "tooltip": "v2.02 temporal chunking (along the T axis, unlike tile_count which is along H/W). 0 = off (default full-segment refine); >0 splits the refine latent along T into token segments of that length with overlap, each run through the existing (spatial-tiled) sampler, with the overlap zones frozen and taken over by smoothstep. Lowers attention/activation peaks to prevent OOM. For T~107, 40~60 is recommended."},
             ),
             "temporal_overlap_tokens": (
-                "INT",
-                {"default": 8, "min": 0, "max": 40, "step": 1, "tooltip": "Overlap tokens between adjacent temporal chunks. Larger = more stable but slower; typically 8~12. Only effective when temporal_chunk_tokens>0."},
+                "STRING",
+                {"default": "8", "tooltip": "Overlap tokens between adjacent temporal chunks. Larger = more stable but slower; typically 8~12. Only effective when temporal_chunk_tokens>0. 兼容旧工作流：'global_inherit'/空值/非数字自动取默认 8。"},
             ),
             # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 权重放 models/semantic_bridge/.
             "semantic_bridge_enable": (
@@ -5311,8 +5314,8 @@ class BSAIH3FilmFactory:
                 {"tooltip": "Semantic Bridge weight file (~11MB), place in ComfyUI/models/semantic_bridge/. Downloads: speach1sdef178/MiniMax-H3-Semantic-Bridge or JOKER141/BUNNY_H3_Conditioning_Bridge (action/multi-person oriented). Choose (Off) to disable."},
             ),
             "semantic_bridge_alpha": (
-                "FLOAT",
-                {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Residual mix strength C=H+alpha*(S'-H). Original default 0.15; larger = tighter to the bridge, too large drifts."},
+                "STRING",
+                {"default": "0.15", "tooltip": "Residual mix strength C=H+alpha*(S'-H). Original default 0.15; larger = tighter to the bridge, too large drifts. 兼容旧工作流：空值/非数字自动取默认 0.15。"},
             ),
             "semantic_bridge_magnitude_match": (
                 "BOOLEAN",
@@ -5395,6 +5398,16 @@ class BSAIH3FilmFactory:
     FUNCTION = "extend"
     CATEGORY = "BSAI/H3 Film Factory"
     OUTPUT_NODE = True
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        # v14.152: 带 **kwargs 的 VALIDATE_INPUTS 让 ComfyUI 跳过所有参数的
+        # min/max 校验与 combo 选项校验（execution.py 1032/1060 行分支），
+        # 使老版本导出的工作流（temporal_overlap_tokens='global_inherit'、
+        # semantic_bridge_alpha=''、semantic_bridge_adapter=False、shift_audio=0.0
+        # 等历史遗留值）能进入 extend()，由函数内容错逻辑统一归一到默认最低档。
+        # 真正的类型/语义校验在 extend() 入口处完成。
+        return True
 
     @staticmethod
     def _resolve_asset_library_refs(clips, asset_library):
@@ -5514,6 +5527,12 @@ class BSAIH3FilmFactory:
         dual_track_shift = bool(kwargs.get("dual_track_shift", True))
         shift_video = float(kwargs.get("shift_video", 12.0))
         shift_audio = float(kwargs.get("shift_audio", 3.0))
+        # v14.152: 老工作流可能存 0.0（旧版 min 允许 0），ModelSamplingAV.audio_scale
+        # = shift/audio_shift 会除零。<=0 一律映射为 None（audio_scale=1.0，关闭音频
+        # shift，即最低档），保证兼容且不崩。
+        if shift_audio <= 0.0:
+            shift_audio = None
+            print(f"[H3 Extender] shift_audio<=0 已映射为 None（关闭音频 shift，最低档）", flush=True)
         selflift_tst_enable = bool(kwargs.get("selflift_tst_enable", True))
         selflift_tst_tau = float(kwargs.get("selflift_tst_tau", 0.2))
         denoise = kwargs.get("denoise")
@@ -5585,12 +5604,29 @@ class BSAIH3FilmFactory:
                 return int(val)
             except (ValueError, TypeError):
                 return default
-        temporal_chunk_tokens = _safe_int(kwargs.get("temporal_chunk_tokens"), 0)
+        def _safe_float(val, default=0.0):
+            if val is None or val == "":
+                return default
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                return default
+        # v14.153: 工作流传布尔 true(开但没给数字) 时自动用建议值 48 (T~107 只切 2~3 段),
+        # 不再被 int(True)=1 -> 强制 16 -> 切成 13 段(每段重跑 4 步, 慢 4 倍)
+        _tc_raw = kwargs.get("temporal_chunk_tokens")
+        if _tc_raw is True or _tc_raw == "true" or _tc_raw == 1:
+            temporal_chunk_tokens = 48
+        else:
+            temporal_chunk_tokens = _safe_int(_tc_raw, 0)
+        # v14.152: 兼容老工作流 'global_inherit' 等历史字符串 — 非数字一律取默认 8
         temporal_overlap_tokens = _safe_int(kwargs.get("temporal_overlap_tokens"), 8)
         # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 小 MLP 残差混合 cond token.
         _sb_enable = bool(kwargs.get("semantic_bridge_enable", False))
-        _sb_adapter = str(kwargs.get("semantic_bridge_adapter", ""))
-        _sb_alpha = float(kwargs.get("semantic_bridge_alpha", 0.15))
+        _sb_adapter_raw = kwargs.get("semantic_bridge_adapter", "")
+        # v14.152: 老工作流可能存 False/None/空串 → 一律视为关闭（最低档）
+        _sb_adapter = "" if _sb_adapter_raw in (False, None, "") else str(_sb_adapter_raw)
+        # v14.152: 老工作流可能存空串 → 取默认 0.15（最低档）
+        _sb_alpha = _safe_float(kwargs.get("semantic_bridge_alpha"), 0.15)
         _sb_mag = bool(kwargs.get("semantic_bridge_magnitude_match", True))
         sb_pack = {
             "enabled": _sb_enable and bool(_sb_adapter) and not _sb_adapter.startswith("("),
@@ -5649,6 +5685,15 @@ class BSAIH3FilmFactory:
             if str(sampler_name) != "lcm":
                 sampler_name = "lcm"
                 print(f"[H3 Extender] DMAD-4步: 采样器强制 lcm (DMAD 官方配方)")
+        elif speed_preset == "武戏组合拳":
+            # P3 (2026-10-20): 参考B站 Liao_2049 BV1G6nw6jEQ6 视频配方.
+            # DMAD加速LoRA + SelfLift二采 + 武戏LoRA组合拳: 8步一采(均衡) + 4步二采,
+            # shift 8/3 (FastH3 增强档默认), 一采无LoRA(模型原生8步), 二采 DMAD+武戏 LoRA 由
+            # H3LoraStack 注入. 一键直出档, 文戏武戏通吃.
+            steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+            if str(sampler_name) != "euler":
+                sampler_name = "euler"
+                print(f"[H3 Extender] 武戏组合拳: 采样器强制 euler (FastH3 8步原生配方)")
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
@@ -7280,30 +7325,70 @@ class BSAIH3FilmFactory:
                     if len(clip_paths) == 1:
                         shutil.copy2(clip_paths[0], merged_path)
                     elif ff:
-                        merge_cmd = [
-                            ff, "-y", "-f", "concat", "-safe", "0",
-                            "-i", str(concat_list),
-                            "-c", "copy",
-                            str(merged_path),
-                        ]
-                        merge_log = temp_root / f"_merge_{owner}_{uuid.uuid4().hex[:8]}.log"
-                        try:
-                            with open(merge_log, "wb") as lf:
-                                subprocess.run(merge_cmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
-                            print(f"[H3 Extender] saved merged video: {merged_path}")
-                        except Exception as _e:
-                            print(f"[H3 Extender] ffmpeg concat failed, trying re-encode: {_e}")
+                        # v2.0: 用 xfade crossfade 替代硬切拼接, 消除段间明暗跳变
+                        def _get_duration(path):
+                            try:
+                                r = subprocess.run(
+                                    [ff, "-i", str(path), "-f", "null", "-"],
+                                    capture_output=True, text=True, timeout=30)
+                                import re
+                                m = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", r.stderr)
+                                if m:
+                                    return int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
+                            except Exception:
+                                pass
+                            return 0.0
+
+                        durations = [_get_duration(cp) for cp in clip_paths]
+                        crossfade_dur = 0.5  # 0.5秒渐变过渡
+
+                        if len(clip_paths) == 2 and all(d > crossfade_dur*2 for d in durations):
+                            # 两 clips: xfade 视频渐变 + acrossfade 音频渐变
+                            offset = max(0.1, durations[0] - crossfade_dur)
+                            afade_dur = 0.3  # 音频渐变短一些, 保持音乐连贯
+                            merge_cmd = [
+                                ff, "-y",
+                                "-i", str(clip_paths[0]),
+                                "-i", str(clip_paths[1]),
+                                "-filter_complex",
+                                f"[0:v][1:v]xfade=transition=fade:duration={crossfade_dur}:offset={offset:.2f}[v];"
+                                f"[0:a][1:a]acrossfade=d={afade_dur}:c1=tri:c2=tri[a]",
+                                "-map", "[v]",
+                                "-map", "[a]",
+                                "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                                "-pix_fmt", "yuv420p",
+                                "-c:a", "aac", "-b:a", "192k",
+                                str(merged_path),
+                            ]
+                        else:
+                            # 多 clips: re-encode concat (音频视频都重编码, 时间戳干净无跳变)
                             merge_cmd = [
                                 ff, "-y", "-f", "concat", "-safe", "0",
                                 "-i", str(concat_list),
                                 "-c:v", "libx264", "-preset", "fast", "-crf", "17",
                                 "-pix_fmt", "yuv420p",
+                                "-c:a", "aac", "-b:a", "192k",
+                                str(merged_path),
+                            ]
+                        merge_log = temp_root / f"_merge_{owner}_{uuid.uuid4().hex[:8]}.log"
+                        try:
+                            with open(merge_log, "wb") as lf:
+                                subprocess.run(merge_cmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
+                            print(f"[H3 Extender] saved merged video (crossfade): {merged_path}")
+                        except Exception as _e:
+                            print(f"[H3 Extender] xfade failed, fallback to concat: {_e}")
+                            merge_cmd = [
+                                ff, "-y", "-f", "concat", "-safe", "0",
+                                "-i", str(concat_list),
+                                "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                                "-pix_fmt", "yuv420p",
+                                "-c:a", "aac", "-b:a", "192k",
                                 str(merged_path),
                             ]
                             try:
                                 with open(merge_log, "wb") as lf:
                                     subprocess.run(merge_cmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
-                                print(f"[H3 Extender] saved merged video (re-encoded): {merged_path}")
+                                print(f"[H3 Extender] saved merged video (re-encoded concat): {merged_path}")
                             except Exception as _e2:
                                 print(f"[H3 Extender] merged re-encode also failed: {_e2}")
                     else:
@@ -7578,7 +7663,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.151 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k + 自动分块n4保稳, 对口型×上下文参考手动可控v2.122: 尾对齐注入+overlap跳过保音频同步)")
+print("[BSAI-H3-Film-Factory] v14.152 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k + 自动分块n4保稳, 对口型×上下文参考手动可控v2.122, 旧工作流4参数容错v14.152: VALIDATE_INPUTS+STRING类型+None映射)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
