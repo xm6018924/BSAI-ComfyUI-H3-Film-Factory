@@ -2513,6 +2513,14 @@ def _decode_single_clip_to_blob(
             _model_sr = int(audio["sample_rate"])
             _lip_wave = lip_audio_segment["waveform"].float()
             _lip_sr = int(lip_audio_segment["sample_rate"])
+            # v14.154 (fix): 重叠切割必须在段原始采样率域执行 —— overlap_samples 由
+            # _split_lip_audio_by_clips 按段原始 sr 计算并记入段 dict。旧顺序先重采样
+            # 到 _model_sr 再按原 sr 的 _ov 切割: 44.1kHz 歌曲段在 32kHz 域切 88200
+            # 样本 = 2.756s(应切 2.0s), clip2+ 输出音频整体晚 ~0.75s → 衔接处音频
+            # 跳针 + 整段口型与音频错位。现在先在原 sr 域切重叠, 再重采样。
+            _ov = int(lip_audio_segment.get("overlap_samples", 0))
+            if _ov > 0 and int(_lip_wave.shape[-1]) > _ov:
+                _lip_wave = _lip_wave[..., _ov:]
             # 统一到模型音频的采样率
             if _lip_sr != _model_sr:
                 _lip_wave = _ta_mix.functional.resample(_lip_wave, _lip_sr, _model_sr)
@@ -2527,10 +2535,6 @@ def _decode_single_clip_to_blob(
                     _lip_wave = _lip_wave.repeat(1, 2, 1)
                 elif _model_wave.shape[1] == 1 and _lip_wave.shape[1] == 2:
                     _model_wave = _model_wave.repeat(1, 2, 1)
-            # v2.111 (fix): 跳过该段头部的 motion-context 重叠
-            _ov = int(lip_audio_segment.get("overlap_samples", 0))
-            if _ov > 0 and int(_lip_wave.shape[-1]) > _ov:
-                _lip_wave = _lip_wave[..., _ov:]
             # 长度对齐到模型音频长度(歌曲段可能略长/略短)
             _target = int(_model_wave.shape[-1])
             if int(_lip_wave.shape[-1]) >= _target:

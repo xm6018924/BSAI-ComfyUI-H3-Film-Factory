@@ -7489,8 +7489,13 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     // 设计依据: 对全部 115 个真实历史工作流(118 个 H3 节点, 14 种布局)全量模拟
     // 映射+校验 0 失败(Python 原型 h3_legacy_mapper.py)。
     const H3LegacyCompat = (() => {
-        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","prompt_pack"];
-        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.45,2,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"","0.15",true,"global_inherit",0.15,false,""];
+        // v14.153 修正(实测全部真实历史工作流布局): prompt_pack 是 H3_PROMPT_PACK
+        // 自定义类型 → 前端输入端口, 从不占 widgets_values; h3_extender_timeline
+        // 是 dom widget(serialize:false, 但现役前端仍把它序列化为尾部空串)。
+        // 现役 64 位: 0..61 = run_mode..face_lock_mode(62 个后端 widget),
+        // 62 = refine_mem_mode, 63 = h3_extender_timeline(dom, applyToNode 跳过)。
+        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","h3_extender_timeline"];
+        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.45,2,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"","0.15",true,"global_inherit",0.15,false,"spatial (分块,兼容)",""];
         const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain"]);
         const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match","face_lock_mode"]);
         const OPTIONS = {
@@ -7505,31 +7510,29 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             upscale_engine: ["auto","dlss5","realesr","bicubic"],
             speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳"],
             env_audio_enable: ["global_inherit","on","off"],
+            refine_mem_mode: ["spatial (分块,兼容)","global (全上下文省显存)"],
         };
         function detect(w) {
             const n = w.length;
-            // v14.153: 老 58 键布局（v14.141~v14.149 时期保存, 缺 P0/P2 五参数
-            // dual_track_shift/shift_video/shift_audio/selflift_tst_enable/tst_tau,
-            // w[48]=temporal_chunk_tokens(number)。现役 58 键位 w[48] 应为 boolean）。
-            // 判据: w[48] 为 number → 老 58 键；boolean → 现役 CURRENT。
-            if (n === 58 && typeof w[48] === "number") return "L58O";
-            if (n === 58) return "CURRENT";
-            // v14.153: 59 键新布局（refine_mem_mode 追加在 required 末尾 = 第 59 位）。
-            // 判据用 w[58] 是 combo 字符串且以 spatial/global 开头，避免与历史
-            // L59（59 键, w[33] string, w[58]=timeline/restore 类）撞车。
+            // v14.153 修正(实测工作流目录全部 H3 节点布局):
+            //  - 64 键 = 现役: 0..61 后端 widget + refine_mem_mode(62) + timeline(63)。
+            //  - 63 键分两代: w[48] boolean → v14.150~152(0..61 + timeline 62);
+            //    w[48] number → 老键序被旧兼容层错位污染后再保存的混合版
+            //    (六联包 temporal/sb 在 48..53, env/gain/face 在 54..56, 尾部为垃圾值)。
+            //  - 62 键 = v14.150~152 无 timeline: 0..61。
+            //  - 59/58 键 = v14.149 及更早(无 P0/P2 五参数): 六联包 48..53,
+            //    env/gain/face 54..56; 59 键多 restore_cache(57)+timeline(58),
+            //    58 键仅 timeline(57)。
+            if (n === 64) return "CUR64";
+            if (n === 63) return (typeof w[48] === "number") ? "O63" : "N63";
+            if (n === 62) return "N62";
+            // L59G 防御分支(未见真实样本): 59 键且 w[58] 是 spatial/global 组合值。
             if (n === 59 && typeof w[58] === "string" &&
                 (w[58].indexOf("spatial") === 0 || w[58].indexOf("global") === 0)) return "L59G";
-            // v14.153: 64 键布局（现役前端序列化 63 键 = 数据 62 + h3_extender_timeline，
-            // refine_mem_mode 插在 face_lock_mode(61) 之后 index 62 → 数据 63 + timeline = 64）。
-            if (n === 64 && typeof w[62] === "string" &&
-                (w[62].indexOf("spatial") === 0 || w[62].indexOf("global") === 0)) return "L64G";
-            // v14.153: 63 键老布局（v14.152 及之前保存的现役工作流，数量最多）。
-            // 判据: w[61]=face_lock_mode(boolean) 且 w[62]=h3_extender_timeline(string)。
-            // 迁移: 前 62 位照抄 + refine_mem_mode 补默认值 + timeline 从 62 搬到 63，
-            // 否则老值 62(空串 timeline)会灌进 refine_mem_mode combo 显示空白。
-            if (n === 63 && typeof w[61] === "boolean" && typeof w[62] === "string") return "L63L";
+            if (n === 59) return "L59";
+            if (n === 58 && typeof w[48] === "number") return "L58O";
+            if (n === 58) return "CURRENT"; // 防御(未见真实样本): 0..57 与现役同键
             const b33 = n > 33 ? w[33] : null;
-            if (n === 59 && typeof b33 === "string") return "L59";
             if (n === 45 && typeof b33 === "string") {
                 const v39 = n > 39 ? w[39] : null;
                 return (typeof v39 === "string" && (/\./.test(v39) || /\\/.test(v39))) ? "L45A" : "L45B";
@@ -7579,61 +7582,57 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         }
         function mapTo(w) {
             const L = detect(w);
-            // v14.153: L59G 新布局 59 位、L64G 现役 64 位（refine_mem_mode 在 index 62）、
-            // L63L 老布局 63 位迁移到 64 位（refine_mem_mode 补默认 + timeline 搬家），
-            // 其余保持 58 位。
-            const outLen = (L === "L64G" || L === "L63L" || L === "L58O") ? 64 : (L === "L59G" ? 59 : 58);
-            const out = new Array(outLen).fill(null);
-            if (L === "CURRENT" || L === "L59G" || L === "L64G") {
-                for (let i = 0; i < out.length; i++) out[i] = i < w.length ? w[i] : null;
-            } else if (L === "L58O") {
-                // v14.153: 老 58 键（缺 P0/P2 五参数）→ 现役 64 键位对齐。
-                // 老 0..47 → 现役 0..47（同键）; 48..52 补 P0/P2 默认;
-                // 老 48..57 → 现役 53..62（temporal/sb/magnitude/env/face_lock 同键后移 5 位）;
-                // refine_mem_mode 补默认; 老 timeline(57) → 现役 63。
-                for (let i = 0; i < 48 && i < w.length; i++) out[i] = w[i];
-                out[48] = true;   // dual_track_shift 默认
-                out[49] = 12.0;   // shift_video 默认
-                out[50] = 3.0;    // shift_audio 默认
-                out[51] = true;   // selflift_tst_enable 默认
-                out[52] = 0.2;    // selflift_tst_tau 默认
-                for (let i = 53; i < 62; i++) out[i] = (i - 5) < w.length ? w[i - 5] : null;
-                out[62] = "spatial (分块,兼容)"; // v14.153 新参数默认值
-                out[63] = w.length > 57 ? w[57] : ""; // h3_extender_timeline
-            } else if (L === "L63L") {
+            // v14.153 修正: 统一输出 64 位(对齐 KEYS): 0..61 后端 widget,
+            // 62 = refine_mem_mode, 63 = h3_extender_timeline(dom, applyToNode 跳过)。
+            const out = new Array(64).fill(null);
+            if (L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
+                // 新纪元(48..52 已有 P0/P2): 0..61 与 KEYS 完全同键, 直接照抄。
                 for (let i = 0; i < 62 && i < w.length; i++) out[i] = w[i];
-                out[62] = "spatial (分块,兼容)"; // v14.153 新参数默认值（老工作流无此值）
-                out[63] = w.length > 62 ? w[62] : ""; // h3_extender_timeline 从 62 搬到 63
+                // CUR64: w[62] = refine_mem_mode 用户值, 保留; w[63]=timeline 丢弃。
+                if (L === "CUR64" && w.length > 62) out[62] = w[62];
+                // L59G 防御: rmm 值在 58。
+                if (L === "L59G" && w.length > 58) out[62] = w[58];
+                // N63/N62/CURRENT: 老文件无 rmm → 留 null → DEFAULTS 补 "spatial (分块,兼容)"。
             } else {
-                for (let i = 0; i < 33 && i < w.length; i++) out[i] = w[i];
-                if (L === "L59") {
-                    for (let i = 33; i < 57; i++) out[i] = w[i];
-                    out[57] = ""; // prompt_pack default; restore_cache/timeline dropped
-                } else if (L === "L45A") {
-                    out[33] = w[33]; out[39] = w[39];
-                    out[45] = w[34]; out[46] = w[35]; out[47] = w[36]; out[48] = w[37]; out[49] = w[38];
-                    out[51] = w[40]; out[52] = w[41]; out[53] = w[42];
-                } else if (L === "L45B") {
-                    out[33] = w[33];
-                    out[45] = w[34]; out[46] = w[35]; out[47] = w[36]; out[48] = w[37]; out[49] = w[38];
-                    out[50] = w[39]; out[51] = w[40]; out[52] = w[41]; out[53] = w[42]; out[54] = w[43];
-                } else if (L === "L43" || L === "L44" || L === "L45E" || L === "L47" || L === "L51" || L === "L52") {
-                    const base = {L43:43, L44:44, L45E:45, L47:47, L51:51, L52:52}[L];
-                    for (let off = 0; off < 10; off++) if (33 + off < w.length) out[44 + off] = w[33 + off];
-                    if (base >= 44 && w.length > 43) out[54] = w[43];
-                    if (base >= 45 && w.length > 44) out[55] = w[44];
-                    if (base >= 47 && w.length > 45) out[56] = w[45];
-                } else if (L === "L38") {
-                    for (let off = 0; off < 4; off++) if (33 + off < w.length) out[44 + off] = w[33 + off];
-                    if (w.length > 37) out[54] = w[37];
-                } else if (L === "L40") {
-                    for (let off = 0; off < 6; off++) if (33 + off < w.length) out[44 + off] = w[33 + off];
-                    if (w.length > 39) out[54] = w[39];
+                // 老纪元(无 P0/P2): 先按老坐标系组装(58 位: 0..47 同键,
+                // 48..53 = temporal/sb 六联包, 54..56 = env/gain/face_lock,
+                // 57 = restore_cache/timeline 丢弃), 再统一变换到新坐标系:
+                // 0..47 照抄, 48..52 留空补 P0/P2 默认, 老 48..56 → 新 53..61,
+                // 62 = refine_mem_mode 默认。
+                const old = new Array(58).fill(null);
+                if (L === "L58O" || L === "L59" || L === "O63") {
+                    // 这三类 0..56 与老坐标系完全同键(真实工作流实测验证);
+                    // 57 及之后(restore_cache/timeline/污染垃圾)一律丢弃。
+                    for (let i = 0; i < 57 && i < w.length; i++) old[i] = w[i];
+                } else {
+                    for (let i = 0; i < 33 && i < w.length; i++) old[i] = w[i];
+                    if (L === "L45A") {
+                        old[33] = w[33]; old[39] = w[39];
+                        old[45] = w[34]; old[46] = w[35]; old[47] = w[36]; old[48] = w[37]; old[49] = w[38];
+                        old[51] = w[40]; old[52] = w[41]; old[53] = w[42];
+                    } else if (L === "L45B") {
+                        old[33] = w[33];
+                        old[45] = w[34]; old[46] = w[35]; old[47] = w[36]; old[48] = w[37]; old[49] = w[38];
+                        old[50] = w[39]; old[51] = w[40]; old[52] = w[41]; old[53] = w[42]; old[54] = w[43];
+                    } else if (L === "L43" || L === "L44" || L === "L45E" || L === "L47" || L === "L51" || L === "L52") {
+                        const base = {L43:43, L44:44, L45E:45, L47:47, L51:51, L52:52}[L];
+                        for (let off = 0; off < 10; off++) if (33 + off < w.length) old[44 + off] = w[33 + off];
+                        if (base >= 44 && w.length > 43) old[54] = w[43];
+                        if (base >= 45 && w.length > 44) old[55] = w[44];
+                        if (base >= 47 && w.length > 45) old[56] = w[45];
+                    } else if (L === "L38") {
+                        for (let off = 0; off < 4; off++) if (33 + off < w.length) old[44 + off] = w[33 + off];
+                        if (w.length > 37) old[54] = w[37];
+                    } else if (L === "L40") {
+                        for (let off = 0; off < 6; off++) if (33 + off < w.length) old[44 + off] = w[33 + off];
+                        if (w.length > 39) old[54] = w[39];
+                    }
+                    // L31/L27/L17/UNKNOWN: 仅前缀, 其余默认。
                 }
-                // L31/L27/L17/UNKNOWN: prefix only, rest defaults
+                for (let i = 0; i < 48; i++) out[i] = old[i];
+                for (let i = 48; i < 57; i++) out[i + 5] = old[i];
             }
-            // v14.153: 循环上限改 out.length（L59G=59 位）。KEYS[58] 超界时 norm
-            // 对未识别 key 原样返回，refine_mem_mode 字符串值不受影响。
+            // 值归一化: 缺位补 DEFAULTS, 选项外回退默认, 数字/布尔类型纠正。
             for (let i = 0; i < out.length; i++) {
                 let v = out[i];
                 if (v === null || v === undefined) v = DEFAULTS[i];
@@ -7714,7 +7713,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
-        try { this.title = "BSAI ComfyUI H3 Film Factory v2.130·v14.153"; } catch (e) {}
+        try { this.title = "BSAI ComfyUI H3 Film Factory v2.131·v14.154"; } catch (e) {}
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -8415,7 +8414,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.130·v14.153";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.131·v14.154";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not

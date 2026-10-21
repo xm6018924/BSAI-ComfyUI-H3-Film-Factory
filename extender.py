@@ -5380,11 +5380,10 @@ class BSAIH3FilmFactory:
                 "BOOLEAN",
                 {"default": False, "tooltip": "Far-shot face preservation mode (automatically locks facial-feature consistency; @图1=full body, @图2.N=each person's face close-up)."},
             ),
-            # v14.153: 二采省显存模式（widget 追加在 required 末尾 = 第 59 位，老工作流零错位）
-            "refine_mem_mode": (
-                ["spatial (分块,兼容)", "global (全上下文省显存)"],
-                {"default": "spatial (分块,兼容)", "tooltip": "Refine memory-saving mode. spatial (default) = current 4-tile spatial tiling (v14.149, may show background swelling/seams on some scenes). global = ported from selflift-Avatar global-context mode: full-sequence attention (no tiles, no seams) + token-chunked norm/MLP to bound VRAM; coexists with KJNodes head-grouping / Sol-Attn override (v14.148 dense gate stays active). Expect per-step time similar or better than 4-tile spatial."},
-            ),
+            # v14.153 修正: refine_mem_mode 移出 required —— 它在 widget 序列中必须
+            # 排在 optional 的 prompt_pack 之后（即所有 widget 的最末尾），否则会让
+            # prompt_pack 从 index 62 挤到 63，与前端 KEYS/历史工作流布局错位，
+            # 导致序列化丢 socket(model/clip/vae)。见下方 optional 末尾的真实定义。
         }
 
         # Standalone audio remains an external socket for now. Image refs are
@@ -5402,6 +5401,13 @@ class BSAIH3FilmFactory:
                 {
                     "tooltip": "Optional external prompt pack. New/changed packs are imported into the normal clip textareas and synchronize the clip count."
                 },
+            ),
+            # v14.153: 二采省显存模式。必须排在 prompt_pack 之后 = 所有 widget 的最末尾
+            # (index 62)，这样 0..61 的 widget 顺序与 v14.152 及更早完全一致，
+            # 老工作流(58/59/63 键)零错位。若放 required 末尾会挤掉 prompt_pack → 丢 socket。
+            "refine_mem_mode": (
+                ["spatial (分块,兼容)", "global (全上下文省显存)"],
+                {"default": "spatial (分块,兼容)", "tooltip": "Refine memory-saving mode. spatial (default) = current 4-tile spatial tiling (v14.149, may show background swelling/seams on some scenes). global = ported from selflift-Avatar global-context mode: full-sequence attention (no tiles, no seams) + token-chunked norm/MLP to bound VRAM; coexists with KJNodes head-grouping / Sol-Attn override (v14.148 dense gate stays active). Expect per-step time similar or better than 4-tile spatial."},
             ),
             "asset_library": ("ASSET_LIBRARY", {"forceInput": True, "tooltip": "Connect BSAI_AssetLibraryInput to resolve @图N/@视频N/@音频N references in clip prompts."}),
         }
@@ -7718,7 +7724,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.152 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k + 自动分块n4保稳, 对口型×上下文参考手动可控v2.122, 旧工作流4参数容错v14.152: VALIDATE_INPUTS+STRING类型+None映射)")
+print("[BSAI-H3-Film-Factory] v14.154 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k + 自动分块n4保稳 + refine_mem_mode空间/全局可切, 对口型×上下文参考手动可控v2.122, 旧工作流4参数容错v14.152, v14.154修复: 纯歌曲输出重叠切割先于重采样(治clip2+音频晚0.75s跳针+口型错位))")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",

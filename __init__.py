@@ -18,6 +18,22 @@ Film Factory nodes (new):
   - BSAI_VideoCombiner/AudioCombiner: Media combining
 """
 
+# === 崩溃栈自动落盘（v14.155 诊断）===
+# torch 2.13.0+cu130 原生层偶发 access violation（torch_cpu.dll read@0x0，
+# WER 记录同族崩溃 50+ 次）。控制台窗口易被误关导致 faulthandler 堆栈丢失，
+# 改为直接写插件目录日志文件：进程崩溃时 Python 栈必落盘，不再依赖控制台。
+try:
+    import faulthandler as _fh, os as _os, datetime as _dt
+    _crash_log = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)),
+                               "_crash_faulthandler.log")
+    _crash_fp = open(_crash_log, "a", buffering=1, encoding="utf-8", errors="replace")
+    _crash_fp.write(f"\n===== faulthandler armed {_dt.datetime.now():%Y-%m-%d %H:%M:%S} =====\n")
+    if _fh.is_enabled():
+        _fh.disable()
+    _fh.enable(file=_crash_fp)
+except Exception:
+    pass
+
 # === BSAI H3 VAE 全量加载统一补丁（宿主 BSAI-ComfyUI-Sol-H3）===
 # 修复 0.39 + --enable-dynamic-vram 下 H3 AudioVAE/VideoVAE 走 DynamicVRAM
 # 权重量流导致的解码极慢（5s 音频 209~324s -> 全量加载约 1.6s）。
