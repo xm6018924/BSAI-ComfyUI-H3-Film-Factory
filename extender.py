@@ -2134,29 +2134,52 @@ def _apply_h3_tst(model, enable, tau):
     if model is None or not enable:
         return model
     try:
-        import sys as _sys_tst, os as _os_tst
-        # 定位 comfyui-SelfLift 目录（双保险：__file__ 推导 + ComfyUI folder_paths 官方路径）
-        # v14.161: 新版 ComfyUI 以 governance.pack_module_spec 隔离加载自定义节点，
-        #   不再把节点目录注入 sys.path，故必须显式把 comfyui-SelfLift 加进 sys.path。
-        _sl_dir = _os_tst.path.join(_os_tst.path.dirname(_os_tst.path.dirname(_os_tst.path.abspath(__file__))), "comfyui-SelfLift")
-        if not _os_tst.path.isfile(_os_tst.path.join(_sl_dir, "h3_tst.py")):
+        import sys as _sys_tst, os as _os_tst, importlib.util as _ilu_tst
+        _tst_patch = None
+        _src_tag = None
+        # v14.163 (2026-10-22): TST 内置化 —— 优先从插件自带 vendor/selflift_tst/h3_tst.py
+        # 加载 (importlib 按文件加载, 不污染 sys.path), 粉丝无需再单独安装 comfyui-SelfLift。
+        _builtin_tst = _os_tst.path.join(
+            _os_tst.path.dirname(_os_tst.path.abspath(__file__)),
+            "vendor", "selflift_tst", "h3_tst.py",
+        )
+        if _os_tst.path.isfile(_builtin_tst):
             try:
-                _cn_roots = folder_paths.get_folder_paths("custom_nodes")
-                _sl_dir = _os_tst.path.join(_cn_roots[0], "comfyui-SelfLift")
-            except Exception:
-                pass
-        if not _os_tst.path.isfile(_os_tst.path.join(_sl_dir, "h3_tst.py")):
-            print(f"[H3 Extender] P2 TST 注入跳过: 未找到 comfyui-SelfLift\\h3_tst.py (期望路径 {_sl_dir})", flush=True)
-            return model
-        if _sl_dir not in _sys_tst.path:
-            _sys_tst.path.insert(0, _sl_dir)
-        from h3_tst import patch_model as _tst_patch
+                _spec_tst = _ilu_tst.spec_from_file_location("bsai_selflift_tst", _builtin_tst)
+                _mod_tst = _ilu_tst.module_from_spec(_spec_tst)
+                _spec_tst.loader.exec_module(_mod_tst)
+                _tst_patch = getattr(_mod_tst, "patch_model", None)
+                _src_tag = "内置 vendor/selflift_tst"
+            except Exception as _be:
+                print(f"[H3 Extender] 内置 TST 加载失败(回退外部): {_be}", flush=True)
+        # 回退: 外部 comfyui-SelfLift（双保险保留，兼容老用户既有安装）
+        if _tst_patch is None:
+            _sl_dir = _os_tst.path.join(
+                _os_tst.path.dirname(_os_tst.path.dirname(_os_tst.path.abspath(__file__))),
+                "comfyui-SelfLift",
+            )
+            if not _os_tst.path.isfile(_os_tst.path.join(_sl_dir, "h3_tst.py")):
+                try:
+                    _cn_roots = folder_paths.get_folder_paths("custom_nodes")
+                    _sl_dir = _os_tst.path.join(_cn_roots[0], "comfyui-SelfLift")
+                except Exception:
+                    pass
+            if _os_tst.path.isfile(_os_tst.path.join(_sl_dir, "h3_tst.py")):
+                if _sl_dir not in _sys_tst.path:
+                    _sys_tst.path.insert(0, _sl_dir)
+                from h3_tst import patch_model as _tst_patch_ext
+                _tst_patch = _tst_patch_ext
+                _src_tag = "外部 comfyui-SelfLift"
+            else:
+                print(f"[H3 Extender] P2 TST 注入跳过: 内置 vendor 与外部 comfyui-SelfLift "
+                      f"均未找到 h3_tst.py (内置 {_builtin_tst} / 外部 {_sl_dir})", flush=True)
+                return model
         m = model.clone()
         patched = _tst_patch(m, float(tau), False)
-        print(f"[H3 Extender] P2 SelfLift H3 TST 注入: tau={tau}", flush=True)
+        print(f"[H3 Extender] P2 SelfLift H3 TST 注入({_src_tag}): tau={tau}", flush=True)
         return patched
     except Exception as _e:
-        print(f"[H3 Extender] P2 TST 注入失败(继续无补偿; 需安装 comfyui-SelfLift): {_e}", flush=True)
+        print(f"[H3 Extender] P2 TST 注入失败(继续无补偿): {_e}", flush=True)
         return model
 
 

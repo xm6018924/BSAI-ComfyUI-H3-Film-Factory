@@ -22,6 +22,15 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.163 (2026-10-22) — TST 内置化：粉丝无需再安装 comfyui-SelfLift / TST vendored: fans no longer need a separate comfyui-SelfLift install
+
+**核心：把 comfyui-SelfLift 的 TST 关键文件 `h3_tst.py` 原样内置进插件 `vendor/selflift_tst/`（含 NOTICE.md / PROVENANCE.json 溯源声明），`_apply_h3_tst` 改为优先用 importlib 按文件加载内置副本（不污染 sys.path），外部 comfyui-SelfLift 仅作回退。P2 少步数画质补偿（selflift_tst_enable / selflift_tst_tau）开箱即用，分发给粉丝时少一个前置安装项。** / Core: the SelfLift TST key file `h3_tst.py` is vendored byte-for-byte into `vendor/selflift_tst/` (with NOTICE.md / PROVENANCE.json provenance), and `_apply_h3_tst` now loads the built-in copy first via importlib by file path (no sys.path pollution), falling back to an external comfyui-SelfLift only if present. The P2 few-step quality compensation (`selflift_tst_enable` / `selflift_tst_tau`) now works out of the box — one less prerequisite for fans.
+- `vendor/selflift_tst/h3_tst.py`：上游原样副本（sha256 `36b9d849...`，与 selflift-Avatar published 版本一致）/ verbatim upstream copy (sha256 `36b9d849...`, matching the selflift-Avatar published build)
+- `extender.py` `_apply_h3_tst`：内置 vendor 优先 → 外部 comfyui-SelfLift 回退，日志标注来源 / built-in vendor first → external fallback, source tagged in the log
+- 验证：py_compile 通过；后端 python 模拟 importlib 加载 + patch_model 调用链（wrapper 挂载 `diffusion_model/selflift_h3_tst` + `optimized_attention_override` 注入）通过 / Verified: py_compile pass; backend-python simulation of importlib load + patch_model call chain (wrapper `diffusion_model/selflift_h3_tst` + `optimized_attention_override` injected) pass
+
+---
+
 ### v14.162 (2026-10-22) — 一镜到底衔接修复（二采保留 motion-context keyframe）+ 4090 clip3 CUDA 崩溃修复（异步编码并发隔离）/ One-shot continuity fix (refine keeps motion-context keyframes) + 4090 clip3 CUDA crash fix (async-encode concurrency isolation)
 
 **核心①：二采不再清空 motion-context keyframe。** 旧 v2.55b 在二采（denoise=0.55 的重新采样，会改变画面）完全清空 keyframe，导致"上一段尾帧"锚定只在一采生效、二采被冲掉 → 段间画面漂移/虚影，一镜到底尾帧引导链断裂（4090 实机 3 clip 视觉实证：clip1/clip2 首帧出现半透明虚影、闭眼/耳机等细节逐段漂移）。修复：把一采 keyframe latent 空间 trilinear resize（D 维不变，按 motion_context_ram v1.25 三元组写法）到二采 latent 分辨率后保留注入，使尾帧引导贯穿一采+二采，接缝无缝。** / Core ①: the refine pass no longer wipes motion-context keyframes. Old v2.55b fully cleared them during refine (a denoise=0.55 re-sampling that changes content), so the previous-clip tail anchor only held in the first pass and was washed out by the second — inter-segment drift/ghosting, the one-shot tail-anchor chain broke (proven on the 4090's 3 clips: ghosting on clip1/clip2 heads, eye-open/headphone details drifting). Fix: trilinear-resize (D kept, same triple-size form as motion_context_ram v1.25) each first-pass keyframe latent to the refine latent resolution and keep injecting, so the tail-frame guide runs through both passes for a seamless seam.

@@ -1,0 +1,11 @@
+{
+  "upstream": "https://github.com/facok/comfyui-SelfLift",
+  "basis": "Local installed snapshot (Byte-for-byte copy; no local modifications).",
+  "vendored_files": {
+    "h3_tst.py": "36b9d8498b0717d32c0aad80c3f99689866882f6b08029040e8f6cf79a00ba26"
+  },
+  "purpose": "P2 few-step quality compensation (Temporal State Transport, arXiv:2609.08505) for BSAI ComfyUI-H3-Film-Factory refine pass; removes the hard dependency on a separately installed comfyui-SelfLift.",
+  "integration": "extender.py::_apply_h3_tst loads this vendored copy first via importlib, falling back to an external comfyui-SelfLift when present.",
+  "author": "facok",
+  "author_url": "https://github.com/facok"
+}
