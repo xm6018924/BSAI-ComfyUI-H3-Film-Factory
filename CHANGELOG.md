@@ -14,6 +14,22 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.158-159 (2026-10-21) — BSAI 一镜到底旁支模式 + 一镜到底×歌曲自动分CLIP（落地 B站 MinimaxH3 长视频一镜到底工作流方法）/ BSAI One-Shot (seamless long-take) side mode + song-driven auto CLIP splitting (ported from the Bilibili MinimaxH3 one-shot workflow)
+
+**核心：新增 `one_shot_mode`（off 分镜剪辑 / on 一镜到底）：①每段提示词自动注入“不切场/不转场/镜头持续跟随主体”（用户已写同义则跳过）；②强制段间 motion context（上一段 latent 尾部作为 Add Guide 等效锚点引导本段）；③合并改无缝 concat 零转场。新增 `one_shot_clip_duration`：连接 lip_audio 歌曲且 one_shot_mode=on 时，自动 CLIP 数 = 歌曲时长 ÷ 本值（向上取整），末段自动取剩余时长并自动补齐/对齐 CLIP 卡片；0 = 关闭自动分。** / Core: new `one_shot_mode` (off=per-clip xfade edit / on=seamless long take): ①auto-injects "no cut / no transition / camera keeps following the subject" per clip (skipped when the user already wrote it); ②forces inter-clip motion context (previous clip's latent tail as an Add-Guide-equivalent anchor); ③merge switches to zero-transition concat. New `one_shot_clip_duration`: with lip_audio connected and one_shot_mode=on, target CLIP count = song length ÷ value (ceil), the tail clip takes the remainder, and CLIP cards are auto-aligned/back-filled; 0 = disabled.
+- `extender.py` / `web/extender.js`：66 键布局（新增 2 个 widget）；对口型音频按每段时长切分逐段驱动口型 / 66-key layout (2 new widgets); lip audio split per-clip drives lips segment by segment
+- 验证：晚风-伍佰 225.3s ÷ 12s = 19 CLIP，与 19 镜一镜到底分镜完全对齐（末镜 9.3s 实际尾长，零缩放）/ Verified: 晚风-伍佰 225.3s ÷ 12s = 19 CLIPs, exactly matching the 19-shot one-shot storyboard (tail clip 9.3s, no rescale)
+
+---
+
+### v14.160 (2026-10-22) — one_shot_clip_duration 默认 12s：与对口型分镜 12s/镜 对齐 / default 12s: aligned with the 12s/CLIP lip-sync storyboard
+
+**核心：默认每段 12s。225.3s 歌曲 ÷ 12 = 19 CLIP，与 19 镜分镜一一对应；旧 10s 默认会把 19 镜分镜自动切成 23 段，多出段复制首个分镜模板、且每段时间轴与分镜文案（0-3/3-6/6-9/9-12 秒拍段）错位。** / Core: 12s default per clip. A 225.3s song ÷ 12 = 19 CLIPs, one-to-one with a 19-shot storyboard; the old 10s default auto-split a 19-shot board into 23 segments whose extras copied the first shot's template and whose timeline no longer matched the board's 0-3/3-6/6-9/9-12s beats.
+- `extender.py`：INPUT_TYPES default 10→12、运行时回退 10→12、tooltip 示例同步（5分钟 ÷ 12s = 25 CLIP）/ INPUT_TYPES default 10→12, runtime fallback 10→12, tooltip example updated (5-min ÷ 12s = 25 CLIPs)
+- `web/extender.js`：前端 DEFAULTS 槽位 64 默认 10→12 / front-end DEFAULTS slot 64 default 10→12
+
+---
+
 ### v14.156 (2026-10-21) — 输出尺寸强制对齐工作流声明：二采倍率被显存预算降级时，成片精确重采样到 1920×1088 / Output size enforced to the declared size: when the VRAM budget silently downgrades the refine factor, decode resamples to 1920×1088
 
 **核心：根因 = 显存预算预检（v1.74，`extender.py` 约 2977 行）在 24GB 卡 + H3 int8（约 21.8GB 模型）上把声明的二采 x2.0 静默降级为 x1.5（`_ws_tbl = {1.0:1.5, 1.5:2.6, 2.0:4.5}`，x2.0 需 resident ≥10GB 不满足、x1.5 满足），且链首段降级后全局锁定。geometry 由 120×68 变成 90×51，经 `_ff_snap_to_multiple(…,40px//16=2)` 向下取整为 90×50 → 解码像素 1440×800，与工作流的 1920×1088 不符。工作流节点 250 的 width/height 被 link 覆盖，真实分辨率来自 ResolutionSelector（16:9 / 0.5MP / 32 → 960×544），二采 x2.0 才是 1920×1088。修复策略（保留 1.5x 二采的稳定与速度）：不解链、不重采样 latent，只在解码/导出时把成片精确重采样到声明尺寸。** / Core: root cause is the v1.74 VRAM-budget precheck (~line 2977) silently downgrading the declared refine x2.0 to x1.5 on a 24GB laptop GPU with the ~21.8GB H3 int8 model (x2.0 needs resident ≥10GB, x1.5 passes), and the downgrade is then locked for the whole chain. Geometry 120×68 becomes 90×51, snapped down to 90×50 by `_ff_snap_to_multiple(…, 40px//16=2)` → 1440×800 instead of the declared 1920×1088. Fix keeps the stable/fast 1.5x latent refine and only resamples the decoded/output pixels to the declared size.
