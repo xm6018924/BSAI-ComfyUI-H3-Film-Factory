@@ -2257,6 +2257,52 @@ def _ff_wrap_members(members, was_nested):
     return members[0]
 
 
+def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
+    """v14.164 (2026-10-22): 二采分块粒度自适应到 Sol-Attn 稀疏健康区。
+
+    Sol-Attn kernel 病态基准(comfy_kitchen ck.sol_attn, RTX 5090 24GB 实机同参):
+      n=218,280 -> 0.97s / n=293,760 -> 0.70s (健康)
+      n=440,640 -> >45s / n=873,120 topk -> >600s (病态)
+    v14.149 固定 n_tiles=4 时每块 latent 46x68x107 = 334,696 tokens, 落在
+    293k(健康) 与 440k(病态) 之间的灰色区 —— 本机实测每块 ~90s+,
+    二采 4 块合计 ~399s/步。本函数把每块 token 压到 <=270k(健康区),
+    二采切回 Sol-Attn 稀疏(0.7s/块级), 配合 KJNodes head 分组叠加。
+    """
+    try:
+        _mm164, _ = _ff_extract_members(samples)
+        if _mm164 is None or getattr(_mm164[0], "ndim", 0) < 5:
+            return int(requested)
+        _b164, _c164, _t164, _h164, _w164 = (int(x) for x in _mm164[0].shape)
+        _axis = max(_h164, _w164)
+        _minhw = min(_h164, _w164)
+        if _axis <= 1 or _minhw <= 1 or _t164 <= 1:
+            return int(requested)
+        # VAE_SPATIAL=16: overlap_px 转 latent 格(日志 128px -> 8 latent)
+        _ov = max(1, int(overlap_px) // 16)
+        # 每块 token ≈ T * minHW * (axis/n + 2*ov)
+        _target = 270000
+        _req = max(1, int(requested))
+        if _req > 1:
+            _per_req = _t164 * _minhw * (_axis // _req + 2 * _ov)
+        else:
+            _per_req = _t164 * _minhw * _axis
+        # 请求值每块已在健康区 -> 尊重请求(分块越少 forward/搬运越少)
+        if _per_req <= _target:
+            return _req
+        # 请求值落在灰色/病态区 -> 提升到每块 <= 270k 的最少块数
+        _den = _target / (_t164 * _minhw) - 2 * _ov
+        if _den <= 0:
+            return max_tiles
+        _n = int(_axis / _den) + 1
+        _n = max(_req + 1, min(max_tiles, _n))
+        _per = _t164 * _minhw * (_axis // _n + 2 * _ov)
+        print(f"[H3 Extender] v14.164 分块粒度自适应: 请求 n_tiles={requested} -> {_n} "
+              f"(每块约 {_per:,} tokens <= 270k Sol-Attn 健康区, 稀疏非 dense)")
+        return _n
+    except Exception:
+        return int(requested)
+
+
 def _ff_snap_to_multiple(n, m):
     m = max(1, int(m))
     return max(m, (int(n) // m) * m)
@@ -3409,6 +3455,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                             _r_to145["minimax_head_chunks"] = _r_to_orig145["minimax_head_chunks"]
                                         if "sol_take_forward" in _r_to_orig145:
                                             _r_to145["sol_take_forward"] = _r_to_orig145["sol_take_forward"]
+                                        # v14.166 (2026-10-22): 二采 kernel 提速——v14.164 健康区(≤270k)后
+                                        # Sol-Attn workspace 随 token 缩水(873k=6.33GB -> 262k≈0.6GB),
+                                        # 把 head 分组 4->1, 每层注意力从"4 次 262k 串行 kernel"
+                                        # 变"1 次 14-head 并行 kernel", 每块 kernel 时间预期减半.
+                                        # 仅改 delegate(二采), 一采 sampling_model 保持 head_chunks=4
+                                        # 不受影响; 显存: 中间激活 +~1GB, workspace 1.9GB, reserve 6.9GB 内.
+                                        try:
+                                            _r_hc166 = int(_r_to145.get("minimax_head_chunks", 4))
+                                            if _r_hc166 > 1:
+                                                _r_to145["minimax_head_chunks"] = 1
+                                                print(f"[H3 Extender] v14.166 二采 delegate head_chunks "
+                                                      f"{_r_hc166}->1 (健康区单次并行 kernel, 每块注意力预期减半)")
+                                        except Exception as _ehc166:
+                                            print(f"[H3 Extender] v14.166 head_chunks 调整跳过(保持 {_r_hc166}): {_ehc166}")
                                     print(f"[H3 Extender] v14.145 KJNodes 低显存补丁已重建绑定到 delegate({len(_r_deleg_blocks145)} blocks)")
                                 else:
                                     print(f"[H3 Extender] v14.145 KJNodes 补丁重建跳过(模块/blocks 不可用), 走原生 forward")
@@ -3521,9 +3581,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _tiles_spec = _ilu_t.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path)
                     _tiles_mod = _ilu_t.module_from_spec(_tiles_spec)
                     _tiles_spec.loader.exec_module(_tiles_mod)
+                    _r_tiles_n164 = _ff_auto_refine_tile_count(samples, tile_count, tile_overlap)
                     _r_restore_tiles = _tiles_mod.wrap_sampler_spatial_tiles(
-                        _r_sampler, n_tiles=int(tile_count), overlap_pixels=int(tile_overlap))
-                    print(f"[H3 Extender] Refine 分块二采已启用: n_tiles={tile_count} overlap={tile_overlap}px")
+                        _r_sampler, n_tiles=_r_tiles_n164, overlap_pixels=int(tile_overlap))
+                    print(f"[H3 Extender] Refine 分块二采已启用: n_tiles={_r_tiles_n164} overlap={tile_overlap}px (v14.164 按 Sol-Attn 健康区自适应)")
                 except Exception as _te_t:
                     print(f"[H3 Extender] Refine 分块包装失败(回退全帧): {_te_t}")
                     _r_restore_tiles = None
@@ -3592,10 +3653,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _tiles_mod3 = _ilu_t3.module_from_spec(_tiles_spec3)
                     _tiles_spec3.loader.exec_module(_tiles_mod3)
                     _r_restore_tiles = _tiles_mod3.wrap_sampler_spatial_tiles(
-                        _r_sampler, n_tiles=4, overlap_pixels=128)
-                    print(f"[H3 Extender] v14.149 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
-                          f"自动启用分块二采 n_tiles=4 overlap=128px "
-                          f"(参考插件实测 240s/步 无雪花路径, 每块 ~334k token 健康区)")
+                        _r_sampler, n_tiles=_ff_auto_refine_tile_count(samples, 4, 128), overlap_pixels=128)
+                    print(f"[H3 Extender] v14.164 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
+                          f"自动启用分块二采 overlap=128px, n_tiles 按 Sol-Attn 健康区自适应 "
+                          f"(v14.149 固定 4 块 ~334k/块灰色区 399s/步 -> v14.164 每块 <=270k 健康区)")
                 except Exception as _te_t3:
                     print(f"[H3 Extender] v14.149 自动分块失败(维持 v14.148 dense 回退门): {_te_t3}")
             # v14.153 (2026-10-20): 二采省显存模式 global —— 移植 selflift-Avatar
@@ -3905,10 +3966,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _tiles_spec2 = _ilu_t2.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path2)
                     _tiles_mod2 = _ilu_t2.module_from_spec(_tiles_spec2)
                     _tiles_spec2.loader.exec_module(_tiles_mod2)
+                    _r_tiles_n164b = _ff_auto_refine_tile_count(samples, tile_count if tile_count else 4, tile_overlap)
                     _r_restore_tiles = _tiles_mod2.wrap_sampler_spatial_tiles(
-                        _r_sampler, n_tiles=int(tile_count) if tile_count else 4, overlap_pixels=int(tile_overlap))
+                        _r_sampler, n_tiles=_r_tiles_n164b, overlap_pixels=int(tile_overlap))
                     _fb_use_tiles = True
-                    print(f"[H3 Extender] v1.92 fallback: 降级分块重跑放大版 n_tiles={tile_count if tile_count else 4}")
+                    print(f"[H3 Extender] v1.92 fallback: 降级分块重跑放大版 n_tiles={_r_tiles_n164b} (v14.164 健康区自适应)")
             except Exception as _te2:
                 _fb_use_tiles = False
                 print(f"[H3 Extender] v1.92 fallback 分块包装失败, 用原始尺寸兜底: {_te2}")
@@ -5657,6 +5719,22 @@ class BSAIH3FilmFactory:
             "INDEX_TTS_MODEL",
             {"forceInput": True, "tooltip": "IndexTTS-2.5 model (connect to the tts_model output of BSAI_IndexTTS2_5Loader). Required in speech mode."},
         )
+        # v14.168 (2026-10-22): FastH3 Omni 8步蒸馏旁支模式 —— 独立单采管道。
+        # 官方 FastVideo FastH3 Omni (2026-10-20 发布, ref2va 8步蒸馏 + VSA 80% 稀疏
+        # + guidance 1.0, shift 12/3): 选择本模式后插件自动跳过二采(Self-Lift),
+        # 一采直接以 8 步蒸馏直出画质即 final; 需配合工作流 Loader 加载
+        # fasth3_omniref_8step_pruned_int8_convrot.safetensors (或 NVFP4 版),
+        # 并在模型分支挂 BlockSparseAttention 节点 (VSA keep_percent=10, 官方模板
+        # video_fasth3_ominiref_r2v 默认)。off 时行为与历史版本完全一致。
+        # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
+        # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
+        optional["render_pipeline"] = (
+            ["Sol-H3 Self-Lift 双采 (默认)", "FastH3 Omni 8步单采"],
+            {
+                "default": "Sol-H3 Self-Lift 双采 (默认)",
+                "tooltip": "v14.168 FastH3 Omni 8步蒸馏旁支模式：选择 'FastH3 Omni 8步单采' 后，插件自动跳过二采(Self-Lift)，一采以 8 步蒸馏直出（guidance 1.0 + shift 12/3），画质即 final，单 CLIP 预期 5-10x 提速。前置：工作流 Loader 换 fasth3_omniref_8step_pruned_int8_convrot.safetensors + 模型分支挂 BlockSparseAttention(VSA keep_percent=10)。默认(双采)行为完全不变。",
+            },
+        )
 
 
         # v1.21: INPUT_TYPES keys kept as pure English for workflow compatibility.
@@ -5888,6 +5966,34 @@ class BSAIH3FilmFactory:
             one_shot_clip_duration = 12
         if one_shot_enabled:
             print("[H3 Extender] 🎬 一镜到底旁支模式已启用：无缝 concat 零转场 + 镜头跟随指令注入 + 强制 motion context")
+        # v14.168 (2026-10-22): FastH3 Omni 8步蒸馏旁支模式。
+        # 选择后 = 单采管道: 跳过二采(Self-Lift refine), 一采强制 8 步 + denoise 1.0
+        # (官方 FastVideo FastH3 Omni 契约: 8步蒸馏 guidance 1.0 shift 12/3, 改步数掉画质)。
+        # 模型/文本编码器/VAE 由工作流 Loader 提供(需换 fasth3_omniref_8step_pruned_int8_convrot),
+        # VSA 稀疏由工作流 BlockSparseAttention 节点挂载 —— 本模式只改采样管道, 不碰模型图。
+        _render_pipeline = str(kwargs.get("render_pipeline", "Sol-H3 Self-Lift 双采 (默认)") or "Sol-H3 Self-Lift 双采 (默认)")
+        omni_8step_mode = _render_pipeline.startswith("FastH3 Omni")
+        if omni_8step_mode:
+            # ① 跳过二采 —— 一采 latent 直接解码, 单采直出
+            refine_enable = False
+            # ② 一采强制 8 步蒸馏契约 (官方固定 8, 4 步掉画质)
+            try:
+                _steps_raw = int(steps or 8)
+            except (TypeError, ValueError):
+                _steps_raw = 8
+            if _steps_raw != 8:
+                print(f"[H3 Extender] v14.168 Omni 8步单采: 一采 steps {_steps_raw} -> 强制 8 (官方蒸馏契约)")
+                steps = 8
+            # ③ 完整蒸馏 = denoise 1.0 (Omni 无 latent 继承, 从零去噪)
+            try:
+                _denoise_raw = float(denoise or 1.0)
+            except (TypeError, ValueError):
+                _denoise_raw = 1.0
+            if _denoise_raw != 1.0:
+                print(f"[H3 Extender] v14.168 Omni 8步单采: denoise {_denoise_raw} -> 强制 1.0 (完整蒸馏)")
+                denoise = 1.0
+            print("[H3 Extender] 🚀 FastH3 Omni 8步单采模式已启用：跳过二采(Self-Lift)，一采 8 步蒸馏直出。"
+                  "确认 Loader 使用 fasth3_omniref_8step_pruned_int8_convrot.safetensors + BlockSparseAttention(VSA keep_percent=10)。")
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
         tile_overlap = int(kwargs.get("tile_overlap", 128))
