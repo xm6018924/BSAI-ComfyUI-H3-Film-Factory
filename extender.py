@@ -2135,7 +2135,19 @@ def _apply_h3_tst(model, enable, tau):
         return model
     try:
         import sys as _sys_tst, os as _os_tst
+        # 定位 comfyui-SelfLift 目录（双保险：__file__ 推导 + ComfyUI folder_paths 官方路径）
+        # v14.161: 新版 ComfyUI 以 governance.pack_module_spec 隔离加载自定义节点，
+        #   不再把节点目录注入 sys.path，故必须显式把 comfyui-SelfLift 加进 sys.path。
         _sl_dir = _os_tst.path.join(_os_tst.path.dirname(_os_tst.path.dirname(_os_tst.path.abspath(__file__))), "comfyui-SelfLift")
+        if not _os_tst.path.isfile(_os_tst.path.join(_sl_dir, "h3_tst.py")):
+            try:
+                _cn_roots = folder_paths.get_folder_paths("custom_nodes")
+                _sl_dir = _os_tst.path.join(_cn_roots[0], "comfyui-SelfLift")
+            except Exception:
+                pass
+        if not _os_tst.path.isfile(_os_tst.path.join(_sl_dir, "h3_tst.py")):
+            print(f"[H3 Extender] P2 TST 注入跳过: 未找到 comfyui-SelfLift\\h3_tst.py (期望路径 {_sl_dir})", flush=True)
+            return model
         if _sl_dir not in _sys_tst.path:
             _sys_tst.path.insert(0, _sl_dir)
         from h3_tst import patch_model as _tst_patch
@@ -3173,18 +3185,49 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
                           f"{_old_hw[1]}x{_old_hw[0]} -> {_up_video.shape[-1]}x{_up_video.shape[-2]} (x{_r_factor})")
 
-            # v2.55b (2026-09-20 fix): 二采 refine 完全清空 minimax_keyframes，避免模糊 keyframe 影响画质。
-            # 跨 clip 连贯性由一采保证，二采只提升分辨率不改变内容。
+            # v14.162 (2026-10-22 fix): 一镜到底连续性修复 —— 二采保留 motion-context keyframe。
+            # 旧 v2.55b 在二采完全清空 minimax_keyframes，但二采是 denoise=0.55 的重新采样
+            # （会改变画面内容），清空后二采失去"上一段尾帧"锚定 → 段间画面漂移/虚影，
+            # 一镜到底的尾帧引导链在一采生效后又被二采冲掉（4090 实机 3 clip 验证）。
+            # 修复：把一采 keyframe latent 空间 trilinear resize 到二采 latent 分辨率后
+            # 保留注入，使"上一段尾帧引导"贯穿一采+二采，接缝处无缝衔接。
             if _r_factor > 1.0:
                 try:
                     _cond_kc = conditioning[0][1] if isinstance(conditioning, list) else conditioning
-                    if isinstance(_cond_kc, dict) and "minimax_keyframes" in _cond_kc:
-                        _nkc = len(_cond_kc.get("minimax_keyframes") or [])
-                        if _nkc:
-                            _cond_kc["minimax_keyframes"] = []
-                            print(f"[H3 Extender] v2.55b 二采清空 {_nkc} 个 motion-context keyframe (避免模糊 keyframe 影响画质)")
+                    if isinstance(_cond_kc, dict) and _cond_kc.get("minimax_keyframes"):
+                        _kfs = _cond_kc["minimax_keyframes"]
+                        _memb14, _nst14 = _ff_extract_members(samples)
+                        _tgt_hw14 = tuple(_memb14[0].shape[-2:]) if _memb14 else None
+                        if _tgt_hw14 is not None:
+                            _nfs14 = []
+                            _resized14 = 0
+                            for _kf14 in _kfs:
+                                _kl14 = _kf14.get("latent")
+                                if _kl14 is not None and _kl14.ndim == 5 \
+                                        and tuple(_kl14.shape[-2:]) != _tgt_hw14:
+                                    try:
+                                        _kl14 = torch.nn.functional.interpolate(
+                                            _kl14,
+                                            size=(
+                                                int(_kl14.shape[2]),
+                                                int(_tgt_hw14[0]),
+                                                int(_tgt_hw14[1]),
+                                            ),
+                                            mode="trilinear",
+                                            align_corners=False,
+                                        )
+                                        _resized14 += 1
+                                    except Exception:
+                                        pass
+                                _nkf14 = dict(_kf14)
+                                _nkf14["latent"] = _kl14
+                                _nfs14.append(_nkf14)
+                            _cond_kc["minimax_keyframes"] = _nfs14
+                            print(f"[H3 Extender] v14.162 二采保留 {len(_nfs14)} 个 motion-context keyframe"
+                                  f" (resize {_resized14} 块到 {_tgt_hw14[1]}x{_tgt_hw14[0]} 二采空间), "
+                                  f"一镜到底尾帧引导贯穿一采+二采")
                 except Exception as _ekc:
-                    print(f"[H3 Extender] v2.55b keyframe 清空失败(可忽略): {_ekc}")
+                    print(f"[H3 Extender] v14.162 keyframe 保留失败(可忽略): {_ekc}")
 
             # v1.43: 3D upscaler 用完后立即清缓存, 释放 VRAM 给二采 diffusion.
             # MODEL_CACHE 不受 ComfyUI model_management 管理 (不在
@@ -7257,6 +7300,23 @@ class BSAIH3FilmFactory:
                     print(f"[H3 Extender] clip[{i}] 显存已释放：allocated={_a:.2f}GB reserved={_r:.2f}GB")
                 except Exception as _me:
                     print(f"[H3 Extender] 显存清理失败(可忽略): {_me}")
+
+            # v14.162 (2026-10-22 fix): 4090 clip3 CUDA launch failure 修复 ——
+            # 等待上一段异步编码线程完全结束再进入本段 TE 文本编码。
+            # 实机根因: clip2 的异步编码(后台线程: VAE decode + NVENC)在 clip3 的
+            # _make_ref2va_conditioning → TE encode(14.9GB 全量驻留 + comfy_kitchen
+            # 量化权重 cast)期间仍在抢占 GPU → CUDA 上下文损坏, 崩在 llama o_proj
+            # 的 weight.clone()。修复: 每段 conditioning 前同步等待 pending 编码
+            # 全部完成并消费(解码+落盘), 杜绝主线程采样与后台编码并发抢 GPU。
+            if _pending_enc:
+                try:
+                    for _pev_done, _pej, _peg in _pending_enc:
+                        _pev_done.wait()
+                    _flush_pending_enc(False)
+                    print(f"[H3 Extender] v14.162 已等待 {_pej + 1} 段异步编码完成(防 TE 并发抢 GPU)")
+                except Exception as _pe_err:
+                    print(f"[H3 Extender] v14.162 等待异步编码完成失败(可忽略): {_pe_err}")
+
             positive, latent = _make_ref2va_conditioning(
                 clip,
                 vae,

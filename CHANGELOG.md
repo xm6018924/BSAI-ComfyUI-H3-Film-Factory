@@ -22,6 +22,27 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.162 (2026-10-22) — 一镜到底衔接修复（二采保留 motion-context keyframe）+ 4090 clip3 CUDA 崩溃修复（异步编码并发隔离）/ One-shot continuity fix (refine keeps motion-context keyframes) + 4090 clip3 CUDA crash fix (async-encode concurrency isolation)
+
+**核心①：二采不再清空 motion-context keyframe。** 旧 v2.55b 在二采（denoise=0.55 的重新采样，会改变画面）完全清空 keyframe，导致"上一段尾帧"锚定只在一采生效、二采被冲掉 → 段间画面漂移/虚影，一镜到底尾帧引导链断裂（4090 实机 3 clip 视觉实证：clip1/clip2 首帧出现半透明虚影、闭眼/耳机等细节逐段漂移）。修复：把一采 keyframe latent 空间 trilinear resize（D 维不变，按 motion_context_ram v1.25 三元组写法）到二采 latent 分辨率后保留注入，使尾帧引导贯穿一采+二采，接缝无缝。** / Core ①: the refine pass no longer wipes motion-context keyframes. Old v2.55b fully cleared them during refine (a denoise=0.55 re-sampling that changes content), so the previous-clip tail anchor only held in the first pass and was washed out by the second — inter-segment drift/ghosting, the one-shot tail-anchor chain broke (proven on the 4090's 3 clips: ghosting on clip1/clip2 heads, eye-open/headphone details drifting). Fix: trilinear-resize (D kept, same triple-size form as motion_context_ram v1.25) each first-pass keyframe latent to the refine latent resolution and keep injecting, so the tail-frame guide runs through both passes for a seamless seam.
+- `extender.py` L3188：v2.55b 清空逻辑 → v14.162 保留 + resize（缺尺寸/异常时安全降级为原行为）/ L3188: v2.55b wipe → v14.162 keep + resize (safe fallback to old behavior on missing shape / exception)
+
+**核心②：每段 TE 文本编码前等待异步编码线程完成。** 4090 实机 clip3 崩在 `_make_ref2va_conditioning → TE encode`（llama o_proj 的 comfy_kitchen 量化权重 `clone()` → `CUDA error: unspecified launch failure`）。根因：clip2 的异步编码（后台线程 VAE decode + NVENC）与 clip3 的 TE 全量驻留（14.9GB）+ 量化 cast 并发抢 GPU → CUDA 上下文损坏。修复：clip 循环 conditioning 前同步等待 `_pending_enc` 全部完成并消费（解码+落盘），杜绝并发。** / Core ②: wait for the async-encode thread before each clip's TE text encoding. The 4090 crashed on clip3 inside `_make_ref2va_conditioning → TE encode` (comfy_kitchen quantized weight `clone()` in llama o_proj → `CUDA error: unspecified launch failure`). Root cause: clip2's async encoding thread (VAE decode + NVENC) was still grabbing the GPU while clip3's TE loaded fully (14.9GB) and cast quantized weights — corrupting the CUDA context. Fix: synchronously wait for and consume all `_pending_enc` before conditioning each clip.
+- `extender.py` L7300：`for _pev_done, ... in _pending_enc: _pev_done.wait()` + `_flush_pending_enc(False)` / wait on all pending done-events, then flush (decode + persist)
+- 验证：py_compile 通过；keyframe resize 全链模拟通过（[1,24,1,60,34]→[1,24,1,68,120]×3 块） / Verified: py_compile pass; full-chain keyframe resize simulation pass ([1,24,1,60,34]→[1,24,1,68,120] ×3)
+- 生效：重启 ComfyUI（8191 端口）后重跑一镜到底；应看到 `v14.162 二采保留 N 个 motion-context keyframe` 与 `v14.162 已等待 N 段异步编码完成` / To take effect: restart ComfyUI (port 8191) and re-run one-shot; expect `v14.162 二采保留 N 个 motion-context keyframe` and `v14.162 已等待 N 段异步编码完成`
+
+---
+
+### v14.161 (2026-10-22) — P2 TST 注入修复：双保险定位 comfyui-SelfLift（兼容新版 ComfyUI 隔离加载）/ P2 TST injection fix: dual-path resolution of comfyui-SelfLift (compatible with new isolated custom-node loading)
+
+**核心：新版 ComfyUI（core 0.3.384+）改用 `governance.pack_module_spec` 隔离加载自定义节点，不再把节点目录注入 `sys.path`，导致 `_apply_h3_tst` 里裸 `from h3_tst import patch_model` 报 `No module named 'h3_tst'`（P2 TST 时间状态传输补偿静默跳过，少步数画质补偿失效）。修复：定位 comfyui-SelfLift 目录改双保险——①基于 `__file__` 向上两级推导；②未命中时用 ComfyUI 官方 `folder_paths.get_folder_paths("custom_nodes")` 兜底；并先校验 `h3_tst.py` 存在性，缺失时打印期望路径而非笼统提示"需安装"。** / Core: new ComfyUI (core 0.3.384+) loads custom nodes via `governance.pack_module_spec` in isolation and no longer injects node dirs into `sys.path`, so the bare `from h3_tst import patch_model` in `_apply_h3_tst` raised `No module named 'h3_tst'` (P2 Temporal State Transport compensation silently skipped, few-step quality compensation lost). Fix: dual-path resolution of the comfyui-SelfLift dir — ① derive from `__file__` two levels up; ② fall back to ComfyUI's official `folder_paths.get_folder_paths("custom_nodes")` when missed; and pre-check `h3_tst.py` existence, printing the expected path instead of a generic "please install".
+- `extender.py`：`_apply_h3_tst` 双路径解析 + 存在性校验 / dual-path resolution + existence check in `_apply_h3_tst`
+- 验证：py_compile 通过；后端 python 模拟两条路径均命中 `custom_nodes\comfyui-SelfLift\h3_tst.py` 且 `from h3_tst import patch_model` 成功 / Verified: py_compile pass; both paths resolve to `custom_nodes\comfyui-SelfLift\h3_tst.py` in the backend python and `from h3_tst import patch_model` succeeds
+- 生效：重启 ComfyUI（8191 端口）后重跑一镜到底，应恢复日志 `P2 SelfLift H3 TST 注入: tau=0.2` / To take effect: restart ComfyUI (port 8191) and re-run one-shot — the log should restore `P2 SelfLift H3 TST 注入: tau=0.2`
+
+---
+
 ### v14.160 (2026-10-22) — one_shot_clip_duration 默认 12s：与对口型分镜 12s/镜 对齐 / default 12s: aligned with the 12s/CLIP lip-sync storyboard
 
 **核心：默认每段 12s。225.3s 歌曲 ÷ 12 = 19 CLIP，与 19 镜分镜一一对应；旧 10s 默认会把 19 镜分镜自动切成 23 段，多出段复制首个分镜模板、且每段时间轴与分镜文案（0-3/3-6/6-9/9-12 秒拍段）错位。** / Core: 12s default per clip. A 225.3s song ÷ 12 = 19 CLIPs, one-to-one with a 19-shot storyboard; the old 10s default auto-split a 19-shot board into 23 segments whose extras copied the first shot's template and whose timeline no longer matched the board's 0-3/3-6/6-9/9-12s beats.
