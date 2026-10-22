@@ -1225,7 +1225,7 @@ const BSAI_BILINGUAL_LABELS = {
     "pause_enable": "暂停开关（每CLIP生成完可暂停）",
     "pause_timeout": "暂停超时（秒，无干预自动继续）",
     "refine_enable": "二次采样开关（画质修复去模糊）",
-    "refine_denoise": "二次采样降噪（0.3-0.45黄金区间）",
+    "refine_denoise": "二次采样降噪（0.5-0.6黄金区间；低照度镜头低于0.5只做平滑）",
     "refine_steps": "二次采样步数",
     "refine_upscale_factor": "潜空间放大倍数（1.0=不放大）",
     "speed_preset": "速度预设（极速4+2步 / 均衡6+4步 / 精细8+6步 / custom）",
@@ -1259,6 +1259,9 @@ const BSAI_BILINGUAL_LABELS = {
     "env_audio_enable": "环境音开关（global_inherit=跟随全局，on=混入，off=只留人声）",
     "env_audio_gain": "环境音音量（默认0.15）",
     "face_lock_mode": "远景人脸锁定模式（@图1全身+@图2.N人脸特写）",
+    "refine_mem_mode": "二采省显存模式（spatial分块兼容 / global全上下文省显存）",
+    "one_shot_mode": "一镜到底模式（off分镜剪辑 / on无缝长镜头：注入不切场+强制motion context+零转场拼接）",
+    "one_shot_clip_duration": "一镜到底每段目标秒数（0关闭自动分CLIP；连歌曲后自动CLIP数=歌曲时长÷本值）",
 };
 function bsaiApplyBilingualLabels(node) {
     if (!node || !node.widgets) return;
@@ -1632,15 +1635,15 @@ function scheduleHiddenRowFallback(node, keys) {
 //   没有快捷按钮的参数 → 一律留在参数区可见（用户明确要求，不得多藏）。
 //
 // H3_MANAGED_ROW_KEYS = 本插件管理过可见性的全部行。
-//   前 19 项 = 快捷条 QUICK_DEFS 对应的参数 → hidden
+//   前 20 项 = 快捷条 QUICK_DEFS 对应的参数 → hidden
 //   后 9 项  = v14.133 误藏的"附属高级参数" → 强制放回参数区（自愈）
 const H3_MANAGED_ROW_KEYS = [
-    // ── 快捷条 19 项 ──
+    // ── 快捷条 20 项 ──
     "refine_enable", "upscale_per_clip", "upscale_final", "block_cache", "ref_cache",
     "output_mode", "speed_preset", "refine_lipsync_mode", "upscale_mode", "pause_enable",
     "output_image_audio", "cache_dit", "clip_select_enable", "upscale_fp16",
     "upscale_face_restore", "tiled_refine", "semantic_bridge_enable",
-    "semantic_bridge_magnitude_match", "face_lock_mode",
+    "semantic_bridge_magnitude_match", "face_lock_mode", "one_shot_mode",
     // ── v14.133 误藏、v14.134 起必须显示 ──
     "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch",
     "tile_count", "tile_overlap", "semantic_bridge_adapter", "semantic_bridge_alpha",
@@ -6646,6 +6649,10 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "semantic_bridge_enable", zh: "语义桥", en: "SemBrg", desc: "Semantic-Bridge 语义桥（约11MB小MLP残差混合，让 H3 更听话：构图/空间/计数）。" },
         { key: "semantic_bridge_magnitude_match", zh: "桥对齐", en: "MagMatch", desc: "语义桥向量模长对齐到原 hidden（原版默认开）。" },
         { key: "face_lock_mode", zh: "保脸", en: "FaceLock", desc: "远景保脸模式（自动锁五官一致；@图1=全身，@图2.N=各人脸特写）。" },
+        // v14.158 (2026-10-21): 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流）。
+        // off=默认分镜剪辑(xfade 转场拼接)；on=无缝长镜头(注入不切场/不转场指令 + 强制
+        // motion context(Add Guide 等效锚点) + 合并零转场 concat)。
+        { key: "one_shot_mode", zh: "一镜到底", en: "OneShot", desc: "一镜到底旁支模式：off=分镜剪辑（xfade转场）；on=无缝长镜头（注入不切场指令+强制motion context+零转场拼接）。", cycle: ["off (分镜模式)", "on (一镜到底)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#f472b6", border: "#be185d" }] },
         // v14.127: restore_cache 已从 QUICK_DEFS 移除——后端 INPUT_TYPES 同步移除
         // 该参数（1.55 toggle 行无法前端隐藏，根治：参数不存在则行不存在）。
         // 恢复缓存功能由节点底部"恢复缓存"按钮（直调后端 /h3_extender/restore_cache
@@ -6792,9 +6799,9 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         upscale_mode: "upscale", upscale_fp16: "upscale",
         // 语义：语义桥 / 桥对齐
         semantic_bridge_enable: "sema", semantic_bridge_magnitude_match: "sema",
-        // 流程：输出 / 预览 / 暂停 / CLIP选择
+        // 流程：输出 / 预览 / 暂停 / CLIP选择 / 一镜到底
         output_mode: "flow", output_image_audio: "flow",
-        pause_enable: "flow", clip_select_enable: "flow",
+        pause_enable: "flow", clip_select_enable: "flow", one_shot_mode: "flow",
     };
     const quickBar = document.createElement("div");
     quickBar.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:5px 4px;border-top:1px solid rgba(255,255,255,.18);margin-bottom:2px;flex-shrink:0;background:#182838;";
@@ -7494,9 +7501,9 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 是 dom widget(serialize:false, 但现役前端仍把它序列化为尾部空串)。
         // 现役 64 位: 0..61 = run_mode..face_lock_mode(62 个后端 widget),
         // 62 = refine_mem_mode, 63 = h3_extender_timeline(dom, applyToNode 跳过)。
-        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","h3_extender_timeline"];
-        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.45,2,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"","0.15",true,"global_inherit",0.15,false,"spatial (分块,兼容)",""];
-        const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain"]);
+        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","one_shot_mode","one_shot_clip_duration","h3_extender_timeline"];
+        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.55,6,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"","0.15",true,"global_inherit",0.15,false,"spatial (分块,兼容)","off (分镜模式)",12,""];
+        const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain","one_shot_clip_duration"]);
         const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match","face_lock_mode"]);
         const OPTIONS = {
             run_mode: ["clip_by_clip","full_batch"],
@@ -7511,6 +7518,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳"],
             env_audio_enable: ["global_inherit","on","off"],
             refine_mem_mode: ["spatial (分块,兼容)","global (全上下文省显存)"],
+            one_shot_mode: ["off (分镜模式)","on (一镜到底)"],
         };
         function detect(w) {
             const n = w.length;
@@ -7523,6 +7531,9 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             //  - 59/58 键 = v14.149 及更早(无 P0/P2 五参数): 六联包 48..53,
             //    env/gain/face 54..56; 59 键多 restore_cache(57)+timeline(58),
             //    58 键仅 timeline(57)。
+            // v14.159: 66 键 = 现役 + one_shot_clip_duration(64) + timeline(65)。
+            if (n === 66) return "CUR66";
+            if (n === 65) return "CUR65";
             if (n === 64) return "CUR64";
             if (n === 63) return (typeof w[48] === "number") ? "O63" : "N63";
             if (n === 62) return "N62";
@@ -7582,14 +7593,19 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         }
         function mapTo(w) {
             const L = detect(w);
-            // v14.153 修正: 统一输出 64 位(对齐 KEYS): 0..61 后端 widget,
-            // 62 = refine_mem_mode, 63 = h3_extender_timeline(dom, applyToNode 跳过)。
-            const out = new Array(64).fill(null);
-            if (L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
+            // v14.159 修正: 统一输出 66 位(对齐 KEYS): 0..61 后端 widget,
+            // 62 = refine_mem_mode, 63 = one_shot_mode, 64 = one_shot_clip_duration,
+            // 65 = h3_extender_timeline(dom, applyToNode 跳过)。
+            const out = new Array(66).fill(null);
+            if (L === "CUR66" || L === "CUR65" || L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
                 // 新纪元(48..52 已有 P0/P2): 0..61 与 KEYS 完全同键, 直接照抄。
                 for (let i = 0; i < 62 && i < w.length; i++) out[i] = w[i];
-                // CUR64: w[62] = refine_mem_mode 用户值, 保留; w[63]=timeline 丢弃。
-                if (L === "CUR64" && w.length > 62) out[62] = w[62];
+                // CUR66: w[62]=rmm 用户值, w[63]=one_shot 用户值, w[64]=clip_dur 用户值; timeline 丢弃。
+                if (L === "CUR66" && w.length > 64) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; }
+                // CUR65(v14.158): one_shot 值保留, clip_dur 缺 → DEFAULTS 10; timeline 丢弃。
+                else if (L === "CUR65" && w.length > 63) { out[62] = w[62]; out[63] = w[63]; }
+                // CUR64: w[62] = refine_mem_mode 用户值, 保留; 其余缺 → DEFAULTS; timeline 丢弃。
+                else if (L === "CUR64" && w.length > 62) out[62] = w[62];
                 // L59G 防御: rmm 值在 58。
                 if (L === "L59G" && w.length > 58) out[62] = w[58];
                 // N63/N62/CURRENT: 老文件无 rmm → 留 null → DEFAULTS 补 "spatial (分块,兼容)"。

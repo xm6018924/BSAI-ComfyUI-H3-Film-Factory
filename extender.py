@@ -564,13 +564,17 @@ def _concat_clip_av(images_list, audios_list):
     return images, audio
 
 
-def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
+def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
     """Split a full lip-sync audio into per-clip segments based on clip durations.
 
     Args:
         lip_audio: AUDIO dict {"waveform": [B,C,L], "sample_rate": int}
         clips: list of clip dicts, each with "duration" (seconds)
         fps: video frame rate (used to align clip durations to frame grid)
+        context_frames: motion context 帧数 (context_length, 默认39)。
+            ctx_on 段的头部被上一段尾部的 motion context 占用, 模型净输出 =
+            标称时长 - context_frames/fps 秒。切分推进必须按净时长, 否则每个
+            段间边界原曲被跳过 1.625s(39帧@24fps) → 歌曲听感"断了一截"。
 
     Returns:
         list of AUDIO dicts, one per clip. Length = len(clips).
@@ -623,8 +627,6 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
         if idx == len(clip_durations) - 1:
             seg_samples = max(1, total_samples - current_sample)
 
-        end_sample = min(current_sample + seg_samples, total_samples)
-
         # v2.111: 上下文参考开关感知 — 只有该 CLIP 自身 context_enabled=True
         # (渲染时接了上一段 motion context) 才需要往前扩展重叠音频；
         # 关闭上下文参考时不再加重叠，切出的段与 lip_audio 原始音频精确对齐。
@@ -637,7 +639,25 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
         #   ctx_off → 纯净零重叠切分(与原曲直接对齐)
         _overlap = overlap_samples if (idx > 0 and _ctx_on) else 0
 
-        if idx > 0 and _overlap > 0:
+        # v14.157 (fix): ctx_on 段按净时长推进。
+        # motion context 占用段头部 context_frames 帧(上一段尾部注入, join 时
+        # 裁掉), 模型净输出 = 标称 - context_frames/fps 秒。旧代码按标称全时长
+        # 推进 → 每个 ctx_on 段边界原曲被跳过 1.625s(39帧@24fps), 歌曲听感
+        # "断了一截"且逐段累积错位。现在: 段 = [current-overlap, current+净],
+        # 推进 = 净时长; 解码混音跳过 overlap 头后 lip 净长恰好等于模型音频
+        # 长度, 段间无缝。注意: 若渲染时前段缓存缺失(trim 被强制为 0), 该段
+        # 实际输出全时长, 下一边界会出现 1.625s 重复 — 属缓存缺失既有异常。
+        _trim_samples = 0
+        if _overlap > 0 and int(context_frames) > 0:
+            _trim_samples = min(
+                int(round(float(context_frames) / float(fps) * sr)),
+                max(0, seg_samples - 1),
+            )
+        _net_samples = max(1, seg_samples - _trim_samples)
+
+        end_sample = min(current_sample + _net_samples, total_samples)
+
+        if _overlap > 0:
             seg_start = max(0, current_sample - _overlap)
         else:
             seg_start = current_sample
@@ -646,13 +666,13 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0):
 
         if actual_samples <= 0:
             # Audio too short for this many clips — fill with silence
-            silent = torch.zeros(waveform.shape[0], waveform.shape[1], max(1, int(dur * sr)),
+            silent = torch.zeros(waveform.shape[0], waveform.shape[1], _net_samples,
                                  dtype=waveform.dtype, device=waveform.device)
             segments.append({"waveform": silent, "sample_rate": sr, "overlap_samples": 0})
         else:
             seg_wave = waveform[..., seg_start:end_sample].clone()
             # If we got less than needed (end of audio), pad with silence
-            needed_samples = seg_samples + _overlap
+            needed_samples = _net_samples + _overlap
             if seg_wave.shape[-1] < needed_samples:
                 pad_len = needed_samples - seg_wave.shape[-1]
                 pad = torch.zeros(waveform.shape[0], waveform.shape[1], pad_len,
@@ -2151,6 +2171,9 @@ def _sigmas(model, scheduler: str, steps: int, denoise: float):
 #   + 音频锁定(默认) + DisableNoise 二采完整去噪
 # ============================================================
 _FF_UPSCALER_MOD = None
+# v14.157: 3D 语义放大回退记录 —— 过去只打一行控制台日志就静默降为
+# bilinear 插值, 用户完全看不到。这里记录状态, 由调用处推到前端状态栏。
+_FF_UPSCALER_FELL_BACK = {"hit": False, "reason": "", "clip": -1}
 try:
     import sys as _sys, os as _os
     _ff_up_dir = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
@@ -2250,6 +2273,9 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
             return out
         except Exception as e:
             print(f"[H3 Extender] Refine 3D upscaler 失败({e}), fallback bilinear")
+            # v14.157: 记录回退原因, 调用处会推送前端显式警告
+            _FF_UPSCALER_FELL_BACK["hit"] = True
+            _FF_UPSCALER_FELL_BACK["reason"] = str(e)[:180]
 
     # fp16/bf16 插值会量化新网格, 二采出现斑点; 统一 fp32 放大后转回原精度
     samples = video.float() if video.dtype in (torch.float16, torch.bfloat16) else video
@@ -2305,6 +2331,62 @@ def _ff_probe_video(path, ff):
         return (w, h, fps, frames)
     except Exception:
         return None
+
+
+def _ff_get_duration(path, ff):
+    """Return duration in seconds, or 0.0 on failure."""
+    try:
+        r = subprocess.run([ff, "-i", str(path), "-f", "null", "-"],
+                           capture_output=True, timeout=30)
+        import re as _re
+        m = _re.search(r"time=(\d+):(\d+):(\d+\.\d+)", r.stderr.decode("utf-8", "replace"))
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return 0.0
+
+
+def _ff_build_xfade_merge_cmd(ff, clip_paths, output_path, vfade=0.5, afade=0.3):
+    """Build ffmpeg command that chains xfade (video) + acrossfade (audio) for N clips.
+    Returns (cmd_list, duration_log). Falls back to re-encoded concat if any clip too short."""
+    durations = [_ff_get_duration(cp, ff) for cp in clip_paths]
+    n = len(clip_paths)
+    if n < 2:
+        return None, durations
+    if any(d < vfade * 2 for d in durations):
+        return None, durations  # too short for xfade, caller falls back
+
+    # Build chained xfade video filter
+    vparts = []
+    aparts = []
+    vlabel = "0:v"
+    alabel = "0:a"
+    cum_dur = durations[0]
+    for i in range(1, n):
+        out_v = f"[v{i:02d}]"
+        out_a = f"[a{i:02d}]"
+        offset = max(0.1, cum_dur - vfade)
+        vparts.append(f"[{vlabel}][{i}:v]xfade=transition=fade:duration={vfade}:offset={offset:.3f}{out_v}")
+        aparts.append(f"[{alabel}][{i}:a]acrossfade=d={afade}:c1=tri:c2=tri{out_a}")
+        vlabel = out_v
+        alabel = out_a
+        cum_dur = cum_dur + durations[i] - vfade  # cumulative after overlap
+
+    filter_complex = ";".join(vparts + aparts)
+    cmd = [ff, "-y"]
+    for cp in clip_paths:
+        cmd += ["-i", str(cp)]
+    cmd += [
+        "-filter_complex", filter_complex,
+        "-map", vlabel,
+        "-map", alabel,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        str(output_path),
+    ]
+    return cmd, durations
 
 
 def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_restore):
@@ -2981,6 +3063,22 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     if _resident_target2 >= 10.0:
                         _chosen2 = _f2
                         break
+                # v14.157: 宁可分块, 不降倍率。
+                # 旧逻辑在预算不足时直接把二采倍率 x2.0 降到 x1.5, 成片像素
+                # 从声明的 1920x1088 悄悄缩水到 1440x800（线性 -25%, 人脸直接糊掉）。
+                # 分块二采把 attention workspace 从 x2.0 的 4.5GB 压到 ~1.1GB,
+                # 24GB 卡足以原地跑满原倍率; 只有分块也放不下时才真正降档。
+                _auto_tiled = False
+                if (not tiled_refine) and (_chosen2 is None or _chosen2 < _orig_f - 1e-6):
+                    _ws_tiled_tbl = {1.0: 0.8, 1.5: 0.9, 2.0: 1.1}
+                    _ws_tiled = _ws_tiled_tbl.get(round(_orig_f, 1), 1.1)
+                    if min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tiled - 3.0 >= 10.0:
+                        tiled_refine = True
+                        _auto_tiled = True
+                        _chosen2 = _orig_f
+                        print(f"[H3 Extender] v14.157 全帧二采 x{_orig_f} 显存不足, "
+                              f"自动启用分块二采(tile_count={tile_count})保住原倍率, "
+                              f"成片不再缩水到 x{_chosen2}")
                 print(f"[H3 Extender] Refine 显存预算(v1.65): 模型~{_model_gb2:.1f}GB "
                       f"驻留alloc={_alloc_gb2:.1f}GB 可用显存={_gpu_free_gb2:.1f}GB/"
                       f"{_gpu_total_gb2:.0f}GB 驻留目标~{min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tbl.get(round(_orig_f, 1), 2.6) - 3.0:.1f}GB")
@@ -3017,6 +3115,19 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] Refine 放大倍率已自动降级: x{_orig_f} -> x{_chosen2} "
                           f"(24GB 级显存 + int8 {_model_gb2:.1f}GB 模型下 x{_orig_f} 二采会假死, "
                           f"见 v1.47 显存预算)")
+                    _send_extender_warning(
+                        owner_id,
+                        f"二采倍率被显存预算降级 x{_orig_f}→x{_chosen2}，"
+                        f"本段成片像素低于声明值（细节会明显变软）",
+                        clip_index=clip_index,
+                    )
+                elif _auto_tiled:
+                    _send_extender_warning(
+                        owner_id,
+                        f"显存不足，已自动启用分块二采保住 x{_orig_f} 倍率"
+                        f"（速度略降，画质不缩水）",
+                        clip_index=clip_index,
+                    )
                 elif _chosen2 is None:
                     print(f"[H3 Extender] Refine 警告: 显存预算不足(需求>可用), "
                           f"二采将尝试流式采样, 若卡死请关闭 DynamicVRAM 启动 "
@@ -3044,8 +3155,19 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             if _r_factor > 1.0:
                 _members, _was_nested = _ff_extract_members(samples)
                 _old_hw = (tuple(_members[0].shape[-2:]) if _members else None)
+                _FF_UPSCALER_FELL_BACK["hit"] = False
+                _FF_UPSCALER_FELL_BACK["reason"] = ""
                 _up_video = _ff_upscale_video_latent(
                     _members[0], _r_factor, _r_align, "bilinear", refine_upscaler_model)
+                # v14.157: 3D 语义放大失败不再静默 —— 会退化成 bilinear,
+                # 画质明显变软, 必须让用户在状态栏看到。
+                if _FF_UPSCALER_FELL_BACK["hit"]:
+                    _send_extender_warning(
+                        owner_id,
+                        f"3D 语义放大失败，已回退 bilinear 插值"
+                        f"（{_FF_UPSCALER_FELL_BACK['reason']}）",
+                        clip_index=clip_index,
+                    )
                 if tuple(_up_video.shape[-2:]) != tuple(_members[0].shape[-2:]):
                     samples = _ff_wrap_members([_up_video] + list(_members[1:]), _was_nested)
                     print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
@@ -4193,6 +4315,19 @@ def _send_extender_progress(
         pass
 
 
+def _send_extender_warning(node_id, message, clip_index=-1, clip_count=0):
+    """v14.157: 把"降级 / 回退"这类过去只写控制台的问题推到节点状态栏，
+    避免用户拿到低画质成片却不知道原因。"""
+    try:
+        text = str(message or "").strip()
+        if not text:
+            return
+        print(f"[H3 Extender] WARNING: {text}")
+        _send_extender_progress(node_id, clip_index, clip_count, "warning", f"⚠ {text}")
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # 暂停渲染控制（CLIP 选择生成 + 每 CLIP 间暂停/继续/仅当前/中止）
 # ---------------------------------------------------------------------------
@@ -5206,15 +5341,15 @@ class BSAIH3FilmFactory:
             "refine_denoise": (
                 "FLOAT",
                 {
-                    "default": 0.45, "min": 0.05, "max": 1.0, "step": 0.01,
-                    "tooltip": "Refine CONST re-noise strength (Sol-H3 dual-pass semantics; default 0.45 = best quality/detail balance, validated on a 5090 24G). 1.0 = full re-noise redraw (official fast dual-pass); 0.55 = keeps 45% of the base image; <0.5 raises the risk of face drift. Only effective when refine_enable is on.",
+                    "default": 0.55, "min": 0.05, "max": 1.0, "step": 0.01,
+                    "tooltip": "Refine CONST re-noise strength (Sol-H3 dual-pass semantics; v14.157 default 0.55 = 保留 45% 底图, 暗部/人脸能真正补出细节; 0.45 及以下在低照度镜头几乎只做平滑). 1.0 = full re-noise redraw (official fast dual-pass). Only effective when refine_enable is on.",
                 },
             ),
             "refine_steps": (
                 "INT",
                 {
-                    "default": 2, "min": 1, "max": 20, "step": 1,
-                    "tooltip": "Refine steps (default 2 = best speed/quality balance; validated 8+2 dual-pass on a 5090 24G). 2 steps are enough for turbo models; more steps add detail but take longer. Only effective when refine_enable is on.",
+                    "default": 6, "min": 1, "max": 20, "step": 1,
+                    "tooltip": "Refine steps (v14.157 default 6 = 4 步在低照度/近景下补不出纹理, 6 步明显更实; 每步成本远低于一采). 2 steps only suit turbo models. Only effective when refine_enable is on.",
                 },
             ),
             "refine_upscale_factor": (
@@ -5408,6 +5543,32 @@ class BSAIH3FilmFactory:
             "refine_mem_mode": (
                 ["spatial (分块,兼容)", "global (全上下文省显存)"],
                 {"default": "spatial (分块,兼容)", "tooltip": "Refine memory-saving mode. spatial (default) = current 4-tile spatial tiling (v14.149, may show background swelling/seams on some scenes). global = ported from selflift-Avatar global-context mode: full-sequence attention (no tiles, no seams) + token-chunked norm/MLP to bound VRAM; coexists with KJNodes head-grouping / Sol-Attn override (v14.148 dense gate stays active). Expect per-step time similar or better than 4-tile spatial."},
+            ),
+            # v14.158 (2026-10-21): BSAI 一镜到底旁支模式 —— 移植自 B站
+            # 《MinimaxH3 长视频一镜到底工作流》(BV1rEto6eEvA) 的核心方法：
+            # ① 段间用上一段尾部做 Add Guide 等效锚点引导（电影工厂已有
+            #    motion context latent 级引导，一镜到底模式下强制开启）；
+            # ② 每段提示词自动注入"不切场/不转场/镜头持续跟随主体"指令；
+            # ③ 合并时改为无缝 concat（零转场），替代默认多镜头 xfade 渐变。
+            # 作为旁支选择，off 时行为与历史版本完全一致，不影响任何旧工作流。
+            "one_shot_mode": (
+                ["off (分镜模式)", "on (一镜到底)"],
+                {
+                    "default": "off (分镜模式)",
+                    "tooltip": "BSAI 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流）：off=默认分镜剪辑模式（每段独立生成 + xfade 转场拼接，行为不变）。on=一镜到底模式：①每段提示词自动注入'不切场/不转场/镜头持续跟随主体'指令（用户已写则跳过）；②强制开启段间 motion context，上一段 latent 尾部作为 Add Guide 等效锚点引导本段生成；③合并改为无缝 concat 零转场拼接，接缝处由末帧引导保证连续。建议各 CLIP 提示词统一采用连续运镜（推/拉/跟/环绕），配合本模式可得到 30s+ 无缝长镜头成片。",
+                },
+            ),
+            # v14.159 (2026-10-21): 一镜到底 × 歌曲自动分 CLIP。
+            # 结合现有对口型模式的歌曲驱动逻辑(_split_lip_audio_by_clips 按 CLIP
+            # 时长切音频): one_shot_mode=on 且连接 lip_audio 歌曲时, 按本值(每段
+            # 目标秒数) 自动把歌曲时长均分为目标 CLIP 数量, 自动补齐/对齐 CLIP
+            # 卡片与每段时长。0 = 关闭自动分(保持手动 CLIP 数)。
+            "one_shot_clip_duration": (
+                "INT",
+                {
+                    "default": 12, "min": 0, "max": 60, "step": 1,
+                    "tooltip": "一镜到底×歌曲 每段目标时长(秒)。连接 lip_audio 歌曲且 one_shot_mode=on 时，自动 CLIP 数 = 歌曲时长 ÷ 本值（向上取整），并自动补齐/对齐 CLIP 卡片；最后一段自动取歌曲剩余时长。例：5分钟歌曲 ÷ 12s = 25 个 CLIP。0 = 关闭自动分 CLIP。",
+                },
             ),
             "asset_library": ("ASSET_LIBRARY", {"forceInput": True, "tooltip": "Connect BSAI_AssetLibraryInput to resolve @图N/@视频N/@音频N references in clip prompts."}),
         }
@@ -5648,6 +5809,19 @@ class BSAIH3FilmFactory:
         env_audio_enable = str(kwargs.get("env_audio_enable", "global_inherit"))
         env_audio_gain = float(kwargs.get("env_audio_gain", 0.15))
         face_lock_mode = bool(kwargs.get("face_lock_mode", False))
+        # v14.158 (2026-10-21): BSAI 一镜到底旁支模式。off 时零影响（默认）；
+        # on 时：①强制段间 motion context（Add Guide 等效锚点引导）
+        #       ②每段提示词自动注入一镜到底镜头指令
+        #       ③合并改无缝 concat（零转场）
+        one_shot_mode = str(kwargs.get("one_shot_mode", "off (分镜模式)") or "off (分镜模式)")
+        one_shot_enabled = one_shot_mode.startswith("on")
+        # v14.159: 一镜到底×歌曲自动分 CLIP 的每段目标时长(秒); 0=关闭自动分
+        try:
+            one_shot_clip_duration = int(kwargs.get("one_shot_clip_duration", 12) or 12)
+        except (TypeError, ValueError):
+            one_shot_clip_duration = 12
+        if one_shot_enabled:
+            print("[H3 Extender] 🎬 一镜到底旁支模式已启用：无缝 concat 零转场 + 镜头跟随指令注入 + 强制 motion context")
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
         tile_overlap = int(kwargs.get("tile_overlap", 128))
@@ -5816,6 +5990,70 @@ class BSAIH3FilmFactory:
         )
         owner = str(unique_id if unique_id is not None else "h3_extender")
         _register_render_ctl(owner)
+
+        # ── v14.159 (2026-10-21): 一镜到底 × 歌曲自动分 CLIP ──────────────
+        # 结合现有对口型模式的歌曲驱动逻辑(_split_lip_audio_by_clips 按 CLIP
+        # 时长切音频): one_shot_mode=on 且连接 lip_audio 歌曲时, 按
+        # one_shot_clip_duration(每段目标秒数) 自动把歌曲时长均分为目标 CLIP
+        # 数量并自动补齐/对齐 CLIP 卡片与每段时长, 再交给现有 lip_audio 切分
+        # 与一镜到底渲染链路。one_shot_clip_duration=0 时关闭自动分。
+        if (one_shot_enabled
+                and kwargs.get("lip_audio") is not None
+                and int(one_shot_clip_duration) > 0):
+            try:
+                _os_audio = kwargs.get("lip_audio")
+                _os_sr = int(_os_audio.get("sample_rate", 32000))
+                _os_total = float(_os_audio["waveform"].shape[-1]) / float(_os_sr)
+                _os_dur = float(one_shot_clip_duration)
+                _os_target = max(1, int(math.ceil(_os_total / _os_dur)))
+                _os_cur = len(clips)
+                print(f"[H3 Extender] 🎵 一镜到底×歌曲: 歌曲 {_os_total:.1f}s ÷ 每段 {_os_dur:.0f}s "
+                      f"→ 自动目标 CLIP 数 {_os_target} (原 {_os_cur})")
+                if _os_cur != _os_target:
+                    # 提示词模板: 第一个含提示词的 CLIP; 无则用内置一镜到底跟随模板
+                    _os_tpl = None
+                    for _c in clips:
+                        if str(_c.get("prompt") or "").strip():
+                            _os_tpl = dict(_c)
+                            break
+                    _os_tpl_prompt = ""
+                    _os_tpl_name = ""
+                    if _os_tpl is not None:
+                        _os_tpl_prompt = str(_os_tpl.get("prompt") or "")
+                        _os_tpl_name = str(_os_tpl.get("name") or "")
+                    else:
+                        _os_tpl_prompt = (
+                            "镜头持续跟随主体运动，不切场、不转场、一镜到底，"
+                            "主体在画面中连续完成动作，空间与时间连续，"
+                            "音乐情绪与画面节奏同步。"
+                        )
+                    # 每段时长: 前 target-1 段 = 目标时长, 最后一段 = 歌曲剩余
+                    _os_seg_dur = [_os_dur] * _os_target
+                    _os_last = _os_total - _os_dur * (_os_target - 1)
+                    if _os_last > 0.5:
+                        _os_seg_dur[-1] = _os_last
+                    _new_clips = []
+                    for _i in range(_os_target):
+                        if _i < _os_cur:
+                            _nc = dict(clips[_i])
+                        else:
+                            _nc = dict(_default_clip(_i))
+                            if _os_tpl is not None:
+                                for _k in ("prompt", "name"):
+                                    if _k in _os_tpl:
+                                        _nc[_k] = _os_tpl[_k]
+                            _nc["prompt"] = _os_tpl_prompt
+                            _nc["name"] = (f"{_os_tpl_name}_{_i + 1}" if _os_tpl_name else f"CLIP{_i + 1}")
+                        _nc["duration"] = float(_os_seg_dur[_i])
+                        _nc["context_enabled"] = True
+                        _new_clips.append(_nc)
+                    clips = _new_clips
+                    print(f"[H3 Extender] 一镜到底×歌曲: 已自动设置 {len(clips)} 个 CLIP, "
+                          f"每段时长 {[round(float(c.get('duration', 0)), 1) for c in clips]}")
+                else:
+                    print(f"[H3 Extender] 一镜到底×歌曲: CLIP 数量已与歌曲匹配, 保持 {_os_cur} 个")
+            except Exception as _os_err:
+                print(f"[H3 Extender] 一镜到底×歌曲自动分CLIP失败(保持手动CLIP数): {_os_err}")
         # CLIP 自定义选择生成：None=全部；set=指定渲染范围。
         # 单选（如 2）语义：从该 CLIP 起连续渲染到结束（自动依次生成后续 CLIP），
         # 除非用户手动暂停或手动选择「合并输出」，才执行合并。多选/范围保留原「仅渲染指定段」语义。
@@ -6097,6 +6335,25 @@ class BSAIH3FilmFactory:
         resolved_width = int(resolution["width"])
         resolved_height = int(resolution["height"])
 
+        # v14.157: 声明的最终输出尺寸必须尽早落盘。
+        # 逐段 MP4 解码靠 manifest 里的 output_width/height 才会把"二采被
+        # 显存预算降级"的段重采样回声明像素；旧实现只在本函数收尾前写这两个
+        # 键，续跑/恢复出来的链常常拿不到，于是成片停在 1440x800 而不是
+        # 声明的 1920x1088（人脸直接糊掉）。这里在渲染开始前就写一次。
+        try:
+            _decl_out_f = max(1.0, float(refine_upscale_factor)) if bool(refine_enable) else 1.0
+            manifest["first_pass_width"] = int(resolved_width)
+            manifest["first_pass_height"] = int(resolved_height)
+            manifest["declared_refine_factor"] = float(_decl_out_f)
+            manifest["output_width"] = int(round(float(resolved_width) * _decl_out_f))
+            manifest["output_height"] = int(round(float(resolved_height) * _decl_out_f))
+            _write_json_atomic(manifest_path, manifest)
+            print(f"[H3 Extender] v14.157 声明输出尺寸: 一采 {resolved_width}x{resolved_height} "
+                  f"× 二采 x{_decl_out_f:.1f} -> "
+                  f"{manifest['output_width']}x{manifest['output_height']}")
+        except Exception as _dow:
+            print(f"[H3 Extender] v14.157 声明输出尺寸写入失败(可忽略): {_dow}")
+
         # v1.98: 渲染前分辨率诊断——断点被清时先看这里, 一眼定位清空原因
         _diag_geom = manifest.get("geometry")
         _diag_cache = cache_resolution or {}
@@ -6122,10 +6379,26 @@ class BSAIH3FilmFactory:
         _cg_geom = manifest.get("geometry") if isinstance(manifest, dict) else None
         _cg_lw = int(_cg_geom.get("video_w", 0)) if isinstance(_cg_geom, dict) else 0
         _cg_lh = int(_cg_geom.get("video_h", 0)) if isinstance(_cg_geom, dict) else 0
+        # v14.156: 显存预算不足时二采倍率会被静默降级 x2.0 -> x1.5（见 v1.74
+        # 预算预检），此时链几何固定为 1.5x。若仍按声明 2.0 比较，每次执行都会
+        # 误判"分辨率变化"而清链，用户被迫从 clip1 重跑。这里对唯一一种预算
+        # 降级组合（声明 2.0 / 实际 1.5）做精确放行；像素尺寸由解码时的
+        # output_width/height 重采样兜底，因此成片尺寸不受影响。
+        _cg_implied = (float(_cg_lw) / float(_req_lw)) if _req_lw else 0.0
+        _budget_degraded = bool(
+            abs(_rfu - 2.0) <= 0.01
+            and abs(_cg_implied - 1.5) <= 0.02
+            and _req_lh > 0
+            and abs(float(_cg_lh) / float(_req_lh) - _cg_implied) <= 0.02
+        )
+        if _budget_degraded:
+            print(f"[H3 Extender] v14.156 链几何匹配显存预算降级结果（声明 x{_rfu:.2f} / "
+                  f"实际 x{_cg_implied:.2f}），保留缓存继续续跑；成片将重采样到声明尺寸")
         requested_mismatch = bool(
             cache_has_segments
             and _cg_lw > 0
             and _cg_lh > 0
+            and not _budget_degraded
             and (
                 int(_cg_lw) != int(round(_req_lw * _rfu))
                 or int(_cg_lh) != int(round(_req_lh * _rfu))
@@ -6226,6 +6499,16 @@ class BSAIH3FilmFactory:
         manifest["extender_ref_ids"] = [
             ref.get("id") if isinstance(ref, dict) else None for ref in refs
         ]
+        # v14.156: 记录工作流声明的最终输出尺寸（一采像素 × 声明二采倍率）。
+        # 二采倍率可能被显存预算静默降级（x2.0 -> x1.5），解码时按此尺寸精确
+        # 重采样，保证 per-clip 与 merged 成片像素与工作流声明一致。
+        try:
+            _decl_f = max(1.0, float(refine_upscale_factor)) if bool(refine_enable) else 1.0
+            manifest["output_width"] = int(round(float(resolved_width) * _decl_f))
+            manifest["output_height"] = int(round(float(resolved_height) * _decl_f))
+            manifest["declared_refine_factor"] = float(_decl_f)
+        except Exception:
+            pass
         manifest["updated_at"] = time.time()
         _write_json_atomic(manifest_path, manifest)
 
@@ -6252,8 +6535,16 @@ class BSAIH3FilmFactory:
         # 每段驱动对应 CLIP 的对口型生成。
         lip_audio_segments = None
         if lip_audio is not None:
-            lip_audio_segments = _split_lip_audio_by_clips(lip_audio, clips, fps=float(FPS))
-            print(f"[H3 LipSync] ✅ 已启用对口型模式，{len(lip_audio_segments)} 段音频已就绪")
+            # v14.157: 传入 context_length 帧数 — ctx_on 段按净时长(标称-context)
+            # 推进切分, 否则每个段间边界原曲被跳过 context/fps 秒(39帧=1.625s)。
+            try:
+                _ctx_frames = int(str(context_length))
+            except (TypeError, ValueError):
+                _ctx_frames = 0
+            lip_audio_segments = _split_lip_audio_by_clips(
+                lip_audio, clips, fps=float(FPS), context_frames=_ctx_frames)
+            print(f"[H3 LipSync] ✅ 已启用对口型模式，{len(lip_audio_segments)} 段音频已就绪 "
+                  f"(context={_ctx_frames}帧, ctx_on 段按净时长推进)")
             # ── 声音参考共存模式（v2.121）──
             # lip_audio 注入 AV latent 锁定口型；ref_audio 保留为音色/风格参考（ref_block）。
             # 两者各司其职：lip_audio 驱动嘴型，ref_audio 告诉模型"这个人的声音应该什么样"。
@@ -6351,10 +6642,25 @@ class BSAIH3FilmFactory:
             # decoded_mp4_blob 缺失——合并输出前对缺失段自动补解码，保证 merged 可产出。
             if final_manifest is not None:
                 try:
+                    _tgt_w = int(final_manifest.get("output_width", 0) or 0)
+                    _tgt_h = int(final_manifest.get("output_height", 0) or 0)
                     _segs = [dict(x) for x in final_manifest.get("segments", [])]
                     for _si, _seg in enumerate(_segs):
-                        if _seg.get("decoded_mp4_blob") is None and int(_seg.get("frames", 0)) > 0:
-                            print(f"[H3 Extender] merge_output: 补解码 segment {_si}（单独生成未产 blob）")
+                        if int(_seg.get("frames", 0)) <= 0:
+                            continue
+                        _need_dec = _seg.get("decoded_mp4_blob") is None
+                        _why = "单独生成未产 blob"
+                        if (not _need_dec and _tgt_w > 0 and _tgt_h > 0
+                                and (int(_seg.get("decoded_mp4_width", 0) or 0) != _tgt_w
+                                     or int(_seg.get("decoded_mp4_height", 0) or 0) != _tgt_h)):
+                            # v14.156: 旧 blob 是二采降级后的像素（如 1440x800），
+                            # 与新段的声明尺寸不一致会导致 concat 失败；解码入口
+                            # 会用 ffmpeg 重采样到声明尺寸并保留原音轨。
+                            _need_dec = True
+                            _why = (f"尺寸 {_seg.get('decoded_mp4_width', '?')}x"
+                                    f"{_seg.get('decoded_mp4_height', '?')} -> {_tgt_w}x{_tgt_h}")
+                        if _need_dec:
+                            print(f"[H3 Extender] merge_output: 校正 segment {_si}（{_why}）")
                             _decode_single_clip_preview(owner, _si, vae, audio_vae, float(FPS), _find_ffmpeg())
                     final_manifest = _load_manifest_from_paths(data_path, manifest_path) or final_manifest
                 except Exception as _me:
@@ -6424,11 +6730,44 @@ class BSAIH3FilmFactory:
                         if len(clip_paths) == 1:
                             shutil.copy2(clip_paths[0], merged_path)
                         elif ff:
-                            cmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(merged_path)]
-                            try:
-                                subprocess.run(cmd, check=True, capture_output=True, timeout=120)
-                            except Exception as _e:
-                                print(f"[H3 Extender] ffmpeg merge failed: {_e}")
+                            # v14.158: 一镜到底旁支模式 —— 无缝 concat（零转场）。
+                            # 段间连续性由 motion context（Add Guide 等效锚点）保证,
+                            # 不再叠加 xfade 转场, 接缝处肉眼不可见。
+                            if one_shot_enabled:
+                                _xcmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                                         "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(merged_path)]
+                                try:
+                                    subprocess.run(_xcmd, check=True, capture_output=True, timeout=600)
+                                    print(f"[H3 Extender] saved merged video (一镜到底无缝 concat, {len(clip_paths)} clips): {merged_path}")
+                                except Exception as _e:
+                                    print(f"[H3 Extender] 一镜到底 seamless concat failed: {_e}")
+                            else:
+                                # v2.0: 链式 xfade 视频渐变 + acrossfade 音频渐变, N段通用
+                                _xcmd, _durs = _ff_build_xfade_merge_cmd(ff, clip_paths, merged_path)
+                                if _xcmd is not None:
+                                    try:
+                                        subprocess.run(_xcmd, check=True, capture_output=True, timeout=600)
+                                        print(f"[H3 Extender] saved merged video (xfade chain, {len(clip_paths)} clips): {merged_path}")
+                                    except Exception as _e:
+                                        print(f"[H3 Extender] xfade chain failed, fallback re-encode concat: {_e}")
+                                        _xcmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                                                 "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                                                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(merged_path)]
+                                        try:
+                                            subprocess.run(_xcmd, check=True, capture_output=True, timeout=600)
+                                        except Exception as _e2:
+                                            print(f"[H3 Extender] re-encode concat also failed: {_e2}")
+                                else:
+                                    # clips too short for xfade → re-encode concat with audio
+                                    _xcmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                                             "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                                             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(merged_path)]
+                                    try:
+                                        subprocess.run(_xcmd, check=True, capture_output=True, timeout=600)
+                                        print(f"[H3 Extender] saved merged video (re-encode concat): {merged_path}")
+                                    except Exception as _e:
+                                        print(f"[H3 Extender] ffmpeg merge failed: {_e}")
 
                         # v14.83 全片合并后一次性超分（默认关）
                         if upscale_final:
@@ -6677,6 +7016,17 @@ class BSAIH3FilmFactory:
         paused_break = False  # v1.13: 用户暂停/停止后禁止自动合并
         _pending_enc = []  # v1.70: async encode 队列 [(done_event, 链内索引, 全局clip索引)]
 
+        # v14.158: 一镜到底旁支模式 —— 强制开启每段 motion context。
+        # 电影工厂的 motion context 把上一段 latent 尾部(默认2s)注入本段 conditioning,
+        # 等效 B站工作流中官方 Add Guide 节点"把上一段最后一秒作为锚点引导生成"。
+        # 一镜到底必须链式衔接，因此无视卡片级 context_enabled 手动关闭，强制为 True。
+        if one_shot_enabled:
+            _os_forced = [i + 1 for i, _c in enumerate(clips) if not _c.get("context_enabled", True)]
+            for _c in clips:
+                _c["context_enabled"] = True
+            if _os_forced:
+                print(f"[H3 Extender] 一镜到底: 强制开启 {len(_os_forced)} 个 CLIP 的段间 motion context (Add Guide 等效): CLIP {','.join(str(x) for x in _os_forced)}")
+
         # v2.68 fix: 异步预览队列消费提前——encode 完成后立即推送预览/落盘，
         # 不再等下一个 CLIP 渲染完。原逻辑只在每个 CLIP 渲染完成的循环体末尾消费一次；
         # NVENC 编码(约2s)完成时主线程已进入下一 CLIP 渲染，消费被推迟整整一个
@@ -6860,6 +7210,23 @@ class BSAIH3FilmFactory:
                 )
                 if "<Audio 1>" not in effective_prompt:
                     effective_prompt = effective_prompt + _audio_tag
+            # v14.158: 一镜到底旁支模式 —— 提示词注入。
+            # 参考 B站《MinimaxH3 长视频一镜到底工作流》: 提示词写"不切场、
+            # 不转场、一镜到底、镜头始终跟随主体运动"。用户已写相关关键词则跳过,
+            # 避免与用户自撰镜头指令冲突。
+            if one_shot_enabled:
+                _os_lower = str(effective_prompt).lower()
+                _os_hit = ("一镜到底" in str(effective_prompt)
+                           or "one shot" in _os_lower
+                           or "不切场" in str(effective_prompt)
+                           or "不转场" in str(effective_prompt))
+                if not _os_hit:
+                    effective_prompt = str(effective_prompt) + (
+                        "\n[一镜到底] 本段为连续不间断长镜头的延续：绝不切场、绝不转场、"
+                        "绝不剪辑、无任何镜头切换。摄影机持续跟随主体运动，保持空间方位"
+                        "与时间连续，上一段末帧的动作与视线无缝衔接，整条成片如同一次拍完。"
+                    )
+                    print(f"[H3 Extender] 一镜到底 clip[{i}]: 已注入一镜到底镜头指令(不切场/不转场/镜头跟随)")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
@@ -7386,72 +7753,51 @@ class BSAIH3FilmFactory:
                     if len(clip_paths) == 1:
                         shutil.copy2(clip_paths[0], merged_path)
                     elif ff:
-                        # v2.0: 用 xfade crossfade 替代硬切拼接, 消除段间明暗跳变
-                        def _get_duration(path):
-                            try:
-                                r = subprocess.run(
-                                    [ff, "-i", str(path), "-f", "null", "-"],
-                                    capture_output=True, text=True, timeout=30)
-                                import re
-                                m = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", r.stderr)
-                                if m:
-                                    return int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
-                            except Exception:
-                                pass
-                            return 0.0
-
-                        durations = [_get_duration(cp) for cp in clip_paths]
-                        crossfade_dur = 0.5  # 0.5秒渐变过渡
-
-                        if len(clip_paths) == 2 and all(d > crossfade_dur*2 for d in durations):
-                            # 两 clips: xfade 视频渐变 + acrossfade 音频渐变
-                            offset = max(0.1, durations[0] - crossfade_dur)
-                            afade_dur = 0.3  # 音频渐变短一些, 保持音乐连贯
-                            merge_cmd = [
-                                ff, "-y",
-                                "-i", str(clip_paths[0]),
-                                "-i", str(clip_paths[1]),
-                                "-filter_complex",
-                                f"[0:v][1:v]xfade=transition=fade:duration={crossfade_dur}:offset={offset:.2f}[v];"
-                                f"[0:a][1:a]acrossfade=d={afade_dur}:c1=tri:c2=tri[a]",
-                                "-map", "[v]",
-                                "-map", "[a]",
-                                "-c:v", "libx264", "-preset", "fast", "-crf", "17",
-                                "-pix_fmt", "yuv420p",
-                                "-c:a", "aac", "-b:a", "192k",
-                                str(merged_path),
-                            ]
-                        else:
-                            # 多 clips: re-encode concat (音频视频都重编码, 时间戳干净无跳变)
-                            merge_cmd = [
-                                ff, "-y", "-f", "concat", "-safe", "0",
-                                "-i", str(concat_list),
-                                "-c:v", "libx264", "-preset", "fast", "-crf", "17",
-                                "-pix_fmt", "yuv420p",
-                                "-c:a", "aac", "-b:a", "192k",
-                                str(merged_path),
-                            ]
+                        # v14.158: 一镜到底旁支模式 —— 无缝 concat（零转场）。
+                        # 段间连续性由 motion context（Add Guide 等效锚点）保证,
+                        # 不再叠加 xfade 转场。
                         merge_log = temp_root / f"_merge_{owner}_{uuid.uuid4().hex[:8]}.log"
-                        try:
-                            with open(merge_log, "wb") as lf:
-                                subprocess.run(merge_cmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
-                            print(f"[H3 Extender] saved merged video (crossfade): {merged_path}")
-                        except Exception as _e:
-                            print(f"[H3 Extender] xfade failed, fallback to concat: {_e}")
-                            merge_cmd = [
-                                ff, "-y", "-f", "concat", "-safe", "0",
-                                "-i", str(concat_list),
-                                "-c:v", "libx264", "-preset", "fast", "-crf", "17",
-                                "-pix_fmt", "yuv420p",
-                                "-c:a", "aac", "-b:a", "192k",
-                                str(merged_path),
-                            ]
+                        if one_shot_enabled:
+                            _xcmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                                     "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(merged_path)]
                             try:
                                 with open(merge_log, "wb") as lf:
-                                    subprocess.run(merge_cmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
-                                print(f"[H3 Extender] saved merged video (re-encoded concat): {merged_path}")
-                            except Exception as _e2:
-                                print(f"[H3 Extender] merged re-encode also failed: {_e2}")
+                                    subprocess.run(_xcmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
+                                print(f"[H3 Extender] saved merged video (一镜到底无缝 concat, {len(clip_paths)} clips): {merged_path}")
+                            except Exception as _e:
+                                print(f"[H3 Extender] 一镜到底 seamless concat failed: {_e}")
+                        else:
+                            # v2.0: 链式 xfade 视频渐变 + acrossfade 音频渐变, N段通用
+                            _xcmd, _durs = _ff_build_xfade_merge_cmd(ff, clip_paths, merged_path)
+                            merge_log = temp_root / f"_merge_{owner}_{uuid.uuid4().hex[:8]}.log"
+                            if _xcmd is not None:
+                                try:
+                                    with open(merge_log, "wb") as lf:
+                                        subprocess.run(_xcmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
+                                    print(f"[H3 Extender] saved merged video (xfade chain, {len(clip_paths)} clips): {merged_path}")
+                                except Exception as _e:
+                                    print(f"[H3 Extender] xfade chain failed, fallback concat: {_e}")
+                                    _xcmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                                             "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                                             "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(merged_path)]
+                                    try:
+                                        with open(merge_log, "wb") as lf:
+                                            subprocess.run(_xcmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
+                                        print(f"[H3 Extender] saved merged video (re-encoded concat): {merged_path}")
+                                    except Exception as _e2:
+                                        print(f"[H3 Extender] merged re-encode also failed: {_e2}")
+                            else:
+                                # clips too short for xfade → re-encode concat
+                                _xcmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                                         "-c:v", "libx264", "-preset", "fast", "-crf", "17",
+                                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(merged_path)]
+                                try:
+                                    with open(merge_log, "wb") as lf:
+                                        subprocess.run(_xcmd, stdout=subprocess.DEVNULL, stderr=lf, check=True)
+                                    print(f"[H3 Extender] saved merged video (re-encoded concat): {merged_path}")
+                                except Exception as _e:
+                                    print(f"[H3 Extender] merged failed: {_e}")
                     else:
                         shutil.copy2(clip_paths[0], merged_path)
 

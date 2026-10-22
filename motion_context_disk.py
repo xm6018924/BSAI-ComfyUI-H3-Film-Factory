@@ -2357,6 +2357,107 @@ def _mp_has_ck_quant_weights(model):
     return False
 
 
+def _rescale_segment_blob(owner_id, clip_index, target_w, target_h, fps, ffmpeg=None):
+    """v14.156: 把已缓存的 decoded MP4 blob 精确重采样到工作流声明的输出尺寸。
+
+    显存预算不足时二采倍率会被静默降级（x2.0 -> x1.5），旧 blob 的像素因此
+    小于声明尺寸。这里用 ffmpeg 重编码视频轨（GOP=48，与预览编码一致）并直接
+    copy 音频轨：既避免逐段 VAE 重解码（慢），也不会丢失对口型模式的歌曲混音。
+    数据文件是 append-only 布局（每段 latent -> blob -> decoded_audio），因此新
+    blob 一律追加到文件末尾并更新偏移，绝不 truncate，避免删除后续段的 latent
+    （也避免删掉此前追加的 blob）。
+    """
+    data_path, manifest_path = _chain_paths(f"extender_{_safe_name(str(owner_id))}")
+    manifest = _load_manifest_from_paths(data_path, manifest_path)
+    if manifest is None:
+        return None
+    segments = [dict(x) for x in manifest.get("segments", [])]
+    i = int(clip_index)
+    if i < 0 or i >= len(segments):
+        return None
+    curr = segments[i]
+    blob = curr.get("decoded_mp4_blob")
+    if blob is None:
+        return None
+    target_w = int(target_w)
+    target_h = int(target_h)
+    if target_w <= 0 or target_h <= 0:
+        return None
+    if (int(curr.get("decoded_mp4_width", 0) or 0) == target_w
+            and int(curr.get("decoded_mp4_height", 0) or 0) == target_h):
+        return curr
+    if ffmpeg is None:
+        try:
+            ffmpeg = _find_ffmpeg()
+        except Exception:
+            ffmpeg = None
+    if ffmpeg is None:
+        return None
+
+    root = _ensure_cache_root()
+    token = f"clipscale_{_safe_name(str(owner_id))}_{i}_{uuid.uuid4().hex[:8]}"
+    src = root / f"_{token}_in.mp4"
+    dst = root / f"_{token}_out.mp4"
+    log_path = root / f"_{token}.log"
+    try:
+        _copy_blob_to_file(data_path, blob, src)
+        enc = _h264_enc_args(ffmpeg, "veryfast", 15)
+        cmd = [
+            ffmpeg, "-y",
+            "-i", str(src),
+            "-vf", f"scale={target_w}:{target_h}:flags=lanczos,setsar=1",
+            "-r", f"{float(fps):.9f}",
+            "-c:a", "copy",
+            *enc,
+            "-movflags", "+faststart",
+            str(dst),
+        ]
+        with open(log_path, "wb") as log_f:
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=log_f,
+                           check=True, timeout=900)
+        if not dst.exists() or dst.stat().st_size <= 0:
+            raise RuntimeError("rescaled mp4 is empty")
+        print(f"[H3 Extender] 输出尺寸校正 clip={i + 1}: "
+              f"-> {target_w}x{target_h} (保留原音轨)")
+
+        is_tail = (i == len(segments) - 1)
+        latent_end = int(curr.get("latent_end", _latent_payload_end(curr)))
+        # v14.156: 只追加、不截断。数据文件是 append-only 布局，非尾段 truncate
+        # 会删除后续段的 latent；而任何一次追加之后，尾段的 truncate 也会删掉
+        # 这些新 blob。新增 latent 时 EOF 恰好等于 latent_end，追加与重写等价。
+        with open(data_path, "ab", buffering=0) as f:
+            f.seek(0, 2)
+            render_spec = _write_blob_raw(f, dst)
+            if is_tail:
+                curr["segment_end"] = int(f.tell())
+            f.flush()
+            os.fsync(f.fileno())
+
+        curr["latent_end"] = latent_end
+        curr["decoded_mp4_blob"] = render_spec
+        curr["decoded_mp4_version"] = 3
+        curr["decoded_mp4_width"] = target_w
+        curr["decoded_mp4_height"] = target_h
+        segments[i] = curr
+
+        updated = dict(manifest)
+        updated["segments"] = segments
+        updated["build"] = BUILD
+        updated["updated_at"] = time.time()
+        _write_json_atomic(manifest_path, updated)
+        return curr
+    except Exception as _e:
+        print(f"[H3 Extender] 输出尺寸校正 clip={i + 1} 失败: {_e}")
+        return None
+    finally:
+        for _p in (src, dst, log_path):
+            try:
+                if _p.exists():
+                    _p.unlink()
+            except Exception:
+                pass
+
+
 def _decode_single_clip_to_blob(
     owner_id,
     clip_index,
@@ -2390,6 +2491,27 @@ def _decode_single_clip_to_blob(
         return None
     curr = segments[i]
 
+    # v14.156: 工作流声明的最终输出尺寸（一采像素 × 声明二采倍率）。显存预算
+    # 不足时二采倍率会被静默降级（x2.0 -> x1.5），latent/解码像素随之变小；
+    # 这里记下目标尺寸，解码后精确重采样，保证成片始终是声明尺寸。
+    _tgt_w = int(manifest.get("output_width", 0) or 0)
+    _tgt_h = int(manifest.get("output_height", 0) or 0)
+    # v14.157: 旧链 / 续跑恢复的链可能没有 output_width/height —— 用
+    # 一采尺寸 × 声明二采倍率补算，避免被显存预算降级过的段以 1440x800
+    # 直接混进成片（声明是 1920x1088）。
+    if _tgt_w <= 0 or _tgt_h <= 0:
+        try:
+            _f_dec = float(manifest.get("declared_refine_factor", 0) or 0)
+            _fpw = int(manifest.get("first_pass_width", 0) or 0)
+            _fph = int(manifest.get("first_pass_height", 0) or 0)
+            if _f_dec > 1.0 and _fpw > 0 and _fph > 0:
+                _tgt_w = int(round(float(_fpw) * _f_dec))
+                _tgt_h = int(round(float(_fph) * _f_dec))
+                print(f"[H3 Extender] v14.157 补算声明输出尺寸: "
+                      f"{_fpw}x{_fph} × x{_f_dec:.1f} -> {_tgt_w}x{_tgt_h}")
+        except Exception:
+            pass
+
     # If already decoded with the current version, skip.
     # v2 = trimmed overlap + audio included.  Old blobs (no version marker)
     # contained full frames (with overlap) and no audio, so we must rebuild.
@@ -2397,7 +2519,15 @@ def _decode_single_clip_to_blob(
     # 预览/成片尾部无 IDR 关键帧而雪花；升版后旧 blob 全部失效、按 GOP=48(2s)
     # 重新编码，预览/渐进全片/最终成片尾部均可独立解码。
     if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 3:
-        return curr
+        _cur_w = int(curr.get("decoded_mp4_width", 0) or 0)
+        _cur_h = int(curr.get("decoded_mp4_height", 0) or 0)
+        if _tgt_w <= 0 or _tgt_h <= 0 or (_cur_w == _tgt_w and _cur_h == _tgt_h):
+            return curr
+        # 已有 blob 像素与声明尺寸不符：优先 ffmpeg 重采样（保留原音轨/歌曲混音），
+        # 不改动 latent 链，避免逐段 VAE 重解码。失败才继续走完整重解码。
+        _scaled = _rescale_segment_blob(owner_id, i, _tgt_w, _tgt_h, fps, ffmpeg)
+        if _scaled is not None:
+            return _scaled
 
     print(f"[H3 Extender] _decode_single_clip_to_blob: clip={i} data_path={data_path} ffmpeg={ffmpeg}")
     import time as _t66
@@ -2565,11 +2695,29 @@ def _decode_single_clip_to_blob(
     # 每批峰值 <= _BS 帧 float32(= _BS*H*W*3*4B) + _BS 帧 uint8, 16帧约 0.6GB。
     _BS = 16
     _vid = video.detach()
+    # v14.156: 二采倍率被显存预算降级时，解码像素小于声明最终尺寸；逐批
+    # bicubic(antialias) 重采样到 output_width/height，失败回退 bilinear。
+    _need_scale = bool(
+        _tgt_w > 0 and _tgt_h > 0
+        and (int(_vid.shape[2]) != _tgt_w or int(_vid.shape[1]) != _tgt_h)
+    )
+    if _need_scale:
+        print(f"[H3 Extender]   输出重采样: {int(_vid.shape[2])}x{int(_vid.shape[1])} "
+              f"-> {_tgt_w}x{_tgt_h} (bicubic, antialias)")
     _parts = []
     for _s in range(0, int(_vid.shape[0]), _BS):
+        _chunk = _vid[_s:_s + _BS].float().clamp(0.0, 1.0)
+        if _need_scale:
+            _ct = _chunk.permute(0, 3, 1, 2)
+            try:
+                _ct = torch.nn.functional.interpolate(
+                    _ct, size=(_tgt_h, _tgt_w), mode="bicubic", antialias=True)
+            except Exception:
+                _ct = torch.nn.functional.interpolate(
+                    _ct, size=(_tgt_h, _tgt_w), mode="bilinear", antialias=True)
+            _chunk = _ct.permute(0, 2, 3, 1)
         _parts.append(
-            _vid[_s:_s + _BS].float().clamp(0.0, 1.0).mul(255.0).add_(0.5)
-            .to(torch.uint8).cpu()
+            _chunk.mul(255.0).add_(0.5).to(torch.uint8).cpu()
         )
     video_cpu = torch.cat(_parts, dim=0).contiguous()
     del _parts, _vid
@@ -2684,11 +2832,14 @@ def _decode_single_clip_to_blob(
         _t66_mark("MP4 encode")
 
         # Read encoded MP4 and store as blob in the cache file
+        # v14.156: 只追加、不截断。数据文件是 append-only 布局（每段 latent ->
+        # blob -> decoded_audio），非尾段 truncate 会删除后续段的 latent；
+        # 且任何追加之后，尾段 truncate 也会删掉这些新 blob。新段写入时
+        # EOF 恰好等于 latent_end，追加与重写完全等价。
         latent_end = int(curr.get("latent_end", _latent_payload_end(curr)))
-        with open(data_path, "r+b", buffering=0) as f:
+        _is_tail = (i == len(segments) - 1)
+        with open(data_path, "ab", buffering=0) as f:
             f.seek(0, 2)
-            f.truncate(latent_end)
-            f.seek(latent_end)
             render_spec = _write_blob_raw(f, temp_mp4)
             audio_spec = _write_tensor_raw(f, audio["waveform"])
             segment_end = int(f.tell())
@@ -2705,13 +2856,16 @@ def _decode_single_clip_to_blob(
         curr["latent_end"] = latent_end
         curr["decoded_mp4_blob"] = render_spec
         curr["decoded_mp4_version"] = 3  # v14.141: v3 = GOP=48(2s IDR) 编码，旧 v2 雪花 blob 不再复用
+        curr["decoded_mp4_width"] = int(video_u8.shape[2])
+        curr["decoded_mp4_height"] = int(video_u8.shape[1])
         curr["decoded_mp4_has_audio"] = has_audio
         curr["decoded_audio"] = {
             "waveform": audio_spec,
             "sample_rate": int(audio["sample_rate"]),
             "timeline_gain": 1.0,
         }
-        curr["segment_end"] = segment_end
+        if _is_tail:
+            curr["segment_end"] = segment_end
         segments[i] = curr
 
         updated = dict(manifest)
