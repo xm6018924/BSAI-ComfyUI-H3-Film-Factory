@@ -2988,21 +2988,35 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] 一采前 DiT 驻留: resident={_res:.1f}GB / total={_tot:.1f}GB (offload ~{_tot-_res:.1f}GB)")
                 # v14.174 (2026-10-23): load_models_gpu 后 resident 无效回退.
                 # int8 H3 total≈20.6GB, 24GB 卡 reserve 4GB 可用 ~20GB —— 装不下
-                # 全量, load_models_gpu 静默返回 resident=0.0GB. 但它会干扰后续
-                # DynamicVRAM staged 按需加载的调度状态, 导致采样时每次 forward
-                # 都走全流式 CPU↔GPU 搬运 + workspace 临界 → step 0/4 直接 OOM
+                # 全量, load_models_gpu 静默返回 resident=0.0GB. 但它会往
+                # current_loaded_models 里插 LoadedModel 占位, 污染 DynamicVRAM
+                # staged 按需加载的调度状态, 导致采样时每次 forward 都走全流式
+                # CPU↔GPU 搬运 + workspace 临界 → step 0/4 直接 OOM
                 # (int8_linear 申请 int32 输出缓冲时爆掉).
                 # 修复: resident < 4GB 说明连核心 transformer 层都没驻留,
-                # 主动卸载回退到按需流式分支 (这条路在 free=12GB 时已验证过能跑通).
+                # 从 current_loaded_models 里摘掉 LoadedModel + soft_empty_cache,
+                # 让 DynamicVRAM 回到干净的 staged 状态, 下次 forward 会按需搬运.
+                # 注: ComfyUI 没有 unload_model() API (仅 unload_model_and_clones,
+                # 会连带 clone_base 一起卸 dynamic DiT, 不可用; free_memory 对
+                # for_dynamic 也是 no-op). 所以用手工摘除 LoadedModel + cache 清理.
                 if _res < 4.0:
                     try:
-                        _mm1.unload_model(model)
+                        from comfy.model_management import current_loaded_models as _r_clm
+                        _removed = 0
+                        for _ri in range(len(_r_clm) - 1, -1, -1):
+                            if getattr(_r_clm[_ri], "model", None) is model:
+                                _r_clm.pop(_ri)
+                                _removed += 1
+                        import gc as _gc174
+                        _gc174.collect()
+                        _mm1.soft_empty_cache(force=True)
                         _t1.cuda.synchronize()
                         _t1.cuda.empty_cache()
                         print(f"[H3 Extender] v14.174 驻留无效(resident={_res:.1f}GB<4GB), "
-                              f"卸载回退到按需流式 (total={_tot:.1f}GB > 可用{_free_os:.1f}GB-reserve)")
+                              f"摘除 LoadedModel(removed={_removed}), "
+                              f"回退 DynamicVRAM 按需流式 (total={_tot:.1f}GB > 可用{_free_os:.1f}GB-reserve)")
                     except Exception as _u174:
-                        print(f"[H3 Extender] v14.174 卸载失败(仍走按需流式): {_u174}")
+                        print(f"[H3 Extender] v14.174 摘除 LoadedModel 失败(回退按需流式): {_u174}")
             except Exception: pass
         else:
             print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
