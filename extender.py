@@ -653,7 +653,11 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
     #   - context_enabled=True  → 段头部含 overlap_samples 重叠(模型 latent 行需要)，
     #     同时把 overlap_samples 记进段 dict，解码混音时精确跳过 → 输出仍与原始对齐。
     #   - context_enabled=False → 纯净切分(零重叠)，输入/输出双侧都与原始音频对齐。
-    MOTION_CONTEXT_OVERLAP_SEC = 2.0  # v2.0: 1.2->2.0 更长上下文保持光照/色彩一致, 一镜到底无缝衔接
+    # v14.178 一镜到底全球方案落地 P0-4/P1-10: 删除 2s overlap 语义(旧: v2.0 1.2->2.0)。
+    # 2s 语音重叠在 19 段链上累积回声/口型提前错位, 且 join 时 PCM 硬切爆音。
+    # 现改 0 重叠 gap-free 切分: 音频时间轴与每段净渲染帧严格对齐; 音频连续性改由
+    # audio_context_length=24 帧的 audio latent 延续 + 接缝 15ms crossfade de-click 承担。
+    MOTION_CONTEXT_OVERLAP_SEC = 0.0
     overlap_samples = int(MOTION_CONTEXT_OVERLAP_SEC * sr)
 
     segments = []
@@ -5417,8 +5421,10 @@ class BSAIH3FilmFactory:
             "sampler_name": (sampler_names, {"default": default_sampler}),
             "scheduler": (scheduler_names, {"default": default_scheduler}),
             "denoise": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1.0, "step": 0.01}),
-            "context_length": (["22", "5", "39", "56"], {"default": "39"}),
-            "audio_context_length": ("INT", {"default": 0, "min": 0, "max": 240, "step": 1}),
+            # v14.178 一镜到底全球方案落地 P0-1: context 默认 39→22(官方 AddGuide 尾部
+            # 22 帧锚定), audio_context_length 默认 0→24(比视频多 2 帧对齐 40Hz 音频网格)。
+            "context_length": (["22", "5", "39", "56"], {"default": "22"}),
+            "audio_context_length": ("INT", {"default": 24, "min": 0, "max": 240, "step": 1}),
             "clips_json": (
                 "STRING",
                 {
@@ -5811,10 +5817,10 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift 双采 (默认)", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "FastH3 Omni 8步单采"],
+            ["Sol-H3 Self-Lift 双采 (默认)", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
-                "tooltip": "v14.172 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ③FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ④Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑤DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑥武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑦FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10)。",
+                "tooltip": "v14.172 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ③FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ④Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑤DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑥武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑦4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑧FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10)。",
             },
         )
 
@@ -6161,6 +6167,31 @@ class BSAIH3FilmFactory:
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
                     print(f"[H3 Extender] v14.176 武戏组合拳(渲染管道): 采样器强制 euler + simple 调度 (YZ终极篇武戏配方)")
+            elif _rp_mode == "4K直出 秘制酱料":
+                # v14.178 (2026-10-23): 对齐 B站《4K直出 MiniMax H3 秘制酱料工作流》
+                # (BV18Vnb6UEPv, 大凯AI/CottonByte/Yusu) —— Self-Lift 自提升渐进采样:
+                # 前期低分辨率阶段(一采 960x544 由 width/2 自动, 6 步)快定构图/轮廓/大幅运动;
+                # 选定时间点 RESOLUTION BOOST (refine_upscale_factor 2.0 升潜空间分辨率);
+                # 后期高分辨率阶段(二采 3 步)补纹理/精细细节。配 Turbo v4 step600 加速 LoRA +
+                # MysticXXX V4 去油光 LoRA, 输出经 DLSS5 像素超分直出 4K (修 H3 高光过曝/发灰)。
+                # 4090/24GB 若二采慢: refine_upscale_factor 降到 1.5 (1440x816) + DLSS 2.66x 仍 4K。
+                steps, refine_steps, tile_count, refine_denoise = 6, 3, 4, 0.45
+                shift_video, shift_audio = 12.0, 3.0
+                try:
+                    _rurf_raw = float(refine_upscale_factor or 2.0)
+                except (TypeError, ValueError):
+                    _rurf_raw = 2.0
+                if _rurf_raw < 2.0:
+                    print(f"[H3 Extender] v14.178 4K直出(渲染管道): refine_upscale_factor {_rurf_raw} 保持 (1.5 搭配 DLSS 2.66x 仍可达 4K)")
+                else:
+                    refine_upscale_factor = 2.0
+                    print(f"[H3 Extender] v14.178 4K直出(渲染管道): refine_upscale_factor -> 2.0 (自提升 boost)")
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print(f"[H3 Extender] v14.178 4K直出(渲染管道): 采样器强制 euler + simple (秘制酱料配方)")
+                print("[H3 Extender] 🎥 4K直出 秘制酱料模式: 一采 6 步低分辨率(自提升构图/形状/运动) → boost x2 → 二采 3 步细节。"
+                      "LoRA 建议: minimax_h3_turbo_v4_step600 (0.5~0.8) + MysticXXX_MMH3-V4 (0.3~0.5, 去油光/高光自然); "
+                      "输出走 DLSS5 像素超分(upscale_final + dlss5) 直出 4K。")
             elif _rp_mode == "FastH3 Omni 8步单采":
                 steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
                 if not omni_8step_mode:
@@ -7489,6 +7520,23 @@ class BSAIH3FilmFactory:
         for i, cfg in enumerate(clips[:loop_end]):
             # v2.68 fix: 渲染本 CLIP 之前先消费已完成的 async encode（预览实时推送）。
             _flush_pending_enc(paused_break)
+            # v14.178 一镜到底全球方案落地 P1-6: 链上采样纪律校验(首段打印一次)。
+            # 官方: 音频 ≥12 步才可用, 链上 base 20-25 步; FastH3 8 步 turbo 蒸馏
+            # 在链式衔接场景下会更快烧穿上下文一致性(诊断: 接缝 PSNR 18.95dB)。
+            # steps 由本节点 INPUT_TYPES 传入(工作流 sampler 侧也可覆写), 此处做
+            # 校验+显式警告, 不强制改写(避免破坏用户速度档选择, 如实记录为已知偏差)。
+            if one_shot_enabled and i == 0:
+                try:
+                    if int(steps) < 20:
+                        print(
+                            f"[H3 Extender] ⚠️ v14.178 一镜到底: 当前一采 steps={steps} < 20 "
+                            f"(官方链上建议 20-25; 音频 8 步最差/≥12 可用)。"
+                            f"steps 由工作流节点参数控制, 无法自动强制, 请手动将采样步数提到 ≥20 后重渲。"
+                        )
+                    else:
+                        print(f"[H3 Extender] ✅ v14.178 一镜到底: 一采 steps={steps} (≥20 达标)")
+                except Exception:
+                    pass
             # Clips with render_enabled=False are skipped entirely: they keep
             # their cached latent (if any) and are not re-rendered.  This lets
             # the user turn off generation for specific clips without removing
@@ -7659,12 +7707,28 @@ class BSAIH3FilmFactory:
                            or "不切场" in str(effective_prompt)
                            or "不转场" in str(effective_prompt))
                 if not _os_hit:
+                    # v14.178 一镜到底全球方案落地 P1-8: 旧版"绝不切场/不转场/镜头跟随"
+                    # 纯口号替换为结构化衔接模板 —— 段头微动作承接 + 段尾预埋下一动作 +
+                    # 跨段语音连续声明 + 切口标记 <scenetrans>/<cutoff>, 避免模型把"不切场"
+                    # 理解成静态画面。中英文双语模板。
                     effective_prompt = str(effective_prompt) + (
-                        "\n[一镜到底] 本段为连续不间断长镜头的延续：绝不切场、绝不转场、"
-                        "绝不剪辑、无任何镜头切换。摄影机持续跟随主体运动，保持空间方位"
-                        "与时间连续，上一段末帧的动作与视线无缝衔接，整条成片如同一次拍完。"
+                        "\n[One-Shot Continuous Take] "
+                        "This clip is a seamless continuation of the same unbroken long take: "
+                        "the camera space, lighting direction and subject position carry over "
+                        "from the previous clip's tail without any cut or transition. "
+                        "On entry: breath steadies, small motion resumes ("
+                        "footsteps continue, gaze adjusts, posture settles into the ongoing action). "
+                        "At the tail: the subject's pose pre-positions for the next beat of motion, "
+                        "so the next clip picks up mid-gesture. "
+                        "Voice continues uninterrupted across this boundary — no pause, no breath reset. "
+                        "<scenetrans> voice continues uninterrupted <scenetrans> <cutoff>"
+                        "\n[一镜到底] 本段为同一条不间断长镜头的延续：机位空间、光照方向与主体位置"
+                        "从上一段尾部无缝带入，无任何切场或转场。段头：呼吸渐稳、微小动作自然承接"
+                        "(脚步延续、视线微调、姿态汇入正在进行的动作)；段尾：姿态预先摆向下一动作，"
+                        "使下一段可从动作中途接上。语音跨此边界连续不断——无停顿、无换气重置。"
+                        "<scenetrans> voice continues uninterrupted <scenetrans> <cutoff>"
                     )
-                    print(f"[H3 Extender] 一镜到底 clip[{i}]: 已注入一镜到底镜头指令(不切场/不转场/镜头跟随)")
+                    print(f"[H3 Extender] 一镜到底 clip[{i}]: 已注入结构化衔接模板(段头承接+段尾预埋+<scenetrans>/<cutoff>)")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
@@ -7757,6 +7821,10 @@ class BSAIH3FilmFactory:
                         _audio_locked[..., :_t_target] = _lip_cut.to(_audio_t.device)
                         latent["samples"] = comfy.nested_tensor.NestedTensor((_video_t, _audio_locked))
                         # noise_mask: video=1(全去噪), audio=0(锁定不修改)
+                        # v14.178 一镜到底全球方案落地 P0-5: 已核对官方网格对齐 ——
+                        # 视频 mask 与 video latent 同形状(采样器内部按 2×2 latent patch
+                        # 上采样), 音频 mask 整 latent 帧 0=keep/1=regen; 现实现 audio 区
+                        # 全 0(锁原音)、video 区全 1, 与官方语义一致, 无需改形状。
                         _vmask = torch.ones_like(_video_t)
                         _amask = torch.zeros_like(_audio_locked)
                         latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_vmask, _amask))
@@ -7785,6 +7853,45 @@ class BSAIH3FilmFactory:
                     int(audio_context_length),
                 )
                 _applied_ctx = True
+                # v14.178 一镜到底全球方案落地 P0-3: 重叠区噪声延续(HR Endless
+                # video_continuation=22 语义)。官方 AddGuide 是 conditioning 语义(采样
+                # 仍从空 latent 起), 接缝区模型仍会"重新想象"(诊断: 接缝 PSNR 仅 18.95dB)。
+                # 这里在 latent/noise 构造路径把本段头部 overlap 帧直接取上一段尾 latent
+                # +10% 扰动, 并在 noise_mask 把视频头部锁 keep(0=不去噪), 使采样器不再
+                # 重画接缝区(该区最终被 join trim 裁掉)。与 P0-2 keyframes 注入双保险。
+                try:
+                    if one_shot_enabled and trim_frames:
+                        _n_head = max(1, (int(trim_frames) + 16) // 17)  # 帧→latent步(stride≈17)
+                        _prev_samples = previous_proxy.get("samples") if isinstance(previous_proxy, dict) else previous_proxy
+                        _tail_v = None
+                        if isinstance(_prev_samples, comfy.nested_tensor.NestedTensor):
+                            _tail_v = _prev_samples.tensors[0]
+                        elif isinstance(_prev_samples, (list, tuple)) and _prev_samples:
+                            _last = _prev_samples[-1]
+                            if isinstance(_last, dict) and isinstance(_last.get("samples"), comfy.nested_tensor.NestedTensor):
+                                _tail_v = _last["samples"].tensors[0]
+                        if _tail_v is not None:
+                            _smp = latent["samples"]
+                            if isinstance(_smp, comfy.nested_tensor.NestedTensor):
+                                _vv, _aa = _smp.tensors[0], _smp.tensors[1]
+                                _n_head = min(_n_head, _tail_v.shape[2], _vv.shape[2])
+                                if _n_head >= 1:
+                                    _vv2 = _vv.clone()
+                                    _src = _tail_v[:, :, -_n_head:].to(_vv2.device, dtype=_vv2.dtype)
+                                    _vv2[:, :, :_n_head] = _src * 0.9 + torch.randn_like(_src) * 0.1
+                                    latent["samples"] = comfy.nested_tensor.NestedTensor((_vv2, _aa))
+                                    _m_old = latent.get("noise_mask")
+                                    if isinstance(_m_old, comfy.nested_tensor.NestedTensor):
+                                        _mv, _ma = _m_old.tensors[0], _m_old.tensors[1]
+                                    else:
+                                        _mv, _ma = torch.ones_like(_vv2), torch.ones_like(_aa)
+                                    _mv = _mv.clone()
+                                    _mv[:, :, :_n_head] = 0.0  # 视频 overlap 区 keep(不去噪)
+                                    latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mv, _ma))
+                                    print(f"[H3 Extender] v14.178 一镜到底: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
+                                          f"噪声从上一段尾latent延续(+10%扰动), noise_mask锁keep")
+                except Exception as _seed_err:
+                    print(f"[H3 Extender] v14.178 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
                 if lip_audio is not None:
                     print(f"[H3 LipSync] clip[{i}] 对口型+上下文参考: 前段尾部已注入, 音频重叠区解码时自动跳过(与原始歌曲对齐)")
             elif i > 0 and cfg.get("context_enabled", True) and lip_audio is not None and previous_proxy is None:

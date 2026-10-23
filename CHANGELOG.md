@@ -112,6 +112,15 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 - 验证：py_compile PASS；备份 `extender.py.bak_wxcombat_pre_v14176` / Verified: py_compile PASS; backup `extender.py.bak_wxcombat_pre_v14176`
 - 生效：重启 ComfyUI 后生效 / To take effect: restart ComfyUI
 
+### v14.178 (2026-10-23) — 新增「4K直出 秘制酱料」渲染管道档（自提升渐进采样 + DLSS5 4K 直出）/ New render-pipeline preset "4K直出 秘制酱料" (Self-Lift progressive sampling + DLSS5 4K output)
+
+**参考：B站《4K直出 MiniMax H3 的视频生成秘制酱料工作流！H3 统一插件 + DLSS 5 超采样》(BV18Vnb6UEPv, 大凯AI / CottonByte / Yusu)。** / Reference: Bilibili "4K direct MiniMax H3 secret-sauce workflow" (BV18Vnb6UEPv, by 大凯AI / CottonByte / Yusu).**
+- **新增渲染管道档「4K直出 秘制酱料」**：一采 **6 步低分辨率**（width/2 自动 960x544，快定构图/轮廓/大幅运动）→ **RESOLUTION BOOST**（refine_upscale_factor 强制 2.0 升潜空间分辨率）→ 二采 **3 步高分辨率细节**；shift **12/3**（官方 v4）；euler+simple 强制；二采 denoise **0.45**（防高光过曝/重绘漂移）/ **New preset "4K直出 秘制酱料"**: first pass **6 steps at low res** (auto 960x544 via width/2, fast composition/shapes/motion) → **RESOLUTION BOOST** (refine_upscale_factor forced 2.0) → refine **3 steps** for high-res texture; shift **12/3**; euler+simple forced; refine denoise **0.45**
+- 若用户已手动把 refine_upscale_factor 降到 1.5（4090/24GB 提速）档位保留其值并提示搭配 DLSS 2.66x 仍达 4K / If user already set refine_upscale_factor 1.5 (4090/24GB speedup) the preset keeps it and hints DLSS 2.66x still reaches 4K
+- 配套（工作流层）：H3LoraStack 建议 **Turbo v4 step600（`minimax_h3_turbo_v4_step600_ema_DasiwaREF2VAHybridV1_0_curveproj1025_compat_v001.safetensors` @0.5~0.8，加速）＋ MysticXXX_MMH3-V4（@0.3~0.5，去油光/高光自然）**；输出启用 **upscale_final + DLSS5 引擎**（RH-DLSS5）放大到 4K；4090 建议 refine_upscale_factor 1.5 + DLSS 2.66x / Companion (workflow layer): H3LoraStack with **Turbo v4 step600 (speed) + MysticXXX_MMH3-V4 (de-oil)**; enable **upscale_final + DLSS5 engine** for 4K; 4090 tip: 1.5x boost + DLSS 2.66x
+- 验证：py_compile PASS；备份 `extender.py.bak_4kdirect_pre_v14178` / Verified: py_compile PASS; backup `extender.py.bak_4kdirect_pre_v14178`
+- 生效：重启 ComfyUI 后生效（下拉选「4K直出 秘制酱料」）/ To take effect: restart ComfyUI and pick "4K直出 秘制酱料" in the render-pipeline dropdown
+
 ### v3.4.12 武戏搭档版工作流（2026-10-23）— 武戏组合拳 7 LoRA 双栈 + LMS upscaler / 武戏搭档 workflow: 7-LoRA dual-stack + LMS upscaler
 
 **配套 `BSAI_H3_Film_Factory电影工厂-MV对口型一镜到底版-武戏搭档-5090.json`（example_workflows/）：** / Companion workflow shipped in example_workflows/:

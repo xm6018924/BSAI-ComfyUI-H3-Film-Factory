@@ -1262,7 +1262,7 @@ const BSAI_BILINGUAL_LABELS = {
     "refine_mem_mode": "二采省显存模式（spatial分块兼容 / global全上下文省显存）",
     "one_shot_mode": "一镜到底模式（off分镜剪辑 / on无缝长镜头：注入不切场+强制motion context+零转场拼接）",
     "one_shot_clip_duration": "一镜到底每段目标秒数（0关闭自动分CLIP；连歌曲后自动CLIP数=歌曲时长÷本值）",
-    "render_pipeline": "渲染管道（Sol-H3 Self-Lift双采默认 / FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / FastH3 Omni 8步单采：配方档统一在此选择，Omni需Loader换fasth3_omniref_8step_pruned_int8_convrot+VSA节点）",
+    "render_pipeline": "渲染管道（Sol-H3 Self-Lift双采默认 / FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / 4K直出 秘制酱料 / FastH3 Omni 8步单采：配方档统一在此选择，4K直出=自提升6+3潜空间x2.0→DLSS5像素超分直出4K，Omni需Loader换fasth3_omniref_8step_pruned_int8_convrot+VSA节点）",
 };
 function bsaiApplyBilingualLabels(node) {
     if (!node || !node.widgets) return;
@@ -6655,11 +6655,11 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // off=默认分镜剪辑(xfade 转场拼接)；on=无缝长镜头(注入不切场/不转场指令 + 强制
         // motion context(Add Guide 等效锚点) + 合并零转场 concat)。
         { key: "one_shot_mode", zh: "一镜到底", en: "OneShot", desc: "一镜到底旁支模式：off=分镜剪辑（xfade转场）；on=无缝长镜头（注入不切场指令+强制motion context+零转场拼接）。", cycle: ["off (分镜模式)", "on (一镜到底)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#f472b6", border: "#be185d" }] },
-        // v14.172 (2026-10-22): 渲染管道统一管理全部模型配方档（7 档）。
+        // v14.178 (2026-10-23): 渲染管道统一管理全部模型配方档（8 档，新增 4K直出 秘制酱料）。
         // 速度档仅留基础 7 档(custom/极速/均衡/精细/VDN×3); FastH3-Trim /
-        // FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / Omni 8步单采 在此选择。
+        // FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / 4K直出 秘制酱料 / Omni 8步单采 在此选择。
         // 选 Omni 时二采 15 行自动隐藏（syncOmniRefineRows），切回双采恢复。
-        { key: "render_pipeline", zh: "渲染管道", en: "Pipeline", desc: "渲染管道（模型配方档统一在此选择，v14.172）：Sol-H3 Self-Lift双采(默认) → FastH3-Trim(8+4) → FastH3-4步VSA(4+2) → Turbo-v4(6+4, shift12/3) → DMAD-4步(4+2, lcm) → 武戏组合拳(8+4, euler) → FastH3 Omni 8步单采(跳过二采, 需Loader换Omni模型+VSA)", cycle: ["Sol-H3 Self-Lift 双采 (默认)", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "FastH3 Omni 8步单采"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#22d3ee", border: "#0891b2" }] },
+        { key: "render_pipeline", zh: "渲染管道", en: "Pipeline", desc: "渲染管道（模型配方档统一在此选择，v14.178）：Sol-H3 Self-Lift双采(默认) → FastH3-Trim(8+4) → FastH3-4步VSA(4+2) → Turbo-v4(6+4, shift12/3) → DMAD-4步(4+2, lcm) → 武戏组合拳(8+4, euler) → 4K直出 秘制酱料(自提升6+3, 潜空间x2.0→DLSS5像素超分4K) → FastH3 Omni 8步单采(跳过二采, 需Loader换Omni模型+VSA)", cycle: ["Sol-H3 Self-Lift 双采 (默认)", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#facc15", border: "#a16207" }, { color: "#22d3ee", border: "#0891b2" }] },
         // v14.127: restore_cache 已从 QUICK_DEFS 移除——后端 INPUT_TYPES 同步移除
         // 该参数（1.55 toggle 行无法前端隐藏，根治：参数不存在则行不存在）。
         // 恢复缓存功能由节点底部"恢复缓存"按钮（直调后端 /h3_extender/restore_cache
@@ -7569,7 +7569,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             env_audio_enable: ["global_inherit","on","off"],
             refine_mem_mode: ["spatial (分块,兼容)","global (全上下文省显存)"],
             one_shot_mode: ["off (分镜模式)","on (一镜到底)"],
-            render_pipeline: ["Sol-H3 Self-Lift 双采 (默认)","FastH3 Omni 8步单采"],
+            render_pipeline: ["Sol-H3 Self-Lift 双采 (默认)","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳","4K直出 秘制酱料","FastH3 Omni 8步单采"],
         };
         function detect(w) {
             const n = w.length;
