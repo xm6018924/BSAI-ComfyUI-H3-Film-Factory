@@ -246,6 +246,44 @@ def _release_dynamic_vram(tag=""):
         pass
 
 
+def _ff_unregister_model(model, label=""):
+    """v14.175 (2026-10-23): 从 current_loaded_models 摘除指定模型的 LoadedModel。
+
+    ComfyUI 没有公开 API 做这件事:
+      - unload_model()     : 不存在 (silent AttributeError, 全局多处误用)
+      - unload_model_and_clones(): 会连带 clone_base 一起卸, dynamic 量化 DiT
+                                  会触发 unpatch -> .to(cpu) -> access violation
+      - free_memory(..., for_dynamic=True): 对 dynamic 模型 memory_to_free=0,
+                                  跳过不卸载
+
+    所以手工从 current_loaded_models 里 pop LoadedModel + GC + soft_empty_cache,
+    让后续 load_models_gpu 按新 reserve 预算重新登记。DynamicVRAM 的 staged 权重
+    在 RAM, 卸载后 forward 会按需自动搬运, 不会丢失。
+
+    返回: 摘除的 LoadedModel 数量 (int)
+    """
+    import gc as _gc_ur
+    _removed = 0
+    try:
+        import comfy.model_management as _mm_ur
+        _clm = getattr(_mm_ur, "current_loaded_models", None)
+        if _clm is not None:
+            for _i in range(len(_clm) - 1, -1, -1):
+                if getattr(_clm[_i], "model", None) is model:
+                    _clm.pop(_i)
+                    _removed += 1
+        _gc_ur.collect()
+        try:
+            _mm_ur.soft_empty_cache(force=True)
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if _removed > 0 or label:
+        print(f"[H3 Extender] v14.175 _unregister{label}: 摘除 {_removed} 个 LoadedModel")
+    return _removed
+
+
 def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=None, async_encode=False, lip_audio_segment=None):
     """Decode a single cached clip to MP4 and store as blob for frontend preview.
     v1.70: async_encode=True 时 encode 段在后台线程执行, 返回
@@ -2994,29 +3032,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # CPU↔GPU 搬运 + workspace 临界 → step 0/4 直接 OOM
                 # (int8_linear 申请 int32 输出缓冲时爆掉).
                 # 修复: resident < 4GB 说明连核心 transformer 层都没驻留,
-                # 从 current_loaded_models 里摘掉 LoadedModel + soft_empty_cache,
-                # 让 DynamicVRAM 回到干净的 staged 状态, 下次 forward 会按需搬运.
-                # 注: ComfyUI 没有 unload_model() API (仅 unload_model_and_clones,
-                # 会连带 clone_base 一起卸 dynamic DiT, 不可用; free_memory 对
-                # for_dynamic 也是 no-op). 所以用手工摘除 LoadedModel + cache 清理.
+                # 调用 _ff_unregister_model 摘除 LoadedModel + soft_empty_cache,
+                # 让 DynamicVRAM 回到干净 staged 状态, forward 时按需搬运.
+                # 注: ComfyUI 无公开 unload_model() API (全局 _mm.unload_model 都是
+                # silent no-op, 已统一替换为 _ff_unregister_model).
                 if _res < 4.0:
-                    try:
-                        from comfy.model_management import current_loaded_models as _r_clm
-                        _removed = 0
-                        for _ri in range(len(_r_clm) - 1, -1, -1):
-                            if getattr(_r_clm[_ri], "model", None) is model:
-                                _r_clm.pop(_ri)
-                                _removed += 1
-                        import gc as _gc174
-                        _gc174.collect()
-                        _mm1.soft_empty_cache(force=True)
-                        _t1.cuda.synchronize()
-                        _t1.cuda.empty_cache()
-                        print(f"[H3 Extender] v14.174 驻留无效(resident={_res:.1f}GB<4GB), "
-                              f"摘除 LoadedModel(removed={_removed}), "
-                              f"回退 DynamicVRAM 按需流式 (total={_tot:.1f}GB > 可用{_free_os:.1f}GB-reserve)")
-                    except Exception as _u174:
-                        print(f"[H3 Extender] v14.174 摘除 LoadedModel 失败(回退按需流式): {_u174}")
+                    _ff_unregister_model(model, label="一采-resident无效")
+                    print(f"[H3 Extender] v14.174 驻留无效(resident={_res:.1f}GB<4GB), "
+                          f"回退 DynamicVRAM 按需流式 (total={_tot:.1f}GB > 可用{_free_os:.1f}GB-reserve)")
             except Exception: pass
         else:
             print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
@@ -3579,17 +3602,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             # free~7.2GB > ws6.5GB, ComfyUI 不再卸载, 分块forward正常换页。
                             if tiled_refine:
                                 _r_reserve_gb = max(_r_reserve_gb, 7.5)
-                            try:
-                                _mm3.unload_model(model)  # 先卸载, 重载时才按新 reserve 预算
-                            except Exception:
-                                pass
+                            _ff_unregister_model(model, label="二采-reserve-branch")
                             _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
                         except Exception:
                             _r_reserve_gb = 8.0 if tiled_refine else 5.5
-                            try:
-                                _mm3.unload_model(model)
-                            except Exception:
-                                pass
+                            _ff_unregister_model(model, label="二采-reserve-fallback")
                             _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
                         print(f"[H3 Extender] Refine 二采前 DiT 驻留 {_res_gb:.1f}GB < 12GB, 重新驻留到 VRAM (reserve->{_r_reserve_gb:.1f}GB) ...")
                         _mm3.load_models_gpu([model])
@@ -4050,10 +4067,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _fb_loaded_gb = 0.0
             if _fb_loaded_gb < 2.0:
                 try:
-                    try:
-                        _mm.unload_model(model)
-                    except Exception:
-                        pass
+                    _ff_unregister_model(model, label="v1.92-fallback")
                     _mm.EXTRA_RESERVED_VRAM = int(10.0 * 1024 ** 3)
                     _mm.load_models_gpu([model])
                     print(f"[H3 Extender] v1.92 fallback: 模型已全卸({_fb_loaded_gb:.1f}GB), 重新驻留后重跑")
