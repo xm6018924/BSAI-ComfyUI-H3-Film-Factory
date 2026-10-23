@@ -5667,7 +5667,8 @@ class BSAIH3FilmFactory:
             "ref_audio": ("AUDIO", {"forceInput": True, "tooltip": "Voice reference audio. When connected, it tells the H3 model that the character's voice/timbre/music style should follow this reference. Can be connected together with lip_audio — lip_audio drives the lip-sync while ref_audio provides the timbre reference."}),
             "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "Single song source: the complete song/dialogue audio. Once connected: (1) the lip-sync of every CLIP and @图N character is driven entirely by the matching segment of this song; (2) the ref_audio port and @音频N are ignored automatically; (3) all model-generated audio is discarded; (4) the output sound is exactly this song. It is auto-sliced per CLIP duration and the final output matches the video length."}),
             # v14.101: 回退 18:35(v14.84) — lip_voice 位置与 v2.7.json 一致（lip_audio 之后）
-            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "Global character voice-line reference (AUDIO, 3~10s clean voice). Used for TTS cloning in speech mode; can also be overridden per CLIP by putting @音频N in the CLIP card lip_voice field."}),
+            # v14.174: lip_voice 升级为对口型驱动音频（同 lip_audio 语义且优先）。
+            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "Lip-sync drive audio (v14.174+): the complete dialogue audio. Once connected, it behaves exactly like lip_audio — (1) drives lip-sync of every CLIP; (2) all model-generated audio is discarded; (3) output sound is exactly this audio, auto-sliced per CLIP; (4) takes priority over lip_audio. Typical use: connect BSAI IndexTTS-2.5 synthesis output here to drive lip-sync with TTS voice lines. 对口型驱动音频：接入后取消模型自生成音频，直接用本音频驱动口型，优先级高于 lip_audio（典型：IndexTTS 合成台词接此端口）。"}),
             "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [分镜N] marker: text before → global prompt, text from [分镜N] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
@@ -6789,15 +6790,21 @@ class BSAIH3FilmFactory:
         audio_vae = kwargs.get("audio_vae")
         ref_audio = kwargs.get("ref_audio")
         lip_audio = kwargs.get("lip_audio")
-        # v14.100: 恢复 v2.115 时代输入端口 — lip_voice(声线参考) / tts_model_TTS模型(IndexTTS模型)。
-        # 台词合成由独立 IndexTTS-2.5 节点完成；合成音频请接入 lip_audio 驱动口型。
-        # 此处仅识别连接并提示正确链路，不改变任何渲染行为。
+        # v14.174: lip_voice 升级为对口型驱动音频（与 lip_audio 同语义, 且优先）。
+        # 用户把 IndexTTS 合成台词音频接入 lip_voice 时, 同样要求:
+        #   1) 取消模型自己生成音频  2) 直接用 lip_voice 外部音频驱动对口型。
+        # 实现: lip_voice 非 None 时重赋值 lip_audio → 下方切段/AV latent注入/
+        # 提示词净化/音频锁定/输出混音替换全链路自动复用, 无需复制代码。
         _lip_voice = kwargs.get("lip_voice")
+        if _lip_voice is not None:
+            lip_audio = _lip_voice
+            print(f"[H3 LipSync] ✅ lip_voice 已连接 → 升级为对口型驱动音频"
+                  f"(取消模型自生成音频, 外部音频驱动口型; lip_voice 优先于 lip_audio)")
+        else:
+            _lip_voice_dummy = None
         _tts_model = kwargs.get("tts_model_TTS模型")
-        if _lip_voice is not None or _tts_model is not None:
-            print(f"[H3 LipSync] 检测到 TTS 输入连接: lip_voice={'已连接' if _lip_voice is not None else '未连接'} "
-                  f"tts_model={'已连接' if _tts_model is not None else '未连接'} — "
-                  f"台词合成请走独立 IndexTTS 节点，合成音频接入 lip_audio 驱动口型")
+        if _tts_model is not None:
+            print(f"[H3 LipSync] 检测到 tts_model 输入连接: tts_model=已连接 — 台词合成请走独立 IndexTTS 节点，合成音频接入 lip_voice 或 lip_audio 驱动口型")
         ref_items = None
         ref_blocks = None
         active_picture_slots = None
@@ -6813,6 +6820,36 @@ class BSAIH3FilmFactory:
                 _ctx_frames = int(str(context_length))
             except (TypeError, ValueError):
                 _ctx_frames = 0
+            # ── v14.175: 对口型驱动音频超长 → 自动追加延续分镜 CLIP ──
+            # 外部音频总时长 > 分镜脚本 clips 总时长时(例: 音频35s / 脚本30s),
+            # 自动追加一个延续上一个分镜画面的 CLIP 承载多余音频, 保证外部音频完整性,
+            # 尾部台词不再被截断丢弃。
+            try:
+                _lip_total_dur = float(int(lip_audio["waveform"].shape[-1])) / float(lip_audio["sample_rate"])
+            except Exception:
+                _lip_total_dur = 0.0
+            _sum_clip_dur = 0.0
+            for _c in clips:
+                _d = _c.get("duration", 5.0)
+                try:
+                    _sum_clip_dur += float(_d)
+                except (TypeError, ValueError):
+                    _sum_clip_dur += float(str(_d))
+            if _lip_total_dur > _sum_clip_dur + 0.01 and clips:
+                _extra_dur = _lip_total_dur - _sum_clip_dur
+                _last = clips[-1]
+                _new_clip = dict(_last)
+                _new_clip["id"] = f"{str(_last.get('id', 'clip'))}_auto_ext"
+                _new_clip["duration"] = float(_duration_to_frames(_extra_dur)) / float(FPS)
+                # 画面延续上一个分镜: 保留原 prompt — lip 模式下提示词净化会抹掉
+                # 唱歌/说话描述, 口型完全由音频驱动, 画面沿用上一分镜构图/场景。
+                _new_clip["prompt"] = _last.get("prompt", "")
+                _new_clip["validated"] = False
+                _new_clip["seed_mode"] = "randomize"
+                clips.append(_new_clip)
+                print(f"[H3 LipSync] ✅ 对口型音频 {_lip_total_dur:.2f}s > 分镜总时长 "
+                      f"{_sum_clip_dur:.2f}s → 自动追加延续分镜 CLIP +{_new_clip['duration']:.2f}s "
+                      f"(id={_new_clip['id']}), 外部音频完整性已保证")
             lip_audio_segments = _split_lip_audio_by_clips(
                 lip_audio, clips, fps=float(FPS), context_frames=_ctx_frames)
             print(f"[H3 LipSync] ✅ 已启用对口型模式，{len(lip_audio_segments)} 段音频已就绪 "

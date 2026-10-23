@@ -76,6 +76,23 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 - 配套工作流建议（v3.4.8）：clip2 提示词移除「品牌logo」「虚拟购物车图标动画」等模型易画成假文字的诱导元素 / Companion workflow (v3.4.8): clip2 prompt removes hallucination-prone elements like "品牌logo" and "虚拟购物车图标动画"
 - 生效：重启 ComfyUI 后生效 / To take effect: restart ComfyUI
 
+### v14.174 (2026-10-23) — lip_voice 升级为对口型驱动音频（同 lip_audio 语义且优先）/ lip_voice upgraded to lip-sync drive audio (same semantics as lip_audio, takes priority)
+
+**问题：lip_voice 端口接入 IndexTTS 合成台词音频后，模型仍自己生成音频、完全不对口型（lip_voice 此前仅打印提示日志，不驱动渲染）。** / Issue: connecting TTS dialogue audio to lip_voice left the model generating its own audio with no lip-sync (lip_voice previously only printed a hint log and changed nothing).**
+- `extender.py`：lip_voice 非 None 时**重赋值 lip_audio 变量** → 切段(_split_lip_audio_by_clips)/AV latent 音频注入+zero-noise 锁定/提示词净化/音频驱动提示词/输出主轨替换（模型音频 15% 垫底）**全链路自动复用**，无需复制代码；lip_voice 优先于 lip_audio；日志更新为"✅ lip_voice 已连接 → 升级为对口型驱动音频" / extender.py: when lip_voice is connected it **overrides the lip_audio variable** so the whole lip-sync pipeline (per-CLIP slicing / AV-latent audio injection + zero-noise lock / prompt stripping / audio-drive prompt / output main-track swap with 15% model bed) is **reused automatically**; lip_voice takes priority over lip_audio; log updated
+- 端口 tooltip 更新（中英双语）：lip_voice = 对口型驱动音频，接入后取消模型自生成音频，典型用途接 IndexTTS 合成台词 / lip_voice tooltip updated (bilingual): lip-sync drive audio; model-generated audio discarded; typical use: IndexTTS synthesis output
+- 验证：py_compile PASS；备份 `extender.py.bak_lipvoice_pre_v14174` / Verified: py_compile PASS; backup `extender.py.bak_lipvoice_pre_v14174`
+- 配套工作流（v3.4.9）：角色档案对齐@图1（高马尾红黑条纹）、道具档案去"品牌标识"、clips 去"品牌logo/购物车图标"诱导、1425 IndexTTS 换香薰口播稿（≤10字/句）/ Companion workflow (v3.4.9): character sheet aligned to @图1 (ponytail + red-black stripe top), prop sheet drops "brand logo", clips drop "logo/cart icon" hallucination bait, 1425 IndexTTS set to candle voice-over script (≤10 chars/sentence)
+- 生效：重启 ComfyUI 后生效 / To take effect: restart ComfyUI
+
+### v14.175 (2026-10-23) — 对口型音频超长自动补 CLIP / Auto-extend CLIPs when lip-sync audio is longer than storyboard
+
+**需求：lip_voice/lip_audio 驱动模式下，外部音频超过分镜脚本设定的 clip 总时长时（例：音频 35s / 脚本 30s），自动新增一个延续上一个分镜画面的 CLIP 承载多余音频，保证外部音频完整性（尾部台词不再被截断丢弃）。** / Requirement: in lip_voice/lip_audio drive mode, when external audio exceeds the total storyboard duration (e.g. audio 35s / script 30s), auto-append a CLIP that continues the previous shot to carry the excess audio, so the external audio stays complete (no tail truncation).
+- `extender.py`：切段前比对 `lip_audio` 总时长与 clips 总时长，超出时**自动追加 CLIP**（id=`<last>_auto_ext`，duration=差额帧对齐，prompt 复制上一个分镜——lip 模式提示词净化会抹掉口播描述，口型由音频驱动，画面自然延续；context_enabled/字幕等字段继承），随后 `_split_lip_audio_by_clips` 按扩展后 clips 切段、逐 CLIP 渲染，输出视频与外部音频逐帧对齐 / extender.py: before slicing, compare lip_audio total duration vs storyboard total; on exceed **auto-append a CLIP** (id=`<last>_auto_ext`, duration=frame-aligned remainder, prompt copied from previous shot — the lip-sync prompt-strip removes talking descriptions, mouth is audio-driven, visuals naturally continue; context/subtitle fields inherited), then slice by the extended clips and render each, final output frame-aligned with the external audio
+- 兼容：原有"音频短于 clips 按比例缩放"逻辑不变；非 lip 模式不受影响 / Compatible: existing "audio shorter than clips scales down proportionally" untouched; non-lip modes unaffected
+- 验证：py_compile PASS；备份 `extender.py.bak_autoext_pre_v14175` / Verified: py_compile PASS; backup `extender.py.bak_autoext_pre_v14175`
+- 生效：重启 ComfyUI 后生效 / To take effect: restart ComfyUI
+
 ---
 
 ### v14.167 (2026-10-22) — 二采 kernel 微基准定论：Sol-Attn 稀疏 pointer 262k=0.99s 即最优，6 块为效率最优点；建议二采 steps 6→4（-33%）/ Refine kernel micro-benchmark verdict: Sol-Attn sparse pointer 262k=0.99s is optimal, 6-block is the efficiency optimum; refine steps 6→4 recommended (-33%)
