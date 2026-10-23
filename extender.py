@@ -5829,7 +5829,7 @@ class BSAIH3FilmFactory:
             ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
-                "tooltip": "v14.182 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); ⑩双采2K = v14.182 T8 思路(BV1aiaL61Eyu): 一采 8 步(FastH3 蒸馏) + 二采 4 步 + latent 不放大(factor=1.0, 二采提速~4x) + HyperVAE 2x 解码像素 2x(encoder 16x 不变, decoder 32x, 全程只解码一次, 不增采样显存; 权重自动探测 models/vae 中 hyper*2x*.safetensors) —— 直播带货配音档变体: 音频重绘继承 w33, 直出 2K 无分块接缝。",
+                "tooltip": "v14.184 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); ⑩双采2K = v14.184 T8 思路(BV1aiaL61Eyu): 一采 8 步(FastH3 蒸馏契约) + 二采 4 步(denoise 0.45) + latent 不放大(factor=1.0, 二采提速~4x) + HyperVAE 2x 解码像素 2x(encoder 16x 不变, decoder 32x, 全程只解码一次, 不增采样显存; 权重自动探测 models/vae 中 hyper*2x*.safetensors) + 音频重绘继承 w33(0.7) —— 直播带货配音档变体, 直出 2K 无分块接缝。⚠️ v14.183 曾试 10 步+音频0.9 致链 segment 音频崩(VAD 0 段)+画质退化, 已回滚。",
             },
         )
 
@@ -6184,14 +6184,21 @@ class BSAIH3FilmFactory:
                 #    因为压根不做 latent 放大, 无 tiles 接缝); ②解码用 HyperVAE 2x
                 #    (encoder 16x 不变, decoder 32x pixel_shuffle 2x) → 二采 latent
                 #    直接解成 2x 像素直出 2K, 全程只解码一次, 不增加采样显存。
-                # 音频: refine_audio_denoise 继承 w33(音频参与重绘0.7) → 配音精修
-                #    与 4K 档共用, 不乱配音。一采 8 步 = FastH3 蒸馏契约(需配
-                #    fastvideo_fasth3_8step_v2_pruned_int8_convrot 或同蒸馏模型)。
+                # v14.184 (2026-10-24): 回滚 v14.183 两处错误改动 ——
+                #    v14.183 曾改: 一采 8->10 步 + 音频重绘 0.7->0.9 + denoise 0.45->0.5,
+                #    实测 clip2(链 segment1) 音频彻底崩(VAD 0 段人声, ASR 置信度 0.43-0.70
+                #    且前 8 秒无声) + 画质退化(10 步违背 FastH3 8 步蒸馏契约, 标签文字变糊)。
+                #    根因: ①音频重绘 0.9 = 90% 重绘音频 latent + 二采仅 4 步 = 从噪声画
+                #      4 步音频, 必崩(0.7 保留 30% 一采音频特征是安全线); ②一采 10 步
+                #      破坏 8 步蒸馏契约掉画质。
+                #    回滚: 一采 8 步(蒸馏契约) + denoise 0.45 + 音频重绘继承 w33(0.7)。
+                #    吞音/噪点残余改用解码后处理(v14.184 双采2K 档解码端轻锐化降噪), 
+                #    不动采样配方 —— 采样配方是已验证良好基线。
                 steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
                 shift_video, shift_audio = 12.0, 3.0
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
-                    print(f"[H3 Extender] v14.182 双采2K(渲染管道): 采样器强制 euler (T8 双采配方)")
+                    print(f"[H3 Extender] v14.184 双采2K(渲染管道): 采样器强制 euler (T8 双采配方)")
                 # 二采 latent 不放大 —— 由 HyperVAE 2x 解码负责像素翻倍
                 try:
                     _rurf2k = float(refine_upscale_factor or 2.0)
@@ -6199,7 +6206,7 @@ class BSAIH3FilmFactory:
                     _rurf2k = 2.0
                 if _rurf2k != 1.0:
                     refine_upscale_factor = 1.0
-                    print(f"[H3 Extender] v14.182 双采2K(渲染管道): refine_upscale_factor {_rurf2k} -> 1.0 (latent 不放大, 二采提速 + HyperVAE 2x 解码像素翻倍)")
+                    print(f"[H3 Extender] v14.184 双采2K(渲染管道): refine_upscale_factor {_rurf2k} -> 1.0 (latent 不放大, 二采提速 + HyperVAE 2x 解码像素翻倍)")
                 _hv2x_decl = 2.0  # v14.182: HyperVAE 2x 解码输出 = 像素 2x, 声明尺寸须翻倍
                 # v14.182: 双采2K 二采 latent 不放大 —— 强制不使用 3D latent
                 # upscaler (否则 L3109 会把 factor<=1.0 自动提到 1.5, 二采又放大
@@ -6207,9 +6214,11 @@ class BSAIH3FilmFactory:
                 if refine_upscaler_model and not str(refine_upscaler_model).startswith("("):
                     _old_urm = str(refine_upscaler_model)
                     refine_upscaler_model = "(bilinear interpolation, no model)"
-                    print(f"[H3 Extender] v14.182 双采2K(渲染管道): 3D upscaler '{_old_urm}' 已禁用 "
+                    print(f"[H3 Extender] v14.184 双采2K(渲染管道): 3D upscaler '{_old_urm}' 已禁用 "
                           f"(factor=1.0 latent 不放大, 由 HyperVAE 2x 解码直出 2K)")
-                print("[H3 Extender] 🎥 双采2K 模式: 一采 8 步(FastH3 蒸馏) + 二采 4 步(factor=1.0 提速) + HyperVAE 2x 解码直出 2K, 音频重绘继承 w33")
+                # v14.184: 音频重绘继承 w33(0.7) —— v14.183 强制 0.9 致音频崩(VAD 0 段),
+                # 0.7 = 保留 30% 一采音频 latent 特征(ref_audio 声线), 只精修 70%。
+                print("[H3 Extender] 🎥 双采2K 模式: 一采 8 步(蒸馏契约) + 二采 4 步(factor=1.0 提速) + HyperVAE 2x 解码直出 2K, 音频重绘继承 w33(0.7)")
             elif _rp_mode == "FastH3-4步VSA":
                 steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.45
             elif _rp_mode == "Turbo-v4":
