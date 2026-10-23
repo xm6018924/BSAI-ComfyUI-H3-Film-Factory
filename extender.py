@@ -3634,31 +3634,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _r_tok_gate = int(_r_m_gate[0].shape[2]) * int(_r_m_gate[0].shape[-2]) * int(_r_m_gate[0].shape[-1])
             except Exception:
                 _r_tok_gate = 0
-            if _r_tok_gate > _REFINE_MAX_SOL_TOKENS:
-                try:
-                    _r_to_gate = _refine_model.model_options.get("transformer_options", {})
-                    if isinstance(_r_to_gate, dict):
-                        _r_to_gate["sol_max_tokens"] = _REFINE_MAX_SOL_TOKENS
-                        print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} > "
-                              f"{_REFINE_MAX_SOL_TOKENS:,}, Sol-Attn 已降级 dense(KJNodes 分组+SageAttention), "
-                              f"绕开病态 kernel(基准: 293k=0.7s 健康 / 440k>45s / 873k>600s)")
-                except Exception as _eg:
-                    print(f"[H3 Extender] v14.148 方案A 注入 sol_max_tokens 失败(可忽略): {_eg}")
-            else:
-                print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} <= "
-                      f"{_REFINE_MAX_SOL_TOKENS:,}, Sol-Attn 稀疏保留(健康区)")
-            # v14.149 (2026-10-13): 方案A 补全——参考插件实测(二采每步 240s 量级、
-            # 画质清晰无雪花)的核心机制是 spatial tiles 分块二采:
-            #   [H3 Extender] Refine 分块二采已启用: n_tiles=4 overlap=128px
-            #   [INFO] spatial tiles: axis=W size=120 n=4 overlap=128px/8 latent
-            #          ranges=[(0, 46), (22, 68), (52, 98), (82, 120)]
-            # 每块 W≈46 latent -> token ≈ 46x68x107 = 334,696 < 440k 病态线,
-            # Sol-Attn 稀疏/head 分组在健康区稳定跑, 无 kernel 病态卡死.
-            # 我们工作流 tiled_refine=False 导致整段 873,120 tokens 命中病态区.
-            # 修正: 二采 latent token 超阈值且未启用 tiled_refine 时, 自动按
-            # 参考插件参数启用分块(n_tiles=4, overlap=128px); 分块后每块 token
-            # ~334k < 350k 门阈值, Sol-Attn 稀疏保留(参考插件同款路径). 分块
-            # 包装失败时维持 v14.148 dense 回退门, 双保险.
+            # v14.164 (2026-10-22 fix #v14.173): 方案A — 先分块再决定 dense 降级。
+            # 旧顺序(v14.148 先注入 sol_max_tokens -> v14.164 后分块)导致分块成功后
+            # dense 门仍留在 transformer_options 里, 每个 262k token 的 tile 强制
+            # 走 dense attention (KJNodes+SageAttention) 而非稀疏 Sol-Attn —— 实机
+            # 4090 二采每步 411s, 远高于稀疏 0.7s/块 × 6 块 = ~4.2s 的理论值.
+            # 修复: 先做 v14.164 分块决策, 再基于"是否已分块"决定要不要给整段注入
+            # dense 门. 分块成功时每块 ~262k tokens 已在 Sol-Attn 健康区, 不需要
+            # dense 回退. 同时显式清理 transformer_options 里可能从上个 clip 残留
+            # 的 sol_max_tokens.
             if _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None and refine_mem_mode != "global":
                 try:
                     import os as _os_t3, importlib.util as _ilu_t3
@@ -3671,8 +3655,46 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] v14.164 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
                           f"自动启用分块二采 overlap=128px, n_tiles 按 Sol-Attn 健康区自适应 "
                           f"(v14.149 固定 4 块 ~334k/块灰色区 399s/步 -> v14.164 每块 <=270k 健康区)")
+                    # v14.173: 分块成功 —— 显式清理 transformer_options 里的 sol_max_tokens.
+                    # 防止同一个 _refine_model 对象被二次调用时(链式 clip) 残留
+                    # 上次注入的 dense 门, 把本该稀疏的 tile 强制降级.
+                    try:
+                        _r_to_clean = _refine_model.model_options.get("transformer_options", {})
+                        if isinstance(_r_to_clean, dict) and "sol_max_tokens" in _r_to_clean:
+                            _r_to_clean.pop("sol_max_tokens", None)
+                            print(f"[H3 Extender] v14.173 清理残留 sol_max_tokens="
+                                  f"已移除 (分块二启用, tile 稀疏保留)")
+                    except Exception as _ec173:
+                        print(f"[H3 Extender] v14.173 清理 sol_max_tokens 失败(可忽略): {_ec173}")
                 except Exception as _te_t3:
-                    print(f"[H3 Extender] v14.149 自动分块失败(维持 v14.148 dense 回退门): {_te_t3}")
+                    print(f"[H3 Extender] v14.149 自动分块失败(走 v14.148 dense 回退门): {_te_t3}")
+            # v14.148 (2026-10-13): 方案A — Sol-Attn kernel 病态规模门.
+            # 独立基准实测(comfy_kitchen ck.sol_attn, RTX 5090 24GB, 与实机同参):
+            #   n=218,280 -> 0.97s / n=293,760 -> 0.70s (健康)
+            #   n=440,640 -> >45s / n=873,120 topk -> >600s / n=873,120 dense -> >60s (病态)
+            # 病态与 topk routing 无关, 是 kernel 在 n>=~440k 时超线性恶化.
+            # 只有在 v14.164 分块 **失败或被跳过** 时才触发 dense 降级 —— 此时整段
+            # latent tokens 命中病态区, 才需要强制 dense 回退 (KJNodes 分组+
+            # SageAttention). 分块成功时 tile 级 token 已在健康区, 稀疏 Sol-Attn
+            # 直接跑通, 不注入 sol_max_tokens.
+            if _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None:
+                try:
+                    _r_to_gate = _refine_model.model_options.get("transformer_options", {})
+                    if isinstance(_r_to_gate, dict):
+                        _r_to_gate["sol_max_tokens"] = _REFINE_MAX_SOL_TOKENS
+                        print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} > "
+                              f"{_REFINE_MAX_SOL_TOKENS:,} 且未启用分块, "
+                              f"Sol-Attn 已降级 dense(KJNodes 分组+SageAttention), "
+                              f"绕开病态 kernel(基准: 293k=0.7s 健康 / 440k>45s / 873k>600s)")
+                except Exception as _eg:
+                    print(f"[H3 Extender] v14.148 方案A 注入 sol_max_tokens 失败(可忽略): {_eg}")
+            elif _r_restore_tiles is not None:
+                print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} > "
+                      f"{_REFINE_MAX_SOL_TOKENS:,}, 分块二启用 — tile 级 token 在健康区, "
+                      f"Sol-Attn 稀疏保留")
+            else:
+                print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} <= "
+                      f"{_REFINE_MAX_SOL_TOKENS:,}, Sol-Attn 稀疏保留(健康区)")
             # v14.153 (2026-10-20): 二采省显存模式 global —— 移植 selflift-Avatar
             # (commit 5b93b6c) global-context 路径, 暂存源码 vendor/selflift_avatar/。
             # 与 spatial(v14.149 4 块分块)互斥: global 跳过空间分块, 对二采模型加
