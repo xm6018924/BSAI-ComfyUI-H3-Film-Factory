@@ -2327,10 +2327,11 @@ def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
         _minhw = min(_h164, _w164)
         if _axis <= 1 or _minhw <= 1 or _t164 <= 1:
             return int(requested)
-        # v14.179: overlap 钳制 64px(原 128px)——实测重叠区重复计算占大头,
-        # 减半 overlap 降低总计算量, 接缝由 v14.162 motion-context keyframe 对齐兜底。
-        overlap_px = min(int(overlap_px), 64)
-        # VAE_SPATIAL=16: overlap_px 转 latent 格(64px -> 4 latent)
+        # v14.181: 恢复 overlap 128px 估算(回滚 v14.179 的 64px 钳制)。
+        # 64px 接缝仅靠 motion-context keyframe 兜底(一镜到底模式), 分镜模式
+        # 无兜底会画面崩坏; 128px 是分镜模式接缝融合的安全值。
+        overlap_px = min(int(overlap_px), 128)
+        # VAE_SPATIAL=16: overlap_px 转 latent 格(128px -> 8 latent)
         _ov = max(1, int(overlap_px) // 16)
         # 每块 token ≈ T * minHW * (axis/n + 2*ov)
         _target = 450000
@@ -3652,7 +3653,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _r_tiles_n164 = _ff_auto_refine_tile_count(samples, tile_count, tile_overlap)
                     _r_restore_tiles = _tiles_mod.wrap_sampler_spatial_tiles(
                         _r_sampler, n_tiles=_r_tiles_n164, overlap_pixels=int(tile_overlap))
-                    print(f"[H3 Extender] Refine 分块二采已启用: n_tiles={_r_tiles_n164} overlap={tile_overlap}px (v14.179 尊重请求不扩块+overlap 64)")
+                    print(f"[H3 Extender] Refine 分块二采已启用: n_tiles={_r_tiles_n164} overlap={tile_overlap}px (v14.181 恢复 128px 接缝融合)")
                 except Exception as _te_t:
                     print(f"[H3 Extender] Refine 分块包装失败(回退全帧): {_te_t}")
                     _r_restore_tiles = None
@@ -3705,10 +3706,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _tiles_mod3 = _ilu_t3.module_from_spec(_tiles_spec3)
                     _tiles_spec3.loader.exec_module(_tiles_mod3)
                     _r_restore_tiles = _tiles_mod3.wrap_sampler_spatial_tiles(
-                        _r_sampler, n_tiles=_ff_auto_refine_tile_count(samples, 4, 128), overlap_pixels=128)
-                    print(f"[H3 Extender] v14.179 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
-                          f"自动启用分块二采 overlap=64px, n_tiles 按请求值(不扩块) "
-                          f"(v14.149 固定 4 块 ~334k/块灰色区 399s/步 -> v14.164 扩 8 块 545s/步 反而更慢 -> v14.179 回退)")
+                        _r_sampler, n_tiles=_ff_auto_refine_tile_count(samples, 4, tile_overlap), overlap_pixels=int(tile_overlap))
+                    print(f"[H3 Extender] v14.181 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
+                          f"自动启用分块二采 overlap={tile_overlap}px, n_tiles 按请求值(不扩块) "
+                          f"(v14.149 固定 4 块 ~334k/块灰色区 399s/步 -> v14.164 扩 8 块 545s/步 反而更慢 -> v14.179 回退 -> v14.181 恢复 128px 接缝))")
                     # v14.173: 分块成功 —— 显式清理 transformer_options 里的 sol_max_tokens.
                     # 防止同一个 _refine_model 对象被二次调用时(链式 clip) 残留
                     # 上次注入的 dense 门, 把本该稀疏的 tile 强制降级.
@@ -3790,8 +3791,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _tiles_mod4 = _ilu_t4.module_from_spec(_tiles_spec4)
                     _tiles_spec4.loader.exec_module(_tiles_mod4)
                     _r_restore_tiles = _tiles_mod4.wrap_sampler_spatial_tiles(
-                        _r_sampler, n_tiles=4, overlap_pixels=128)
-                    print(f"[H3 Extender] v14.153 回退保底: 已补启用 spatial 分块 n_tiles=4 overlap=128px")
+                        _r_sampler, n_tiles=4, overlap_pixels=int(tile_overlap))
+                    print(f"[H3 Extender] v14.180 回退保底: 已补启用 spatial 分块 n_tiles=4 overlap={tile_overlap}px")
                 except Exception as _te_t4:
                     print(f"[H3 Extender] v14.153 回退补分块失败(仅 v14.148 dense 门兜底): {_te_t4}")
             _r_guider = _BasicGuider(_refine_model)
@@ -5825,10 +5826,10 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采"],
+            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
-                "tooltip": "v14.172 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10)。",
+                "tooltip": "v14.182 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); ⑩双采2K = v14.182 T8 思路(BV1aiaL61Eyu): 一采 8 步(FastH3 蒸馏) + 二采 4 步 + latent 不放大(factor=1.0, 二采提速~4x) + HyperVAE 2x 解码像素 2x(encoder 16x 不变, decoder 32x, 全程只解码一次, 不增采样显存; 权重自动探测 models/vae 中 hyper*2x*.safetensors) —— 直播带货配音档变体: 音频重绘继承 w33, 直出 2K 无分块接缝。",
             },
         )
 
@@ -6092,7 +6093,13 @@ class BSAIH3FilmFactory:
                   "确认 Loader 使用 fasth3_omniref_8step_pruned_int8_convrot.safetensors + BlockSparseAttention(VSA keep_percent=10)。")
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
-        tile_overlap = int(kwargs.get("tile_overlap", 128))
+        # v14.181 (2026-10-23): 回滚 v14.180 的 overlap 钳制 64px -> 恢复 128px。
+        # 实测崩坏(分镜模式, 22:00 渲染): v14.179 声称 overlap 64 的接缝由
+        # motion-context keyframe 对齐兜底, 但该兜底仅在一镜到底(one_shot=on)
+        # 时注入; 分镜模式(one_shot=off) 无 keyframe 兜底, 64px 接缝完全裸露
+        # -> 画面扭曲/变形/重影/分块严重。分镜模式必须保留 128px 接缝融合区。
+        # 提速不能靠砍 overlap(接缝是画质底线), 正确路径=Sol-Attn 稀疏真生效。
+        tile_overlap = min(int(kwargs.get("tile_overlap", 128)), 128)
         # v14.153: 二采省显存模式（spatial=v14.149 分块路径 / global=全上下文省显存）
         refine_mem_mode = str(kwargs.get("refine_mem_mode", "spatial (分块,兼容)") or "spatial (分块,兼容)")
         refine_mem_global = refine_mem_mode.startswith("global")
@@ -6147,6 +6154,9 @@ class BSAIH3FilmFactory:
         # speed_preset 仅剩 7 项基础档。旧工作流遗留的配方档值(速度档里)仍由下方
         # speed_preset 兼容分支按值生效, 两源互斥不叠加。
         _rp_mode = str(kwargs.get("render_pipeline", "") or "")
+        # v14.182: HyperVAE 2x 像素翻倍因子 —— 仅「双采2K」档在分支内置 2.0,
+        # 其余档保持 1.0 (声明输出尺寸 = 实际解码像素, 不放大)。
+        _hv2x_decl = 1.0
         if _rp_mode and _rp_mode != "Sol-H3 Self-Lift 双采 (默认)":
             _rp_handled = True
             if _rp_mode == "直播配音高清（音频≥12步）":
@@ -6167,6 +6177,39 @@ class BSAIH3FilmFactory:
                 print("[H3 Extender] 🎙️ 直播配音高清模式: 一采 12 步(音频≥12步官方可用下限) + 二采 4 步 + 音频重绘 0.7, 根治乱配音/含混吞音")
             elif _rp_mode == "FastH3-Trim":
                 steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+            elif _rp_mode == "双采2K（HyperVAE 2x 解码）":
+                # v14.182 (2026-10-23): T8 思路(B站 BV1aiaL61Eyu) 双采放大高分辨率。
+                # 核心增量: ①二采 latent 不放大(factor=1.0) → 二采 token 少 ~4x,
+                #    328s/步 -> ~80-90s/步 (同时根治 v14.180 64px overlap 接缝问题,
+                #    因为压根不做 latent 放大, 无 tiles 接缝); ②解码用 HyperVAE 2x
+                #    (encoder 16x 不变, decoder 32x pixel_shuffle 2x) → 二采 latent
+                #    直接解成 2x 像素直出 2K, 全程只解码一次, 不增加采样显存。
+                # 音频: refine_audio_denoise 继承 w33(音频参与重绘0.7) → 配音精修
+                #    与 4K 档共用, 不乱配音。一采 8 步 = FastH3 蒸馏契约(需配
+                #    fastvideo_fasth3_8step_v2_pruned_int8_convrot 或同蒸馏模型)。
+                steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+                shift_video, shift_audio = 12.0, 3.0
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print(f"[H3 Extender] v14.182 双采2K(渲染管道): 采样器强制 euler (T8 双采配方)")
+                # 二采 latent 不放大 —— 由 HyperVAE 2x 解码负责像素翻倍
+                try:
+                    _rurf2k = float(refine_upscale_factor or 2.0)
+                except (TypeError, ValueError):
+                    _rurf2k = 2.0
+                if _rurf2k != 1.0:
+                    refine_upscale_factor = 1.0
+                    print(f"[H3 Extender] v14.182 双采2K(渲染管道): refine_upscale_factor {_rurf2k} -> 1.0 (latent 不放大, 二采提速 + HyperVAE 2x 解码像素翻倍)")
+                _hv2x_decl = 2.0  # v14.182: HyperVAE 2x 解码输出 = 像素 2x, 声明尺寸须翻倍
+                # v14.182: 双采2K 二采 latent 不放大 —— 强制不使用 3D latent
+                # upscaler (否则 L3109 会把 factor<=1.0 自动提到 1.5, 二采又放大
+                # token, 双采2K 提速与 HyperVAE 2x 直出 2K 的收益全丢)。
+                if refine_upscaler_model and not str(refine_upscaler_model).startswith("("):
+                    _old_urm = str(refine_upscaler_model)
+                    refine_upscaler_model = "(bilinear interpolation, no model)"
+                    print(f"[H3 Extender] v14.182 双采2K(渲染管道): 3D upscaler '{_old_urm}' 已禁用 "
+                          f"(factor=1.0 latent 不放大, 由 HyperVAE 2x 解码直出 2K)")
+                print("[H3 Extender] 🎥 双采2K 模式: 一采 8 步(FastH3 蒸馏) + 二采 4 步(factor=1.0 提速) + HyperVAE 2x 解码直出 2K, 音频重绘继承 w33")
             elif _rp_mode == "FastH3-4步VSA":
                 steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.45
             elif _rp_mode == "Turbo-v4":
@@ -6229,6 +6272,38 @@ class BSAIH3FilmFactory:
             if _rp_handled:
                 print(f"[H3 Extender] v14.172 渲染管道: {_rp_mode} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (速度档不叠加)")
                 speed_preset = "custom"  # 防下方 speed_preset 分支再覆盖配方档参数
+        # v14.182: 双采2K 档 —— 解码用 HyperVAE 2x (encoder 16x 不变, decoder 32x
+        # pixel_shuffle 2x)。整体替换 vae: encode 路径(参考图/conditioning)输出
+        # 与原生 VAE 完全一致(权重含完整 encoder, encoder_unchanged=True), decode
+        # 路径自动输出 2x 像素。权重自动探测 models/vae 中 hyper*2x* 文件;
+        # 加载失败回退原生 vae 并降级提示(不崩)。
+        if _rp_mode == "双采2K（HyperVAE 2x 解码）":
+            _hv2x_path = None
+            try:
+                for _hv_dir in folder_paths.get_folder_paths("vae"):
+                    for _hv_file in os.listdir(_hv_dir):
+                        _hv_l = _hv_file.lower()
+                        if _hv_l.endswith(".safetensors") and ("hyper" in _hv_l or "2x" in _hv_l):
+                            _hv2x_path = os.path.join(_hv_dir, _hv_file)
+                            break
+                    if _hv2x_path:
+                        break
+            except Exception:
+                _hv2x_path = None
+            if _hv2x_path:
+                try:
+                    from bsai_h3_hypervae_2x import load_hyper_vae_2x as _load_hv2x
+                    _hv_vae, _hv_report = _load_hv2x(_hv2x_path)
+                    _hv_vae.model_name = os.path.basename(_hv2x_path)  # ref2va cache key 区分
+                    vae = _hv_vae
+                    print(f"[H3 Extender] v14.182 双采2K: HyperVAE 2x 解码已装载 ({os.path.basename(_hv2x_path)}, "
+                          f"decode_scale=2x, encode_scale=16x, 全程只解码一次)")
+                except Exception as _hve:
+                    print(f"[H3 Extender] ⚠️ v14.182 双采2K: HyperVAE 2x 加载失败, 回退原生 VAE: {_hve}")
+                    vae = vae  # 保持原生
+            else:
+                print(f"[H3 Extender] ⚠️ v14.182 双采2K: models/vae 未探测到 HyperVAE 2x 权重 "
+                      f"(hyperVAEKrea2Minimax_v20MinimaxX2Upscale.safetensors), 回退原生 VAE 解码(像素 1x, 档位不生效)")
         if speed_preset == "极速":
             # v1.85: 二采 2->3 步 + denoise 0.55->0.5. 写实动态(打斗)场景 2 步二采
             # 在 55% 重噪下收敛不足导致画面发糊, 3 步收敛更好保留高频细节.
@@ -6756,6 +6831,9 @@ class BSAIH3FilmFactory:
         # 声明的 1920x1088（人脸直接糊掉）。这里在渲染开始前就写一次。
         try:
             _decl_out_f = max(1.0, float(refine_upscale_factor)) if bool(refine_enable) else 1.0
+            # v14.182: 双采2K 档声明输出尺寸计入 HyperVAE 2x 像素翻倍 (latent
+            # factor=1.0 不放大, 但解码输出 = 一采像素 × 2)。
+            _decl_out_f = _decl_out_f * float(_hv2x_decl)
             manifest["first_pass_width"] = int(resolved_width)
             manifest["first_pass_height"] = int(resolved_height)
             manifest["declared_refine_factor"] = float(_decl_out_f)
@@ -6918,6 +6996,8 @@ class BSAIH3FilmFactory:
         # 重采样，保证 per-clip 与 merged 成片像素与工作流声明一致。
         try:
             _decl_f = max(1.0, float(refine_upscale_factor)) if bool(refine_enable) else 1.0
+            # v14.182: 双采2K 档计入 HyperVAE 2x 像素翻倍
+            _decl_f = _decl_f * float(_hv2x_decl)
             manifest["output_width"] = int(round(float(resolved_width) * _decl_f))
             manifest["output_height"] = int(round(float(resolved_height) * _decl_f))
             manifest["declared_refine_factor"] = float(_decl_f)
