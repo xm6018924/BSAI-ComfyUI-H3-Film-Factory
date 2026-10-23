@@ -9113,7 +9113,7 @@
       },
       "widgets_values": [
         "H3_speed_slider_1.1.safetensors",
-        3,
+        2.0,
         "MysticXXX_MMH3-V1.safetensors",
         0.35,
         "H3电影质感V0.4 .safetensors",
@@ -9123,7 +9123,7 @@
       ],
       "widgets_values_named": {
         "lora_1": "H3_speed_slider_1.1.safetensors",
-        "strength_1": 3,
+        "strength_1": 2.0,
         "lora_2": "MysticXXX_MMH3-V1.safetensors",
         "strength_2": 0.35,
         "lora_3": "H3电影质感V0.4 .safetensors",
