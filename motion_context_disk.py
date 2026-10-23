@@ -1413,18 +1413,53 @@ def _decode_pair_video(vae, chain, meta):
     return decoded, previous_raw, current_raw, int(shift)
 
 
+def _oneshoot_dissolve_current_head(previous_raw, current_raw, frames=4):
+    # v14.178 一镜到底全球方案落地 P0-4: 接缝像素域硬切 → 三角窗溶解(Diff-VF WWS)。
+    # 旧: current_raw 原样硬切接在上一段尾帧后(诊断: 接缝 PSNR 仅 18.95dB, 直方图
+    # 相关 0.977, "再生成漂移"型跳变)。现: 本段头部 W=4 帧与上段尾部 W 帧线性混合 ——
+    # 距接缝(段头起点)越近越偏上段外观, 越远越偏本段。4 帧 ≈ 0.17s(24fps):
+    # 消除硬切跳变, 又不造成可感时间冻结(22 帧长窗需真时间重叠帧, 本管线无重复
+    # 时间区, 会拖出 0.92s 冻结感 —— 故取实测 4 帧值)。帧总数守恒(就地替换)。
+    # v14.179 OOM 修复: 旧实现 out=current_raw.clone()(整段 2.35GB) 且 linspace
+    # dtype=uint8 权重 0.33/0.66 被截断成 0 → 溶解退化为"复制上段尾帧"(断帧/冻结感
+    # 来源)。现改 float32 域混合 + 就地写回头部 W 帧, 按输入 dtype 自适应归一化。
+    frames = int(frames)
+    if frames <= 0:
+        return current_raw
+    if previous_raw.shape[0] < frames or current_raw.shape[0] < frames:
+        return current_raw
+    w = torch.linspace(0.0, 1.0, frames, device=current_raw.device, dtype=torch.float32)
+    w = w.view(frames, *([1] * (current_raw.ndim - 1)))
+    prev_t = previous_raw[-frames:].to(torch.float32)
+    cur_t = current_raw[:frames].to(torch.float32)
+    mix = prev_t * (1.0 - w) + cur_t * w
+    if current_raw.is_floating_point():
+        mix = mix.clamp(0.0, 1.0)
+    else:
+        mix = mix.clamp(0.0, 255.0).round()
+    current_raw[:frames] = mix.to(current_raw.dtype)
+    return current_raw
+
+
 def _correct_current_segment(previous_raw, current_raw):
     tail_n = min(4, int(previous_raw.shape[0]))
     if tail_n < 1:
         return current_raw
-    pair = torch.cat((previous_raw[-tail_n:], current_raw), dim=0)
+    # v14.179 OOM 修复: 光度匹配只对"接缝窗口"(上段尾 4 帧 + 本段头 ≤64 帧)就地
+    # 校正, 不再 cat+clone 整段全分辨率像素(1920×1088×374帧 float32 ≈9.4GB CPU
+    # 分配, 实测崩于 alloc_cpu.cpp:117)。接缝平滑只依赖 seam 附近, 窗口外帧
+    # 无需重写; 校正语义(全局 gamma/gain/contrast + 首帧局部稳定)保持不变。
+    win = min(64, int(current_raw.shape[0]))
+    pair = torch.cat((previous_raw[-tail_n:], current_raw[:win]), dim=0)
     pair = _photometric_match_segment(
         pair,
         seam_frame=tail_n,
         detect_window=4,
         end_frame=int(pair.shape[0]),
     )
-    return pair[tail_n:]
+    current_raw[:win] = pair[tail_n:]
+    # v14.178 P0-4: 亮度匹配后再做 4 帧三角窗溶解, 接缝平滑。
+    return _oneshoot_dissolve_current_head(previous_raw, current_raw)
 
 
 def _find_ffmpeg():
@@ -1652,8 +1687,21 @@ def _decode_pair_audio(data_path, prev_desc, curr_desc, audio_vae, fps, seam_shi
     if cut_b >= int(w.shape[-1]):
         raise RuntimeError("Disk Final Decode audio: warm-up removes continuation.")
 
+    # v14.178 一镜到底全球方案落地 P0-4: 接缝 PCM 硬切 → 15ms 线性 crossfade de-click。
+    # 旧: cat(w[:prev_n], w[cut_b:]) 样本级硬切(诊断: 段间边界爆音/音色突变)。
+    # 现: 本段头 fade_n=15ms 样本与上段尾同长样本线性混合 —— 时间轴与样本数守恒
+    # (就地替换 curr 段头), 15ms 内人耳不可感停顿, 只消除开关式瞬态。
+    prev_part = w[..., :prev_n]
+    curr_part = w[..., cut_b:]
+    fade_n = int(round(0.015 * sr))
+    if fade_n > 0 and prev_part.shape[-1] >= fade_n and curr_part.shape[-1] > fade_n:
+        ramp = torch.linspace(0.0, 1.0, fade_n, device=w.device, dtype=w.dtype)
+        _prev_tail = prev_part[..., -fade_n:]
+        _curr_head = curr_part[..., :fade_n]
+        _blended = _prev_tail * (1.0 - ramp) + _curr_head * ramp
+        curr_part = torch.cat((_blended, curr_part[..., fade_n:]), dim=-1)
     pair = {
-        "waveform": torch.cat((w[..., :prev_n], w[..., cut_b:]), dim=-1),
+        "waveform": torch.cat((prev_part, curr_part), dim=-1),
         "sample_rate": sr,
     }
     final_frames = previous_frames + next_frames - trim

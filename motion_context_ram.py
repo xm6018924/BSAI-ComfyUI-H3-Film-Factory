@@ -419,22 +419,28 @@ def _photometric_match_segment(images, seam_frame, detect_window=4, end_frame=No
     contrast_full = float(max(0.92, min(1.08, contrast_full)))
 
     global_strength = 0.55
-    out = images.clone()
-
-    # Vectorized global correction on this segment only.
-    segment = out[seam:seg_end]
-    rgb = segment[..., :3].float()
-    y = _luma_map(rgb)
-    y_full = y.clamp(eps, 1.0).pow(gamma_full)
-    y_full = (y_full - ref_mean) * contrast_full + ref_mean
-    y_full = y_full * gain_full
-    seam_full_mean = gamma_mean * gain_full
-    mean_offset = ref_mean - seam_full_mean
-    y_full = (y_full + mean_offset).clamp(0.0, 1.0)
-    delta = (y_full - y) * global_strength
-    out[seam:seg_end, ..., :3] = (
-        rgb + delta.unsqueeze(-1)
-    ).clamp(0.0, 1.0).to(segment.dtype)
+    # v14.179 OOM 修复: 不再 clone 整段 + 一次性全段 float32(1920×1088×374帧
+    # ≈9.4GB CPU 分配, 实测崩于 alloc_cpu.cpp:117)。改为就地分块写回,
+    # 每块 8 帧 float32 峰值 ≈200MB, 校正语义与整段向量化完全一致。
+    out = images
+    _blk = 8
+    _i0 = seam
+    while _i0 < seg_end:
+        _i1 = min(seg_end, _i0 + _blk)
+        _seg = out[_i0:_i1]
+        _rgb = _seg[..., :3].float()
+        _y = _luma_map(_rgb)
+        _y_full = _y.clamp(eps, 1.0).pow(gamma_full)
+        _y_full = (_y_full - ref_mean) * contrast_full + ref_mean
+        _y_full = _y_full * gain_full
+        _seam_mean = gamma_mean * gain_full
+        _off = ref_mean - _seam_mean
+        _y_full = (_y_full + _off).clamp(0.0, 1.0)
+        _delta = (_y_full - _y) * global_strength
+        out[_i0:_i1, ..., :3] = (
+            _rgb + _delta.unsqueeze(-1)
+        ).clamp(0.0, 1.0).to(_seg.dtype)
+        _i0 = _i1
 
     # Local first-3-frame seam stabilization.
     local_count = min(3, seg_end - seam)
@@ -464,26 +470,29 @@ def _photometric_match_segment(images, seam_frame, detect_window=4, end_frame=No
             ).clamp(0.0, 1.0).to(frame.dtype)
             out[idx] = frame_out
 
-    # Validated +3.5% stable continuation lift, vectorized.
+    # Validated +3.5% stable continuation lift. v14.179: 同 OOM 修复, 分块就地写回。
     tail_gain = 1.035
     tail_start = seam + 3
     if tail_start < seg_end:
-        tail = out[tail_start:seg_end]
-        rgb = tail[..., :3].float()
-        y = _luma_map(rgb)
-        y_lift = (y * tail_gain).clamp(0.0, 1.0)
-
-        count = int(tail.shape[0])
-        strength = torch.ones((count, 1, 1), device=y.device, dtype=y.dtype)
+        count = int(seg_end - tail_start)
+        strength = torch.ones((count, 1, 1), device=out.device, dtype=torch.float32)
         if count >= 1:
             strength[0] = 1.0 / 3.0
         if count >= 2:
             strength[1] = 2.0 / 3.0
 
-        delta = (y_lift - y) * strength
-        out[tail_start:seg_end, ..., :3] = (
-            rgb + delta.unsqueeze(-1)
-        ).clamp(0.0, 1.0).to(tail.dtype)
+        _i0 = tail_start
+        while _i0 < seg_end:
+            _i1 = min(seg_end, _i0 + _blk)
+            _tail = out[_i0:_i1]
+            _rgb = _tail[..., :3].float()
+            _y = _luma_map(_rgb)
+            _y_lift = (_y * tail_gain).clamp(0.0, 1.0)
+            _dlt = (_y_lift - _y) * strength[_i0 - tail_start:_i1 - tail_start]
+            out[_i0:_i1, ..., :3] = (
+                _rgb + _dlt.unsqueeze(-1)
+            ).clamp(0.0, 1.0).to(_tail.dtype)
+            _i0 = _i1
 
     return out
 
@@ -606,12 +615,18 @@ class MiniMaxH3MotionContextRAM:
                 "context_latent": ("LATENT",),
                 "context_length": (
                     ["22", "5", "39", "56"],
-                    {"default": "39"},
+                    # v14.178 一镜到底全球方案落地 P0-1: 默认 39→22。
+                    # 官方 AddGuide 锚定=上一段尾部 22 帧; 22 帧上下文足够锚住接缝又不浪费净输出,
+                    # 档位 5/22/39/56 保留可配。
+                    {"default": "22"},
                 ),
                 "audio_context_length": (
                     "INT",
                     {
-                        "default": 0,
+                        # v14.178 一镜到底全球方案落地 P0-1: 独立音频上下文, 默认 24 帧
+                        # (比视频 22 帧多 2 帧以对齐 40Hz 音频 latent 网格: 24/24*40=40 整步)。
+                        # 原 0 = 回退跟随视频档; 现独立默认 24, 保音频线连续。
+                        "default": 24,
                         "min": 0,
                         "max": 240,
                         "step": 1,
@@ -728,12 +743,42 @@ class MiniMaxH3MotionContextRAM:
             context_latent, context_frames
         )
 
+        # v14.178 一镜到底全球方案落地 P1-7: 段尾冻结检测 + Safe Tail Bridge。
+        # Herrgotts 洞察: H3 常提前到达 last frame 并在 clip 尾部数帧"冻结"
+        # (人站定、镜头不动), 直接钉尾帧会把"假结尾"传给下段做锚点 → 下段起点
+        # 错位重生成。latent 域估计末尾 3 步 vs 全段平均运动能量:
+        # 若尾段运动能量 < 均值 15% → 判定冻结, 丢弃最后 1 个锚点块(约 1 步 ≈
+        # Safe Tail Bridge 2 帧缓冲), 让锚点停在仍在运动的帧上。窗口/trim 不变,
+        # 不破坏 %5==0 帧网格。
+        try:
+            _vt = source_video[0]  # [C, T, H, W]
+            _diffs = [
+                float(torch.mean((_vt[:, k + 1] - _vt[:, k]) ** 2))
+                for k in range(_vt.shape[1] - 1)
+            ]
+            if _diffs:
+                _avg_motion = sum(_diffs) / len(_diffs)
+                _tail_motion = sum(_diffs[-3:]) / 3.0
+                if _avg_motion > 0 and _tail_motion < 0.15 * _avg_motion and len(blocks) > 1:
+                    _LOG.warning(
+                        "MiniMax H3 Motion Context RAM: 段尾冻结检测命中"
+                        "(尾段运动 %.5f < 全段均值 %.5f 的 15%%), 丢弃最后 1 个锚点块作 Safe Tail Bridge。",
+                        _tail_motion,
+                        _avg_motion,
+                    )
+                    blocks = blocks[:-1]
+                    offsets = offsets[:-1]
+        except Exception as _fe:
+            _LOG.info("frozen-tail check skipped: %s", _fe)
+
         keyframes = []
+        _padded_blocks = []  # v14.178 P0-2: 收集对齐后的视频块用于官方成对锚点
         for pixel_index, block in zip(offsets, blocks):
             block = _pad_motion_context_block_to_target(
                 block,
                 target_video,
             )
+            _padded_blocks.append(block)
             if guide_api == "native":
                 # Same one-token block, same pixel offset, same order as v14.21.
                 # New ComfyUI can express the interior anchor directly.
@@ -760,6 +805,27 @@ class MiniMaxH3MotionContextRAM:
         audio_latent, audio_t, overhang = _audio_tail_from_latent(
             context_latent, a_frames
         )
+
+        # v14.178 一镜到底全球方案落地 P0-2: 对齐官方 minimax_keyframes schema ——
+        # 追加 frame_idx=0 成对锚点 {"resolved_frame_index": 0, "latent": <上一段尾部
+        # 视频 latent 拼合>, "audio_latent": <上一段尾部音频 latent>}。
+        # 官方 AddGuide 语义: "上一段尾部 22 帧在本段 frame 0 同时续上视频+音频双流",
+        # keyframe 每步重注入、永不进入去噪。audio_latent 直接取自已 audio_vae 编码的
+        # 上一段采样 latent 尾部(40Hz 网格已经 _audio_tail_from_latent snap 对齐,
+        # 32kHz stereo [B,32,2,T40]), 不再二次 VAE 重编码以免引入解码漂移。
+        # 写入键名即官方 "minimax_keyframes"(下方 conditioning_set_values),
+        # 旧 MC_KEY/minimax_refs 兼容路径保留作 fallback。
+        try:
+            if audio_latent is not None and _padded_blocks:
+                keyframes.append(
+                    {
+                        "resolved_frame_index": 0,
+                        "latent": torch.cat(_padded_blocks, dim=2),
+                        "audio_latent": audio_latent,
+                    }
+                )
+        except Exception as _pe:
+            _LOG.info("official paired keyframe skipped: %s", _pe)
 
         # EXACT v14.21 end-alignment calculation.
         end_frame = float(span) + overhang / FRAME_RESCALE

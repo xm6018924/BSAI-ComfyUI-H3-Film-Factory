@@ -3904,11 +3904,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _cl_members[0][:, :, :_ov_here] = _acc_v[:, :, _st:_st + _ov_here]
                             _chunk_latent["samples"] = _ff_wrap_members(_cl_members, _was_nested_tc)
                             _a_part = _chunk_latent["samples"].tensors[1]
-                            # 音频掩码必须为 0(锁定一采音频): _ff_const_add_noise 已按
-                            # refine_audio_denoise=0 置零音频噪声, 此处给 1 会把干净音频
-                            # 当生成行全权重绘, 联合注意力下污染视频上下文, 且与段 1 行为不一致。
-                            _amask = torch.zeros((1, 1, 1, int(_a_part.shape[-1])),
-                                                 dtype=_mask_ki.dtype, device=_a_part.device)
+                            # v14.179 (2026-10-23): 音频掩码跟随 refine_audio_denoise,
+                            # 不再无条件锁定。旧代码此处永远 mask=0(保持一采音频), 会
+                            # 把"直播配音高清"档(音频≥12步+音频重绘0.7)的二采音频精修
+                            # 覆盖回锁定, 导致分块二采下配音仍乱/含混。audio_denoise>=0.5
+                            # 时音频参与二采重绘(mask=1), <0.5 时锁定(mask=0)。
+                            if float(_r_audio) >= 0.5:
+                                _amask = torch.ones((1, 1, 1, int(_a_part.shape[-1])),
+                                                    dtype=_mask_ki.dtype, device=_a_part.device)
+                            else:
+                                _amask = torch.zeros((1, 1, 1, int(_a_part.shape[-1])),
+                                                    dtype=_mask_ki.dtype, device=_a_part.device)
                             _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_ki, _amask))
                         with _aimdo_disabled():
                             _chunk_out = _r_guider.sample(
@@ -5819,10 +5825,10 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift 双采 (默认)", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采"],
+            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
-                "tooltip": "v14.172 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ③FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ④Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑤DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑥武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑦4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑧FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10)。",
+                "tooltip": "v14.172 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10)。",
             },
         )
 
@@ -6143,7 +6149,23 @@ class BSAIH3FilmFactory:
         _rp_mode = str(kwargs.get("render_pipeline", "") or "")
         if _rp_mode and _rp_mode != "Sol-H3 Self-Lift 双采 (默认)":
             _rp_handled = True
-            if _rp_mode == "FastH3-Trim":
+            if _rp_mode == "直播配音高清（音频≥12步）":
+                # v14.179 (2026-10-23): 直播带货 ref_audio 配音模式专用配方。
+                # 根因: H3 官方/社区实证 —— 音频 8 步最差, ≥12 步才可用;
+                # 旧默认档 6~8 步一采 + 二采 audio_denoise=0.0 锁定音频 → 中文人声
+                # 含混/吞音/切碎(VAD 10 段人声 ASR 仅转出 2 段 = 用户听到的"乱配音")。
+                # 本档: 一采 12 步(音频达标) + 二采 4 步 + 音频参与重绘 0.7
+                # (二采对音频重新加噪去噪, 精修人声清晰度, 同时保留 ref_audio 声线参考)。
+                # 注意: 需配非 8 步蒸馏模型(如 minimax_h3_ref2va_int8_convrot),
+                # 8 步蒸馏模型改 12 步会违背蒸馏契约掉画质。
+                steps, refine_steps, tile_count, refine_denoise = 12, 4, 4, 0.45
+                refine_audio_denoise = 0.7
+                shift_video, shift_audio = 12.0, 3.0
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print(f"[H3 Extender] v14.179 直播配音高清(渲染管道): 采样器强制 euler + simple (配音精修配方)")
+                print("[H3 Extender] 🎙️ 直播配音高清模式: 一采 12 步(音频≥12步官方可用下限) + 二采 4 步 + 音频重绘 0.7, 根治乱配音/含混吞音")
+            elif _rp_mode == "FastH3-Trim":
                 steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
             elif _rp_mode == "FastH3-4步VSA":
                 steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.45
