@@ -93,6 +93,15 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 - 验证：py_compile PASS；备份 `extender.py.bak_autoext_pre_v14175` / Verified: py_compile PASS; backup `extender.py.bak_autoext_pre_v14175`
 - 生效：重启 ComfyUI 后生效 / To take effect: restart ComfyUI
 
+### v14.176 (2026-10-23) — 武戏组合拳档对齐 YZ金鱼终极篇配方（画质+速度双优化）/ 武戏组合拳 recipe aligned to YZ金鱼 ultimate edition (quality + speed)
+
+**参考：B站「MiniMax H3终极篇、新二采、新加速、文武双全又快又好」(BV1LKJm6VELc) + YZ金鱼终极篇示例工作流。** / Reference: Bilibili "MiniMax H3 ultimate edition" (BV1LKJm6VELc) + YZ金鱼 example workflow.**
+- **配方升级（渲染管道「武戏组合拳」+ 速度档兼容分支同步）**：一采 8 步+二采 4 步 → **一采 6 步 + 二采 6 步（总 12 步）**——YZ 明确武戏 6+6 拟合更好更清晰；shift 8/3 → **12/3**（官方 v4 参数）；euler+simple 调度保持；二采 denoise 0.45 / 分块 4 保持 / Recipe upgrade (render-pipeline "武戏组合拳" + speed-widget legacy branch synced): 8+4 → **6+6 (12 total, better action fitting per YZ)**; shift 8/3 → **12/3 (official v4)**; euler+simple kept; refine denoise 0.45 / tiles 4 kept
+- **H3 17 帧块对齐（武戏档新增）**：命中武戏组合拳档时，clips 帧数统一对齐 `%17==5`（YZ 帧数公式），在 lip 切段/时长换算前调整 duration——防高动态武戏 latent 时间结构错位/果冻伪影 / **H3 17-frame-block alignment (new, combat preset only)**: frames aligned to `%17==5` (YZ frame formula) before lip-slicing/duration math — prevents latent time-structure jitter/ghosting in high-motion action scenes
+- 配套（工作流层，需下载 YZ 包内文件）：主模型已具备 `minimax_h3_hybrid_fl2va_ref2va_b25-49-int8`；建议 H3LoraStack 增加 **DMAD融合LoRA（minimax_h3_dmad_full_dareties_v4_step600_comfy_fro @0.8）＋H3_Fight_Flow_V1（@0.35）＋速度滑块 H3_speed_slider_1.1（@3）＋可选去油腻 MysticXXX_MMH3-V1（@0.35）**；latent upscaler 换 **V2（minimax_h3_latent_upscaler_3d_fp16_V2，LMS 更锐利）**；下载：夸克网盘 s/6af352275c72（视频简介） / Companion (workflow layer, files from YZ pack): model already present; H3LoraStack + DMAD-merge LoRA (0.8) + H3_Fight_Flow_V1 (0.35) + speed slider (3) + optional de-oil MysticXXX (0.35); latent upscaler → V2 (sharper); download: quark s/6af352275c72
+- 验证：py_compile PASS；备份 `extender.py.bak_wxcombat_pre_v14176` / Verified: py_compile PASS; backup `extender.py.bak_wxcombat_pre_v14176`
+- 生效：重启 ComfyUI 后生效 / To take effect: restart ComfyUI
+
 ---
 
 ### v14.167 (2026-10-22) — 二采 kernel 微基准定论：Sol-Attn 稀疏 pointer 262k=0.99s 即最优，6 块为效率最优点；建议二采 steps 6→4（-33%）/ Refine kernel micro-benchmark verdict: Sol-Attn sparse pointer 262k=0.99s is optimal, 6-block is the efficiency optimum; refine steps 6→4 recommended (-33%)

@@ -6050,6 +6050,10 @@ class BSAIH3FilmFactory:
         # v1.83: 速度预设覆盖 (先于 REFINE-PARAMS 打印, 保证日志反映实际生效参数)
         speed_preset = str(kwargs.get("speed_preset", "均衡"))
         _sp_old = (steps, refine_steps, tile_count, refine_denoise)
+        # v14.176: 武戏组合拳档启用 H3 17 帧块对齐 (YZ金鱼终极篇帧数公式 %17==5,
+        # 防高动态武戏 latent 时间结构错位/果冻伪影)。档位分支命中后置 True,
+        # lip 切段前统一把 clips duration 对齐到 17 帧块。
+        _h3_align17 = False
         # v14.172: 渲染管道统一管理模型配方档 —— 非默认档时模式参数由渲染管道接管,
         # speed_preset 仅剩 7 项基础档。旧工作流遗留的配方档值(速度档里)仍由下方
         # speed_preset 兼容分支按值生效, 两源互斥不叠加。
@@ -6072,10 +6076,16 @@ class BSAIH3FilmFactory:
                     sampler_name = "lcm"
                     print(f"[H3 Extender] v14.172 DMAD-4步(渲染管道): 采样器强制 lcm (DMAD 官方配方)")
             elif _rp_mode == "武戏组合拳":
-                steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+                # v14.176: 对齐 YZ金鱼「终极篇」武戏配方 (BV1LKJm6VELc):
+                # 一采6步(simple) + 二采6步(总12步, 武戏拟合更清晰),
+                # shift 12/3 (官方 v4), euler+simple 调度, 帧数对齐 H3 17 块.
+                # 二采 denoise 0.45 (防高动态重绘漂移), 分块4 (24GB 显存防 OOM).
+                steps, refine_steps, tile_count, refine_denoise = 6, 6, 4, 0.45
+                shift_video, shift_audio = 12.0, 3.0
+                _h3_align17 = True
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
-                    print(f"[H3 Extender] v14.172 武戏组合拳(渲染管道): 采样器强制 euler (FastH3 8步原生配方)")
+                    print(f"[H3 Extender] v14.176 武戏组合拳(渲染管道): 采样器强制 euler + simple 调度 (YZ终极篇武戏配方)")
             elif _rp_mode == "FastH3 Omni 8步单采":
                 steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
                 if not omni_8step_mode:
@@ -6139,14 +6149,15 @@ class BSAIH3FilmFactory:
                 sampler_name = "lcm"
                 print(f"[H3 Extender] DMAD-4步: 采样器强制 lcm (DMAD 官方配方)")
         elif speed_preset == "武戏组合拳":
-            # P3 (2026-10-20): 参考B站 Liao_2049 BV1G6nw6jEQ6 视频配方.
-            # DMAD加速LoRA + SelfLift二采 + 武戏LoRA组合拳: 8步一采(均衡) + 4步二采,
-            # shift 8/3 (FastH3 增强档默认), 一采无LoRA(模型原生8步), 二采 DMAD+武戏 LoRA 由
-            # H3LoraStack 注入. 一键直出档, 文戏武戏通吃.
-            steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+            # v14.176: 与渲染管道档对齐 — YZ金鱼「终极篇」武戏配方 (BV1LKJm6VELc):
+            # 一采6步 + 二采6步(总12步, 武戏拟合更清晰), shift 12/3, euler+simple,
+            # 帧数对齐 H3 17 块。旧值 8+4 仍可用但拟合弱于 6+6。
+            steps, refine_steps, tile_count, refine_denoise = 6, 6, 4, 0.45
+            shift_video, shift_audio = 12.0, 3.0
+            _h3_align17 = True
             if str(sampler_name) != "euler":
                 sampler_name = "euler"
-                print(f"[H3 Extender] 武戏组合拳: 采样器强制 euler (FastH3 8步原生配方)")
+                print(f"[H3 Extender] v14.176 武戏组合拳: 采样器强制 euler + simple 调度 (YZ终极篇武戏配方)")
         elif speed_preset == "FastH3 Omni 8步单采":
             # v14.172 (2026-10-22): 速度档已移除 Omni 枚举(统一走渲染管道)。
             # 本分支仅兼容 v14.170 遗留旧工作流(速度档仍存有 Omni 值) —— 命中时
@@ -6808,6 +6819,24 @@ class BSAIH3FilmFactory:
         ref_items = None
         ref_blocks = None
         active_picture_slots = None
+
+        # ── v14.176: 武戏组合拳档 → H3 17 帧块对齐 ──
+        # YZ金鱼终极篇帧数公式 max(5, round(a*24)) + (5 - x%17)%17 (即帧数 %17==5),
+        # 对齐 H3 video latent 时间结构, 防高动态武戏 latent 时间错位/果冻伪影。
+        # 在 lip 切段/时长换算之前统一调整 clips duration, 保证帧数与音频段一致。
+        if _h3_align17 and clips:
+            for _c in clips:
+                _cd = _c.get("duration", 5.0)
+                try:
+                    _cd_f = float(_cd)
+                except (TypeError, ValueError):
+                    _cd_f = float(str(_cd))
+                _cf = _duration_to_frames(_cd_f)
+                _cfa = _cf + (5 - _cf % 17) % 17
+                if _cfa != _cf:
+                    _c["duration"] = float(_cfa) / float(FPS)
+            print(f"[H3 Extender] v14.176 武戏组合拳: clips 帧数已对齐 H3 17 块 "
+                  f"({'/'.join(str(_duration_to_frames(float(_c.get('duration', 5)))) for _c in clips)} 帧)")
 
         # ── Lip Sync Audio 预分割 ──
         # 连接 lip_audio 时，按各 CLIP 时长把完整音频切成 N 段，
