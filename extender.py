@@ -2764,7 +2764,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                refine_mem_mode="spatial",
                temporal_chunk_tokens=0, temporal_overlap_tokens=8,
                dual_track_shift=True, shift_video=12.0, shift_audio=3.0,
-               tst_enable=True, tst_tau=0.2):
+               tst_enable=True, tst_tau=0.2, omni_8step_mode=False):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -2791,6 +2791,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         model = _apply_h3_tst(model, True, float(tst_tau))
 
     guider = _BasicGuider(model)
+    # v14.169: FastH3 Omni 蒸馏契约 = guidance 1.0 单前向(无 CFG)。
+    # CFGGuider 默认 cfg=8 双前向会过驱动蒸馏模型 → 过曝/伪影/糊
+    # (cfg=8 是 FastH3 V2 老模型的用法; Omni 8步蒸馏必须 guidance 1.0)。
+    if omni_8step_mode:
+        guider.cfg_scale = 1.0
+        print("[H3 Extender] v14.169 Omni 8步单采: 一采 guidance 1.0 (官方蒸馏契约, 单前向)")
     guider.set_conds(conditioning)
     sampler = comfy.samplers.sampler_object(str(sampler_name))
     sigmas = _sigmas(model, scheduler, steps, denoise)
@@ -5572,11 +5578,15 @@ class BSAIH3FilmFactory:
             # v1.83: 速度预设 - 落地 B站 MiniMax急速工作流(comfyu-Selflift)技术:
             # 高分辨率二采只跑2步 + 一采4步, 视频验证 16G 跑 10s 200wpx 耗时 1000s 且质量保住.
             # 24G 跑 15s 208wpx(1920x1088) 极速模式预计 ~10-12 分钟/clip.
+            # v14.172: 速度档仅保留基础速度/画质档(custom/极速/均衡/精细 + VDN 变体 7 项);
+            # 模型配方档(FastH3-Trim/FastH3-4步VSA/Turbo-v4/DMAD-4步/武戏组合拳/Omni)
+            # 已迁入「渲染管道 render_pipeline」下拉。旧工作流若遗留旧值, 下方
+            # 兼容分支仍按值生效。
             "speed_preset": (
-                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳"],
+                ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"],
                 {
                     "default": "custom",
-                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. FastH3-Trim = nvfp4 pruned model, 8 + 4 refine. FastH3-4step VSA = 4-step VSA distilled LoRA + 2 refine steps, fastest. Turbo-v4 = Turbo LoRA v4 step600 EMA (6 + 4 refine, shift 12/3, res_multistep 建议). DMAD-4步 = DMAD 4-step distilled LoRA (4 + 2 refine, shift 12/2, lcm sampler, CFG~1, 无需 CFG). 武戏组合拳 = 参考B站 Liao_2049 配方: 8步一采(均衡) + 4步二采(SelfLift), euler, 一采无LoRA, 武戏/DMAD LoRA 由 H3LoraStack 注入. custom = explicit widget values below.",
+                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. 模型配方档(FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / FastH3 Omni 8步单采) 已移至「渲染管道 render_pipeline」下拉选择。custom = explicit widget values below.",
                 },
             ),
             # P0 (2026-10-17): 官方双轨迹采样 —— MiniMaxH3SigmaShift 等效注入.
@@ -5719,20 +5729,16 @@ class BSAIH3FilmFactory:
             "INDEX_TTS_MODEL",
             {"forceInput": True, "tooltip": "IndexTTS-2.5 model (connect to the tts_model output of BSAI_IndexTTS2_5Loader). Required in speech mode."},
         )
-        # v14.168 (2026-10-22): FastH3 Omni 8步蒸馏旁支模式 —— 独立单采管道。
-        # 官方 FastVideo FastH3 Omni (2026-10-20 发布, ref2va 8步蒸馏 + VSA 80% 稀疏
-        # + guidance 1.0, shift 12/3): 选择本模式后插件自动跳过二采(Self-Lift),
-        # 一采直接以 8 步蒸馏直出画质即 final; 需配合工作流 Loader 加载
-        # fasth3_omniref_8step_pruned_int8_convrot.safetensors (或 NVFP4 版),
-        # 并在模型分支挂 BlockSparseAttention 节点 (VSA keep_percent=10, 官方模板
-        # video_fasth3_ominiref_r2v 默认)。off 时行为与历史版本完全一致。
+        # v14.172 (2026-10-22): 渲染管道统一管理全部模型配方档 —— 双采默认 +
+        # FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / Omni 8步单采。
+        # 速度档(v14.170 曾并入的配方档)已回退为 7 项基础档, 配方档统一在此选择。
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift 双采 (默认)", "FastH3 Omni 8步单采"],
+            ["Sol-H3 Self-Lift 双采 (默认)", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "FastH3 Omni 8步单采"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
-                "tooltip": "v14.168 FastH3 Omni 8步蒸馏旁支模式：选择 'FastH3 Omni 8步单采' 后，插件自动跳过二采(Self-Lift)，一采以 8 步蒸馏直出（guidance 1.0 + shift 12/3），画质即 final，单 CLIP 预期 5-10x 提速。前置：工作流 Loader 换 fasth3_omniref_8step_pruned_int8_convrot.safetensors + 模型分支挂 BlockSparseAttention(VSA keep_percent=10)。默认(双采)行为完全不变。",
+                "tooltip": "v14.172 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ③FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ④Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑤DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑥武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑦FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10)。",
             },
         )
 
@@ -6043,6 +6049,45 @@ class BSAIH3FilmFactory:
         # v1.83: 速度预设覆盖 (先于 REFINE-PARAMS 打印, 保证日志反映实际生效参数)
         speed_preset = str(kwargs.get("speed_preset", "均衡"))
         _sp_old = (steps, refine_steps, tile_count, refine_denoise)
+        # v14.172: 渲染管道统一管理模型配方档 —— 非默认档时模式参数由渲染管道接管,
+        # speed_preset 仅剩 7 项基础档。旧工作流遗留的配方档值(速度档里)仍由下方
+        # speed_preset 兼容分支按值生效, 两源互斥不叠加。
+        _rp_mode = str(kwargs.get("render_pipeline", "") or "")
+        if _rp_mode and _rp_mode != "Sol-H3 Self-Lift 双采 (默认)":
+            _rp_handled = True
+            if _rp_mode == "FastH3-Trim":
+                steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+            elif _rp_mode == "FastH3-4步VSA":
+                steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.45
+            elif _rp_mode == "Turbo-v4":
+                # v14.173: 6+4/denoise0.55 -> 8+4/denoise0.45 (一采8步结构更稳, 二采少重绘防
+                # clip2 复杂场景(点火/火焰/特写) 结构漂移变形; 速度仍快于精细(8+6)二采少2步)
+                steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+                shift_video, shift_audio = 12.0, 3.0
+            elif _rp_mode == "DMAD-4步":
+                steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.5
+                shift_video, shift_audio = 12.0, 2.0
+                if str(sampler_name) != "lcm":
+                    sampler_name = "lcm"
+                    print(f"[H3 Extender] v14.172 DMAD-4步(渲染管道): 采样器强制 lcm (DMAD 官方配方)")
+            elif _rp_mode == "武戏组合拳":
+                steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print(f"[H3 Extender] v14.172 武戏组合拳(渲染管道): 采样器强制 euler (FastH3 8步原生配方)")
+            elif _rp_mode == "FastH3 Omni 8步单采":
+                steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
+                if not omni_8step_mode:
+                    omni_8step_mode = True
+                    refine_enable = False
+                    denoise = 1.0
+                    shift_video, shift_audio = 12.0, 3.0
+                    print(f"[H3 Extender] v14.172 FastH3 Omni 8步单采(渲染管道): 跳过二采, 一采 8 步蒸馏直出")
+            else:
+                _rp_handled = False
+            if _rp_handled:
+                print(f"[H3 Extender] v14.172 渲染管道: {_rp_mode} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (速度档不叠加)")
+                speed_preset = "custom"  # 防下方 speed_preset 分支再覆盖配方档参数
         if speed_preset == "极速":
             # v1.85: 二采 2->3 步 + denoise 0.55->0.5. 写实动态(打斗)场景 2 步二采
             # 在 55% 重噪下收敛不足导致画面发糊, 3 步收敛更好保留高频细节.
@@ -6080,8 +6125,9 @@ class BSAIH3FilmFactory:
             steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.45
         elif speed_preset == "Turbo-v4":
             # P1 (2026-10-17): Turbo LoRA v4 step600 EMA. 6步一采(v4 画质舒适区) + 4步二采.
+            # v14.173: 8+4/denoise0.45 与渲染管道档对齐 (复杂场景防结构漂移/变形)
             # 双轨迹 shift 12/3 (官方 v4 参数); 建议手动把采样器切到 res_multistep 以贴合官方配方.
-            steps, refine_steps, tile_count, refine_denoise = 6, 4, 4, 0.55
+            steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
             shift_video, shift_audio = 12.0, 3.0
         elif speed_preset == "DMAD-4步":
             # P1 (2026-10-17): DMAD 4-step 蒸馏 LoRA. 4步一采 + 2步二采, shift 12/2,
@@ -6100,6 +6146,19 @@ class BSAIH3FilmFactory:
             if str(sampler_name) != "euler":
                 sampler_name = "euler"
                 print(f"[H3 Extender] 武戏组合拳: 采样器强制 euler (FastH3 8步原生配方)")
+        elif speed_preset == "FastH3 Omni 8步单采":
+            # v14.172 (2026-10-22): 速度档已移除 Omni 枚举(统一走渲染管道)。
+            # 本分支仅兼容 v14.170 遗留旧工作流(速度档仍存有 Omni 值) —— 命中时
+            # 同样联动渲染管道, 行为与 v14.170 完全一致; 新工作流请从「渲染管道」
+            # 下拉选择 FastH3 Omni 8步单采。
+            steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
+            if not omni_8step_mode:
+                omni_8step_mode = True
+                _render_pipeline = "FastH3 Omni 8步单采"
+                refine_enable = False
+                denoise = 1.0
+                shift_video, shift_audio = 12.0, 3.0
+                print(f"[H3 Extender] v14.172 FastH3 Omni 8步单采(旧速度档遗留值兼容): 渲染管道已切 Omni, 跳过二采, 一采 8 步蒸馏直出")
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
@@ -6506,6 +6565,47 @@ class BSAIH3FilmFactory:
 
         resolved_width = int(resolution["width"])
         resolved_height = int(resolution["height"])
+
+        # v14.171 (2026-10-22): Omni 单采一采钳制到 latent token 健康区。
+        # 实测: 一采 1376x768 → latent(172,96,107) ≈ 177万 tokens, Sol-Attn 降级
+        # dense 后 24GB 卡 attention 峰值 OOM (3/8 步崩溃, 叠加 lip_audio 音频注入
+        # 峰值更高)。Omni 无二采, 直出高分辨率的代价是 attention 峰值爆炸;
+        # 正确做法: 一采钳制 ≤ 960x544 (873,120 tokens, 与 v14.164 二采分块健康区
+        # 同源), 最终高清由用户侧 upscale_final 超分链兜底 (保真放大, 无二采伪影)。
+        if omni_8step_mode:
+            _omni_max_px = 960 * 544  # Omni 一采健康像素上限
+            _area = resolved_width * resolved_height
+            if _area > _omni_max_px:
+                _s = (_omni_max_px / float(_area)) ** 0.5
+                _nw = max(32, int(round(resolved_width * _s / 32)) * 32)
+                _nh = max(32, int(round(resolved_height * _s / 32)) * 32)
+                # 等比取整后可能仍略超上限, 逐档 32px 收紧到像素上限内
+                while _nw > 32 and _nh > 32 and _nw * _nh > _omni_max_px:
+                    if _nw > _nh:
+                        _nw -= 32
+                    else:
+                        _nh -= 32
+                print(f"[H3 Extender] v14.171 Omni 一采钳制: {resolved_width}x{resolved_height} "
+                      f"({_area/1e6:.2f}MP, latent {int(resolved_width/8)*int(resolved_height/8)*107:,} tokens)"
+                      f" -> {_nw}x{_nh} (latent {int(_nw/8)*int(_nh/8)*107:,} tokens, 24GB 健康区; "
+                      f"高清由 upscale_final 超分兜底)")
+                resolved_width, resolved_height = _nw, _nh
+                resolution["width"] = _nw
+                resolution["height"] = _nh
+                resolution["requested_width"] = _nw
+                resolution["requested_height"] = _nh
+            elif resolved_width < 960 or resolved_height < 544:
+                # 低请求(老 0.5MP=960x544 以下) → 等比提到健康区, 直出更清晰
+                _s = max(960 / float(resolved_width or 1), 544 / float(resolved_height or 1))
+                _nw = max(32, int(round(resolved_width * _s / 32)) * 32)
+                _nh = max(32, int(round(resolved_height * _s / 32)) * 32)
+                print(f"[H3 Extender] v14.171 Omni 一采保底: {resolved_width}x{resolved_height} "
+                      f"-> {_nw}x{_nh} (官方健康区, 直出更清晰)")
+                resolved_width, resolved_height = _nw, _nh
+                resolution["width"] = _nw
+                resolution["height"] = _nh
+                resolution["requested_width"] = _nw
+                resolution["requested_height"] = _nh
 
         # v14.157: 声明的最终输出尺寸必须尽早落盘。
         # 逐段 MP4 解码靠 manifest 里的 output_width/height 才会把"二采被
@@ -7570,6 +7670,7 @@ class BSAIH3FilmFactory:
                     refine_mem_mode=("global" if refine_mem_global else "spatial"),
                     temporal_chunk_tokens=int(temporal_chunk_tokens),
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
+                    omni_8step_mode=omni_8step_mode,
                 )
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
@@ -8259,7 +8360,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.154 backend loaded (59-widget mid-insert layout, history-key remap supported, DynamicVRAM refine delegate KJNodes-patch-rebuild + Sol-Attn head-group, speed_preset 8档全, quickbar cycle→dropdown, 二采 Sol-Attn token上限门=350k + 自动分块n4保稳 + refine_mem_mode空间/全局可切, 对口型×上下文参考手动可控v2.122, 旧工作流4参数容错v14.152, v14.154修复: 纯歌曲输出重叠切割先于重采样(治clip2+音频晚0.75s跳针+口型错位))")
+print("[BSAI-H3-Film-Factory] v14.171 backend loaded (Omni 单采: render_pipeline/speed_preset 13档联动 + guidance 1.0 + 一采分辨率钳制≤960x544 健康区(修复1376x768直出OOM) + upscale_final超分兜底; 双采: Sol-Attn token上限门350k + 自动分块n6 + 二采 delegate KJNodes 重建; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",

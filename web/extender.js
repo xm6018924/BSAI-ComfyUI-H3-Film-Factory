@@ -1228,7 +1228,7 @@ const BSAI_BILINGUAL_LABELS = {
     "refine_denoise": "二次采样降噪（0.5-0.6黄金区间；低照度镜头低于0.5只做平滑）",
     "refine_steps": "二次采样步数",
     "refine_upscale_factor": "潜空间放大倍数（1.0=不放大）",
-    "speed_preset": "速度预设（极速4+2步 / 均衡6+4步 / 精细8+6步 / custom）",
+    "speed_preset": "速度预设（custom / 极速4+2步 / 均衡6+4步 / 精细8+6步 / VDN×3；配方档见渲染管道）",
     "temporal_chunk_tokens": "Temporal chunk size (split along T axis to prevent OOM; 0=off, T~107 recommends 40~60)",
     "temporal_overlap_tokens": "时间分块重叠（相邻段重叠token，越大越稳越慢，一般8~12）",
     "refine_upscaler_model": "二采放大模型（3D语义放大/默认bilinear插值）",
@@ -1262,7 +1262,7 @@ const BSAI_BILINGUAL_LABELS = {
     "refine_mem_mode": "二采省显存模式（spatial分块兼容 / global全上下文省显存）",
     "one_shot_mode": "一镜到底模式（off分镜剪辑 / on无缝长镜头：注入不切场+强制motion context+零转场拼接）",
     "one_shot_clip_duration": "一镜到底每段目标秒数（0关闭自动分CLIP；连歌曲后自动CLIP数=歌曲时长÷本值）",
-    "render_pipeline": "渲染管道（Sol-H3 Self-Lift双采默认 / FastH3 Omni 8步单采：跳过二采，一采8步蒸馏直出，需Loader换fasth3_omniref_8step_pruned_int8_convrot+VSA节点）",
+    "render_pipeline": "渲染管道（Sol-H3 Self-Lift双采默认 / FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / FastH3 Omni 8步单采：配方档统一在此选择，Omni需Loader换fasth3_omniref_8step_pruned_int8_convrot+VSA节点）",
 };
 function bsaiApplyBilingualLabels(node) {
     if (!node || !node.widgets) return;
@@ -1636,15 +1636,16 @@ function scheduleHiddenRowFallback(node, keys) {
 //   没有快捷按钮的参数 → 一律留在参数区可见（用户明确要求，不得多藏）。
 //
 // H3_MANAGED_ROW_KEYS = 本插件管理过可见性的全部行。
-//   前 20 项 = 快捷条 QUICK_DEFS 对应的参数 → hidden
+//   前 21 项 = 快捷条 QUICK_DEFS 对应的参数 → hidden
 //   后 9 项  = v14.133 误藏的"附属高级参数" → 强制放回参数区（自愈）
 const H3_MANAGED_ROW_KEYS = [
-    // ── 快捷条 20 项 ──
+    // ── 快捷条 21 项 ──
     "refine_enable", "upscale_per_clip", "upscale_final", "block_cache", "ref_cache",
     "output_mode", "speed_preset", "refine_lipsync_mode", "upscale_mode", "pause_enable",
     "output_image_audio", "cache_dit", "clip_select_enable", "upscale_fp16",
     "upscale_face_restore", "tiled_refine", "semantic_bridge_enable",
     "semantic_bridge_magnitude_match", "face_lock_mode", "one_shot_mode",
+    "render_pipeline",
     // ── v14.133 误藏、v14.134 起必须显示 ──
     "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch",
     "tile_count", "tile_overlap", "semantic_bridge_adapter", "semantic_bridge_alpha",
@@ -6636,7 +6637,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "block_cache", zh: "块缓存", en: "BlkCache", desc: "H3 Block Cache(F1B0 残差)加速，需 T8 插件；顺序画面稳定时显著提速。" },
         { key: "ref_cache", zh: "参考缓存", en: "RefCache", desc: "Ref2VA 参考图编码磁盘缓存，调参重跑跳过重复编码。" },
         { key: "output_mode", zh: "输出", en: "Output", desc: "输出模式循环：none(仅缓存)→per_clip(分段)→merged(合并)→both(两者)。", cycle: ["none", "per_clip", "merged", "both"] },
-        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环（12档）：custom→极速→均衡→精细→极速-VDN→均衡-VDN→精细-VDN→FastH3-Trim→FastH3-4步VSA→Turbo-v4→DMAD-4步→武戏组合拳。", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }] },
+        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环（7档）：custom→极速→均衡→精细→极速-VDN→均衡-VDN→精细-VDN（v14.172：模型配方档 FastH3-Trim/FastH3-4步VSA/Turbo-v4/DMAD-4步/武戏组合拳/Omni 已移至「渲染管道」选择）。", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }] },
         { key: "refine_lipsync_mode", zh: "口型", en: "Lipsync", desc: "对口型×二采预设循环：锁定保口型→音频参与重绘0.7→音频全重绘1.0。", cycle: ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"] },
         { key: "upscale_mode", zh: "超分模式", en: "UpxMode", desc: "超分模式循环：平衡(质量+速度)→质量优先→速度优先→自定义。", cycle: ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"] },
         { key: "pause_enable", zh: "暂停", en: "Pause", desc: "每 CLIP 生成完自动暂停等待；无干预超时自动继续。" },
@@ -6654,6 +6655,11 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // off=默认分镜剪辑(xfade 转场拼接)；on=无缝长镜头(注入不切场/不转场指令 + 强制
         // motion context(Add Guide 等效锚点) + 合并零转场 concat)。
         { key: "one_shot_mode", zh: "一镜到底", en: "OneShot", desc: "一镜到底旁支模式：off=分镜剪辑（xfade转场）；on=无缝长镜头（注入不切场指令+强制motion context+零转场拼接）。", cycle: ["off (分镜模式)", "on (一镜到底)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#f472b6", border: "#be185d" }] },
+        // v14.172 (2026-10-22): 渲染管道统一管理全部模型配方档（7 档）。
+        // 速度档仅留基础 7 档(custom/极速/均衡/精细/VDN×3); FastH3-Trim /
+        // FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / Omni 8步单采 在此选择。
+        // 选 Omni 时二采 15 行自动隐藏（syncOmniRefineRows），切回双采恢复。
+        { key: "render_pipeline", zh: "渲染管道", en: "Pipeline", desc: "渲染管道（模型配方档统一在此选择，v14.172）：Sol-H3 Self-Lift双采(默认) → FastH3-Trim(8+4) → FastH3-4步VSA(4+2) → Turbo-v4(6+4, shift12/3) → DMAD-4步(4+2, lcm) → 武戏组合拳(8+4, euler) → FastH3 Omni 8步单采(跳过二采, 需Loader换Omni模型+VSA)", cycle: ["Sol-H3 Self-Lift 双采 (默认)", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "FastH3 Omni 8步单采"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#22d3ee", border: "#0891b2" }] },
         // v14.127: restore_cache 已从 QUICK_DEFS 移除——后端 INPUT_TYPES 同步移除
         // 该参数（1.55 toggle 行无法前端隐藏，根治：参数不存在则行不存在）。
         // 恢复缓存功能由节点底部"恢复缓存"按钮（直调后端 /h3_extender/restore_cache
@@ -6800,9 +6806,10 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         upscale_mode: "upscale", upscale_fp16: "upscale",
         // 语义：语义桥 / 桥对齐
         semantic_bridge_enable: "sema", semantic_bridge_magnitude_match: "sema",
-        // 流程：输出 / 预览 / 暂停 / CLIP选择 / 一镜到底
+        // 流程：输出 / 预览 / 暂停 / CLIP选择 / 一镜到底 / 渲染管道
         output_mode: "flow", output_image_audio: "flow",
         pause_enable: "flow", clip_select_enable: "flow", one_shot_mode: "flow",
+        render_pipeline: "flow",
     };
     const quickBar = document.createElement("div");
     quickBar.style.cssText = "display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:5px 4px;border-top:1px solid rgba(255,255,255,.18);margin-bottom:2px;flex-shrink:0;background:#182838;";
@@ -6990,12 +6997,14 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         "refine_upscaler_model", "refine_align_to", "refine_audio_denoise",
         "refine_lipsync_mode", "tiled_refine", "tile_count", "tile_overlap",
         "temporal_chunk_tokens", "temporal_overlap_tokens", "refine_mem_mode",
-        "speed_preset",
     ];
     const syncOmniRefineRows = (nd) => {
         if (!nd) return;
         const rp = nd.widgets && nd.widgets.find((x) => x && x.name === "render_pipeline");
-        const omni = rp && String(rp.value || "").indexOf("Omni") >= 0;
+        const sp = nd.widgets && nd.widgets.find((x) => x && x.name === "speed_preset");
+        // v14.170: speed_preset 也纳入 Omni 判定（速度档选 FastH3 Omni 8步单采时同样隐藏二采行）
+        const omni = (rp && String(rp.value || "").indexOf("Omni") >= 0) ||
+                     (sp && String(sp.value || "").indexOf("Omni") >= 0);
         const keys = omni ? HIDDEN_ROW_KEYS.concat(H3_REFINE_ROW_KEYS) : HIDDEN_ROW_KEYS.slice();
         applyHiddenParamRows(nd, keys);
     };
@@ -7007,6 +7016,16 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             rpw.callback = function () {
                 try { syncOmniRefineRows(node); } catch (e) {}
                 if (typeof _oc === "function") _oc.apply(this, arguments);
+            };
+        }
+        // v14.170: 速度档选 FastH3 Omni 8步单采时同样实时联动隐藏二采行
+        const spw = node.widgets && node.widgets.find((x) => x && x.name === "speed_preset");
+        if (spw && !spw.__h3OmniHook) {
+            spw.__h3OmniHook = true;
+            const _sc = spw.callback;
+            spw.callback = function () {
+                try { syncOmniRefineRows(node); } catch (e) {}
+                if (typeof _sc === "function") _sc.apply(this, arguments);
             };
         }
         syncOmniRefineRows(node);
@@ -7765,7 +7784,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
-        try { this.title = "BSAI ComfyUI H3 Film Factory v2.131·v14.154"; } catch (e) {}
+        try { this.title = "BSAI ComfyUI H3 Film Factory v2.131·v14.171"; } catch (e) {}
 
         // Poisoned-height recovery runs AFTER configure (workflow size has been
         // applied). Reset an absurd serialized height to the computed minimum;
@@ -8466,7 +8485,7 @@ app.registerExtension({
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
 
             // Force-update the node title to the new display name
-            this.title = "BSAI ComfyUI H3 Film Factory v2.131·v14.154";
+            this.title = "BSAI ComfyUI H3 Film Factory v2.131·v14.171";
 
             // New nodes must start in Auto resolution mode. Older workflows are
             // still migrated to Manual later in onConfigure when they do not
