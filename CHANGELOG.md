@@ -14,6 +14,16 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.179 (2026-10-23) — 二采分块提速：回退盲目扩块，overlap 减半，head 分组恢复 / refine-tile speed: no blind re-tiling, halved overlap, head-chunking restored
+
+**根因（实机数据实锤）：** v14.164 把请求 4 块自动扩到 8 块（每块 <=270k 假设 Sol-Attn 稀疏 0.7s/块），但 tile 实际走 KJNodes head 分组路径（实测 0.26~0.55s/k tokens），8 块 overlap 重叠区重复计算翻倍 → 545s/步，反超 v14.149 固定 4 块（~334k/块灰色区）的 399s/步；v14.166 再把 head 分组 4->1，KJNodes 分组稀疏退化成全 head dense，雪上加霜。 **/ Root cause (proven by real runs): v14.164 auto-blew requested 4 tiles to 8 (<=270k/tile assumed Sol-Attn sparse at 0.7s/tile), but tiles actually run through the KJNodes head-chunk path (~0.26-0.55s/k tokens measured); 8 tiles double the overlap duplicate work → 545s/step, worse than v14.149's fixed 4 tiles (~334k grey-zone) at 399s/step. v14.166 then cut head chunks 4->1, degrading KJNodes grouped sparse into full-head dense.**
+
+- **修复①（extender.py `_ff_auto_refine_tile_count`）**：健康区目标 270k -> 安全区 450k，每块 <=450k 一律尊重请求值不扩块（分块越少 forward/搬运/重叠越少）；overlap 钳制 128px -> 64px（重叠重复计算减半，接缝由 motion-context keyframe 对齐兜底）。 **/ Fix ①: healthy-zone target 270k -> safe-zone 450k; per-tile <=450k now respects the requested count (fewer tiles = less forward/move/overlap); overlap clamped 128px -> 64px.**
+- **修复②（extender.py 二采 delegate）**：回退 v14.166 的 head_chunks 4->1，恢复 head 分组 4，让 KJNodes 低显存分组稀疏重新生效。 **/ Fix ②: revert v14.166's head_chunks 4->1 back to 4 so KJNodes low-mem grouped sparse re-engages.**
+- **预期**：995k tokens 二采（clip1 8 块 545s/步）回到 ~4 块 340s/步量级；如需 200-240s/步，可后续攻 Sol-Attn 稀疏真生效（tile 0.7s）或二采 x1.8（成片 1728p）。 **/ Expected: 995k-token refine from 545s/step (8 tiles) back to ~340s/step (4 tiles); for 200-240s/step, either pursue true Sol-Attn sparse (0.7s/tile) or refine at x1.8 (1728p output).**
+
+---
+
 ### v14.177 (2026-10-23) — 一镜到底段间衔接断裂根治：渲染帧数补上 motion context 帧 / one-shot inter-segment continuity fix: render frame count now includes motion context frames
 
 **根因（5090 实测链缓存实锤）：** 渲染 latent 帧数只按目标时长构造（12s → 294 帧），而 motion context 会把上一段尾部 39 帧作为 keyframes 注入本段开头，join 解码时按 trim_frames=39 裁掉这段上下文 → 每段净输出只剩 255 帧 = 10.63s（目标 12s，每段短 1.375s），音频同步被裁（seg1/2=340000 samples=10.63s）→ 段间断帧断音、成片总时长 804 < 864，且段首过渡区被裁造成"切镜感"。** / Root cause (proven by 5090 chain-cache): render latent frame count was built from the target duration only (12s → 294 frames), but motion context injects the previous clip's tail 39 frames as keyframes into the start of this clip and join trims those 39 context frames at decode → each clip net-outputs only 255 frames = 10.63s (target 12s, short by 1.375s/clip), audio trimmed in sync (seg1/2 = 340000 samples = 10.63s) → inter-segment frame/audio gaps, total 804 < 864 frames, and the trimmed head-transition area reads as "camera cut".**

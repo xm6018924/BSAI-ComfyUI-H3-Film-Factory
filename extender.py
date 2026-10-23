@@ -2308,15 +2308,15 @@ def _ff_wrap_members(members, was_nested):
 
 
 def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
-    """v14.164 (2026-10-22): 二采分块粒度自适应到 Sol-Attn 稀疏健康区。
+    """v14.179 (2026-10-23): 二采分块粒度自适应 —— 不再盲目扩块到 Sol-Attn 健康区。
 
-    Sol-Attn kernel 病态基准(comfy_kitchen ck.sol_attn, RTX 5090 24GB 实机同参):
-      n=218,280 -> 0.97s / n=293,760 -> 0.70s (健康)
-      n=440,640 -> >45s / n=873,120 topk -> >600s (病态)
-    v14.149 固定 n_tiles=4 时每块 latent 46x68x107 = 334,696 tokens, 落在
-    293k(健康) 与 440k(病态) 之间的灰色区 —— 本机实测每块 ~90s+,
-    二采 4 块合计 ~399s/步。本函数把每块 token 压到 <=270k(健康区),
-    二采切回 Sol-Attn 稀疏(0.7s/块级), 配合 KJNodes head 分组叠加。
+    实测修正(实机 5090 24GB):
+      - v14.149 固定 4 块(每块 ~334k 灰色区) = 399s/步;
+      - v14.164 扩到 8 块(每块 <=270k 健康区) = 545s/步 —— 块间 overlap 重复计算
+        翻倍, 且 tile 实际走 KJNodes head 分组(实测 0.26~0.55s/k tokens), 并非
+        注释假设的 Sol-Attn 0.7s/块, 扩块反而更慢。
+    → 结论: 每块 <=450k(病态边缘) 一律尊重请求值(分块越少 forward/搬运/重叠越少);
+      每块 > 450k 才提升到每块 <=450k 的最少块数, 绕开 440k+ 病态 kernel。
     """
     try:
         _mm164, _ = _ff_extract_members(samples)
@@ -2327,27 +2327,32 @@ def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
         _minhw = min(_h164, _w164)
         if _axis <= 1 or _minhw <= 1 or _t164 <= 1:
             return int(requested)
-        # VAE_SPATIAL=16: overlap_px 转 latent 格(日志 128px -> 8 latent)
+        # v14.179: overlap 钳制 64px(原 128px)——实测重叠区重复计算占大头,
+        # 减半 overlap 降低总计算量, 接缝由 v14.162 motion-context keyframe 对齐兜底。
+        overlap_px = min(int(overlap_px), 64)
+        # VAE_SPATIAL=16: overlap_px 转 latent 格(64px -> 4 latent)
         _ov = max(1, int(overlap_px) // 16)
         # 每块 token ≈ T * minHW * (axis/n + 2*ov)
-        _target = 270000
+        _target = 450000
         _req = max(1, int(requested))
         if _req > 1:
             _per_req = _t164 * _minhw * (_axis // _req + 2 * _ov)
         else:
             _per_req = _t164 * _minhw * _axis
-        # 请求值每块已在健康区 -> 尊重请求(分块越少 forward/搬运越少)
+        # 请求值每块未达病态边缘 -> 尊重请求(分块越少 forward/搬运/重叠越少)
         if _per_req <= _target:
+            print(f"[H3 Extender] v14.179 分块粒度: 请求 n_tiles={requested} -> {_req} "
+                  f"(每块约 {_per_req:,} tokens <= 450k 安全区, 尊重请求不扩块)")
             return _req
-        # 请求值落在灰色/病态区 -> 提升到每块 <= 270k 的最少块数
+        # 请求值落在病态区 -> 提升到每块 <= 450k 的最少块数
         _den = _target / (_t164 * _minhw) - 2 * _ov
         if _den <= 0:
             return max_tiles
         _n = int(_axis / _den) + 1
         _n = max(_req + 1, min(max_tiles, _n))
         _per = _t164 * _minhw * (_axis // _n + 2 * _ov)
-        print(f"[H3 Extender] v14.164 分块粒度自适应: 请求 n_tiles={requested} -> {_n} "
-              f"(每块约 {_per:,} tokens <= 270k Sol-Attn 健康区, 稀疏非 dense)")
+        print(f"[H3 Extender] v14.179 分块粒度: 请求 n_tiles={requested} -> {_n} "
+              f"(每块约 {_per:,} tokens <= 450k 安全区, 绕开病态 kernel)")
         return _n
     except Exception:
         return int(requested)
@@ -3527,20 +3532,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                             _r_to145["minimax_head_chunks"] = _r_to_orig145["minimax_head_chunks"]
                                         if "sol_take_forward" in _r_to_orig145:
                                             _r_to145["sol_take_forward"] = _r_to_orig145["sol_take_forward"]
-                                        # v14.166 (2026-10-22): 二采 kernel 提速——v14.164 健康区(≤270k)后
-                                        # Sol-Attn workspace 随 token 缩水(873k=6.33GB -> 262k≈0.6GB),
-                                        # 把 head 分组 4->1, 每层注意力从"4 次 262k 串行 kernel"
-                                        # 变"1 次 14-head 并行 kernel", 每块 kernel 时间预期减半.
-                                        # 仅改 delegate(二采), 一采 sampling_model 保持 head_chunks=4
-                                        # 不受影响; 显存: 中间激活 +~1GB, workspace 1.9GB, reserve 6.9GB 内.
-                                        try:
-                                            _r_hc166 = int(_r_to145.get("minimax_head_chunks", 4))
-                                            if _r_hc166 > 1:
-                                                _r_to145["minimax_head_chunks"] = 1
-                                                print(f"[H3 Extender] v14.166 二采 delegate head_chunks "
-                                                      f"{_r_hc166}->1 (健康区单次并行 kernel, 每块注意力预期减半)")
-                                        except Exception as _ehc166:
-                                            print(f"[H3 Extender] v14.166 head_chunks 调整跳过(保持 {_r_hc166}): {_ehc166}")
+                                        # v14.179 (2026-10-23): 回退 v14.166 的 head_chunks 4->1。
+                                        # 实测: v14.166 把 delegate head 分组 4->1 后, 每块走
+                                        # KJNodes 分组稀疏的注意力退化成全 head dense 路径,
+                                        # 8 块二采 545s/步 > v14.149(4块+head4) 399s/步。
+                                        # 恢复 head 分组 4, 让 KJNodes 低显存分组生效。
+                                        # (v14.166 注释称"单次并行 kernel 注意力减半"与实机不符)
+                                        _r_hc166 = int(_r_to145.get("minimax_head_chunks", 4))
+                                        _r_to145["minimax_head_chunks"] = 4
+                                        if _r_hc166 != 4:
+                                            print(f"[H3 Extender] v14.179 二采 delegate head_chunks "
+                                                  f"{_r_hc166}->4 (回退 v14.166, 恢复 KJNodes 分组稀疏)")
                                     print(f"[H3 Extender] v14.145 KJNodes 低显存补丁已重建绑定到 delegate({len(_r_deleg_blocks145)} blocks)")
                                 else:
                                     print(f"[H3 Extender] v14.145 KJNodes 补丁重建跳过(模块/blocks 不可用), 走原生 forward")
@@ -3650,7 +3652,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _r_tiles_n164 = _ff_auto_refine_tile_count(samples, tile_count, tile_overlap)
                     _r_restore_tiles = _tiles_mod.wrap_sampler_spatial_tiles(
                         _r_sampler, n_tiles=_r_tiles_n164, overlap_pixels=int(tile_overlap))
-                    print(f"[H3 Extender] Refine 分块二采已启用: n_tiles={_r_tiles_n164} overlap={tile_overlap}px (v14.164 按 Sol-Attn 健康区自适应)")
+                    print(f"[H3 Extender] Refine 分块二采已启用: n_tiles={_r_tiles_n164} overlap={tile_overlap}px (v14.179 尊重请求不扩块+overlap 64)")
                 except Exception as _te_t:
                     print(f"[H3 Extender] Refine 分块包装失败(回退全帧): {_te_t}")
                     _r_restore_tiles = None
@@ -3704,9 +3706,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _tiles_spec3.loader.exec_module(_tiles_mod3)
                     _r_restore_tiles = _tiles_mod3.wrap_sampler_spatial_tiles(
                         _r_sampler, n_tiles=_ff_auto_refine_tile_count(samples, 4, 128), overlap_pixels=128)
-                    print(f"[H3 Extender] v14.164 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
-                          f"自动启用分块二采 overlap=128px, n_tiles 按 Sol-Attn 健康区自适应 "
-                          f"(v14.149 固定 4 块 ~334k/块灰色区 399s/步 -> v14.164 每块 <=270k 健康区)")
+                    print(f"[H3 Extender] v14.179 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
+                          f"自动启用分块二采 overlap=64px, n_tiles 按请求值(不扩块) "
+                          f"(v14.149 固定 4 块 ~334k/块灰色区 399s/步 -> v14.164 扩 8 块 545s/步 反而更慢 -> v14.179 回退)")
                     # v14.173: 分块成功 —— 显式清理 transformer_options 里的 sol_max_tokens.
                     # 防止同一个 _refine_model 对象被二次调用时(链式 clip) 残留
                     # 上次注入的 dense 门, 把本该稀疏的 tile 强制降级.
