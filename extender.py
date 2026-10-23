@@ -647,13 +647,21 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
         # 推进 = 净时长; 解码混音跳过 overlap 头后 lip 净长恰好等于模型音频
         # 长度, 段间无缝。注意: 若渲染时前段缓存缺失(trim 被强制为 0), 该段
         # 实际输出全时长, 下一边界会出现 1.625s 重复 — 属缓存缺失既有异常。
+        #
+        # v14.177 (fix): 上述"净时长推进"是配套旧渲染帧数(只含标称)的。渲染
+        # 侧已改为 渲染帧数 = 标称 + context 帧(解码裁 context 后净输出 = 标称),
+        # 因此这里必须改回按标称全时长推进 —— 否则 lip 段会短 context/fps 秒,
+        # 与视频净输出(标称)错位。overlap 头跳过逻辑不变。
         _trim_samples = 0
+        _net_samples = max(1, seg_samples)
         if _overlap > 0 and int(context_frames) > 0:
+            # v14.177: 推进仍按标称; 仅记录 context 帧样本数供解码跳过段头重叠。
+            # 注意: 音频 latent 行数由渲染帧数(标称+context)决定, lip 段需覆盖
+            # 该长度; 段头 overlap 由解码混音按 overlap_samples 跳过。
             _trim_samples = min(
                 int(round(float(context_frames) / float(fps) * sr)),
                 max(0, seg_samples - 1),
             )
-        _net_samples = max(1, seg_samples - _trim_samples)
 
         end_sample = min(current_sample + _net_samples, total_samples)
 
@@ -7521,6 +7529,31 @@ class BSAIH3FilmFactory:
                       f"{len(ref_blocks)} ref_blocks, active_picture_slots={active_picture_slots}")
 
             frame_count = _duration_to_frames(cfg["duration"])
+            # v14.177 (fix): 段间衔接断裂根治 —— 渲染帧数必须包含 motion context 帧。
+            # 机制: 本段将应用 motion context 时 (i>0 且 context_enabled 且前段有缓存),
+            # 模型输出开头的 context 帧是上一段尾画面的延续 (join 解码时按 trim_frames
+            # 裁掉, 只保留本段新内容)。旧代码 frame_count 只按目标时长构造 (12s -> 294),
+            # motion.apply 返回 trim=39 后被裁 -> 每段净输出 255 帧 = 10.63s < 目标 12s,
+            # 段间断帧断音、总时长 804 < 864, 成片每段短 1.37s。
+            # 修复: 渲染帧数 = 目标帧 + context 帧 (经 H3 grid %17==5 对齐, 所有
+            # context 档 5/22/39/56 裁后净输出均为 289 帧 ≈ 12.04s, 与目标 12s 一致)。
+            if (
+                i > 0
+                and cfg.get("context_enabled", True)
+                and previous_proxy is not None
+            ):
+                try:
+                    _ctx_frames = int(str(context_length))
+                except (TypeError, ValueError):
+                    _ctx_frames = 0
+                if _ctx_frames > 0:
+                    _tgt_raw = int(round(float(cfg["duration"]) * FPS))
+                    frame_count = _align_frame_count(_tgt_raw + _ctx_frames)
+                    print(
+                        f"[H3 Extender] v14.177 段间衔接: clip[{i+1}] 渲染帧数 = "
+                        f"目标 {_tgt_raw} + context {_ctx_frames} -> {frame_count} "
+                        f"(解码裁 {_ctx_frames} 后净输出 ≈ {frame_count - _ctx_frames} 帧)"
+                    )
             # Prepend global prompt if connected from an external node.
             # The [角色档案]/[道具档案]/[场景档案] inventories are stripped so
             # the render prompt only ever describes THIS CLIP's own content.
