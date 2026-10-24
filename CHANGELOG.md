@@ -14,6 +14,17 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.191 (2026-10-24) — 一镜到底中段切镜（阶段一）：分拍时间标记反切镜指令 / one-shot mid-clip cut fix (phase 1): anti-cut directive for time-beat prompts
+
+**实测定位：** clip1 预览（287 帧 / 11.96s）场景检测（scene>0.18）发现 **2 个硬切：t=2.67s（帧64）正面中景→侧后方、t=6.46s（帧155）侧后方→正面手持相机**。两个切点与提示词 "0-3秒 / 3-6秒" 分拍边界（3s/6s）对齐 → 模型把分拍脚本当成镜头清单，在拍点按 MV 蒙太奇先验自行分镜覆盖。 **/ Measured: two hard cuts in the 11.96s clip at 2.67s and 6.46s, aligned with the prompt's 0-3s/3-6s beat boundaries — the model read the beat list as a shot list and montage-covered the beats.**
+
+- **根因（机制层面）**：既有链式机制（噪声延续 + 头部均匀锁 keep + 衔接模板）只锚定**段头 ~1s**；12s 单次生成窗口内其余 ~11s 是模型自由行驶区，没有任何机制约束段内不切镜。参考工作流的"一镜到底"全部使用 ~5s 短链，窗口短所以段内几乎不会切。 **/ Root cause: all chain mechanisms anchor only the ~1s head; the remaining ~11s of a 12s single-pass window is free-running. Reference workflows use ~5s links, where mid-link cuts are rare.**
+- **本次修改（零风险，不动时序/缓存/参数）**：一镜到底模式下始终追加双语"[单镜头硬规则]"指令 —— 显式声明提示词中的时间段描述是**同一连续运镜的先后阶段而非多个镜头**，禁止拍点切镜/转场/机位景别跳变/时间跳跃。单采与双采档都生效。 **/ Change (zero-risk, no timing/cache/param impact): one-shot mode now always appends a bilingual "[Single Continuous Take — Hard Rule]" directive declaring the time beats are phases of ONE unbroken camera move, not separate shots.**
+- **阶段二（待确认）**：12s 长段拆分为 ≤6.4s 链式短段（141+153 帧 / 136+153 帧，按 %17==5 网格精确求和 = 现有净帧数 294/289，**零音频漂移**）。需要先拿到一次实机渲染日志核对音频推进公式后再实施；启用后需全量重渲一次（旧缓存索引错位）。 / Phase 2 (pending): split 12s segments into ≤6.4s chained links with exact %17==5 grid math (sums match current net frames 294/289 — zero audio drift). Needs one runtime log to verify the audio-advance formula before implementation; enabling forces one full re-render.
+- 验证：py_compile PASS。 / Verified: py_compile PASS.
+
+---
+
 ### v14.190 (2026-10-24) — 淡彩/低步数彩点修复：解码后色度去斑（不动亮度、不加参数）/ chroma despeckle after decode: kill the colored dots without touching luma or adding widgets
 
 **根因（实测定位）：** 成片 1920×1088 每帧约 420 个极端饱和像素（官方样本 0 个）；对官方干净样本用 libx264 crf17 yuv420p / yuv444p 重编码均为 0 → 排除编码器，彩点存在于编码前像素。真实彩点样例 `(33,181,134)` 青绿、自身 Cb/Cr=(0.006,−0.275)、邻域=(−0.10,+0.10)，偏离 0.37~0.40 且成 2×2 块（4:2:0 扩散特征）。链条：低步数单采 → VAE 解码在明暗交界/高光处逐通道过冲 → uint8 按通道硬截断成 2~6px 高饱和色块；淡彩画面本身低饱和，这些点成了画面唯一的高饱和像素，因此格外刺眼。 **/ Root cause (measured): ~420 extreme-saturation pixels per frame (0 in official samples); re-encoding a clean official sample with libx264 crf17 yuv420p/yuv444p yields 0 → encoder ruled out. Real sample (33,181,134): chroma (0.006,−0.275) vs neighborhood (−0.10,+0.10), deviation 0.37-0.40, in 2×2 blocks (4:2:0 spread). Chain: low-step single pass → VAE decode per-channel overshoot at luma/highlight boundaries → uint8 hard clipping into 2-6px saturated blotches, which stand out in a low-saturation pastel frame.**

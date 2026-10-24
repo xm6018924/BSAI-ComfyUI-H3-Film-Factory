@@ -7919,6 +7919,27 @@ class BSAIH3FilmFactory:
                         "<scenetrans> voice continues uninterrupted <scenetrans> <cutoff>"
                     )
                     print(f"[H3 Extender] 一镜到底 clip[{i}]: 已注入结构化衔接模板(段头承接+段尾预埋+<scenetrans>/<cutoff>)")
+            # v14.191: 一镜到底 —— 分拍时间标记反切镜指令(始终追加, 单采/双采都生效)。
+            # 实测根因(clip1 预览 287 帧): 12s 长段提示词按 "0-3秒/3-6秒/6-9秒/9-12秒"
+            # 分拍描述运镜时, 模型把每个分拍当成独立镜头, 在拍点处自行硬切
+            # (实测切镜点 2.67s/6.46s ≈ 3s/6s 分拍边界, 场景检测 scene>0.18)。
+            # 既有链式机制(噪声延续+头部均匀锁 keep+衔接模板)只锚定段头 ~1s,
+            # 对段内中段无约束。此指令显式声明分拍=同一连续运镜的先后阶段,
+            # 压制模型在拍点的蒙太奇先验。
+            if one_shot_enabled:
+                effective_prompt = str(effective_prompt) + (
+                    "\n[Single Continuous Take — Hard Rule] "
+                    "All time-range descriptions in this prompt (0-3s / 3-6s / 6-9s / 9-12s etc.) "
+                    "are consecutive PHASES of ONE single unbroken camera move inside THIS clip — "
+                    "they are NOT separate shots. At every phase boundary the camera must glide "
+                    "continuously: no cut, no transition, no angle or shot-size jump, no time skip. "
+                    "Framing may only evolve smoothly and continuously from phase to phase."
+                    "\n[单镜头硬规则] 本段提示词中所有时间段描述(0-3秒/3-6秒/6-9秒/9-12秒等)"
+                    "是同一个连续运镜的先后阶段，不是多个镜头。每个阶段边界镜头必须平滑连续滑过："
+                    "禁止切镜、禁止转场、禁止机位角度或景别跳变、禁止时间跳跃，"
+                    "构图只允许随运镜连续渐变。"
+                )
+                print(f"[H3 Extender] v14.191 一镜到底 clip[{i}]: 已注入分拍反切镜指令(时间段=同一连续运镜的阶段)")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
