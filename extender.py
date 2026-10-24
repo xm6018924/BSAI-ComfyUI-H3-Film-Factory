@@ -7695,11 +7695,15 @@ class BSAIH3FilmFactory:
                     previous_handle = result[0]
                     previous_proxy = result[1]
                     statuses.append(result[4])
-                elif single_clip_replace:
+                    continue
+                if single_clip_replace:
                     # v2.66: per-clip 独立渲染——前置段磁盘无缓存时不补渲、不 join，
                     # 直接跳过，让选中 clip 从当前链末尾接续渲染（绝不回 clip1）。
                     print(f"[H3 Extender] v2.66 独立渲染跳过前置段 clip{i+1}: validated=True 但磁盘无缓存，不补渲，选中 clip 将接续现有链末尾")
-                continue
+                    continue
+                # validated 标记与磁盘缓存不一致（缓存被清理或路径变更）：
+                # 不能静默跳过，否则 H3 链断裂且最终无 cache handle，落入下方采样路径重渲本段。
+                print(f"[H3 Extender] clip{i+1} 标记为 validated 但磁盘缓存缺失，自动改为重新渲染")
 
             # Any active clip is unvalidated. Make sure everything after it is
             # false in the serialized state as well.
@@ -8178,9 +8182,13 @@ class BSAIH3FilmFactory:
         # All clips rendered; the last handle is the active cached prefix
         # expected by Final Decode.
         if previous_handle is None:
-            # This can only happen if the workflow contains no valid cards,
-            # which _parse_clips_json prevents. Keep a defensive error anyway.
-            raise RuntimeError("MiniMax H3 Extender: sequence produced no cache handle.")
+            # 循环内没有任何 clip 产出 cache handle：磁盘缓存为空，且所有 CLIP
+            # 均被跳过（生成开关关闭，或不在 clip_select 选择范围内）。
+            raise RuntimeError(
+                "MiniMax H3 Extender: sequence produced no cache handle — "
+                "磁盘缓存为空且所有 CLIP 均被跳过。请开启至少一个 CLIP 的生成开关，"
+                "或调整 clip_select 范围后重试。"
+            )
 
         # Restore saved tail latents after selective re-rendering.
         # This block is for legacy in-memory tail restore. In single-clip
