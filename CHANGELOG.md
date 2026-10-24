@@ -14,6 +14,20 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.185 (2026-10-24) — 一镜到底接缝模糊/抖动根治：单采无缝档（对齐 Motion Context V2 单遍采样）/ one-shot seam blur & jitter fix: single-pass seamless tier (aligned with Motion Context V2)
+
+**根因（参考工作流实锤）：** B站 Motion Context V2 (BV1T9ho6HEKP) 实测结论——"continuing a chain off dual-pass latents gives pixel shift at the joins. Single pass joins clean."。我们的一镜到底链每段走一采+二采（refine denoise 重采样），二采在接缝处引入像素漂移（段间模糊/抖动）；v14.162 keyframe resize 携带、v14.178 头部噪声延续都是对"双采链"的补丁，无法根治。另一参考《MiniMax H3 首帧上下文连续长镜头》(BV1eSgH6yE7z) 同为单遍采样链（res_multistep + beta 8 步 + turbo LoRA，22 pinned 帧接缝裁切）。** / Root cause (proven by reference workflows): continuing a chain off dual-pass latents gives pixel shift at the joins — our one-shot chain ran first-pass + refine per clip, and the refine re-denoise shifted pixels at every seam. v14.162/v14.178 were patches on a seam-hostile dual-pass chain.**
+
+- **新增 `one_shot_sampling` widget（extender.py INPUT_TYPES optional 最末尾 / 前端 index 66）**：`单采无缝 (推荐)` / `双采高清 (接缝风险)`，默认单采。一镜到底开启且单采档时渲染循环 `_eff_refine` 强制 False（绕过 `_sample_h3` L3093 refine 分支，不动其内部），链式 latent 不重绘；双采档保留旧行为并打印接缝风险警告。** / New `one_shot_sampling` widget (appended last, frontend index 66): single-pass (default) forces `_eff_refine=False` in the render loop; dual-pass keeps legacy behavior with a seam-risk warning.**
+- **步数校验翻转（原 v14.178 steps≥20 检查）**：单采档对齐参考标准 turbo 蒸馏 LoRA + beta 调度 + 6-8 步——steps≥20 警告蒸馏链过采样烧穿上下文一致性（历史诊断接缝 PSNR 18.95dB），scheduler≠beta 仅提示；双采档保留 ≥20 校验。** / Steps check flipped: single-pass recommends turbo LoRA + beta + 6-8 steps and warns on steps≥20; dual-pass keeps the ≥20 check.**
+- **提示词纪律引导（启用时打印 + tooltip，不改用户提示词）**：接缝裁切 22 帧≈0.92s，段内时间戳想落在 T 写 T+0.92s；续写段开头只写承接勿加新景物名词；接缝落在运动中段勿落在门槛/事件点；台词每 2.5s 一句短句。** / Prompt-discipline guidance printed on enable + tooltip (user prompts untouched).**
+- **前端同步（extender.js）**：KEYS/DEFAULTS/OPTIONS 68 键扩展、detect() 新增 CUR68、mapTo() 输出 68 位（CUR67 及更早布局自动补默认值）、widget 中文标签。** / Frontend: KEYS/DEFAULTS/OPTIONS extended to 68 keys, CUR68 detection, mapTo outputs 68 slots with defaults for older layouts, bilingual label.**
+- 分镜模式（one_shot=off）零影响；lip_audio/lip_voice 对口型链路不受影响（音频注入 AV latent 与 refine 无关）；单采档下 refine 放大（含 HyperVAE 2K）不生效，需 2K 时改用双采档或分镜模式。** / Storyboard mode unaffected; lip-sync paths unaffected; refine upscaling (incl. HyperVAE 2K) is inactive in single-pass tier by design.**
+- 验证：py_compile PASS；node --check PASS。 / Verified: py_compile PASS; node --check PASS.
+- ⚠️ 待用户实机 3+ clip 一镜到底链验收（接缝无模糊/抖动、音频连续）后再 commit/push 与 C 盘同步（铁律）/ ⚠️ Awaiting user acceptance run before commit/push and C-drive sync (iron rule)
+
+---
+
 ### v14.179 (2026-10-23) — 二采分块提速：回退盲目扩块，overlap 减半，head 分组恢复 / refine-tile speed: no blind re-tiling, halved overlap, head-chunking restored
 
 **根因（实机数据实锤）：** v14.164 把请求 4 块自动扩到 8 块（每块 <=270k 假设 Sol-Attn 稀疏 0.7s/块），但 tile 实际走 KJNodes head 分组路径（实测 0.26~0.55s/k tokens），8 块 overlap 重叠区重复计算翻倍 → 545s/步，反超 v14.149 固定 4 块（~334k/块灰色区）的 399s/步；v14.166 再把 head 分组 4->1，KJNodes 分组稀疏退化成全 head dense，雪上加霜。 **/ Root cause (proven by real runs): v14.164 auto-blew requested 4 tiles to 8 (<=270k/tile assumed Sol-Attn sparse at 0.7s/tile), but tiles actually run through the KJNodes head-chunk path (~0.26-0.55s/k tokens measured); 8 tiles double the overlap duplicate work → 545s/step, worse than v14.149's fixed 4 tiles (~334k grey-zone) at 399s/step. v14.166 then cut head chunks 4->1, degrading KJNodes grouped sparse into full-head dense.**

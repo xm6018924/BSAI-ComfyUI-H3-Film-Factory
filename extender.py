@@ -5784,7 +5784,7 @@ class BSAIH3FilmFactory:
                 ["off (分镜模式)", "on (一镜到底)"],
                 {
                     "default": "off (分镜模式)",
-                    "tooltip": "BSAI 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流）：off=默认分镜剪辑模式（每段独立生成 + xfade 转场拼接，行为不变）。on=一镜到底模式：①每段提示词自动注入'不切场/不转场/镜头持续跟随主体'指令（用户已写则跳过）；②强制开启段间 motion context，上一段 latent 尾部作为 Add Guide 等效锚点引导本段生成；③合并改为无缝 concat 零转场拼接，接缝处由末帧引导保证连续。建议各 CLIP 提示词统一采用连续运镜（推/拉/跟/环绕），配合本模式可得到 30s+ 无缝长镜头成片。",
+                    "tooltip": "BSAI 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流 + Motion Context V2 BV1T9ho6HEKP）：off=默认分镜剪辑模式（每段独立生成 + xfade 转场拼接，行为不变）。on=一镜到底模式：①每段提示词自动注入'不切场/不转场/镜头持续跟随主体'指令（用户已写则跳过）；②强制开启段间 motion context，上一段 latent 尾部作为 Add Guide 等效锚点引导本段生成；③合并改为无缝 concat 零转场拼接。v14.185 新增 one_shot_sampling 采样档（本节点最末参数）：默认「单采无缝」跳过二采，链式 latent 不重绘、接缝零漂移（双采续链会产生像素漂移，仅需要 2K 放大时选用）。提示词纪律：接缝裁切 22 帧≈0.92s，段内时间戳想落在 T 请写 T+0.92s；续写段开头只写承接（同节奏/同机位/同光照），勿引入新景物名词；接缝落在运动中段勿落在门槛/事件点；台词每 2.5s 一句短句。建议各 CLIP 提示词统一采用连续运镜（推/拉/跟/环绕），配合本模式可得到 30s+ 无缝长镜头成片。",
                 },
             ),
             # v14.159 (2026-10-21): 一镜到底 × 歌曲自动分 CLIP。
@@ -5830,6 +5830,17 @@ class BSAIH3FilmFactory:
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
                 "tooltip": "v14.184 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); ⑩双采2K = v14.184 T8 思路(BV1aiaL61Eyu): 一采 8 步(FastH3 蒸馏契约) + 二采 4 步(denoise 0.45) + latent 不放大(factor=1.0, 二采提速~4x) + HyperVAE 2x 解码像素 2x(encoder 16x 不变, decoder 32x, 全程只解码一次, 不增采样显存; 权重自动探测 models/vae 中 hyper*2x*.safetensors) + 音频重绘继承 w33(0.7) —— 直播带货配音档变体, 直出 2K 无分块接缝。⚠️ v14.183 曾试 10 步+音频0.9 致链 segment 音频崩(VAD 0 段)+画质退化, 已回滚。",
+            },
+        )
+        # v14.185 (2026-10-24): 一镜到底采样档 —— 追加在 render_pipeline 之后（optional
+        # 最末尾），不挤占任何既有 widget index。
+        # 参考 B站 Motion Context V2 (BV1T9ho6HEKP) 实测结论：双采 latent 续链在接缝
+        # 产生像素漂移，单采接缝干净——一镜到底默认单采。
+        optional["one_shot_sampling"] = (
+            ["单采无缝 (推荐)", "双采高清 (接缝风险)"],
+            {
+                "default": "单采无缝 (推荐)",
+                "tooltip": "一镜到底采样档（仅 one_shot_mode=on 时生效）：单采无缝 = 跳过二采(refine)，链式 latent 不重绘，接缝零漂移，推荐配 turbo 8 步 LoRA + beta 调度器 + 6-8 步；双采高清 = 保留二采放大/精修（可出 2K），但参考工作流实测双采续链会在接缝引入像素漂移（段间模糊/抖动），仅在需要高清放大时选用。",
             },
         )
 
@@ -6056,6 +6067,11 @@ class BSAIH3FilmFactory:
         #       ③合并改无缝 concat（零转场）
         one_shot_mode = str(kwargs.get("one_shot_mode", "off (分镜模式)") or "off (分镜模式)")
         one_shot_enabled = one_shot_mode.startswith("on")
+        # v14.185: 一镜到底采样档 —— 单采无缝(默认)/双采高清(接缝风险)。
+        # 参考 B站 Motion Context V2 (BV1T9ho6HEKP) 实测: 双采 latent 续链在接缝
+        # 产生像素漂移(段间模糊/抖动), 单采接缝干净。
+        one_shot_sampling = str(kwargs.get("one_shot_sampling", "单采无缝 (推荐)") or "单采无缝 (推荐)")
+        one_shot_single_pass = one_shot_enabled and not one_shot_sampling.startswith("双采")
         # v14.159: 一镜到底×歌曲自动分 CLIP 的每段目标时长(秒); 0=关闭自动分
         try:
             one_shot_clip_duration = int(kwargs.get("one_shot_clip_duration", 12) or 12)
@@ -6063,6 +6079,11 @@ class BSAIH3FilmFactory:
             one_shot_clip_duration = 12
         if one_shot_enabled:
             print("[H3 Extender] 🎬 一镜到底旁支模式已启用：无缝 concat 零转场 + 镜头跟随指令注入 + 强制 motion context")
+            # v14.185: 提示词纪律引导(Motion Context V2 实测规则, 不改用户提示词)。
+            print("[H3 Extender] 📝 一镜到底提示词纪律：①接缝裁切 22 帧(≈0.92s)，段内时间戳想落在 T 请写 T+0.92s；"
+                  "②续写段开头只写承接(同节奏/同机位/同光照)，勿引入新景物名词；"
+                  "③接缝落在运动中段(行走/奔跑中)，勿落在门槛/事件点，渐进式运镜勿跨接缝；"
+                  "④台词约每 2.5s 一句短句，按句子切分段。")
         # v14.168 (2026-10-22): FastH3 Omni 8步蒸馏旁支模式。
         # 选择后 = 单采管道: 跳过二采(Self-Lift refine), 一采强制 8 步 + denoise 1.0
         # (官方 FastVideo FastH3 Omni 契约: 8步蒸馏 guidance 1.0 shift 12/3, 改步数掉画质)。
@@ -7630,24 +7651,41 @@ class BSAIH3FilmFactory:
 
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
+        _os_pass_notice_done = False  # v14.185: 一镜到底采样档提示每次执行只打印一次
         for i, cfg in enumerate(clips[:loop_end]):
             # v2.68 fix: 渲染本 CLIP 之前先消费已完成的 async encode（预览实时推送）。
             _flush_pending_enc(paused_break)
-            # v14.178 一镜到底全球方案落地 P1-6: 链上采样纪律校验(首段打印一次)。
-            # 官方: 音频 ≥12 步才可用, 链上 base 20-25 步; FastH3 8 步 turbo 蒸馏
-            # 在链式衔接场景下会更快烧穿上下文一致性(诊断: 接缝 PSNR 18.95dB)。
-            # steps 由本节点 INPUT_TYPES 传入(工作流 sampler 侧也可覆写), 此处做
-            # 校验+显式警告, 不强制改写(避免破坏用户速度档选择, 如实记录为已知偏差)。
+            # v14.185 一镜到底采样纪律校验(首段打印一次) —— 按采样档分流。
+            # 单采无缝档对齐 Motion Context V2 实测标准: turbo 蒸馏 LoRA + beta 调度
+            # + 6-8 步; 蒸馏链 steps≥20 过采样会烧穿上下文一致性(历史诊断: 接缝
+            # PSNR 18.95dB)。双采高清档保留旧 ≥20 校验(非蒸馏底模思路)。
+            # steps/scheduler 由本节点 INPUT_TYPES 传入, 此处校验+显式警告, 不强制改写。
             if one_shot_enabled and i == 0:
                 try:
-                    if int(steps) < 20:
+                    _os_steps = int(steps)
+                    _os_sched = str(scheduler)
+                    if one_shot_single_pass:
+                        if _os_steps >= 20:
+                            print(
+                                f"[H3 Extender] ⚠️ v14.185 一镜到底·单采: 当前 steps={_os_steps} ≥ 20 —— "
+                                f"turbo 蒸馏链过采样会烧穿上下文一致性(接缝劣化), "
+                                f"参考工作流标准为 6-8 步 + beta 调度器, 请降低步数后重渲。"
+                            )
+                        elif 6 <= _os_steps <= 8 and _os_sched == "beta":
+                            print(f"[H3 Extender] ✅ v14.185 一镜到底·单采: steps={_os_steps} + beta 调度 (对齐 Motion Context V2 标准)")
+                        else:
+                            print(f"[H3 Extender] ℹ️ v14.185 一镜到底·单采: steps={_os_steps} scheduler={_os_sched} "
+                                  f"(参考标准: 6-8 步 + beta; 低动态内容可 6 步, 高动态 8 步)")
+                        if _os_sched != "beta":
+                            print(f"[H3 Extender] ℹ️ v14.185 一镜到底·单采: 当前调度器={_os_sched}, 参考工作流标准为 beta(仅提示, 不强制)")
+                    elif _os_steps < 20:
                         print(
-                            f"[H3 Extender] ⚠️ v14.178 一镜到底: 当前一采 steps={steps} < 20 "
+                            f"[H3 Extender] ⚠️ v14.178 一镜到底·双采: 当前一采 steps={_os_steps} < 20 "
                             f"(官方链上建议 20-25; 音频 8 步最差/≥12 可用)。"
                             f"steps 由工作流节点参数控制, 无法自动强制, 请手动将采样步数提到 ≥20 后重渲。"
                         )
                     else:
-                        print(f"[H3 Extender] ✅ v14.178 一镜到底: 一采 steps={steps} (≥20 达标)")
+                        print(f"[H3 Extender] ✅ v14.178 一镜到底·双采: 一采 steps={_os_steps} (≥20 达标)")
                 except Exception:
                     pass
             # Clips with render_enabled=False are skipped entirely: they keep
@@ -8031,6 +8069,21 @@ class BSAIH3FilmFactory:
 
             try:
                 _eff_refine = bool(refine_enable)
+                # v14.185: 一镜到底·单采无缝 —— 链式 latent 不做二采重绘。
+                # Motion Context V2 (BV1T9ho6HEKP) 实测: 双采 latent 续链在接缝
+                # 产生像素漂移(段间模糊/抖动), 单采接缝干净(45s+ 零拼接痕迹)。
+                if one_shot_enabled and _eff_refine:
+                    if one_shot_single_pass:
+                        _eff_refine = False
+                        if not _os_pass_notice_done:
+                            _os_pass_notice_done = True
+                            print("[H3 Extender] 一镜到底·单采无缝：已跳过二采（refine），链式 latent 不重绘，"
+                                  "接缝零漂移（对齐 Motion Context V2 单遍采样方案）；"
+                                  "如需 2K/高清放大请改用「双采高清」档或分镜模式")
+                    elif not _os_pass_notice_done:
+                        _os_pass_notice_done = True
+                        print("[H3 Extender] ⚠️ 一镜到底·双采高清：二采重采样会在接缝引入像素漂移"
+                              "（参考工作流实测），如出现段间模糊/抖动请改用「单采无缝」档")
                 sampled = _sample_h3(
                     sampling_model,
                     positive,
