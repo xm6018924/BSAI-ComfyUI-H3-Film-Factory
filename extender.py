@@ -3027,6 +3027,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] v1.91 一采前解除 fraction 限制: {_cur_frac91b:.3f} -> 1.0")
         except Exception as _e91b:
             print(f"[H3 Extender] v1.91 一采前 fraction reset 失败: {_e91b}")
+        # v14.186: 显存预算自检 —— 权重装不下时明确告警，避免用户白跑一整轮
+        # (实测 19.5GB DiT 在 24GB 卡上不走驻留 → 每步 800s+，而驻留时 100-200s)。
+        def _h3_warn_stream_fallback(_total_gb, _free_gb):
+            _avail = max(0.0, float(_free_gb) - 4.0)
+            print(f"[H3 Extender] ⚠️ v14.186 显存预算不足: DiT 权重 {float(_total_gb):.1f}GB > "
+                  f"可用 {float(_free_gb):.1f}GB − reserve 4.0GB = {_avail:.1f}GB")
+            print("[H3 Extender] ⚠️ 本段将走 DynamicVRAM 逐层流式搬运(同步, 无法与计算重叠): "
+                  "实测每步可能 600-900s (权重整块驻留时 100-200s)")
+            print("[H3 Extender] ⚠️ 建议: ①换剪枝/int8 小模型(如 fasth3_omniref_8step_pruned_int8_convrot, "
+                  "配「FastH3 Omni 8步单采」档)让权重整块驻留; ②或换更大显存显卡; "
+                  "③降低分辨率/上下文只能减 activation, 解决不了权重装不下")
         if _free_os >= 18.0:
             _mm1.load_models_gpu([model])   # reserve 4.0 预算: 驻留 ~17.5GB, 尾部 ~2GB offload
             _t1.cuda.synchronize()
@@ -3050,9 +3061,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _ff_unregister_model(model, label="一采-resident无效")
                     print(f"[H3 Extender] v14.174 驻留无效(resident={_res:.1f}GB<4GB), "
                           f"回退 DynamicVRAM 按需流式 (total={_tot:.1f}GB > 可用{_free_os:.1f}GB-reserve)")
+                    _h3_warn_stream_fallback(_tot, _free_os)
             except Exception: pass
         else:
             print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
+            try:
+                _h3_warn_stream_fallback(model.model_size() / 1024 ** 3, _free_os)
+            except Exception:
+                pass
     except Exception as _lp1:
         print(f"[H3 Extender] 一采前驻留预算设置失败(走按需流式): {_lp1}")
     # ---- BSAI 协同：GPU 主采样租约（失败不阻断采样，仅叠加租约管理） ----
@@ -5784,7 +5800,7 @@ class BSAIH3FilmFactory:
                 ["off (分镜模式)", "on (一镜到底)"],
                 {
                     "default": "off (分镜模式)",
-                    "tooltip": "BSAI 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流）：off=默认分镜剪辑模式（每段独立生成 + xfade 转场拼接，行为不变）。on=一镜到底模式：①每段提示词自动注入'不切场/不转场/镜头持续跟随主体'指令（用户已写则跳过）；②强制开启段间 motion context，上一段 latent 尾部作为 Add Guide 等效锚点引导本段生成；③合并改为无缝 concat 零转场拼接，接缝处由末帧引导保证连续。建议各 CLIP 提示词统一采用连续运镜（推/拉/跟/环绕），配合本模式可得到 30s+ 无缝长镜头成片。",
+                    "tooltip": "BSAI 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流 + Motion Context V2 BV1T9ho6HEKP）：off=默认分镜剪辑模式（每段独立生成 + xfade 转场拼接，行为不变）。on=一镜到底模式：①每段提示词自动注入'不切场/不转场/镜头持续跟随主体'指令（用户已写则跳过）；②强制开启段间 motion context，上一段 latent 尾部作为 Add Guide 等效锚点引导本段生成；③合并改为无缝 concat 零转场拼接。v14.185 新增 one_shot_sampling 采样档（本节点最末参数）：默认「单采无缝」跳过二采，链式 latent 不重绘、接缝零漂移（双采续链会产生像素漂移，仅需要 2K 放大时选用）。提示词纪律：接缝裁切 22 帧≈0.92s，段内时间戳想落在 T 请写 T+0.92s；续写段开头只写承接（同节奏/同机位/同光照），勿引入新景物名词；接缝落在运动中段勿落在门槛/事件点；台词每 2.5s 一句短句。建议各 CLIP 提示词统一采用连续运镜（推/拉/跟/环绕），配合本模式可得到 30s+ 无缝长镜头成片。",
                 },
             ),
             # v14.159 (2026-10-21): 一镜到底 × 歌曲自动分 CLIP。
@@ -5830,6 +5846,17 @@ class BSAIH3FilmFactory:
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
                 "tooltip": "v14.184 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); ⑩双采2K = v14.184 T8 思路(BV1aiaL61Eyu): 一采 8 步(FastH3 蒸馏契约) + 二采 4 步(denoise 0.45) + latent 不放大(factor=1.0, 二采提速~4x) + HyperVAE 2x 解码像素 2x(encoder 16x 不变, decoder 32x, 全程只解码一次, 不增采样显存; 权重自动探测 models/vae 中 hyper*2x*.safetensors) + 音频重绘继承 w33(0.7) —— 直播带货配音档变体, 直出 2K 无分块接缝。⚠️ v14.183 曾试 10 步+音频0.9 致链 segment 音频崩(VAD 0 段)+画质退化, 已回滚。",
+            },
+        )
+        # v14.185 (2026-10-24): 一镜到底采样档 —— 追加在 render_pipeline 之后（optional
+        # 最末尾），不挤占任何既有 widget index。
+        # 参考 B站 Motion Context V2 (BV1T9ho6HEKP) 实测结论：双采 latent 续链在接缝
+        # 产生像素漂移，单采接缝干净——一镜到底默认单采。
+        optional["one_shot_sampling"] = (
+            ["单采无缝 (推荐)", "双采高清 (接缝风险)"],
+            {
+                "default": "单采无缝 (推荐)",
+                "tooltip": "一镜到底采样档（仅 one_shot_mode=on 时生效）：单采无缝 = 跳过二采(refine)，链式 latent 不重绘，接缝零漂移，推荐配 turbo 8 步 LoRA + beta 调度器 + 6-8 步；双采高清 = 保留二采放大/精修（可出 2K），但参考工作流实测双采续链会在接缝引入像素漂移（段间模糊/抖动），仅在需要高清放大时选用。",
             },
         )
 
@@ -6056,6 +6083,11 @@ class BSAIH3FilmFactory:
         #       ③合并改无缝 concat（零转场）
         one_shot_mode = str(kwargs.get("one_shot_mode", "off (分镜模式)") or "off (分镜模式)")
         one_shot_enabled = one_shot_mode.startswith("on")
+        # v14.185: 一镜到底采样档 —— 单采无缝(默认)/双采高清(接缝风险)。
+        # 参考 B站 Motion Context V2 (BV1T9ho6HEKP) 实测: 双采 latent 续链在接缝
+        # 产生像素漂移(段间模糊/抖动), 单采接缝干净。
+        one_shot_sampling = str(kwargs.get("one_shot_sampling", "单采无缝 (推荐)") or "单采无缝 (推荐)")
+        one_shot_single_pass = one_shot_enabled and not one_shot_sampling.startswith("双采")
         # v14.159: 一镜到底×歌曲自动分 CLIP 的每段目标时长(秒); 0=关闭自动分
         try:
             one_shot_clip_duration = int(kwargs.get("one_shot_clip_duration", 12) or 12)
@@ -6063,6 +6095,11 @@ class BSAIH3FilmFactory:
             one_shot_clip_duration = 12
         if one_shot_enabled:
             print("[H3 Extender] 🎬 一镜到底旁支模式已启用：无缝 concat 零转场 + 镜头跟随指令注入 + 强制 motion context")
+            # v14.185: 提示词纪律引导(Motion Context V2 实测规则, 不改用户提示词)。
+            print("[H3 Extender] 📝 一镜到底提示词纪律：①接缝裁切 22 帧(≈0.92s)，段内时间戳想落在 T 请写 T+0.92s；"
+                  "②续写段开头只写承接(同节奏/同机位/同光照)，勿引入新景物名词；"
+                  "③接缝落在运动中段(行走/奔跑中)，勿落在门槛/事件点，渐进式运镜勿跨接缝；"
+                  "④台词约每 2.5s 一句短句，按句子切分段。")
         # v14.168 (2026-10-22): FastH3 Omni 8步蒸馏旁支模式。
         # 选择后 = 单采管道: 跳过二采(Self-Lift refine), 一采强制 8 步 + denoise 1.0
         # (官方 FastVideo FastH3 Omni 契约: 8步蒸馏 guidance 1.0 shift 12/3, 改步数掉画质)。
@@ -7630,24 +7667,41 @@ class BSAIH3FilmFactory:
 
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
+        _os_pass_notice_done = False  # v14.185: 一镜到底采样档提示每次执行只打印一次
         for i, cfg in enumerate(clips[:loop_end]):
             # v2.68 fix: 渲染本 CLIP 之前先消费已完成的 async encode（预览实时推送）。
             _flush_pending_enc(paused_break)
-            # v14.178 一镜到底全球方案落地 P1-6: 链上采样纪律校验(首段打印一次)。
-            # 官方: 音频 ≥12 步才可用, 链上 base 20-25 步; FastH3 8 步 turbo 蒸馏
-            # 在链式衔接场景下会更快烧穿上下文一致性(诊断: 接缝 PSNR 18.95dB)。
-            # steps 由本节点 INPUT_TYPES 传入(工作流 sampler 侧也可覆写), 此处做
-            # 校验+显式警告, 不强制改写(避免破坏用户速度档选择, 如实记录为已知偏差)。
+            # v14.185 一镜到底采样纪律校验(首段打印一次) —— 按采样档分流。
+            # 单采无缝档对齐 Motion Context V2 实测标准: turbo 蒸馏 LoRA + beta 调度
+            # + 6-8 步; 蒸馏链 steps≥20 过采样会烧穿上下文一致性(历史诊断: 接缝
+            # PSNR 18.95dB)。双采高清档保留旧 ≥20 校验(非蒸馏底模思路)。
+            # steps/scheduler 由本节点 INPUT_TYPES 传入, 此处校验+显式警告, 不强制改写。
             if one_shot_enabled and i == 0:
                 try:
-                    if int(steps) < 20:
+                    _os_steps = int(steps)
+                    _os_sched = str(scheduler)
+                    if one_shot_single_pass:
+                        if _os_steps >= 20:
+                            print(
+                                f"[H3 Extender] ⚠️ v14.185 一镜到底·单采: 当前 steps={_os_steps} ≥ 20 —— "
+                                f"turbo 蒸馏链过采样会烧穿上下文一致性(接缝劣化), "
+                                f"参考工作流标准为 6-8 步 + beta 调度器, 请降低步数后重渲。"
+                            )
+                        elif 6 <= _os_steps <= 8 and _os_sched == "beta":
+                            print(f"[H3 Extender] ✅ v14.185 一镜到底·单采: steps={_os_steps} + beta 调度 (对齐 Motion Context V2 标准)")
+                        else:
+                            print(f"[H3 Extender] ℹ️ v14.185 一镜到底·单采: steps={_os_steps} scheduler={_os_sched} "
+                                  f"(参考标准: 6-8 步 + beta; 低动态内容可 6 步, 高动态 8 步)")
+                        if _os_sched != "beta":
+                            print(f"[H3 Extender] ℹ️ v14.185 一镜到底·单采: 当前调度器={_os_sched}, 参考工作流标准为 beta(仅提示, 不强制)")
+                    elif _os_steps < 20:
                         print(
-                            f"[H3 Extender] ⚠️ v14.178 一镜到底: 当前一采 steps={steps} < 20 "
+                            f"[H3 Extender] ⚠️ v14.178 一镜到底·双采: 当前一采 steps={_os_steps} < 20 "
                             f"(官方链上建议 20-25; 音频 8 步最差/≥12 可用)。"
                             f"steps 由工作流节点参数控制, 无法自动强制, 请手动将采样步数提到 ≥20 后重渲。"
                         )
                     else:
-                        print(f"[H3 Extender] ✅ v14.178 一镜到底: 一采 steps={steps} (≥20 达标)")
+                        print(f"[H3 Extender] ✅ v14.178 一镜到底·双采: 一采 steps={_os_steps} (≥20 达标)")
                 except Exception:
                     pass
             # Clips with render_enabled=False are skipped entirely: they keep
@@ -7695,11 +7749,15 @@ class BSAIH3FilmFactory:
                     previous_handle = result[0]
                     previous_proxy = result[1]
                     statuses.append(result[4])
-                elif single_clip_replace:
+                    continue
+                if single_clip_replace:
                     # v2.66: per-clip 独立渲染——前置段磁盘无缓存时不补渲、不 join，
                     # 直接跳过，让选中 clip 从当前链末尾接续渲染（绝不回 clip1）。
                     print(f"[H3 Extender] v2.66 独立渲染跳过前置段 clip{i+1}: validated=True 但磁盘无缓存，不补渲，选中 clip 将接续现有链末尾")
-                continue
+                    continue
+                # validated 标记与磁盘缓存不一致（缓存被清理或路径变更）：
+                # 不能静默跳过，否则 H3 链断裂且最终无 cache handle，落入下方采样路径重渲本段。
+                print(f"[H3 Extender] clip{i+1} 标记为 validated 但磁盘缓存缺失，自动改为重新渲染")
 
             # Any active clip is unvalidated. Make sure everything after it is
             # false in the serialized state as well.
@@ -7972,13 +8030,13 @@ class BSAIH3FilmFactory:
                 # 这里在 latent/noise 构造路径把本段头部 overlap 帧直接取上一段尾 latent
                 # +10% 扰动, 并在 noise_mask 把视频头部锁 keep(0=不去噪), 使采样器不再
                 # 重画接缝区(该区最终被 join trim 裁掉)。与 P0-2 keyframes 注入双保险。
-                # v14.185 (fix): 重叠区噪声延续从"一镜到底"扩展到所有上下文衔接段(分镜模式)。
+                # v14.187 (fix): 重叠区噪声延续从"一镜到底"扩展到所有上下文衔接段(分镜模式)。
                 # 根因: 分镜模式 clip2+ 头部 motion context 走 conditioning(keyframes) 语义,
                 # 采样 latent 仍从空噪声起, 模型在接缝区"重新想象" → clip2 前 3~4s 渐进模糊
                 # (实测 Laplacian 153 vs clip1 1034, 量化确认 clip2 独有)。锁 keep 上一段尾
                 # latent 后, 采样器不再重画接缝区, 前几帧从上一段尾状态延续 → 输出清晰;
                 # 被锁区最终仍由 join trim 裁掉, 不进入成片。
-                # v14.186 (fix): 分镜模式(场景可跳变)改"渐进锁 keep"——均匀锁 keep 会把上一段
+                # v14.188 (fix): 分镜模式(场景可跳变)改"渐进锁 keep"——均匀锁 keep 会把上一段
                 # 尾画面(如主播直播)强锁到新场景(如蜡烛特写)头部, 输出区前几帧被迫从旧场景
                 # 演化 → 过渡帧重影/一帧崩坏(实测: clip2 首帧=主播场景重影马赛克, Laplacian
                 # 突变 diff=107)。改为 noise_mask 头部 0.0→1.0 线性渐降: 首步完全 keep(无缝
@@ -8025,10 +8083,10 @@ class BSAIH3FilmFactory:
                                         _lock_desc = "渐进锁keep(0→1)"
                                     latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mv, _ma))
                                     _mode_tag = "一镜到底" if one_shot_enabled else "分镜衔接"
-                                    print(f"[H3 Extender] v14.186 {_mode_tag}: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
+                                    print(f"[H3 Extender] v14.188 {_mode_tag}: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
                                           f"噪声从上一段尾latent延续(+10%扰动), noise_mask {_lock_desc}")
                 except Exception as _seed_err:
-                    print(f"[H3 Extender] v14.186 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
+                    print(f"[H3 Extender] v14.188 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
                 if lip_audio is not None:
                     print(f"[H3 LipSync] clip[{i}] 对口型+上下文参考: 前段尾部已注入, 音频重叠区解码时自动跳过(与原始歌曲对齐)")
             elif i > 0 and cfg.get("context_enabled", True) and lip_audio is not None and previous_proxy is None:
@@ -8051,6 +8109,21 @@ class BSAIH3FilmFactory:
 
             try:
                 _eff_refine = bool(refine_enable)
+                # v14.185: 一镜到底·单采无缝 —— 链式 latent 不做二采重绘。
+                # Motion Context V2 (BV1T9ho6HEKP) 实测: 双采 latent 续链在接缝
+                # 产生像素漂移(段间模糊/抖动), 单采接缝干净(45s+ 零拼接痕迹)。
+                if one_shot_enabled and _eff_refine:
+                    if one_shot_single_pass:
+                        _eff_refine = False
+                        if not _os_pass_notice_done:
+                            _os_pass_notice_done = True
+                            print("[H3 Extender] 一镜到底·单采无缝：已跳过二采（refine），链式 latent 不重绘，"
+                                  "接缝零漂移（对齐 Motion Context V2 单遍采样方案）；"
+                                  "如需 2K/高清放大请改用「双采高清」档或分镜模式")
+                    elif not _os_pass_notice_done:
+                        _os_pass_notice_done = True
+                        print("[H3 Extender] ⚠️ 一镜到底·双采高清：二采重采样会在接缝引入像素漂移"
+                              "（参考工作流实测），如出现段间模糊/抖动请改用「单采无缝」档")
                 sampled = _sample_h3(
                     sampling_model,
                     positive,
@@ -8202,9 +8275,13 @@ class BSAIH3FilmFactory:
         # All clips rendered; the last handle is the active cached prefix
         # expected by Final Decode.
         if previous_handle is None:
-            # This can only happen if the workflow contains no valid cards,
-            # which _parse_clips_json prevents. Keep a defensive error anyway.
-            raise RuntimeError("MiniMax H3 Extender: sequence produced no cache handle.")
+            # 循环内没有任何 clip 产出 cache handle：磁盘缓存为空，且所有 CLIP
+            # 均被跳过（生成开关关闭，或不在 clip_select 选择范围内）。
+            raise RuntimeError(
+                "MiniMax H3 Extender: sequence produced no cache handle — "
+                "磁盘缓存为空且所有 CLIP 均被跳过。请开启至少一个 CLIP 的生成开关，"
+                "或调整 clip_select 范围后重试。"
+            )
 
         # Restore saved tail latents after selective re-rendering.
         # This block is for legacy in-memory tail restore. In single-clip

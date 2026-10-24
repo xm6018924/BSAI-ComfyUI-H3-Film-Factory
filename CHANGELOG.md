@@ -14,19 +14,41 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
-### v14.186 (2026-10-24) — 分镜模式过渡帧重影/一帧崩坏根治：渐进锁 keep（场景跳变平滑转向）/ storyboard-mode seam ghost-frame fix: progressive keep-lock (smooth turn toward the new scene)
+### v14.188 (2026-10-24, merge 整合) — 分镜模式过渡帧重影/一帧崩坏根治：渐进锁 keep（场景跳变平滑转向）/ storyboard-mode seam ghost-frame fix: progressive keep-lock (smooth turn toward the new scene)
 
-**根因（实机抽帧量化实锤）：** 分镜模式场景跳变（clip1 尾=主播直播场景 → clip2 首=蜡烛特写）时，v14.185 的均匀锁 keep 把上一段尾画面强锁到新场景头部，输出区前几帧被迫从旧场景演化 → 过渡帧重影/一帧崩坏（实测 clip2 首帧=主播场景重影马赛克，相邻帧差突变 diff=107 且内容错位；用户截图 2094x1299 亦为主播+货架场景重影）。** / Root cause (frame-extract proven): in storyboard mode with scene jumps (clip1 tail = livestream host → clip2 head = candle close-up), v14.185's uniform keep-lock pins the previous clip's tail frame into the new scene's head; the post-trim output must evolve out of the old scene → ghost/damaged transition frames (measured: clip2 head = host scene ghosted/mosaiced, neighbor-frame diff=107 with content mismatch; user screenshot also shows host+shelf scene ghosting).**
+**根因（实机抽帧量化实锤）：** 分镜模式场景跳变（clip1 尾=主播直播场景 → clip2 首=蜡烛特写）时，v14.187 的均匀锁 keep 把上一段尾画面强锁到新场景头部，输出区前几帧被迫从旧场景演化 → 过渡帧重影/一帧崩坏（实测 clip2 首帧=主播场景重影马赛克，相邻帧差突变 diff=107 且内容错位；用户截图 2094x1299 亦为主播+货架场景重影）。** / Root cause (frame-extract proven): in storyboard mode with scene jumps (clip1 tail = livestream host → clip2 head = candle close-up), v14.187's uniform keep-lock pins the previous clip's tail frame into the new scene's head; the post-trim output must evolve out of the old scene → ghost/damaged transition frames (measured: clip2 head = host scene ghosted/mosaiced, neighbor-frame diff=107 with content mismatch; user screenshot also shows host+shelf scene ghosting).**
 
 - **修复（extender.py 段落头 noise_mask）**：一镜到底（连续镜头）保持均匀锁 keep（v14.178 已验证无缝）；**分镜模式改"渐进锁 keep"——noise_mask 头部 0.0→1.0 线性渐降（首步完全 keep 无缝进入，逐步放开重绘）**，模型前几步从上一段尾状态平滑转向新场景，trim 后输出区起点已是转向完成的画面（清晰新场景、无重影/崩坏帧）。** / Fix (extender.py head noise_mask): one-shot (continuous) keeps uniform keep-lock (v14.178 proven seamless); **storyboard mode switches to progressive keep-lock — head noise_mask ramps 0.0→1.0 linearly (first step fully kept for seamless entry, then denoise weight released step by step)** — the model smoothly turns from the previous tail state toward the new scene in the first steps, and the post-trim output starts from the turned result (sharp new scene, no ghost/corrupt frames).**
 
 ---
 
-### v14.185 (2026-10-24) — 分镜模式 clip2+ 前段渐进模糊根治：重叠区噪声延续扩展到所有上下文衔接段 / storyboard-mode clip2+ head blur fix: seam noise-continuation extended to all motion-context segments
+### v14.187 (2026-10-24) — 分镜模式 clip2+ 前段渐进模糊根治：重叠区噪声延续扩展到所有上下文衔接段 / storyboard-mode clip2+ head blur fix: seam noise-continuation extended to all motion-context segments
 
 **根因（抽帧+Laplacian 量化实锤）：** 分镜模式 clip2+ 头部 motion context 走 conditioning（minimax_keyframes）语义，采样 latent 仍从空噪声起，模型在接缝区"重新想象"（v14.178 已诊断接缝 PSNR 仅 18.95dB）→ clip2 前 0.5~4s 渐进模糊。实测同机同工作流：clip1 前段清晰度 1034~1044，clip2 前段 153→236→320→452→650（0.5~4s）才恢复——clip2 独有、系统性前段模糊。** / Root cause (frame-extract + Laplacian proven): in storyboard mode the clip2+ head motion context is conditioning-only (minimax_keyframes); the sampling latent still starts from empty noise, so the model "re-imagines" the seam zone (v14.178 already diagnosed seam PSNR 18.95dB) → clip2's first 0.5~4s blur progressively. Measured on the same machine/workflow: clip1 head sharpness 1034~1044 vs clip2 head 153→236→320→452→650 — clip2-exclusive systematic head blur.**
 
 - **修复（extender.py 段落头 latent 构造）**：v14.178 的"重叠区噪声延续"（头部 overlap 帧直接取上一段尾 latent +10% 扰动 + noise_mask 锁 keep 0=不去噪，采样器不再重画接缝区，被锁区最终由 join trim 裁掉）从 `one_shot_enabled` 扩展到**所有 `trim_frames` 生效的上下文衔接段（含分镜模式）**——clip2+ 从上一段尾 latent 状态延续而非空噪声重画，前几帧与接缝连续、清晰；日志区分"一镜到底/分镜衔接"。** / Fix (extender.py head-latent construction): v14.178's seam noise-continuation (head overlap rows = previous clip's tail latent +10% perturbation + noise_mask keep 0=no-denoise, sampler no longer repaints the seam zone, locked rows finally trimmed by join) extended from `one_shot_enabled` to **every motion-context segment where `trim_frames` applies (storyboard mode included)** — clip2+ continues from the previous tail latent instead of re-imagining from empty noise, so the first frames stay sharp and continuous; logs distinguish 一镜到底/分镜衔接.**
+
+---
+
+### v14.186 (2026-10-24) — 显存预算自检告警：权重装不下时明确提示将走流式 / VRAM budget self-check warning when weights cannot be resident
+
+**背景：** 实机出现 831s/步（正常 100-200s/步），日志显示 19.5GB DiT 在 24GB 卡上 `resident=0.0GB` → 回退 DynamicVRAM 逐层流式搬运（NUM_STREAMS=0 同步搬运）。旧版仅打印"驻留无效"，看不出后果与解法。 **/ Background: real run showed 831s/step; the 19.5GB DiT could not be resident on a 24GB card and fell back to per-layer streaming.**
+
+- **新增启动自检（extender.py 一采前显存预算段）**：当 `DiT 权重 > 可用 − reserve 4GB`（含 `free < 18GB` 分支）时，打印三条明确告警——①预算数值对照；②后果（每步 600-900s vs 驻留 100-200s）；③解法（换剪枝/int8 小模型如 `fasth3_omniref_8step_pruned_int8_convrot` 配「FastH3 Omni 8步单采」档 / 更大显存卡 / 降分辨率只减 activation 解决不了权重装不下）。不改变任何采样行为，纯诊断输出。 **/ Added a VRAM-budget self-check that prints budget, consequence, and remedies when weights cannot fit; diagnostic only, no behavior change.**
+- 验证：py_compile PASS。 / Verified: py_compile PASS.
+
+---
+
+### v14.185 (2026-10-24) — 一镜到底接缝模糊/抖动根治：单采无缝档（对齐 Motion Context V2 单遍采样）/ one-shot seam blur & jitter fix: single-pass seamless tier (aligned with Motion Context V2)
+
+**根因（参考工作流实锤）：** B站 Motion Context V2 (BV1T9ho6HEKP) 实测结论——"continuing a chain off dual-pass latents gives pixel shift at the joins. Single pass joins clean."。我们的一镜到底链每段走一采+二采（refine denoise 重采样），二采在接缝处引入像素漂移（段间模糊/抖动）；v14.162 keyframe resize 携带、v14.178 头部噪声延续都是对"双采链"的补丁，无法根治。另一参考《MiniMax H3 首帧上下文连续长镜头》(BV1eSgH6yE7z) 同为单遍采样链（res_multistep + beta 8 步 + turbo LoRA，22 pinned 帧接缝裁切）。** / Root cause (proven by reference workflows): continuing a chain off dual-pass latents gives pixel shift at the joins — our one-shot chain ran first-pass + refine per clip, and the refine re-denoise shifted pixels at every seam. v14.162/v14.178 were patches on a seam-hostile dual-pass chain.**
+
+- **新增 `one_shot_sampling` widget（extender.py INPUT_TYPES optional 最末尾 / 前端 index 66）**：`单采无缝 (推荐)` / `双采高清 (接缝风险)`，默认单采。一镜到底开启且单采档时渲染循环 `_eff_refine` 强制 False（绕过 `_sample_h3` L3093 refine 分支，不动其内部），链式 latent 不重绘；双采档保留旧行为并打印接缝风险警告。** / New `one_shot_sampling` widget (appended last, frontend index 66): single-pass (default) forces `_eff_refine=False` in the render loop; dual-pass keeps legacy behavior with a seam-risk warning.**
+- **步数校验翻转（原 v14.178 steps≥20 检查）**：单采档对齐参考标准 turbo 蒸馏 LoRA + beta 调度 + 6-8 步——steps≥20 警告蒸馏链过采样烧穿上下文一致性（历史诊断接缝 PSNR 18.95dB），scheduler≠beta 仅提示；双采档保留 ≥20 校验。** / Steps check flipped: single-pass recommends turbo LoRA + beta + 6-8 steps and warns on steps≥20; dual-pass keeps the ≥20 check.**
+- **提示词纪律引导（启用时打印 + tooltip，不改用户提示词）**：接缝裁切 22 帧≈0.92s，段内时间戳想落在 T 写 T+0.92s；续写段开头只写承接勿加新景物名词；接缝落在运动中段勿落在门槛/事件点；台词每 2.5s 一句短句。** / Prompt-discipline guidance printed on enable + tooltip (user prompts untouched).**
+- **前端同步（extender.js）**：KEYS/DEFAULTS/OPTIONS 68 键扩展、detect() 新增 CUR68、mapTo() 输出 68 位（CUR67 及更早布局自动补默认值）、widget 中文标签。** / Frontend: KEYS/DEFAULTS/OPTIONS extended to 68 keys, CUR68 detection, mapTo outputs 68 slots with defaults for older layouts, bilingual label.**
+- 分镜模式（one_shot=off）零影响；lip_audio/lip_voice 对口型链路不受影响（音频注入 AV latent 与 refine 无关）；单采档下 refine 放大（含 HyperVAE 2K）不生效，需 2K 时改用双采档或分镜模式。** / Storyboard mode unaffected; lip-sync paths unaffected; refine upscaling (incl. HyperVAE 2K) is inactive in single-pass tier by design.**
+- 验证：py_compile PASS；node --check PASS。 / Verified: py_compile PASS; node --check PASS.
 
 ---
 

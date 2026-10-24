@@ -1262,6 +1262,7 @@ const BSAI_BILINGUAL_LABELS = {
     "refine_mem_mode": "二采省显存模式（spatial分块兼容 / global全上下文省显存）",
     "one_shot_mode": "一镜到底模式（off分镜剪辑 / on无缝长镜头：注入不切场+强制motion context+零转场拼接）",
     "one_shot_clip_duration": "一镜到底每段目标秒数（0关闭自动分CLIP；连歌曲后自动CLIP数=歌曲时长÷本值）",
+    "one_shot_sampling": "一镜到底采样档（单采无缝=跳过二采接缝零漂移·推荐turbo 8步LoRA+beta+6-8步 / 双采高清=保留二采放大可出2K但接缝有像素漂移风险）",
     "render_pipeline": "渲染管道（Sol-H3 Self-Lift双采默认 / FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / 4K直出 秘制酱料 / FastH3 Omni 8步单采 / 双采2K：配方档统一在此选择，4K直出=自提升6+3潜空间x2.0→DLSS5像素超分直出4K，Omni需Loader换fasth3_omniref_8step_pruned_int8_convrot+VSA节点，双采2K=8+4步+latent不放大+HyperVAE 2x解码像素2x直出2K+音频重绘继承w33 0.7，v14.183曾试10步+音频0.9致链segment音频崩已回滚）",
 };
 function bsaiApplyBilingualLabels(node) {
@@ -7555,8 +7556,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 是 dom widget(serialize:false, 但现役前端仍把它序列化为尾部空串)。
         // 现役 64 位: 0..61 = run_mode..face_lock_mode(62 个后端 widget),
         // 62 = refine_mem_mode, 63 = h3_extender_timeline(dom, applyToNode 跳过)。
-        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","one_shot_mode","one_shot_clip_duration","render_pipeline","h3_extender_timeline"];
-        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.55,6,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"","0.15",true,"global_inherit",0.15,false,"spatial (分块,兼容)","off (分镜模式)",12,"Sol-H3 Self-Lift 双采 (默认)",""];
+        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","one_shot_mode","one_shot_clip_duration","render_pipeline","one_shot_sampling","h3_extender_timeline"];
+        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.55,6,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"","0.15",true,"global_inherit",0.15,false,"spatial (分块,兼容)","off (分镜模式)",12,"Sol-H3 Self-Lift 双采 (默认)","单采无缝 (推荐)",""];
         const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain","one_shot_clip_duration"]);
         const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match","face_lock_mode"]);
         const OPTIONS = {
@@ -7573,6 +7574,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             env_audio_enable: ["global_inherit","on","off"],
             refine_mem_mode: ["spatial (分块,兼容)","global (全上下文省显存)"],
             one_shot_mode: ["off (分镜模式)","on (一镜到底)"],
+            one_shot_sampling: ["单采无缝 (推荐)","双采高清 (接缝风险)"],
             render_pipeline: ["Sol-H3 Self-Lift 双采 (默认)","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳","4K直出 秘制酱料","FastH3 Omni 8步单采","双采2K（HyperVAE 2x 解码）"],
         };
         function detect(w) {
@@ -7588,6 +7590,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             //    58 键仅 timeline(57)。
             // v14.159: 66 键 = 现役 + one_shot_clip_duration(64) + timeline(65)。
             // v14.168: 67 键 = 现役 + render_pipeline(65) + timeline(66)。
+            // v14.185: 68 键 = 现役 + render_pipeline(65) + one_shot_sampling(66) + timeline(67)。
+            if (n === 68) return "CUR68";
             if (n === 67) return "CUR67";
             if (n === 66) return "CUR66";
             if (n === 65) return "CUR65";
@@ -7650,15 +7654,17 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         }
         function mapTo(w) {
             const L = detect(w);
-            // v14.168 修正: 统一输出 67 位(对齐 KEYS): 0..61 后端 widget,
+            // v14.185 修正: 统一输出 68 位(对齐 KEYS): 0..61 后端 widget,
             // 62 = refine_mem_mode, 63 = one_shot_mode, 64 = one_shot_clip_duration,
-            // 65 = render_pipeline, 66 = h3_extender_timeline(dom, applyToNode 跳过)。
-            const out = new Array(67).fill(null);
-            if (L === "CUR67" || L === "CUR66" || L === "CUR65" || L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
+            // 65 = render_pipeline, 66 = one_shot_sampling, 67 = h3_extender_timeline(dom, applyToNode 跳过)。
+            const out = new Array(68).fill(null);
+            if (L === "CUR68" || L === "CUR67" || L === "CUR66" || L === "CUR65" || L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
                 // 新纪元(48..52 已有 P0/P2): 0..61 与 KEYS 完全同键, 直接照抄。
                 for (let i = 0; i < 62 && i < w.length; i++) out[i] = w[i];
-                // CUR67: w[62..65] = rmm/one_shot/clip_dur/render_pipeline 用户值; timeline 丢弃。
-                if (L === "CUR67" && w.length > 65) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; }
+                // CUR68: w[62..66] = rmm/one_shot/clip_dur/render_pipeline/one_shot_sampling 用户值; timeline 丢弃。
+                if (L === "CUR68" && w.length > 66) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; out[66] = w[66]; }
+                // CUR67: w[62..65] = rmm/one_shot/clip_dur/render_pipeline 用户值; one_shot_sampling 缺 → DEFAULTS; timeline 丢弃。
+                else if (L === "CUR67" && w.length > 65) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; }
                 // CUR66: w[62]=rmm 用户值, w[63]=one_shot 用户值, w[64]=clip_dur 用户值; timeline 丢弃。
                 else if (L === "CUR66" && w.length > 64) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; }
                 // CUR65(v14.158): one_shot 值保留, clip_dur 缺 → DEFAULTS 10; timeline 丢弃。
