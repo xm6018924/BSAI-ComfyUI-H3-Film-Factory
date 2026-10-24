@@ -7972,8 +7972,14 @@ class BSAIH3FilmFactory:
                 # 这里在 latent/noise 构造路径把本段头部 overlap 帧直接取上一段尾 latent
                 # +10% 扰动, 并在 noise_mask 把视频头部锁 keep(0=不去噪), 使采样器不再
                 # 重画接缝区(该区最终被 join trim 裁掉)。与 P0-2 keyframes 注入双保险。
+                # v14.185 (fix): 重叠区噪声延续从"一镜到底"扩展到所有上下文衔接段(分镜模式)。
+                # 根因: 分镜模式 clip2+ 头部 motion context 走 conditioning(keyframes) 语义,
+                # 采样 latent 仍从空噪声起, 模型在接缝区"重新想象" → clip2 前 3~4s 渐进模糊
+                # (实测 Laplacian 153 vs clip1 1034, 量化确认 clip2 独有)。锁 keep 上一段尾
+                # latent 后, 采样器不再重画接缝区, 前几帧从上一段尾状态延续 → 输出清晰;
+                # 被锁区最终仍由 join trim 裁掉, 不进入成片。
                 try:
-                    if one_shot_enabled and trim_frames:
+                    if trim_frames:
                         _n_head = max(1, (int(trim_frames) + 16) // 17)  # 帧→latent步(stride≈17)
                         _prev_samples = previous_proxy.get("samples") if isinstance(previous_proxy, dict) else previous_proxy
                         _tail_v = None
@@ -8001,10 +8007,11 @@ class BSAIH3FilmFactory:
                                     _mv = _mv.clone()
                                     _mv[:, :, :_n_head] = 0.0  # 视频 overlap 区 keep(不去噪)
                                     latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mv, _ma))
-                                    print(f"[H3 Extender] v14.178 一镜到底: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
+                                    _mode_tag = "一镜到底" if one_shot_enabled else "分镜衔接"
+                                    print(f"[H3 Extender] v14.185 {_mode_tag}: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
                                           f"噪声从上一段尾latent延续(+10%扰动), noise_mask锁keep")
                 except Exception as _seed_err:
-                    print(f"[H3 Extender] v14.178 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
+                    print(f"[H3 Extender] v14.185 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
                 if lip_audio is not None:
                     print(f"[H3 LipSync] clip[{i}] 对口型+上下文参考: 前段尾部已注入, 音频重叠区解码时自动跳过(与原始歌曲对齐)")
             elif i > 0 and cfg.get("context_enabled", True) and lip_audio is not None and previous_proxy is None:

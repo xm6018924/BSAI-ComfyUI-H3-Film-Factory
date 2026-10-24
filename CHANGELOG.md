@@ -14,6 +14,14 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.185 (2026-10-24) — 分镜模式 clip2+ 前段渐进模糊根治：重叠区噪声延续扩展到所有上下文衔接段 / storyboard-mode clip2+ head blur fix: seam noise-continuation extended to all motion-context segments
+
+**根因（抽帧+Laplacian 量化实锤）：** 分镜模式 clip2+ 头部 motion context 走 conditioning（minimax_keyframes）语义，采样 latent 仍从空噪声起，模型在接缝区"重新想象"（v14.178 已诊断接缝 PSNR 仅 18.95dB）→ clip2 前 0.5~4s 渐进模糊。实测同机同工作流：clip1 前段清晰度 1034~1044，clip2 前段 153→236→320→452→650（0.5~4s）才恢复——clip2 独有、系统性前段模糊。** / Root cause (frame-extract + Laplacian proven): in storyboard mode the clip2+ head motion context is conditioning-only (minimax_keyframes); the sampling latent still starts from empty noise, so the model "re-imagines" the seam zone (v14.178 already diagnosed seam PSNR 18.95dB) → clip2's first 0.5~4s blur progressively. Measured on the same machine/workflow: clip1 head sharpness 1034~1044 vs clip2 head 153→236→320→452→650 — clip2-exclusive systematic head blur.**
+
+- **修复（extender.py 段落头 latent 构造）**：v14.178 的"重叠区噪声延续"（头部 overlap 帧直接取上一段尾 latent +10% 扰动 + noise_mask 锁 keep 0=不去噪，采样器不再重画接缝区，被锁区最终由 join trim 裁掉）从 `one_shot_enabled` 扩展到**所有 `trim_frames` 生效的上下文衔接段（含分镜模式）**——clip2+ 从上一段尾 latent 状态延续而非空噪声重画，前几帧与接缝连续、清晰；日志区分"一镜到底/分镜衔接"。** / Fix (extender.py head-latent construction): v14.178's seam noise-continuation (head overlap rows = previous clip's tail latent +10% perturbation + noise_mask keep 0=no-denoise, sampler no longer repaints the seam zone, locked rows finally trimmed by join) extended from `one_shot_enabled` to **every motion-context segment where `trim_frames` applies (storyboard mode included)** — clip2+ continues from the previous tail latent instead of re-imagining from empty noise, so the first frames stay sharp and continuous; logs distinguish 一镜到底/分镜衔接.**
+
+---
+
 ### v14.179 (2026-10-23) — 二采分块提速：回退盲目扩块，overlap 减半，head 分组恢复 / refine-tile speed: no blind re-tiling, halved overlap, head-chunking restored
 
 **根因（实机数据实锤）：** v14.164 把请求 4 块自动扩到 8 块（每块 <=270k 假设 Sol-Attn 稀疏 0.7s/块），但 tile 实际走 KJNodes head 分组路径（实测 0.26~0.55s/k tokens），8 块 overlap 重叠区重复计算翻倍 → 545s/步，反超 v14.149 固定 4 块（~334k/块灰色区）的 399s/步；v14.166 再把 head 分组 4->1，KJNodes 分组稀疏退化成全 head dense，雪上加霜。 **/ Root cause (proven by real runs): v14.164 auto-blew requested 4 tiles to 8 (<=270k/tile assumed Sol-Attn sparse at 0.7s/tile), but tiles actually run through the KJNodes head-chunk path (~0.26-0.55s/k tokens measured); 8 tiles double the overlap duplicate work → 545s/step, worse than v14.149's fixed 4 tiles (~334k grey-zone) at 399s/step. v14.166 then cut head chunks 4->1, degrading KJNodes grouped sparse into full-head dense.**
