@@ -94,6 +94,7 @@ from .motion_context_disk import (
     _decode_single_audio,
     _find_ffmpeg,
     _copy_blob_to_file,
+    _despeckle_frames,
     _next_output_path,
     _comfy_media_item,
     _save_tail_latents,
@@ -498,6 +499,16 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
     if video.shape[0] == 0:
         return None, None
     images = video.movedim(1, -1).float().cpu().contiguous()  # [T,H,W,C]
+    # v14.190: 去彩点(色度去斑) —— VAE 解码在轮廓处逐通道截断产生的单像素饱和彩点
+    try:
+        _dp_parts = []
+        for _s in range(0, int(images.shape[0]), 16):
+            _dp_parts.append(_despeckle_frames(images[_s:_s + 16]))
+        if _dp_parts:
+            images = torch.cat(_dp_parts, dim=0).contiguous()
+        del _dp_parts
+    except Exception as _dp_err:
+        print(f"[H3 Extender] 彩点修复跳过 clip={i}: {_dp_err}")
 
     # Audio latent -> {waveform [B,C,L], sample_rate}
     audio = None

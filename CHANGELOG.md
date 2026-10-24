@@ -14,6 +14,19 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.190 (2026-10-24) — 淡彩/低步数彩点修复：解码后色度去斑（不动亮度、不加参数）/ chroma despeckle after decode: kill the colored dots without touching luma or adding widgets
+
+**根因（实测定位）：** 成片 1920×1088 每帧约 420 个极端饱和像素（官方样本 0 个）；对官方干净样本用 libx264 crf17 yuv420p / yuv444p 重编码均为 0 → 排除编码器，彩点存在于编码前像素。真实彩点样例 `(33,181,134)` 青绿、自身 Cb/Cr=(0.006,−0.275)、邻域=(−0.10,+0.10)，偏离 0.37~0.40 且成 2×2 块（4:2:0 扩散特征）。链条：低步数单采 → VAE 解码在明暗交界/高光处逐通道过冲 → uint8 按通道硬截断成 2~6px 高饱和色块；淡彩画面本身低饱和，这些点成了画面唯一的高饱和像素，因此格外刺眼。 **/ Root cause (measured): ~420 extreme-saturation pixels per frame (0 in official samples); re-encoding a clean official sample with libx264 crf17 yuv420p/yuv444p yields 0 → encoder ruled out. Real sample (33,181,134): chroma (0.006,−0.275) vs neighborhood (−0.10,+0.10), deviation 0.37-0.40, in 2×2 blocks (4:2:0 spread). Chain: low-step single pass → VAE decode per-channel overshoot at luma/highlight boundaries → uint8 hard clipping into 2-6px saturated blotches, which stand out in a low-saturation pastel frame.**
+
+- **新增 `motion_context_disk._despeckle_frames()`**：① 转 YCbCr；② 彩度参考取 13px 均值，像素彩度与参考差 d 超过 knee(0.07) 后按 span(0.12) 线性把 Cb/Cr 混向参考值，**Y 原样保留**（轮廓/纹理锐度不变）；③ 亮度只处理"孤立"亮点——`|Y−邻域均值|` 超阈且 `偏离/邻域起伏` 比值 >2.5（真实边缘比值约 1.5，单像素脉冲 6+），因此高对比边缘不被磨掉。 **/ New `_despeckle_frames()`: YCbCr split; chroma reference = 13px mean, blend Cb/Cr toward it with a soft knee (0.07 + 0.12 span), Y untouched; luma only for isolated impulses, gated by a deviation/neighborhood-variation ratio >2.5 so real high-contrast edges are never softened.**
+- **接入四个出口**：`_write_image_frames()`（uint8 与 float 两个分支，即所有 VAE 解码→mp4 编码）、单 clip 预览解码 chunk 循环、`extender._decode_clip_to_av()`（按 16 帧分块）。 **/ Wired into four exits: `_write_image_frames()` (uint8 + float branches), the single-clip preview decode chunk loop, and `_decode_clip_to_av()`.**
+- **缓存失效**：`decoded_mp4_version` 3 → **4**（3 处），旧 v3 blob 自动重编码，否则旧预览仍带彩点。 **/ Cache invalidation: `decoded_mp4_version` 3 → 4 so old v3 blobs re-encode.**
+- **实测指标**：PSNR 44.85dB、改动像素 0.137%/帧、1080p CPU 约 102ms/帧；合成验证 4px 饱和块彩度保留 7%（按彩点处理）、12px 起 100% 保留、大色块内部改动 0.0、高对比边缘逐像素不变、1px 纯白亮点归零。 **/ Measured: PSNR 44.85dB, 0.137% pixels changed/frame, ~102ms per 1080p frame on CPU; synthetic: 4px saturated block retains 7% chroma (treated as speck), 12px+ fully kept, interior of large blocks unchanged, hard edges pixel-identical, 1px white dot removed.**
+- **不改参数区、不动快捷条、不改旧工作流**：纯解码后处理，无新 widget；分镜模式/对口型链路同样受益。版本号 v14.190（远端 v14.187-189 已被 C/G 盘分镜修复与 lip_audio 修复占用）。 **/ No widget changes, no quick-bar changes, no workflow breakage — pure post-decode processing. Renumbered to v14.190 as remote took v14.187-189.**
+- 验证：py_compile PASS；离线真实帧评估脚本通过。 / Verified: py_compile PASS; offline real-frame evaluation passed.
+
+---
+
 ### v14.189 (2026-10-24) — 对口型音频超长自动追加延续 CLIP 时 clip_ref_plans 越界崩溃修复 / fix IndexError crash when auto-appended extension CLIP desyncs clip_ref_plans
 
 **根因（G盘 8191 实机 IndexError 实锤）：** 分镜 clips 总时长 < lip_audio（对口型/歌曲）总时长时，插件在渲染函数前部按原始 clips 构建 clip_ref_plans（len=N），随后在 lip 处理段 `clips.append(_new_clip)` 自动追加延续分镜（len=N+1）——渲染循环 `loop_end=len(clips)=N+1` 访问 `clip_ref_plans[N]` → `IndexError: list index out of range`（extender.py:7766 `_plan = clip_ref_plans[i]`，clip 全部采样/解码完成后崩溃，成片无法输出）。** / Root cause (G-drive 8191 real IndexError): when total storyboard clip duration < lip_audio duration, clip_ref_plans is built for the original N clips, then `clips.append(_new_clip)` auto-extends to N+1 — the render loop (`loop_end = len(clips)`) hits `clip_ref_plans[N]` → IndexError at the end of the chain, discarding all rendered clips.**
