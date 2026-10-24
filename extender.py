@@ -7978,6 +7978,13 @@ class BSAIH3FilmFactory:
                 # (实测 Laplacian 153 vs clip1 1034, 量化确认 clip2 独有)。锁 keep 上一段尾
                 # latent 后, 采样器不再重画接缝区, 前几帧从上一段尾状态延续 → 输出清晰;
                 # 被锁区最终仍由 join trim 裁掉, 不进入成片。
+                # v14.186 (fix): 分镜模式(场景可跳变)改"渐进锁 keep"——均匀锁 keep 会把上一段
+                # 尾画面(如主播直播)强锁到新场景(如蜡烛特写)头部, 输出区前几帧被迫从旧场景
+                # 演化 → 过渡帧重影/一帧崩坏(实测: clip2 首帧=主播场景重影马赛克, Laplacian
+                # 突变 diff=107)。改为 noise_mask 头部 0.0→1.0 线性渐降: 首步完全 keep(无缝
+                # 进入), 逐步放开重绘, 模型前几步从上一段尾状态平滑转向新场景, trim 后输出
+                # 区起点已是转向完成的画面(清晰新场景, 无重影)。一镜到底(连续镜头)保持均匀
+                # 锁 keep(v14.178 已验证无缝)。
                 try:
                     if trim_frames:
                         _n_head = max(1, (int(trim_frames) + 16) // 17)  # 帧→latent步(stride≈17)
@@ -8005,13 +8012,23 @@ class BSAIH3FilmFactory:
                                     else:
                                         _mv, _ma = torch.ones_like(_vv2), torch.ones_like(_aa)
                                     _mv = _mv.clone()
-                                    _mv[:, :, :_n_head] = 0.0  # 视频 overlap 区 keep(不去噪)
+                                    if one_shot_enabled:
+                                        # 一镜到底(连续镜头): 头部均匀锁 keep, 无缝延续
+                                        _mv[:, :, :_n_head] = 0.0
+                                        _lock_desc = "均匀锁keep"
+                                    else:
+                                        # 分镜模式(场景可跳变): 头部渐进锁 keep, 0.0→1.0
+                                        # 线性渐降, 首步完全保持(无缝进入), 逐步放开重绘,
+                                        # 前几步从上一段尾平滑转向新场景, 无重影/崩坏帧
+                                        for _k in range(_n_head):
+                                            _mv[:, :, _k] = _k / max(1, _n_head - 1)
+                                        _lock_desc = "渐进锁keep(0→1)"
                                     latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mv, _ma))
                                     _mode_tag = "一镜到底" if one_shot_enabled else "分镜衔接"
-                                    print(f"[H3 Extender] v14.185 {_mode_tag}: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
-                                          f"噪声从上一段尾latent延续(+10%扰动), noise_mask锁keep")
+                                    print(f"[H3 Extender] v14.186 {_mode_tag}: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
+                                          f"噪声从上一段尾latent延续(+10%扰动), noise_mask {_lock_desc}")
                 except Exception as _seed_err:
-                    print(f"[H3 Extender] v14.185 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
+                    print(f"[H3 Extender] v14.186 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
                 if lip_audio is not None:
                     print(f"[H3 LipSync] clip[{i}] 对口型+上下文参考: 前段尾部已注入, 音频重叠区解码时自动跳过(与原始歌曲对齐)")
             elif i > 0 and cfg.get("context_enabled", True) and lip_audio is not None and previous_proxy is None:

@@ -14,6 +14,14 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.186 (2026-10-24) — 分镜模式过渡帧重影/一帧崩坏根治：渐进锁 keep（场景跳变平滑转向）/ storyboard-mode seam ghost-frame fix: progressive keep-lock (smooth turn toward the new scene)
+
+**根因（实机抽帧量化实锤）：** 分镜模式场景跳变（clip1 尾=主播直播场景 → clip2 首=蜡烛特写）时，v14.185 的均匀锁 keep 把上一段尾画面强锁到新场景头部，输出区前几帧被迫从旧场景演化 → 过渡帧重影/一帧崩坏（实测 clip2 首帧=主播场景重影马赛克，相邻帧差突变 diff=107 且内容错位；用户截图 2094x1299 亦为主播+货架场景重影）。** / Root cause (frame-extract proven): in storyboard mode with scene jumps (clip1 tail = livestream host → clip2 head = candle close-up), v14.185's uniform keep-lock pins the previous clip's tail frame into the new scene's head; the post-trim output must evolve out of the old scene → ghost/damaged transition frames (measured: clip2 head = host scene ghosted/mosaiced, neighbor-frame diff=107 with content mismatch; user screenshot also shows host+shelf scene ghosting).**
+
+- **修复（extender.py 段落头 noise_mask）**：一镜到底（连续镜头）保持均匀锁 keep（v14.178 已验证无缝）；**分镜模式改"渐进锁 keep"——noise_mask 头部 0.0→1.0 线性渐降（首步完全 keep 无缝进入，逐步放开重绘）**，模型前几步从上一段尾状态平滑转向新场景，trim 后输出区起点已是转向完成的画面（清晰新场景、无重影/崩坏帧）。** / Fix (extender.py head noise_mask): one-shot (continuous) keeps uniform keep-lock (v14.178 proven seamless); **storyboard mode switches to progressive keep-lock — head noise_mask ramps 0.0→1.0 linearly (first step fully kept for seamless entry, then denoise weight released step by step)** — the model smoothly turns from the previous tail state toward the new scene in the first steps, and the post-trim output starts from the turned result (sharp new scene, no ghost/corrupt frames).**
+
+---
+
 ### v14.185 (2026-10-24) — 分镜模式 clip2+ 前段渐进模糊根治：重叠区噪声延续扩展到所有上下文衔接段 / storyboard-mode clip2+ head blur fix: seam noise-continuation extended to all motion-context segments
 
 **根因（抽帧+Laplacian 量化实锤）：** 分镜模式 clip2+ 头部 motion context 走 conditioning（minimax_keyframes）语义，采样 latent 仍从空噪声起，模型在接缝区"重新想象"（v14.178 已诊断接缝 PSNR 仅 18.95dB）→ clip2 前 0.5~4s 渐进模糊。实测同机同工作流：clip1 前段清晰度 1034~1044，clip2 前段 153→236→320→452→650（0.5~4s）才恢复——clip2 独有、系统性前段模糊。** / Root cause (frame-extract + Laplacian proven): in storyboard mode the clip2+ head motion context is conditioning-only (minimax_keyframes); the sampling latent still starts from empty noise, so the model "re-imagines" the seam zone (v14.178 already diagnosed seam PSNR 18.95dB) → clip2's first 0.5~4s blur progressively. Measured on the same machine/workflow: clip1 head sharpness 1034~1044 vs clip2 head 153→236→320→452→650 — clip2-exclusive systematic head blur.**
