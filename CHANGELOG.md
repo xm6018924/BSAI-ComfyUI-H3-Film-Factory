@@ -14,6 +14,15 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.186 (2026-10-24) — 显存预算自检告警：权重装不下时明确提示将走流式 / VRAM budget self-check warning when weights cannot be resident
+
+**背景：** 实机出现 831s/步（正常 100-200s/步），日志显示 19.5GB DiT 在 24GB 卡上 `resident=0.0GB` → 回退 DynamicVRAM 逐层流式搬运（NUM_STREAMS=0 同步搬运）。旧版仅打印"驻留无效"，看不出后果与解法。 **/ Background: real run showed 831s/step; the 19.5GB DiT could not be resident on a 24GB card and fell back to per-layer streaming.**
+
+- **新增启动自检（extender.py 一采前显存预算段）**：当 `DiT 权重 > 可用 − reserve 4GB`（含 `free < 18GB` 分支）时，打印三条明确告警——①预算数值对照；②后果（每步 600-900s vs 驻留 100-200s）；③解法（换剪枝/int8 小模型如 `fasth3_omniref_8step_pruned_int8_convrot` 配「FastH3 Omni 8步单采」档 / 更大显存卡 / 降分辨率只减 activation 解决不了权重装不下）。不改变任何采样行为，纯诊断输出。 **/ Added a VRAM-budget self-check that prints budget, consequence, and remedies when weights cannot fit; diagnostic only, no behavior change.**
+- 验证：py_compile PASS。 / Verified: py_compile PASS.
+
+---
+
 ### v14.185 (2026-10-24) — 一镜到底接缝模糊/抖动根治：单采无缝档（对齐 Motion Context V2 单遍采样）/ one-shot seam blur & jitter fix: single-pass seamless tier (aligned with Motion Context V2)
 
 **根因（参考工作流实锤）：** B站 Motion Context V2 (BV1T9ho6HEKP) 实测结论——"continuing a chain off dual-pass latents gives pixel shift at the joins. Single pass joins clean."。我们的一镜到底链每段走一采+二采（refine denoise 重采样），二采在接缝处引入像素漂移（段间模糊/抖动）；v14.162 keyframe resize 携带、v14.178 头部噪声延续都是对"双采链"的补丁，无法根治。另一参考《MiniMax H3 首帧上下文连续长镜头》(BV1eSgH6yE7z) 同为单遍采样链（res_multistep + beta 8 步 + turbo LoRA，22 pinned 帧接缝裁切）。** / Root cause (proven by reference workflows): continuing a chain off dual-pass latents gives pixel shift at the joins — our one-shot chain ran first-pass + refine per clip, and the refine re-denoise shifted pixels at every seam. v14.162/v14.178 were patches on a seam-hostile dual-pass chain.**

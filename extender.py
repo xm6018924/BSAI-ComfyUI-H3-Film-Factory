@@ -3027,6 +3027,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] v1.91 一采前解除 fraction 限制: {_cur_frac91b:.3f} -> 1.0")
         except Exception as _e91b:
             print(f"[H3 Extender] v1.91 一采前 fraction reset 失败: {_e91b}")
+        # v14.186: 显存预算自检 —— 权重装不下时明确告警，避免用户白跑一整轮
+        # (实测 19.5GB DiT 在 24GB 卡上不走驻留 → 每步 800s+，而驻留时 100-200s)。
+        def _h3_warn_stream_fallback(_total_gb, _free_gb):
+            _avail = max(0.0, float(_free_gb) - 4.0)
+            print(f"[H3 Extender] ⚠️ v14.186 显存预算不足: DiT 权重 {float(_total_gb):.1f}GB > "
+                  f"可用 {float(_free_gb):.1f}GB − reserve 4.0GB = {_avail:.1f}GB")
+            print("[H3 Extender] ⚠️ 本段将走 DynamicVRAM 逐层流式搬运(同步, 无法与计算重叠): "
+                  "实测每步可能 600-900s (权重整块驻留时 100-200s)")
+            print("[H3 Extender] ⚠️ 建议: ①换剪枝/int8 小模型(如 fasth3_omniref_8step_pruned_int8_convrot, "
+                  "配「FastH3 Omni 8步单采」档)让权重整块驻留; ②或换更大显存显卡; "
+                  "③降低分辨率/上下文只能减 activation, 解决不了权重装不下")
         if _free_os >= 18.0:
             _mm1.load_models_gpu([model])   # reserve 4.0 预算: 驻留 ~17.5GB, 尾部 ~2GB offload
             _t1.cuda.synchronize()
@@ -3050,9 +3061,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _ff_unregister_model(model, label="一采-resident无效")
                     print(f"[H3 Extender] v14.174 驻留无效(resident={_res:.1f}GB<4GB), "
                           f"回退 DynamicVRAM 按需流式 (total={_tot:.1f}GB > 可用{_free_os:.1f}GB-reserve)")
+                    _h3_warn_stream_fallback(_tot, _free_os)
             except Exception: pass
         else:
             print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
+            try:
+                _h3_warn_stream_fallback(model.model_size() / 1024 ** 3, _free_os)
+            except Exception:
+                pass
     except Exception as _lp1:
         print(f"[H3 Extender] 一采前驻留预算设置失败(走按需流式): {_lp1}")
     # ---- BSAI 协同：GPU 主采样租约（失败不阻断采样，仅叠加租约管理） ----
