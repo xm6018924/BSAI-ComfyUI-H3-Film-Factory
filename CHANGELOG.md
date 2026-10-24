@@ -14,6 +14,16 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.189 (2026-10-24) — 对口型音频超长自动追加延续 CLIP 时 clip_ref_plans 越界崩溃修复 / fix IndexError crash when auto-appended extension CLIP desyncs clip_ref_plans
+
+**根因（G盘 8191 实机 IndexError 实锤）：** 分镜 clips 总时长 < lip_audio（对口型/歌曲）总时长时，插件在渲染函数前部按原始 clips 构建 clip_ref_plans（len=N），随后在 lip 处理段 `clips.append(_new_clip)` 自动追加延续分镜（len=N+1）——渲染循环 `loop_end=len(clips)=N+1` 访问 `clip_ref_plans[N]` → `IndexError: list index out of range`（extender.py:7766 `_plan = clip_ref_plans[i]`，clip 全部采样/解码完成后崩溃，成片无法输出）。** / Root cause (G-drive 8191 real IndexError): when total storyboard clip duration < lip_audio duration, clip_ref_plans is built for the original N clips, then `clips.append(_new_clip)` auto-extends to N+1 — the render loop (`loop_end = len(clips)`) hits `clip_ref_plans[N]` → IndexError at the end of the chain, discarding all rendered clips.**
+
+- **修复（extender.py `clips.append` 处同步扩展）**：追加延续 CLIP 后，若 `clip_ref_plans` 非 None 则同步 `clip_ref_plans.append(dict(clip_ref_plans[-1]))`——延续段画面沿用上一分镜构图，其 `<Picture N>` 引用与上一分镜相同，直接继承最后一条 plan；plans 长度与 clips 重新对齐，循环不再越界。** / Fix (sync-extend at clips.append): after appending the extension clip, append a copy of the last clip_ref_plans entry so plans length tracks clips length; the extension clip inherits the previous shot's reference plan (same scene/pictures).**
+- 验证：py_compile PASS。 / Verified: py_compile PASS.
+- ⚠️ 待用户实机验收（超长歌曲自动延续段渲染不再崩溃、成片完整输出）后再 commit/push 与 C 盘同步（铁律）/ ⚠️ Awaiting user acceptance run before commit/push and C-drive sync (iron rule)
+
+---
+
 ### v14.188 (2026-10-24, merge 整合) — 分镜模式过渡帧重影/一帧崩坏根治：渐进锁 keep（场景跳变平滑转向）/ storyboard-mode seam ghost-frame fix: progressive keep-lock (smooth turn toward the new scene)
 
 **根因（实机抽帧量化实锤）：** 分镜模式场景跳变（clip1 尾=主播直播场景 → clip2 首=蜡烛特写）时，v14.187 的均匀锁 keep 把上一段尾画面强锁到新场景头部，输出区前几帧被迫从旧场景演化 → 过渡帧重影/一帧崩坏（实测 clip2 首帧=主播场景重影马赛克，相邻帧差突变 diff=107 且内容错位；用户截图 2094x1299 亦为主播+货架场景重影）。** / Root cause (frame-extract proven): in storyboard mode with scene jumps (clip1 tail = livestream host → clip2 head = candle close-up), v14.187's uniform keep-lock pins the previous clip's tail frame into the new scene's head; the post-trim output must evolve out of the old scene → ghost/damaged transition frames (measured: clip2 head = host scene ghosted/mosaiced, neighbor-frame diff=107 with content mismatch; user screenshot also shows host+shelf scene ghosting).**

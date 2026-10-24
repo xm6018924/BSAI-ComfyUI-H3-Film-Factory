@@ -7132,6 +7132,14 @@ class BSAIH3FilmFactory:
                 _new_clip["validated"] = False
                 _new_clip["seed_mode"] = "randomize"
                 clips.append(_new_clip)
+                # v14.189 (fix): 自动追加延续 CLIP 后必须同步扩展 clip_ref_plans ——
+                # clip_ref_plans 在函数前部按原始 clips 构建(len=N), 此处 append 使
+                # len(clips)=N+1, 渲染循环 loop_end=len(clips) 会访问 clip_ref_plans[N]
+                # → IndexError: list index out of range。延续段画面沿用上一分镜构图,
+                # 其 <Picture N> 引用与上一分镜相同, 直接继承最后一条 plan 即可。
+                if clip_ref_plans is not None:
+                    clip_ref_plans.append(dict(clip_ref_plans[-1]))
+                    print(f"[H3 Extender] v14.189 clip_ref_plans 同步扩展: {len(clip_ref_plans)-1} 条 -> {len(clip_ref_plans)} 条 (继承最后一条)")
                 print(f"[H3 LipSync] ✅ 对口型音频 {_lip_total_dur:.2f}s > 分镜总时长 "
                       f"{_sum_clip_dur:.2f}s → 自动追加延续分镜 CLIP +{_new_clip['duration']:.2f}s "
                       f"(id={_new_clip['id']}), 外部音频完整性已保证")
