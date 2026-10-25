@@ -637,7 +637,7 @@ def _load_segment_audio(data_path, desc):
     return audio
 
 
-def _append_segment(data_path, latent, index, trim_frames, validated, manifest):
+def _append_segment(data_path, latent, index, trim_frames, validated, manifest, speech_gate=None):
     video, audio = _streams_from_latent(latent, "samples")
     _validate_batch_one(video, audio)
     if manifest.get("geometry") is not None:
@@ -665,7 +665,7 @@ def _append_segment(data_path, latent, index, trim_frames, validated, manifest):
         f.flush()
         os.fsync(f.fileno())
 
-    return {
+    desc = {
         "index": int(index),
         "validated": bool(validated),
         "frames": int(frames),
@@ -673,7 +673,12 @@ def _append_segment(data_path, latent, index, trim_frames, validated, manifest):
         "video": video_spec,
         "audio": audio_spec,
         "segment_end": segment_end,
-    }, _geometry(video, audio)
+    }
+    # v14.210: 语音压制窗口随段持久化(秒, 相对本段正片起点), 供解码时确定性
+    # 压掉台词结束点之后的人声。
+    if speech_gate:
+        desc["speech_gate"] = [[round(float(t0), 3), round(float(t1), 3)] for t0, t1 in speech_gate]
+    return desc, _geometry(video, audio)
 
 
 def _backup_chain_before_truncate(data_path, manifest_path, reason):
@@ -927,6 +932,7 @@ def _save_tail_latents(data_path, manifest, from_index):
             "frames": int(seg["frames"]),
             "trim_frames": int(seg.get("trim_frames", 0)),
             "color_adjustment": seg.get("color_adjustment"),
+            "speech_gate": seg.get("speech_gate"),
         })
     return saved
 
@@ -952,6 +958,7 @@ def _restore_tail_latents(data_path, manifest_path, saved_latents):
             trim_frames=int(item["trim_frames"]),
             validated=True,
             manifest=manifest,
+            speech_gate=item.get("speech_gate"),
         )
         if item.get("color_adjustment") is not None:
             desc["color_adjustment"] = item["color_adjustment"]
@@ -988,6 +995,7 @@ def _save_tail_latents_to_disk(data_path, manifest, from_index, owner_id):
             "frames": int(seg["frames"]),
             "trim_frames": int(seg.get("trim_frames", 0)),
             "color_adjustment": seg.get("color_adjustment"),
+            "speech_gate": seg.get("speech_gate"),
         })
 
     torch.save(saved, str(tail_file))
@@ -1217,6 +1225,7 @@ class MiniMaxH3MotionContextDiskJoin:
         fps=24.0,
         previous_cache=None,
         unique_id=None,
+        speech_gate=None,
     ):
         data_path, manifest_path, manifest, mode, stop, index = _effective_state(
             previous_cache, run_mode, fps, unique_id
@@ -1287,6 +1296,7 @@ class MiniMaxH3MotionContextDiskJoin:
                 trim_frames=trim,
                 validated=bool(validated),
                 manifest=manifest,
+                speech_gate=speech_gate,
             )
             segments = [dict(x) for x in manifest.get("segments", [])] + [desc]
             manifest = dict(manifest)
@@ -1781,6 +1791,93 @@ def _clean_audio_waveform(wave, sr, enabled=True):
         return wave
 
 
+# v14.210: 确定性语音门 —— H3 靠提示词无法稳定阻止它在台词空档自编人声。
+# extender 逐拍算出"台词结束点"之后的窗口写进 segment["speech_gate"](秒, 相对
+# 本段起点), 解码后在这些窗口内只压掉 300-3000Hz 语音带, <300Hz 低频与
+# >3000Hz 高频环境音原样保留 → 听感是"人声消失, 环境还在"。
+_SPEECH_GATE_BAND_HZ = (300.0, 3000.0)
+_SPEECH_GATE_GAIN = 0.12
+_SPEECH_GATE_RAMP_SEC = 0.12
+
+
+def _speech_gate_windows(desc, offset_sec=0.0):
+    """段的压制窗口(秒), 已按 offset_sec 平移到解码波形的时间基。"""
+    out = []
+    for item in desc.get("speech_gate") or []:
+        try:
+            t0 = float(item[0]) + float(offset_sec)
+            t1 = float(item[1]) + float(offset_sec)
+        except (TypeError, ValueError, IndexError):
+            continue
+        t0 = max(0.0, t0)
+        if t1 > t0:
+            out.append((t0, t1))
+    return out
+
+
+def _speech_gate_channel(x, sr, windows):
+    n_fft = 2048 if int(sr) >= 32000 else 1024
+    hop = n_fft // 2
+    win = np.hanning(n_fft).astype(np.float32)
+    pad = n_fft
+    xp = np.pad(x.astype(np.float32), (pad, pad))
+    n_frames = 1 + (xp.shape[0] - n_fft) // hop
+    frames = np.lib.stride_tricks.sliding_window_view(xp, n_fft)[::hop][:n_frames]
+    S = np.fft.rfft(frames * win, axis=1)
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / float(sr))
+    t = (np.arange(n_frames, dtype=np.float64) * hop + n_fft * 0.5 - pad) / float(sr)
+    g = np.ones(n_frames, dtype=np.float64)
+    for _t0, _t1 in windows:
+        g[(t >= _t0) & (t <= _t1)] = _SPEECH_GATE_GAIN
+    # 增益在窗口边界做 ~0.12s 平滑, 避免开关式泵浦/爆音
+    w_g = max(3, min(n_frames, int(round(_SPEECH_GATE_RAMP_SEC * float(sr) / hop))))
+    c = np.cumsum(np.concatenate([[0.0], g]))
+    h = w_g // 2
+    gs = np.empty_like(g)
+    for _i in range(n_frames):
+        lo = max(0, _i - h)
+        hi = min(n_frames, _i + h + 1)
+        gs[_i] = (c[hi] - c[lo]) / float(hi - lo)
+    band = (freqs >= _SPEECH_GATE_BAND_HZ[0]) & (freqs <= _SPEECH_GATE_BAND_HZ[1])
+    gain = np.ones((n_frames, freqs.size), dtype=np.float32)
+    gain[:, band] = gs[:, None].astype(np.float32)
+    S_out = S * gain
+    out = np.zeros(xp.shape[0], dtype=np.float32)
+    wsum = np.zeros(xp.shape[0], dtype=np.float32)
+    for _i in range(n_frames):
+        seg = np.fft.irfft(S_out[_i], n=n_fft)
+        _s = _i * hop
+        out[_s:_s + n_fft] += seg * win
+        wsum[_s:_s + n_fft] += win * win
+    wsum[wsum < 1e-8] = 1.0
+    out = out / wsum
+    return out[pad:pad + x.shape[0]]
+
+
+def _apply_speech_gate(waveform, sr, windows):
+    if waveform is None or not windows or int(waveform.shape[-1]) < 256:
+        return waveform
+    try:
+        _device = waveform.device
+        _dtype = waveform.dtype
+        x = waveform.detach().float().cpu().numpy()
+        orig_shape = x.shape
+        if x.ndim == 1:
+            x = x.reshape(1, 1, -1)
+        elif x.ndim == 2:
+            x = x.reshape(1, x.shape[0], x.shape[1])
+        elif x.ndim != 3:
+            return waveform
+        out = np.empty_like(x)
+        for _b in range(x.shape[0]):
+            for _c in range(x.shape[1]):
+                out[_b, _c] = _speech_gate_channel(x[_b, _c], int(sr), windows)
+        return torch.from_numpy(out).to(device=_device, dtype=_dtype).reshape(orig_shape)
+    except Exception as _sg_err:
+        print(f"[H3 Extender] v14.210 语音门跳过(可忽略): {_sg_err}")
+        return waveform
+
+
 def _lf_cut_gain(freqs, sr):
     """低频轰鸣削减曲线(纯增益, 无硬零 → 无时域瞬态):
        ≤50Hz  -22dB;  100Hz ≈ -15dB;  150Hz ≈ -11.5dB;  200Hz ≈ -9dB;
@@ -1898,7 +1995,17 @@ def _decode_audio_latent(audio_vae, latent, frames, fps):
 
 def _decode_single_audio(data_path, desc, audio_vae, fps):
     latent = _load_segment_audio(data_path, desc)
-    return _decode_audio_latent(audio_vae, latent, int(desc["frames"]), fps)
+    audio = _decode_audio_latent(audio_vae, latent, int(desc["frames"]), fps)
+    # v14.210: 波形时间基从段首(含 trim 重叠)开始, 而 speech_gate 是相对
+    # 本段正片起点(台词 0 秒), 故窗口整体后移 trim 帧。
+    _trim = int(desc.get("trim_frames", 0) or 0)
+    windows = _speech_gate_windows(desc, float(_trim) / float(fps))
+    if windows:
+        audio = dict(audio)
+        audio["waveform"] = _apply_speech_gate(
+            audio["waveform"], int(audio["sample_rate"]), windows
+        )
+    return audio
 
 
 def _decode_pair_audio(data_path, prev_desc, curr_desc, audio_vae, fps, seam_shift):
@@ -1929,6 +2036,21 @@ def _decode_pair_audio(data_path, prev_desc, curr_desc, audio_vae, fps, seam_shi
     sr = int(decoded["sample_rate"])
 
     prev_n = int(round(float(previous_frames) / float(fps) * sr))
+    # v14.210: 确定性语音门 —— 解码波形 = 上一段全段(时间基 0) + 本段从
+    # warmup_start_frames 处开始(w[prev_n])。两段的 speech_gate 都换算到
+    # 这个共同时间基后一次性压制, 再走后面的切割/crossfade。
+    _gate_prev = _speech_gate_windows(
+        prev_desc, float(int(prev_desc.get("trim_frames", 0) or 0)) / float(fps)
+    )
+    _gate_curr = _speech_gate_windows(
+        curr_desc,
+        float(prev_n) / float(sr)
+        + float(int(curr_desc.get("trim_frames", 0) or 0)) / float(fps)
+        - float(warmup_start_frames) / float(fps),
+    )
+    if _gate_prev or _gate_curr:
+        w = _apply_speech_gate(w, sr, _gate_prev + _gate_curr)
+
     effective_warm = max(0, int(warmup_frames) + int(seam_shift))
     warm_n = int(round(float(effective_warm) / float(fps) * sr))
     cut_b = prev_n + warm_n
