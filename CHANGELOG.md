@@ -14,41 +14,6 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
-### v14.210 (2026-10-25) — 确定性语音门：按台词结束点后的窗口在 300-3000Hz 语音带直接压掉人声 / Deterministic speech gate: mute the 300-3000 Hz voice band after each beat's estimated line end
-
-**背景：v14.208/209 的台词缺口约束是"提示词侧"的手段，H3 偶尔仍会在空档自编人声；这里加一层"解码侧"的确定性保险，真正改音频。** **/ Context: the v14.208/209 guards only steer the prompt; this adds a deterministic post-decode gate that actually changes the audio.**
-
-- **窗口怎么算：** `_ff_speech_gate_windows()` 把命中拍换算成 `[拍起点 + 估算台词时长, 拍终点]`；短于 0.25s 的空档跳过，重叠窗口合并。** / Windows = [beat start + estimated speech, beat end]; gaps under 0.25s skipped; overlaps merged.**
-- **怎么压：** `_apply_speech_gate()` → `_speech_gate_channel()` 在 STFT 域只对 300-3000Hz 的人声带做增益（0.12 ≈ -18.4dB），<300Hz 低频与 >3000Hz 高频完全不动，边界 0.12s 平滑防泵浦/爆音 → 听感为"人声消失、环境音还在"。** / STFT gain only inside the 300-3000 Hz band (0.12 ≈ -18.4 dB); lows/highs untouched; 0.12s smoothing.**
-- **窗口随段持久化：** `segment["speech_gate"]`（秒，相对本段正片起点），由 Disk Join 写入；`_restore_tail_latents` / tail `.pt` 保存恢复时一并带上。** / Persisted on the segment and carried through tail save/restore.**
-- **解码侧接入：** `_decode_single_audio` 按 `trim_frames` 平移窗口后压制；`_decode_pair_audio` 把上一段全段与本段（从 warmup 起点）的窗口换算到同一时间基后一次性压制，再走原有切割/crossfade。预览 MP4、渐进预览、最终成片共用同一条路径。** / Applied in both audio decode paths with the correct time bases; previews and final export share it.**
-- **开关：** `BSAI_H3_SPEECH_GATE=0` 关闭；lip_audio/lip_voice 模式不启用。** / Disable with `BSAI_H3_SPEECH_GATE=0`; off in lip_audio mode.**
-- **验证：** py_compile PASS；合成信号（220Hz 环境 + 1000Hz 人声 + 5000Hz 高频）窗内 1000Hz 功率降至 0.014、220/5000Hz 保持 1.000、最大采样阶跃不变（无爆音）；真实工作流 prompt 回归 clip1 → `[[5.38,6.0],[8.38,9.0],[11.38,12.0],[13.9,15.0]]`，clip2 → 5 窗。** / Verified: py_compile PASS; synthetic tones show 1000 Hz power down to 0.014 while 220/5000 Hz stay 1.000 and max sample step is unchanged; real prompts produce the expected windows.**
-
----
-
-### v14.209 (2026-10-25) — 台词缺口约束加强 + 修漏判：全片音频硬规则置顶、每拍带秒数时间锚点、角引号优先 / Stronger no-extra-speech guard + fix the missed detection
-
-**实测（用户 2026-10-25 报 `_clippv_250_0_10c17b79.mp4`，clip1 第 2-4 秒仍乱加台词）：机制确实生效了（进程 21:17 启动、插件 21:14 同步，clip1 5 拍里 4 拍都追加了约束），但仍然出事。两个可查到的原因：①强调用的弯引号被当台词计入字数，覆盖率虚高 → 漏判；②约束只挂在拍尾，权重低。** **/ Measured: the guard did fire (4 of 5 beats flagged) yet speech still appeared; emphasis quotes inflated coverage, and tail-only notes carry little weight.**
-
-- **修漏判：** 引号按优先级取 `『』「」`（剧本台词）→ 无角引号才用 `“”` → 最后直引号。旧代码把「台词 + 语气强调“没刺鼻味”」拼一起算字数（10+4 字 ≈ 2.8s），3 秒拍刚好凑满而放行。** / Quotes are now tiered: 『』「」 first, then curly, then straight; emphasis quotes no longer inflate coverage.**
-- **语速更保守：** 5.0 → 4.2 字/秒、容差 0.4 → 0.5s，台词"念完即闭口"的估算不再乐观。** / Slower chars/s + wider tolerance so the estimated silence is honest.**
-- **约束更硬：** ①任意一拍命中即把「全片音频硬规则」插到 prompt 最前（只许念『』内台词、每句必须在该时段内念完、不得提前抢话/拖到下一段、句间留停顿、禁止补充台词/即兴加话/旁人说话/重复念白/哼唱/拟声、空档只留环境音与音乐）；②每拍尾部追加**带秒数的时间锚点**（"本拍只有这一句，约 2.4 秒；念完到本拍结束约 0.6 秒立即闭口完全静默"）。** / Global hard rule at the prompt head + per-beat anchor with explicit seconds.**
-- **删死代码：** 旧函数 `except` 后残留一段永不执行的重复实现（且引用未定义的 `_DIALOGUE_GAP_QUOTE_RE`）。** / Removed the unreachable duplicate block.**
-- **验证：** py_compile PASS；用该工作流真实 prompt 回归：clip0 4/5 拍命中（0-3s 台词 13 字≈3.1s，本身就填满，属正常）、clip1 5/5 拍命中。启动横幅 `v14.209 backend loaded`。** / Verified on the real prompts: clip0 4/5, clip1 5/5.**
-
----
-
-### v14.208 (2026-10-25) — 台词缺口 → 无对白约束：逐拍检测台词覆盖不足, 自动追加"本拍不再出声"约束, 抑制模型在台词空档乱配音 / Dialogue-gap guard: per-beat coverage check auto-appends a "no extra speech" tail constraint so the model stops improvising gibberish in the gaps
-
-**实测（用户 2026-10-25 报）: 直播带货 clip1 在 5-6s 出现听不懂的乱配音。H3 是音视频联合模型, 音频由模型自生成, 脚本台词只是"建议"——3 秒拍的台词(≈11 字 ≈ 2.2s)念不满该拍, 模型就在剩余空档自由发挥。** **/ Measured: gibberish dialogue at 5-6s; H3 self-generates audio, a ~11-char line only fills ~2.2s of a 3s beat, so the model improvises the rest.**
-
-- **机制：** 新增 `_ff_dialogue_gap_guard(prompt)` —— 逐拍解析 `X-Y秒：…`, 取中文引号 『』「」“” 内台词(无中文引号时回退直引号; 强调用的直引号不计), 按直播快语速 5 字/秒估算朗读时长; 对"无台词"或"台词覆盖不足"(speech + 0.4s < 拍时长)的拍在拍尾追加约束: 有台词→「本时段台词有限, 仅念上述引号内台词, 念完后不再出现任何人声; 镜头自然移至产品/道具特写或场景空镜, 运镜平稳延续、不做硬切」; 无台词→「本时段无对白」+ 同样的镜头引导。** / Core: per-beat parse + CJK-quote dialogue extraction + 5 chars/s estimate; under-covered beats get a tail constraint that also quietly steers the camera to a product/scene cutaway (no hard cut).**
-- **生效范围：** 仅在**非** lip_audio/lip_voice 模式注入(外部音频驱动口型时不存在自生成音频); 环境变量 `BSAI_H3_DIALOGUE_GAP=0` 可关闭。** / Only when lip_audio is not connected; disable with `BSAI_H3_DIALOGUE_GAP=0`.**
-- **验证：** `extender.py` py_compile PASS; 用 clip1 真实 prompt 实测 5 拍全部命中(含 3-6s 台词≈2.0s); 无台词拍的边界测试走「无对白」分支。** / Verified: py_compile PASS; clip1 prompt flags all 5 beats; no-dialogue beats hit the silent branch.**
-
----
-
 ### v14.207 (2026-10-25) — 修二采 OOM 兜底的 shape mismatch 崩溃：keyframe 几何随 fallback 收缩 + fallback 非 OOM 异常不再打死整个 prompt / Fix the OOM-fallback shape-mismatch crash: keyframe geometry follows the fallback, and a non-OOM fallback error no longer kills the whole prompt
 
 **实测（用户 2026-10-25 16:12 报错，`clip2`）：`RuntimeError: shape mismatch: value tensor of shape [51648, 96] cannot be broadcast to indexing result of shape [14928, 96]`（`comfy/ldm/minimax/model.py:576 all_video_rows[~img_update] = cond_video_rows`），1 小时 34 分的作业在二采兜底里直接失败。** **/ Measured: clip 2's refine OOM fallback crashed with a cond-row shape mismatch, killing a 1h34m job.**

@@ -4499,113 +4499,6 @@ def _default_clip(index: int = 0):
     }
 
 
-# ---------- v14.208: 台词缺口 → 无对白约束 ----------
-# 实测 (clip1 5-6s): H3 是音视频联合模型, 音频由模型自生成, 脚本台词只是"建议" ——
-# 某个时间拍的台词念不满该拍时长时, 模型会在剩余空档自由发挥, 产出听不懂的乱配音。
-# 机制: 逐拍估算台词朗读时长, 对"无台词"或"台词覆盖不足"的拍追加"本拍无对白"约束,
-# 抑制模型在这些空档生成人声 (仅保留环境音/背景音乐)。仅在非 lip_audio 模式生效。
-_DIALOGUE_GAP_BEAT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[-–—~至]\s*(\d+(?:\.\d+)?)\s*秒")
-# v14.209: 拆成「角引号」与「弯引号」两级。角引号『』「」= 剧本台词; 弯引号“”
-# 在本剧本里大量用于语气强调(如 语气强调“没刺鼻味”)，旧代码把两者拼在一起算字数,
-# 导致 10 字台词 + 4 字强调 = 14 字 ≈ 2.8s，凑满 3s 拍而漏判(实测 clip1: 5 拍全放行)。
-_DIALOGUE_GAP_QUOTE_CORNER_RE = re.compile(r"[『「]([^』」]+)[』」]")
-_DIALOGUE_GAP_QUOTE_CURLY_RE = re.compile(r"[“]([^”]+)[”]")
-_DIALOGUE_GAP_QUOTE_EN_RE = re.compile(r"\"([^\"]+)\"")
-_DIALOGUE_GAP_WORD_RE = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]")
-# v14.209: 只要有一段被判"台词有缺口"，就在 prompt 最前面加一条全片硬规则。
-# 拍尾的局部说明权重低(尤其二采 denoise 0.55 会重画一大部分), 头部硬规则更容易被遵守。
-_DIALOGUE_GAP_GLOBAL_RULE = (
-    "【全片音频硬规则】只允许念出各时段『』内写明的台词；每句必须在该时段内念完，"
-    "不得提前抢话、不得拖到下一时段，句与句之间留清晰停顿；念完立即闭口，"
-    "禁止补充台词、即兴加话、旁白、旁人说话、重复念白、哼唱或拟声发音；"
-    "台词以外的所有空档只保留环境音与背景音乐，不得出现任何人声。\n"
-)
-
-
-def _ff_dialogue_gap_guard(prompt, chars_per_sec=4.2, tol=0.5):
-    """对台词说不满的时间拍追加"台词有限 + 念完即静默"约束, 抑制模型乱配音。
-
-    判定 (两者都算): ①该拍没有任何台词; ②台词按直播语速 (默认 4.2 字/秒,
-    只计中英数字符、不含标点) 估算的朗读时长覆盖不足该拍时长
-    (speech_sec + tol < 拍时长)。
-
-    台词取角引号 『』「」 内内容; 没有角引号时才回退弯引号 “” 与直引号。
-    v14.209: 弯引号在本剧本里用于语气强调(语气强调“没刺鼻味”), 旧代码把强调
-    和台词混在一起算字数, 覆盖率虚高导致漏判(实测 clip1 5 拍全部放行)。
-
-    命中后: ①该拍尾部追加带秒数的时间锚点("念完即闭口, 剩余 X 秒完全静默");
-    ②prompt 最前面插入一条全片音频硬规则。返回 (新 prompt, flagged)。
-    flagged = [(start, end, speech_sec), ...]。
-    """
-    try:
-        text = str(prompt)
-        beats = list(_DIALOGUE_GAP_BEAT_RE.finditer(text))
-        if not beats:
-            return prompt, []
-        flagged = []
-        out = text
-        for idx in range(len(beats) - 1, -1, -1):
-            m = beats[idx]
-            try:
-                start = float(m.group(1))
-                end = float(m.group(2))
-            except (TypeError, ValueError):
-                continue
-            dur = max(0.0, end - start)
-            if dur <= 0:
-                continue
-            seg_start = m.end()
-            seg_end = beats[idx + 1].start() if idx + 1 < len(beats) else len(text)
-            seg = text[seg_start:seg_end]
-            # v14.209: 角引号优先; 无角引号才用弯引号; 再没有才回退直引号。
-            _quoted = "".join(_DIALOGUE_GAP_QUOTE_CORNER_RE.findall(seg))
-            if not _quoted:
-                _quoted = "".join(_DIALOGUE_GAP_QUOTE_CURLY_RE.findall(seg))
-            if not _quoted:
-                _quoted = "".join(_DIALOGUE_GAP_QUOTE_EN_RE.findall(seg))
-            speech_chars = len(_DIALOGUE_GAP_WORD_RE.findall(_quoted))
-            speech_sec = speech_chars / chars_per_sec if chars_per_sec > 0 else 0.0
-            if speech_chars > 0 and (speech_sec + tol) >= dur:
-                continue
-            if speech_chars == 0:
-                note = ("【本时段无对白】此镜头不出现任何人声台词、口播、旁白或加话; "
-                        "镜头自然转向产品/道具特写或场景空镜, 运镜平稳延续、不做硬切, "
-                        "仅保留环境音与背景音乐。")
-            else:
-                _silent = max(0.0, dur - speech_sec)
-                note = (f"【本时段台词有限】本拍只有上面引号内这一句台词, 约 {speech_sec:.1f} 秒; "
-                        f"念完到本拍结束(约 {_silent:.1f} 秒)立即闭口完全静默, 不得再补任何字句"
-                        f"(无口播、旁白、加话、重复念白或拟声发音); 镜头自然移至产品/道具特写"
-                        f"或场景空镜, 运镜平稳延续、不做硬切, 仅保留环境音与背景音乐。")
-            out = out[:seg_end] + note + "\n" + out[seg_end:]
-            flagged.append((start, end, round(speech_sec, 2)))
-        if flagged:
-            # v14.209: 全片硬规则置顶(拍尾局部说明权重低, 二采 denoise 0.55 会重画大半)
-            out = _DIALOGUE_GAP_GLOBAL_RULE + out
-        return out, flagged
-    except Exception:
-        return prompt, []
-
-
-def _ff_speech_gate_windows(flagged, min_gap=0.25):
-    """v14.210: 把台词缺口拍换算成"人声压制窗口"(秒, 相对本段起点)。
-
-    窗口 = [拍起点 + 估算台词时长, 拍终点], 即模型最可能即兴加话的尾巴。
-    短于 min_gap 的空档不值得动刀, 跳过。返回 [[t0, t1], ...]。
-    """
-    out = []
-    for _start, _end, _speech in sorted(flagged, key=lambda x: float(x[0])):
-        t0 = float(_start) + float(_speech)
-        t1 = float(_end)
-        if t1 - t0 < float(min_gap):
-            continue
-        if out and t0 <= out[-1][1]:
-            out[-1] = [min(out[-1][0], t0), max(out[-1][1], t1)]
-        else:
-            out.append([t0, t1])
-    return [[round(a, 3), round(b, 3)] for a, b in out]
-
-
 _DIALOGUE_AUDIO_LINE_RE = re.compile(
     r"^\s*(?:"
     r"【[^】]*(?:对白|台词|对话|旁白|音效|配音|配乐|voiceover|dialogue)[^】]*】"
@@ -8613,23 +8506,6 @@ class BSAIH3FilmFactory:
                     "构图只允许随运镜连续渐变。"
                 )
                 print(f"[H3 Extender] v14.191 一镜到底 clip[{i}]: 已注入分拍反切镜指令(时间段=同一连续运镜的阶段)")
-            # v14.208: 台词缺口 → 无对白约束 (抑制模型在台词空档乱配音)。
-            # 仅非 lip_audio/lip_voice 模式生效: 外部音频驱动口型时不存在自生成音频。
-            _speech_gate = None
-            if lip_audio_segments is None and os.environ.get("BSAI_H3_DIALOGUE_GAP", "1") != "0":
-                _dg_prompt, _dg_flagged = _ff_dialogue_gap_guard(effective_prompt)
-                if _dg_flagged:
-                    effective_prompt = _dg_prompt
-                    for _dg in _dg_flagged:
-                        print(f"[H3 Extender] v14.208 台词缺口: clip[{i + 1}] "
-                              f"{_dg[0]:g}-{_dg[1]:g}s 台词≈{_dg[2]}s -> 追加无对白约束")
-                    # v14.210: 确定性保险 —— 提示词约束偶发失效时, 解码阶段在这
-                    # 些窗口内直接压掉 300-3000Hz 语音带(环境音保留)。
-                    if os.environ.get("BSAI_H3_SPEECH_GATE", "1") != "0":
-                        _speech_gate = _ff_speech_gate_windows(_dg_flagged)
-                        if _speech_gate:
-                            print(f"[H3 Extender] v14.210 语音门: clip[{i + 1}] "
-                                  f"压制窗口 {_speech_gate}")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
@@ -8905,7 +8781,6 @@ class BSAIH3FilmFactory:
                 fps=float(FPS),
                 previous_cache=previous_handle,
                 unique_id=f"extender_{owner}",
-                speech_gate=_speech_gate,
             )
             previous_handle = result[0]
             previous_proxy = result[1]
@@ -9582,7 +9457,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.210 backend loaded (v14.210 确定性语音门: 按每拍台词结束点之后的窗口, 解码时在 300-3000Hz 语音带做平滑增益压制(环境音保留), 窗口随 segment.speech_gate 持久化, BSAI_H3_SPEECH_GATE=0 关闭; v14.209 台词缺口约束加强: 全片音频硬规则置顶 + 每拍带秒数时间锚点(念完即闭口) + 角引号优先(修强调弯引号虚增字数致漏判) + 语速 4.2 字/秒; v14.208 台词缺口→无对白约束, BSAI_H3_DIALOGUE_GAP=0 关闭; v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.207 backend loaded (v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
