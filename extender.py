@@ -4223,6 +4223,38 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _fb_use_tiles = False
                 print(f"[H3 Extender] v1.92 fallback 分块包装失败, 用原始尺寸兜底: {_te2}")
             _fb_use = samples if _fb_use_tiles else _fb_samples
+            # v14.207: fallback 用一采 34x60 重跑时, PackedLayout 会按输入 x 的空间网格
+            # 给 keyframe cond 预留行数, 而 _cond_video_rows 按 keyframe latent 的实际
+            # 尺寸 patchify —— v14.162 已把它们放大到二采 68x120, 两者差 4 倍, 首步前向
+            # 直接 shape mismatch: [51648,96] vs [14928,96]。重跑前把 keyframe 缩回
+            # 一采空间; 分块重跑(仍用放大版)时几何本来就一致, 不动。
+            if not _fb_use_tiles:
+                try:
+                    _fbm, _fbst = _ff_extract_members(_fb_use)
+                    _fb_hw = tuple(_fbm[0].shape[-2:]) if _fbm else None
+                    _cond_fb = conditioning[0][1] if isinstance(conditioning, list) else conditioning
+                    if _fb_hw and isinstance(_cond_fb, dict) and _cond_fb.get("minimax_keyframes"):
+                        _kfs_fb = []
+                        _kf_resized = 0
+                        for _kf_fb in _cond_fb["minimax_keyframes"]:
+                            _kl_fb = _kf_fb.get("latent")
+                            if _kl_fb is not None and _kl_fb.ndim == 5 \
+                                    and tuple(_kl_fb.shape[-2:]) != _fb_hw:
+                                _kl_fb = torch.nn.functional.interpolate(
+                                    _kl_fb,
+                                    size=(int(_kl_fb.shape[2]), int(_fb_hw[0]), int(_fb_hw[1])),
+                                    mode="trilinear", align_corners=False)
+                                _kf_resized += 1
+                            _nkf_fb = dict(_kf_fb)
+                            _nkf_fb["latent"] = _kl_fb
+                            _kfs_fb.append(_nkf_fb)
+                        _cond_fb["minimax_keyframes"] = _kfs_fb
+                        if _kf_resized:
+                            print(f"[H3 Extender] v14.207 fallback: {_kf_resized} 个 keyframe "
+                                  f"latent 已缩回一采 {int(_fb_hw[1])}x{int(_fb_hw[0])}"
+                                  f"(原二采空间), 避免 cond 行数 4x 失配")
+                except Exception as _fbk_e:
+                    print(f"[H3 Extender] v14.207 fallback keyframe 几何对齐失败: {_fbk_e}")
             # v1.92: 仅当模型已被 ComfyUI 全卸(<2GB)时才卸载重载; 否则保持
             # 当前 staged 状态(DynamicVRAM 下卸载重载会 staged 21.36GB 二次 OOM).
             try:
@@ -4277,6 +4309,19 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     samples = _samples_pre_upscale
                     print(f"[H3 Extender] 已回退到一采 latent; 建议手动把 "
                           f"refine_upscale_factor 改成 1.0 重新跑")
+            except Exception as _fb_err:
+                # v14.207: fallback 自己抛非 OOM 异常(如 cond 行数/CUDA kernel 报错)时,
+                # 旧代码会直接穿出 except-OOM 分支把整个 prompt 打死(实测 1.5 小时作业
+                # 在 clip2 二采兜底里死于 shape mismatch)。兜底失败就不该再兜底,
+                # 退回一采 latent 让成片先落地。用户取消(Interrupt)照常抛出。
+                if type(_fb_err).__name__ == "InterruptProcessingException":
+                    raise
+                print(f"[H3 Extender] Refine fallback 失败(非 OOM): {_fb_err}")
+                import traceback as _tb_fb
+                _tb_fb.print_exc()
+                if _samples_pre_upscale is not None:
+                    samples = _samples_pre_upscale
+                    print(f"[H3 Extender] 已回退到一采 latent (fallback 异常)")
             finally:
                 # v1.65: 恢复 prepare_sampling, 防污染后续采样(下一 clip / 其它工作流)
                 try:
@@ -9412,7 +9457,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.206 backend loaded (v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.207 backend loaded (v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",

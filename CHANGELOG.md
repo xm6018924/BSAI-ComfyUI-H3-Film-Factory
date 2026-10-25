@@ -14,6 +14,18 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.207 (2026-10-25) — 修二采 OOM 兜底的 shape mismatch 崩溃：keyframe 几何随 fallback 收缩 + fallback 非 OOM 异常不再打死整个 prompt / Fix the OOM-fallback shape-mismatch crash: keyframe geometry follows the fallback, and a non-OOM fallback error no longer kills the whole prompt
+
+**实测（用户 2026-10-25 16:12 报错，`clip2`）：`RuntimeError: shape mismatch: value tensor of shape [51648, 96] cannot be broadcast to indexing result of shape [14928, 96]`（`comfy/ldm/minimax/model.py:576 all_video_rows[~img_update] = cond_video_rows`），1 小时 34 分的作业在二采兜底里直接失败。** **/ Measured: clip 2's refine OOM fallback crashed with a cond-row shape mismatch, killing a 1h34m job.**
+
+- **根因：** `PackedLayout` 按**输入 x 的空间网格**给 keyframe cond 预留行数（`frame_rows` 来自 `latent_shapes`），而 `_cond_video_rows` 按 **keyframe latent 的实际尺寸** patchify。v14.162 已把 keyframe 放大到二采 68×120；v14.206 修好一采备份后，OOM fallback 第一次真正走到「用一采 34×60 重跑」，两者空间差 4 倍 → 预留 14928 行 vs 实际 51648 行。** / Root cause: layout reserves keyframe rows from the input grid while cond rows are patchified from the actual keyframe size; the now-working backup path reruns at 34×60 against 68×120 keyframes.**
+- **修复：** fallback 走「原始备份 / 非分块」时，先把 `conditioning` 里的 keyframe latent trilinear 缩回 `_fb_use` 的空间尺寸再采样；分块重跑（仍是放大版）几何本来一致，不动。** / Fix: when the fallback reruns at first-pass size, keyframe latents are trilinear-resized to that grid before sampling.**
+- **兜底失败不再穿出：** 原来的 `except torch.cuda.OutOfMemoryError` 只兜 OOM；fallback 内部抛其它异常会直接穿出这个 except 分支（同级 `except Exception` 接不住），把整个 prompt 打死。现在追加 `except Exception`：打印栈并退回一采 latent 让成片先落地，`InterruptProcessingException` 照常抛出（取消不受影响）。** / A non-OOM error inside the fallback now degrades to the first-pass latent instead of aborting the run; user interrupt still propagates.**
+- **验证：** `extender.py` py_compile PASS；启动横幅 `v14.207 backend loaded`。** / Verified: py_compile PASS, banner v14.207.**
+- **附带观察（非本次改动）：** 该工作流 `tiled_refine=False` + 1920×1088 二采 → 995k tokens 走 v14.148 dense 降级，实测 **601s/步**（clip1 二采 4 步 40 分钟，clip2 直接 OOM）。想正常用双采请开分块二采（`tiled_refine=True`, 4×128）或把二采倍率降到 x1.5。** / Note: without tiled refine, 995k tokens fall back to dense attention at 601s/step; enable tiled refine or reduce the refine factor.**
+
+---
+
 ### v14.206 (2026-10-25) — 二采 latent 塌陷检测：自动回退一采 latent + 告警，杜绝静默灰片 / Refine latent-collapse guard: auto-rollback to first-pass latent + warning, no more silent gray clips
 
 **实测（2026-10-25 灰片排查）：二采偶发把 latent 采成近似常数场——每通道空间 std 0.147、4×4 低通后 0.043，VAE 解码即灰雾/无画面；同机一采健康 latent 为 0.68~1.13。** **/ Measured: the refine pass occasionally collapses into a near-constant latent (per-channel spatial std 0.147, 4×4 low-pass 0.043), which decodes as gray; healthy first-pass latents measure 0.68-1.13.**
