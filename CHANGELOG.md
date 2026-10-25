@@ -14,6 +14,16 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.208 (2026-10-25) — 台词缺口 → 无对白约束：逐拍检测台词覆盖不足, 自动追加"本拍不再出声"约束, 抑制模型在台词空档乱配音 / Dialogue-gap guard: per-beat coverage check auto-appends a "no extra speech" tail constraint so the model stops improvising gibberish in the gaps
+
+**实测（用户 2026-10-25 报）: 直播带货 clip1 在 5-6s 出现听不懂的乱配音。H3 是音视频联合模型, 音频由模型自生成, 脚本台词只是"建议"——3 秒拍的台词(≈11 字 ≈ 2.2s)念不满该拍, 模型就在剩余空档自由发挥。** **/ Measured: gibberish dialogue at 5-6s; H3 self-generates audio, a ~11-char line only fills ~2.2s of a 3s beat, so the model improvises the rest.**
+
+- **机制：** 新增 `_ff_dialogue_gap_guard(prompt)` —— 逐拍解析 `X-Y秒：…`, 取中文引号 『』「」“” 内台词(无中文引号时回退直引号; 强调用的直引号不计), 按直播快语速 5 字/秒估算朗读时长; 对"无台词"或"台词覆盖不足"(speech + 0.4s < 拍时长)的拍在拍尾追加约束: 有台词→「本时段台词有限, 仅念上述引号内台词, 念完后不再出现任何人声; 镜头自然移至产品/道具特写或场景空镜, 运镜平稳延续、不做硬切」; 无台词→「本时段无对白」+ 同样的镜头引导。** / Core: per-beat parse + CJK-quote dialogue extraction + 5 chars/s estimate; under-covered beats get a tail constraint that also quietly steers the camera to a product/scene cutaway (no hard cut).**
+- **生效范围：** 仅在**非** lip_audio/lip_voice 模式注入(外部音频驱动口型时不存在自生成音频); 环境变量 `BSAI_H3_DIALOGUE_GAP=0` 可关闭。** / Only when lip_audio is not connected; disable with `BSAI_H3_DIALOGUE_GAP=0`.**
+- **验证：** `extender.py` py_compile PASS; 用 clip1 真实 prompt 实测 5 拍全部命中(含 3-6s 台词≈2.0s); 无台词拍的边界测试走「无对白」分支。** / Verified: py_compile PASS; clip1 prompt flags all 5 beats; no-dialogue beats hit the silent branch.**
+
+---
+
 ### v14.207 (2026-10-25) — 修二采 OOM 兜底的 shape mismatch 崩溃：keyframe 几何随 fallback 收缩 + fallback 非 OOM 异常不再打死整个 prompt / Fix the OOM-fallback shape-mismatch crash: keyframe geometry follows the fallback, and a non-OOM fallback error no longer kills the whole prompt
 
 **实测（用户 2026-10-25 16:12 报错，`clip2`）：`RuntimeError: shape mismatch: value tensor of shape [51648, 96] cannot be broadcast to indexing result of shape [14928, 96]`（`comfy/ldm/minimax/model.py:576 all_video_rows[~img_update] = cond_video_rows`），1 小时 34 分的作业在二采兜底里直接失败。** **/ Measured: clip 2's refine OOM fallback crashed with a cond-row shape mismatch, killing a 1h34m job.**
