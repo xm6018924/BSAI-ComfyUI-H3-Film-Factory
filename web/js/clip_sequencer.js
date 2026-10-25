@@ -284,23 +284,23 @@ async function fetchAssetLibrary() {
 function parseAssetRefs(refsStr) {
     var refs = { images: [], videos: [], audios: [] };
     if (!refsStr) return refs;
-    refs.images = (refsStr.match(/@图(\d+)/g) || []).map(function (s) {
-        return parseInt(s.replace("@图", ""));
+    refs.images = (refsStr.match(/@(?:图|img)(\d+)/gi) || []).map(function (s) {
+        return parseInt(s.replace(/@(?:图|img)/i, ""));
     });
-    refs.videos = (refsStr.match(/@视频(\d+)/g) || []).map(function (s) {
-        return parseInt(s.replace("@视频", ""));
+    refs.videos = (refsStr.match(/@(?:视频|vid)(\d+)/gi) || []).map(function (s) {
+        return parseInt(s.replace(/@(?:视频|vid)/i, ""));
     });
-    refs.audios = (refsStr.match(/@音频(\d+)/g) || []).map(function (s) {
-        return parseInt(s.replace("@音频", ""));
+    refs.audios = (refsStr.match(/@(?:音频|aud)(\d+)/gi) || []).map(function (s) {
+        return parseInt(s.replace(/@(?:音频|aud)/i, ""));
     });
     return refs;
 }
 
 function rebuildRefsStr(selected) {
     var parts = [];
-    selected.images.forEach(function (n) { parts.push("@图" + n); });
-    selected.videos.forEach(function (n) { parts.push("@视频" + n); });
-    selected.audios.forEach(function (n) { parts.push("@音频" + n); });
+    selected.images.forEach(function (n) { parts.push("@img" + n); });
+    selected.videos.forEach(function (n) { parts.push("@vid" + n); });
+    selected.audios.forEach(function (n) { parts.push("@aud" + n); });
     return parts.join(" ");
 }
 

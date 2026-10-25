@@ -137,9 +137,9 @@ if (!document.getElementById(STYLE_ID)) {
 }
 
 var SECTIONS = [
-    { id: "images", title: "Images", prefix: "图", accept: "image/*", widget: "image_files" },
-    { id: "videos", title: "Videos", prefix: "视频", accept: "video/*", widget: "video_files" },
-    { id: "audios", title: "Audio", prefix: "音频", accept: "audio/*", widget: "audio_files" },
+    { id: "images", title: "Images", prefix: "img", accept: "image/*", widget: "image_files" },
+    { id: "videos", title: "Videos", prefix: "vid", accept: "video/*", widget: "video_files" },
+    { id: "audios", title: "Audio", prefix: "aud", accept: "audio/*", widget: "audio_files" },
 ];
 
 app.registerExtension({

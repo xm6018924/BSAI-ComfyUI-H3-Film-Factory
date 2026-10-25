@@ -36,11 +36,11 @@ def _extract_subtitles_from_prompt(prompt):
         line = line.strip()
         if not line:
             continue
-        if re.match(r'^(?:【旁白】|旁白[：:]|\(旁白[:：])', line):
-            text = re.sub(r'^(?:【旁白】|旁白[：:]|\(旁白[:：]\s*)', '', line).rstrip(')')
+        if re.match(r'^(?:【旁白】|旁白[：:]|\(旁白[:：]|\[Narration\]|Narration[：:]|\(Narration[:：])', line, re.IGNORECASE):
+            text = re.sub(r'^(?:【旁白】|旁白[：:]|\(旁白[:：]\s*|\[Narration\]|Narration[：:]|\(Narration[:：]\s*)', '', line, flags=re.IGNORECASE).rstrip(')')
             narration_lines.append(text.strip())
-        elif re.match(r'^(?:【对白】|对白[：:]|\(对白[:：])', line):
-            text = re.sub(r'^(?:【对白】|对白[：:]|\(对白[:：]\s*)', '', line).rstrip(')')
+        elif re.match(r'^(?:【对白】|对白[：:]|\(对白[:：]|\[Dialogue\]|Dialogue[：:]|\(Dialogue[:：])', line, re.IGNORECASE):
+            text = re.sub(r'^(?:【对白】|对白[：:]|\(对白[:：]\s*|\[Dialogue\]|Dialogue[：:]|\(Dialogue[:：]\s*)', '', line, flags=re.IGNORECASE).rstrip(')')
             dialogue_lines.append(text.strip())
     return '\n'.join(narration_lines), '\n'.join(dialogue_lines)
 
@@ -114,10 +114,10 @@ class BSAI_ClipComposer:
         return {
             "required": {
                 "prompt": ("STRING", {"default": "", "multiline": True, "tooltip": "Generation prompt. Use [voiceover]/[dialogue] for subtitles, @imgN/@vidN/@audN for assets (legacy Chinese tags also accepted)."}),
-                "asset_refs": ("STRING", {"default": "", "multiline": False, "tooltip": "Asset references: @img1 @img2 @vid1 @aud1 (legacy @图1 @视频1 @音频1 also accepted)"}),
+                "asset_refs": ("STRING", {"default": "", "multiline": False, "tooltip": "Asset references: @img1 @img2 @vid1 @aud1 (legacy Chinese notation is also accepted)"}),
                 "narration": ("STRING", {"default": "", "multiline": True, "tooltip": "Narration subtitle text. Used when subtitle_source='manual'."}),
                 "dialogue": ("STRING", {"default": "", "multiline": True, "tooltip": "Dialogue subtitle text. Used when subtitle_source='manual'."}),
-                "subtitle_source": (["manual", "extract_from_prompt"], {"default": "manual", "tooltip": "manual: use narration/dialogue fields. extract_from_prompt: parse 【旁白】/【对白】 from prompt."}),
+                "subtitle_source": (["manual", "extract_from_prompt"], {"default": "manual", "tooltip": "manual: use narration/dialogue fields. extract_from_prompt: parse [Narration]/[Dialogue] markers (legacy Chinese forms are also accepted) from prompt."}),
                 "audio_mode": (["H3_auto", "custom"], {"default": "H3_auto", "tooltip": "H3_auto: use H3 generated audio. custom: use user-provided audio."}),
                 "duration": ("FLOAT", {"default": 5.0, "min": 0.25, "max": 150.0, "step": 0.25, "tooltip": "Clip duration in seconds. Snapped to H3 17n+5 frame grid."}),
                 "width": ("INT", {"default": 1344, "min": 256, "max": 2048, "step": 32, "tooltip": "Video width (multiple of 32)"}),

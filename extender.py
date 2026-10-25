@@ -6005,14 +6005,14 @@ class BSAIH3FilmFactory:
                 "FLOAT",
                 {
                     "default": 0.55, "min": 0.05, "max": 1.0, "step": 0.01,
-                    "tooltip": "Refine CONST re-noise strength (Sol-H3 dual-pass semantics; v14.157 default 0.55 = 保留 45% 底图, 暗部/人脸能真正补出细节; 0.45 及以下在低照度镜头几乎只做平滑). 1.0 = full re-noise redraw (official fast dual-pass). Only effective when refine_enable is on.",
+                    "tooltip": "Refine CONST re-noise strength (Sol-H3 dual-pass semantics; v14.157 default 0.55 keeps 45% of the first-pass image, so shadows and faces gain real detail; 0.45 and below mostly smooth low-light shots). 1.0 = full re-noise redraw (official fast dual-pass). Only effective when refine_enable is on.",
                 },
             ),
             "refine_steps": (
                 "INT",
                 {
                     "default": 6, "min": 1, "max": 20, "step": 1,
-                    "tooltip": "Refine steps (v14.157 default 6 = 4 步在低照度/近景下补不出纹理, 6 步明显更实; 每步成本远低于一采). 2 steps only suit turbo models. Only effective when refine_enable is on.",
+                    "tooltip": "Refine steps (v14.157 default 6 = 4 steps cannot resolve texture in low light or close-ups, 6 steps is visibly more solid; each step costs far less than a first pass). 2 steps only suit turbo models. Only effective when refine_enable is on.",
                 },
             ),
             "refine_upscale_factor": (
@@ -6115,7 +6115,7 @@ class BSAIH3FilmFactory:
                 ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"],
                 {
                     "default": "custom",
-                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. 模型配方档(FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / FastH3 Omni 8步单采) 已移至「渲染管道 render_pipeline」下拉选择。custom = explicit widget values below.",
+                    "tooltip": "v1.86 speed preset (default custom = explicit values from the widgets below; best 8+2 dual-pass out of the box). Turbo = 4 first-pass steps + 3 refine steps + denoise 0.5 (~20min/clip); Balanced = 6 + 4 (~28min); Fine = 8 + 6 (~40min). VDN presets pair with the VDN workflows. Model recipes (FastH3-Trim / FastH3-4step VSA / Turbo-v4 / DMAD-4step / Action Combo / FastH3 Omni 8-step single-pass) have moved to the Render Pipeline dropdown. custom = explicit widget values below.",
                 },
             ),
             # P0 (2026-10-17): 官方双轨迹采样 —— MiniMaxH3SigmaShift 等效注入.
@@ -6123,26 +6123,26 @@ class BSAIH3FilmFactory:
             # 从共享 base grid 推导. 默认开(12/3, 官方推荐), 关掉则回到旧行为.
             "dual_track_shift": (
                 "BOOLEAN",
-                {"default": True, "tooltip": "P0: 官方双轨迹采样（MiniMaxH3SigmaShift 等效）。video/audio 各自 flow shift，改善音视频同步与少步数收敛。默认开。"},
+                {"default": True, "tooltip": "P0: official dual-track sampling (MiniMaxH3SigmaShift equivalent). Separate video/audio flow shift improves A/V sync and few-step convergence. On by default."},
             ),
             "shift_video": (
                 "FLOAT",
-                {"default": 12.0, "min": 0.01, "max": 100.0, "step": 0.1, "tooltip": "Video flow shift，驱动采样器 sigma 调度。官方默认 12；DMAD 配方 12；Turbo v4 12。"},
+                {"default": 12.0, "min": 0.01, "max": 100.0, "step": 0.1, "tooltip": "Video flow shift, drives the sampler sigma schedule. Official default 12; DMAD recipe 12; Turbo v4 12."},
             ),
             "shift_audio": (
                 "FLOAT",
-                {"default": 3.0, "min": 0.0, "max": 100.0, "step": 0.1, "tooltip": "Audio flow shift。官方默认 3；DMAD 配方 2。0.0=关闭音频 shift（兼容旧工作流）。"},
+                {"default": 3.0, "min": 0.0, "max": 100.0, "step": 0.1, "tooltip": "Audio flow shift. Official default 3; DMAD recipe 2. 0.0 = audio shift off (kept for old workflows)."},
             ),
             # P2 (2026-10-17): SelfLift H3 TST 时间状态传输 —— 少步数画质补偿.
             # 校正 H3 视频时间不平衡(闪烁/身份漂移/不合理运动), 运行时开销 1-2%.
             # 依赖 comfyui-SelfLift (facok) 已安装; 未安装时自动跳过并提示.
             "selflift_tst_enable": (
                 "BOOLEAN",
-                {"default": True, "tooltip": "P2: SelfLift H3 TST 少步数画质补偿（校正闪烁/身份漂移/不合理运动）。tau 默认 0.2。需已安装 comfyui-SelfLift。"},
+                {"default": True, "tooltip": "P2: SelfLift H3 TST few-step quality compensation (corrects flicker, identity drift, implausible motion). Default tau 0.2. Requires comfyui-SelfLift to be installed."},
             ),
             "selflift_tst_tau": (
                 "FLOAT",
-                {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "TST 校正强度，论文推荐 0.2；0.5 过强。0=仅诊断。"},
+                {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "TST correction strength; the paper recommends 0.2, and 0.5 is too strong. 0 = diagnostics only."},
             ),
             "temporal_chunk_tokens": (
                 "INT",
@@ -6150,7 +6150,7 @@ class BSAIH3FilmFactory:
             ),
             "temporal_overlap_tokens": (
                 "STRING",
-                {"default": "8", "tooltip": "Overlap tokens between adjacent temporal chunks. Larger = more stable but slower; typically 8~12. Only effective when temporal_chunk_tokens>0. 兼容旧工作流：'global_inherit'/空值/非数字自动取默认 8。"},
+                {"default": "8", "tooltip": "Overlap tokens between adjacent temporal chunks. Larger = more stable but slower; typically 8~12. Only effective when temporal_chunk_tokens>0. Old workflows: 'global_inherit', empty, or non-numeric values fall back to the default 8."},
             ),
             # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 权重放 models/semantic_bridge/.
             "semantic_bridge_enable": (
@@ -6163,7 +6163,7 @@ class BSAIH3FilmFactory:
             ),
             "semantic_bridge_alpha": (
                 "STRING",
-                {"default": "0.15", "tooltip": "Residual mix strength C=H+alpha*(S'-H). Original default 0.15; larger = tighter to the bridge, too large drifts. 兼容旧工作流：空值/非数字自动取默认 0.15。"},
+                {"default": "0.15", "tooltip": "Residual mix strength C=H+alpha*(S'-H). Original default 0.15; larger = tighter to the bridge, too large drifts. Old workflows: empty or non-numeric values fall back to the default 0.15."},
             ),
             "semantic_bridge_magnitude_match": (
                 "BOOLEAN",
@@ -6180,7 +6180,7 @@ class BSAIH3FilmFactory:
             ),
             "face_lock_mode": (
                 "BOOLEAN",
-                {"default": False, "tooltip": "Far-shot face preservation mode (automatically locks facial-feature consistency; @图1=full body, @图2.N=each person's face close-up)."},
+                {"default": False, "tooltip": "Far-shot face preservation mode (automatically locks facial-feature consistency; @imgN: @img1=full body, @img2.N=each person's face close-up)."},
             ),
             # v14.153 修正: refine_mem_mode 移出 required —— 它在 widget 序列中必须
             # 排在 optional 的 prompt_pack 之后（即所有 widget 的最末尾），否则会让
@@ -6194,11 +6194,11 @@ class BSAIH3FilmFactory:
         optional = {
             "audio_vae": ("VAE", {"forceInput": True}),
             "ref_audio": ("AUDIO", {"forceInput": True, "tooltip": "Voice reference audio. When connected, it tells the H3 model that the character's voice/timbre/music style should follow this reference. Can be connected together with lip_audio — lip_audio drives the lip-sync while ref_audio provides the timbre reference."}),
-            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "Single song source: the complete song/dialogue audio. Once connected: (1) the lip-sync of every CLIP and @图N character is driven entirely by the matching segment of this song; (2) the ref_audio port and @音频N are ignored automatically; (3) all model-generated audio is discarded; (4) the output sound is exactly this song. It is auto-sliced per CLIP duration and the final output matches the video length."}),
+            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "Single song source: the complete song/dialogue audio. Once connected: (1) the lip-sync of every CLIP and @imgN character is driven entirely by the matching segment of this song; (2) the ref_audio port and @audN are ignored automatically; (3) all model-generated audio is discarded; (4) the output sound is exactly this song. It is auto-sliced per CLIP duration and the final output matches the video length."}),
             # v14.101: 回退 18:35(v14.84) — lip_voice 位置与 v2.7.json 一致（lip_audio 之后）
             # v14.174: lip_voice 升级为对口型驱动音频（同 lip_audio 语义且优先）。
-            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "Lip-sync drive audio (v14.174+): the complete dialogue audio. Once connected, it behaves exactly like lip_audio — (1) drives lip-sync of every CLIP; (2) all model-generated audio is discarded; (3) output sound is exactly this audio, auto-sliced per CLIP; (4) takes priority over lip_audio. Typical use: connect BSAI IndexTTS-2.5 synthesis output here to drive lip-sync with TTS voice lines. 对口型驱动音频：接入后取消模型自生成音频，直接用本音频驱动口型，优先级高于 lip_audio（典型：IndexTTS 合成台词接此端口）。"}),
-            "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [分镜N] marker: text before → global prompt, text from [分镜N] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
+            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "Lip-sync drive audio (v14.174+): the complete dialogue audio. Once connected, it behaves exactly like lip_audio — (1) drives lip-sync of every CLIP; (2) all model-generated audio is discarded; (3) output sound is exactly this audio, auto-sliced per CLIP; (4) takes priority over lip_audio. Typical use: connect BSAI IndexTTS-2.5 synthesis output here to drive lip-sync with TTS voice lines."}),
+            "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [ShotN] marker: text before → global prompt, text from [ShotN] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
                 {
@@ -6223,7 +6223,7 @@ class BSAIH3FilmFactory:
                 ["off (分镜模式)", "on (一镜到底)"],
                 {
                     "default": "off (分镜模式)",
-                    "tooltip": "BSAI 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流 + Motion Context V2 BV1T9ho6HEKP）：off=默认分镜剪辑模式（每段独立生成 + xfade 转场拼接，行为不变）。on=一镜到底模式：①每段提示词自动注入'不切场/不转场/镜头持续跟随主体'指令（用户已写则跳过）；②强制开启段间 motion context，上一段 latent 尾部作为 Add Guide 等效锚点引导本段生成；③合并改为无缝 concat 零转场拼接。v14.185 新增 one_shot_sampling 采样档（本节点最末参数）：默认「单采无缝」跳过二采，链式 latent 不重绘、接缝零漂移（双采续链会产生像素漂移，仅需要 2K 放大时选用）。提示词纪律：接缝裁切 22 帧≈0.92s，段内时间戳想落在 T 请写 T+0.92s；续写段开头只写承接（同节奏/同机位/同光照），勿引入新景物名词；接缝落在运动中段勿落在门槛/事件点；台词每 2.5s 一句短句。建议各 CLIP 提示词统一采用连续运镜（推/拉/跟/环绕），配合本模式可得到 30s+ 无缝长镜头成片。",
+                    "tooltip": "BSAI one-shot branch (based on the Bilibili MinimaxH3 long-take workflow + Motion Context V2 BV1T9ho6HEKP): off = default shot-by-shot editing mode (each segment generated independently and joined with xfade transitions; behavior unchanged). on = one-shot mode: (1) every segment prompt gets a 'no cuts / no transitions / camera keeps following the subject' instruction injected automatically (skipped if you already wrote it); (2) inter-segment motion context is forced on, and the tail latent of the previous segment guides the current one as an Add Guide equivalent anchor; (3) joining switches to seamless concat with zero transitions. v14.185 adds the one_shot_sampling tier (the last parameter of this node): the default 'single-pass seamless' skips the refine pass, so chained latents are never redrawn and seams have zero drift (dual-pass chaining introduces pixel drift; only pick it when you need 2K upscaling). Prompt discipline: the seam trims 22 frames, about 0.92s, so to land a timestamp at T write T+0.92s; continuation segments should only state what carries over (same rhythm / same camera / same lighting) and must not introduce new scene nouns; keep seams inside motion, never on a threshold or event; keep dialogue lines to one short sentence per 2.5s. Continuous camera moves (push / pull / follow / orbit) across all CLIP prompts are recommended; together with this mode you get 30s+ seamless long takes.",
                 },
             ),
             # v14.159 (2026-10-21): 一镜到底 × 歌曲自动分 CLIP。
@@ -6235,10 +6235,10 @@ class BSAIH3FilmFactory:
                 "INT",
                 {
                     "default": 12, "min": 0, "max": 60, "step": 1,
-                    "tooltip": "一镜到底×歌曲 每段目标时长(秒)。连接 lip_audio 歌曲且 one_shot_mode=on 时，自动 CLIP 数 = 歌曲时长 ÷ 本值（向上取整），并自动补齐/对齐 CLIP 卡片；最后一段自动取歌曲剩余时长。例：5分钟歌曲 ÷ 12s = 25 个 CLIP。0 = 关闭自动分 CLIP。",
+                    "tooltip": "One-shot x song: target duration per segment (seconds). When lip_audio is connected and one_shot_mode=on, the CLIP count is auto-computed as song duration / this value (rounded up), and CLIP cards are added/aligned automatically; the last segment takes the song's remaining duration. Example: a 5-minute song / 12s = 25 CLIPs. 0 = auto-split off.",
                 },
             ),
-            "asset_library": ("ASSET_LIBRARY", {"forceInput": True, "tooltip": "Connect BSAI_AssetLibraryInput to resolve @图N/@视频N/@音频N references in clip prompts."}),
+            "asset_library": ("ASSET_LIBRARY", {"forceInput": True, "tooltip": "Connect BSAI_AssetLibraryInput to resolve @imgN/@vidN/@audN references in clip prompts."}),
         }
 
         # v1.22: per-clip external prompt input ports (clip_prompt_1..clip_prompt_12).
@@ -6268,7 +6268,7 @@ class BSAIH3FilmFactory:
             ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货（全自动）"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
-                "tooltip": "v14.184 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); ⑩双采2K = v14.184 T8 思路(BV1aiaL61Eyu): 一采 8 步(FastH3 蒸馏契约) + 二采 4 步(denoise 0.45) + latent 不放大(factor=1.0, 二采提速~4x) + HyperVAE 2x 解码像素 2x(encoder 16x 不变, decoder 32x, 全程只解码一次, 不增采样显存; 权重自动探测 models/vae 中 hyper*2x*.safetensors) + 音频重绘继承 w33(0.7) —— 直播带货配音档变体, 直出 2K 无分块接缝。⚠️ v14.183 曾试 10 步+音频0.9 致链 segment 音频崩(VAD 0 段)+画质退化, 已回滚。⑪QAD-v2-8步 = 2026-10-20 海螺 AI Lab 发布 FastH3-QAD-v2(量化感知蒸馏整套 NVFP4, 118GB→30GB, 质量不降反升): 一采 8 步蒸馏直出(video shift 10 / audio shift 3 官方 V2 NVFP4 schedule, 注意 Omni 档是 12/3, 本档 10/3 是 QAD-v2 专属), 跳过二采(单采无缝); 需 Loader 换 QAD-v2 整套 NVFP4 模型(transformer + 50层文本编码器 qwen3vl_32b_minimax_h3_nvfp4_awq + 新 NVFP4 VAE 解码器 36层/8层) + BlockSparseAttention VSA keep_percent=10; RTX 5090 实测 5s 480P 仅 12.6~14.8s(8层解码器)。⑫直播带货（全自动） = v14.202 直播带货 ref_audio 一站式配方: 选中后除 width/height(分辨率沿用工作流, 防一采像素暴涨)外全部参数由本档接管, 手动设置一律无效 —— 一采 12 步 + 二采 4 步(denoise 0.55) + 3D latent upscaler x2.0 + 音频重绘 0.7(4 步时由 v14.196 自动锁一采 12 步音频) + shift 12/3 + TST tau 0.2 + 分块二采 4x128 + audio_context_length=0(不注入上一段语音) + clip2 起关闭 motion context(防硬切段首帧拖影)。配 minimax_h3_ref2va_int8_convrot + 4步lora。",
+                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift dual-pass (default, HD refine); (2) Live Dub HD = v14.179 dedicated live-commerce ref_audio dubbing: 12 first-pass steps (the usable lower bound for official audio) + 4 refine steps + audio redraw 0.7 (refines Mandarin vocals and eliminates garbled/mumbled dubbing at 6~8 steps; requires a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3-4step VSA = 4-step distillation + VSA LoRA, 4+2 dual-pass; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 dual-pass (shift 12/3); (6) DMAD-4step = DMAD 4-step distillation LoRA, 4+2 dual-pass (forced lcm, shift 12/2); (7) Action Combo = 8+4 dual-pass (euler; action/DMAD LoRAs are injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res first pass + boost x2 / 3-step detail second pass + DLSS5 4K pixel upscale, based on Bilibili BV18Vnb6UEPv); (9) FastH3 Omni 8-step single-pass = skip the refine pass and go straight from an 8-step distilled first pass (guidance 1.0 + shift 12/3; the Loader must switch to fasth3_omniref_8step_pruned_int8_convrot with BlockSparseAttention VSA keep_percent=10); (10) Dual-pass 2K = v14.184 T8 idea (BV1aiaL61Eyu): 8-step first pass (FastH3 distillation contract) + 4-step second pass (denoise 0.45) + no latent upscale (factor=1.0, about 4x faster refine) + HyperVAE 2x decoded pixels 2x (encoder 16x unchanged, decoder 32x, decode happens once with no extra sampling VRAM; weights are auto-detected from models/vae as hyper*2x*.safetensors) + audio redraw inherits w33 (0.7) — a live-commerce dubbing variant that outputs 2K directly without tiling seams. Note: v14.183 tried 10 steps + audio 0.9 and broke chained-segment audio (VAD returned 0 segments) with quality regression, so it was rolled back. (11) QAD-v2-8step = FastH3-QAD-v2 released 2026-10-20 by Hailuo AI Lab (a full quantization-aware distillation NVFP4 set, 118GB -> 30GB, with quality improving rather than dropping): 8-step distilled single pass (video shift 10 / audio shift 3, the official V2 NVFP4 schedule; note the Omni tier is 12/3 while this tier's 10/3 is QAD-v2 specific), refine pass skipped (single-pass seamless); the Loader must switch to the full QAD-v2 NVFP4 set (transformer + 50-layer text encoder qwen3vl_32b_minimax_h3_nvfp4_awq + new NVFP4 VAE decoder with 36/8 layers) with BlockSparseAttention VSA keep_percent=10; measured on RTX 5090, a 5s 480P clip takes only 12.6~14.8s (8-layer decoder). (12) Live Commerce (fully automatic) = v14.202 one-stop live-commerce ref_audio recipe: once selected, every parameter is taken over by this tier except width/height (resolution stays as the workflow defines it to prevent first-pass pixel blowup), and manual settings are ignored — 12 first-pass steps + 4 refine steps (denoise 0.55) + 3D latent upscaler x2.0 + audio redraw 0.7 (at 4 steps v14.196 automatically locks the 12-step first-pass audio) + shift 12/3 + TST tau 0.2 + tiled 4x128 refine + audio_context_length=0 (no previous-segment speech injection) + motion context disabled from clip2 on (prevents ghosting on the first frame of hard cuts). Pair with minimax_h3_ref2va_int8_convrot + 4-step LoRA.",
             },
         )
         # v14.185 (2026-10-24): 一镜到底采样档 —— 追加在 render_pipeline 之后（optional
@@ -6279,7 +6279,7 @@ class BSAIH3FilmFactory:
             ["单采无缝 (推荐)", "双采高清 (接缝风险)"],
             {
                 "default": "单采无缝 (推荐)",
-                "tooltip": "一镜到底采样档（仅 one_shot_mode=on 时生效）：单采无缝 = 跳过二采(refine)，链式 latent 不重绘，接缝零漂移，推荐配 turbo 8 步 LoRA + beta 调度器 + 6-8 步；双采高清 = 保留二采放大/精修（可出 2K），但参考工作流实测双采续链会在接缝引入像素漂移（段间模糊/抖动），仅在需要高清放大时选用。",
+                "tooltip": "One-shot sampling tier (only effective when one_shot_mode=on): Single-pass seamless = skip the refine pass, chained latents are never redrawn, seams have zero drift; recommended with the turbo 8-step LoRA + beta scheduler + 6-8 steps. Dual-pass HD = keep the refine upscale/refinement (can reach 2K), but the reference workflow shows dual-pass chaining introduces pixel drift at seams (blur/jitter between segments), so pick it only when you need HD upscaling.",
             },
         )
         # v14.193: 视觉锚点改为全自动（自动记录 + 自动注入）—— 手动输入 widget

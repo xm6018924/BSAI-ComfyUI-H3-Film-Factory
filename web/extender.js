@@ -704,7 +704,7 @@ function renderPreviewPanel(panel, clip, index, node, runtime) {
     const expandBtn = document.createElement("button");
     expandBtn.type = "button";
     expandBtn.textContent = expanded ? "⤫" : "⤢";
-    expandBtn.title = expanded ? "缩小预览" : "放大预览";
+    expandBtn.title = expanded ? "Shrink preview" : "Enlarge preview";
     expandBtn.style.cssText = "width:22px;height:22px;padding:0;border-radius:4px;border:1px solid rgba(255,255,255,.15);background:rgba(40,40,40,.8);color:rgba(255,255,255,.7);cursor:pointer;font-size:12px;line-height:1;flex:0 0 auto;";
     expandBtn.addEventListener("click", (e) => {
         e.preventDefault();
@@ -1202,71 +1202,71 @@ function getWidget(node, name) {
 
 // Bilingual widget labels: English name + Chinese usage description (global scope)
 const BSAI_BILINGUAL_LABELS = {
-    "run_mode": "运行模式（clip_by_clip逐帧 / full_batch全批）",
-    "width": "宽度（手动分辨率宽，自动模式下回退）",
-    "height": "高度（手动分辨率高，自动模式下回退）",
-    "ref_image_size": "参考图尺寸（match匹配 / max取最大）",
-    "steps": "采样步数",
+    "run_mode": "Run mode (clip_by_clip = one clip at a time / full_batch = all clips in one batch)",
+    "width": "Width (manual render width; falls back to automatic)",
+    "height": "Height (manual render height; falls back to automatic)",
+    "ref_image_size": "Reference image size (match = follow the reference / max = use the largest)",
+    "steps": "Sampling steps",
     "sampler_name": "Sampler",
-    "scheduler": "调度器",
-    "denoise": "降噪强度（1.0=全量重绘）",
-    "context_length": "上下文长度（H3时间上下文帧数）",
-    "audio_context_length": "音频上下文长度（0=自动）",
-    "resolution_mode": "分辨率模式（auto_from_ref自动 / manual手动）",
-    "megapixels": "百万像素（自动分辨率目标总像素）",
+    "scheduler": "Scheduler",
+    "denoise": "Denoise strength (1.0 = full re-render)",
+    "context_length": "Context length (H3 temporal context frames)",
+    "audio_context_length": "Audio context length (0 = auto)",
+    "resolution_mode": "Resolution mode (auto_from_ref = automatic / manual = manual)",
+    "megapixels": "Megapixels (target total pixels for the automatic resolution)",
     "output_mode": "Output mode (none=cached / per_clip=segmented / merged=combined / both=both)",
     "filename_prefix": "Filename Prefix",
     "output_image_audio": "Output image & audio (decoded per clip)",
-    "block_cache": "块缓存加速（F1B0残差，需T8插件）",
-    "block_cache_threshold": "块缓存阈值（越高越易命中）",
-    "block_cache_device": "块缓存设备（cpu省显存/gpu占显存）",
-    "ref_cache": "参考图缓存（Ref2VA编码，调参重跑提速）",
-    "cache_dit": "DiT步间缓存（CacheDiT加速，需插件）",
+    "block_cache": "Block cache acceleration (F1B0 residual; requires the T8 plugin)",
+    "block_cache_threshold": "Block cache threshold (higher = easier to hit)",
+    "block_cache_device": "Block cache device (cpu = saves VRAM / gpu = uses VRAM)",
+    "ref_cache": "Reference image cache (Ref2VA encoding; skips re-encoding on re-runs)",
+    "cache_dit": "DiT step cache (CacheDiT acceleration; requires the plugin)",
     "clip_select_enable": "Clip selection toggle (render only selected clips)",
     "clip_select": "Clip selection (all / 1,3 / 2-5 / 3,5,7 / 7-10)",
-    "restore_cache": "恢复缓存（从最近备份恢复已渲染CLIP，无需重渲染）",
-    "pause_enable": "暂停开关（每CLIP生成完可暂停）",
-    "pause_timeout": "暂停超时（秒，无干预自动继续）",
-    "refine_enable": "二次采样开关（画质修复去模糊）",
-    "refine_denoise": "二次采样降噪（0.5-0.6黄金区间；低照度镜头低于0.5只做平滑）",
-    "refine_steps": "二次采样步数",
-    "refine_upscale_factor": "潜空间放大倍数（1.0=不放大）",
-    "speed_preset": "速度预设（custom / 极速4+2步 / 均衡6+4步 / 精细8+6步 / VDN×3；配方档见渲染管道）",
+    "restore_cache": "Restore cache (rebuilds rendered CLIPs from the latest backup, no re-render)",
+    "pause_enable": "Pause toggle (pause after each CLIP finishes)",
+    "pause_timeout": "Pause timeout (seconds; auto-resume when there is no input)",
+    "refine_enable": "Refine toggle (quality repair / deblur)",
+    "refine_denoise": "Refine denoise (0.5-0.6 is the sweet spot; low-light shots below 0.5 only get smoothed)",
+    "refine_steps": "Refine steps",
+    "refine_upscale_factor": "Latent upscale factor (1.0 = no upscale)",
+    "speed_preset": "Speed preset (custom / Fast 4+2 / Balanced 6+4 / Fine 8+6 / VDN x3; model recipes live in Render Pipeline)",
     "temporal_chunk_tokens": "Temporal chunk size (split along T axis to prevent OOM; 0=off, T~107 recommends 40~60)",
-    "temporal_overlap_tokens": "时间分块重叠（相邻段重叠token，越大越稳越慢，一般8~12）",
-    "refine_upscaler_model": "二采放大模型（3D语义放大/默认bilinear插值）",
-    "refine_align_to": "二采对齐步长（默认32，分辨率自动取整防边缘色条）",
-    "refine_audio_denoise": "二采音频重绘（0=锁音频不变，推荐；0.5~1.0会改声音）",
-    "tiled_refine": "分块二采开关（显存不够时开，沿H/W切，默认关）",
-    "tile_count": "空间分块数（越大越省显存越慢，默认4）",
-    "tile_overlap": "分块重叠像素（相邻块融合，默认128）",
-    "semantic_bridge_enable": "语义桥开关（Semantic-Bridge，默认关）",
-    "semantic_bridge_adapter": "语义桥权重（放models/semantic_bridge，约11MB）",
-    "semantic_bridge_alpha": "语义桥强度（C=H+α*(S-H)，默认0.15）",
-    "semantic_bridge_magnitude_match": "语义桥模长对齐（原版默认开）",
-    "dual_track_shift": "官方双轨迹采样（video/audio各自shift，默认开）",
-    "shift_video": "视频flow shift（官方默认12）",
-    "shift_audio": "音频flow shift（官方默认3，0=关闭）",
-    "selflift_tst_enable": "SelfLift TST时间状态传输（少步数画质补偿）",
-    "selflift_tst_tau": "TST校正强度（论文推荐0.2）",
-    "upscale_batch": "超分批次帧数（越大越快越吃显存，默认4）",
-    "upscale_tile": "超分分块像素（0=整帧，显存紧张设512~1024）",
-    "upscale_model": "超分模型（realesr模型，放models/upscale_models）",
-    "upscale_factor": "超分倍数（相对二采输出分辨率）",
-    "upscale_engine": "超分引擎（auto/dlss5/realesr/bicubic）",
-    "upscale_mode": "超分模式（平衡/质量优先/速度优先/自定义）",
-    "upscale_per_clip": "逐段超分开关（默认关）",
-    "upscale_final": "全片超分开关（默认关）",
-    "upscale_fp16": "超分FP16半精度加速",
-    "upscale_face_restore": "超分后人脸修复（需GPFGAN/CodeFormer）",
-    "env_audio_enable": "环境音开关（global_inherit=跟随全局，on=混入，off=只留人声）",
-    "env_audio_gain": "环境音音量（默认0.15）",
-    "face_lock_mode": "远景人脸锁定模式（@图1全身+@图2.N人脸特写）",
-    "refine_mem_mode": "二采省显存模式（spatial分块兼容 / global全上下文省显存）",
-    "one_shot_mode": "一镜到底模式（off分镜剪辑 / on无缝长镜头：注入不切场+强制motion context+零转场拼接）",
-    "one_shot_clip_duration": "一镜到底每段目标秒数（0关闭自动分CLIP；连歌曲后自动CLIP数=歌曲时长÷本值）",
-    "one_shot_sampling": "一镜到底采样档（单采无缝=跳过二采接缝零漂移·推荐turbo 8步LoRA+beta+6-8步 / 双采高清=保留二采放大可出2K但接缝有像素漂移风险）",
-    "render_pipeline": "渲染管道（Sol-H3 Self-Lift双采默认 / FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / 4K直出 秘制酱料 / FastH3 Omni 8步单采 / 双采2K：配方档统一在此选择，4K直出=自提升6+3潜空间x2.0→DLSS5像素超分直出4K，Omni需Loader换fasth3_omniref_8step_pruned_int8_convrot+VSA节点，双采2K=8+4步+latent不放大+HyperVAE 2x解码像素2x直出2K+音频重绘继承w33 0.7，v14.183曾试10步+音频0.9致链segment音频崩已回滚）",
+    "temporal_overlap_tokens": "Temporal chunk overlap (tokens shared by adjacent chunks; higher = steadier but slower; usually 8-12)",
+    "refine_upscaler_model": "Refine upscale model (3D semantic upscale / default bilinear)",
+    "refine_align_to": "Refine alignment stride (default 32; rounds the resolution to avoid edge color bands)",
+    "refine_audio_denoise": "Refine audio denoise (0 = keep the audio unchanged, recommended; 0.5-1.0 alters the sound)",
+    "tiled_refine": "Tiled refine toggle (enable when VRAM is low; splits along H/W; off by default)",
+    "tile_count": "Spatial tile count (higher = less VRAM but slower; default 4)",
+    "tile_overlap": "Tile overlap in pixels (adjacent tiles are blended; default 128)",
+    "semantic_bridge_enable": "Semantic Bridge toggle (default off)",
+    "semantic_bridge_adapter": "Semantic Bridge weights (place in models/semantic_bridge, about 11MB)",
+    "semantic_bridge_alpha": "Semantic Bridge strength (C = H + alpha*(S-H); default 0.15)",
+    "semantic_bridge_magnitude_match": "Semantic Bridge magnitude match (on by default, as upstream)",
+    "dual_track_shift": "Official dual-track sampling (separate video/audio shift; on by default)",
+    "shift_video": "Video flow shift (official default 12)",
+    "shift_audio": "Audio flow shift (official default 3; 0 = off)",
+    "selflift_tst_enable": "SelfLift TST temporal state transfer (compensates quality at low step counts)",
+    "selflift_tst_tau": "TST correction strength (paper recommends 0.2)",
+    "upscale_batch": "Upscale batch frames (higher = faster but more VRAM; default 4)",
+    "upscale_tile": "Upscale tile pixels (0 = full frame; use 512-1024 when VRAM is tight)",
+    "upscale_model": "Upscale model (Real-ESRGAN models in models/upscale_models)",
+    "upscale_factor": "Upscale factor (relative to the refine output resolution)",
+    "upscale_engine": "Upscale engine (auto/dlss5/realesr/bicubic)",
+    "upscale_mode": "Upscale mode (balanced / quality first / speed first / custom)",
+    "upscale_per_clip": "Per-clip upscale toggle (default off)",
+    "upscale_final": "Full-film upscale toggle (default off)",
+    "upscale_fp16": "Upscale FP16 half-precision acceleration",
+    "upscale_face_restore": "Face restore after upscale (requires GPFGAN/CodeFormer)",
+    "env_audio_enable": "Ambient audio toggle (global_inherit = follow global, on = mix in, off = voice only)",
+    "env_audio_gain": "Ambient audio gain (default 0.15)",
+    "face_lock_mode": "Distant face lock mode (@img1 full body + @img2.N face close-ups)",
+    "refine_mem_mode": "Refine VRAM-saving mode (spatial = tiling-compatible / global = full context)",
+    "one_shot_mode": "One-shot mode (off = shot-by-shot editing / on = seamless long take: no-cut instruction + forced motion context + zero-transition concat)",
+    "one_shot_clip_duration": "One-shot target seconds per segment (0 disables auto CLIP split; with a song, CLIP count = song duration / this value)",
+    "one_shot_sampling": "One-shot sampling preset (single-pass seamless = skip refine, zero seam drift, recommended turbo 8-step LoRA + beta 6-8 steps / dual-pass HD = keep refine for 2K but seams may drift)",
+    "render_pipeline": "Render pipeline (all model recipes are selected here, v14.184): Sol-H3 Self-Lift dual-pass (default) -> FastH3-Trim (8+4) -> FastH3 4-step VSA (4+2) -> Turbo-v4 (6+4, shift 12/3) -> DMAD 4-step (4+2, lcm) -> action combo (8+4, euler) -> 4K direct secret sauce (self-lift 6+3, latent x2.0 -> DLSS5 pixel upscale to 4K) -> FastH3 Omni 8-step single-pass (skips refine; switch the loader to the Omni model + VSA) -> dual-pass 2K (8+4, latent not upscaled + HyperVAE 2x decode -> 2x pixels -> 2K, audio refine inherits w33 0.7) -> live commerce fully automatic (12+4 one-click tier: audio_context_length=0 + context off from clip2; manual parameters are ignored).",
 };
 function bsaiApplyBilingualLabels(node) {
     if (!node || !node.widgets) return;
@@ -1287,7 +1287,7 @@ function bsaiApplyBilingualLabels(node) {
     }
     if (applied > 0) {
         node.__bsaiBilingualDone = true;
-        console.log("[BSAI双语] 节点", node.id, "已应用", applied, "个双语标签");
+        console.log("[BSAI] node", node.id, "applied", applied, "bilingual labels");
     }
 }
 
@@ -3376,9 +3376,9 @@ function showAssetPicker(parentEl, clip, node, runtime, textarea) {
 
     const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
     const groups = [
-        { label: "Images", items: assetList.images || [], type: "images", prefix: "图" },
-        { label: "Videos", items: assetList.videos || [], type: "videos", prefix: "视频" },
-        { label: "Audio", items: assetList.audios || [], type: "audios", prefix: "音频" },
+        { label: "Images", items: assetList.images || [], type: "images", prefix: "img" },
+        { label: "Videos", items: assetList.videos || [], type: "videos", prefix: "vid" },
+        { label: "Audio", items: assetList.audios || [], type: "audios", prefix: "aud" },
     ];
 
     groups.forEach(function(g) {
@@ -3488,9 +3488,9 @@ function showAssetPickerForTextarea(parentEl, clipOrState, node, runtime, textar
 
     const assetList = runtime._h3_assetCache || { images: [], videos: [], audios: [] };
     const groups = [
-        { label: "Images", items: assetList.images || [], type: "images", prefix: "图" },
-        { label: "Videos", items: assetList.videos || [], type: "videos", prefix: "视频" },
-        { label: "Audio", items: assetList.audios || [], type: "audios", prefix: "音频" },
+        { label: "Images", items: assetList.images || [], type: "images", prefix: "img" },
+        { label: "Videos", items: assetList.videos || [], type: "videos", prefix: "vid" },
+        { label: "Audio", items: assetList.audios || [], type: "audios", prefix: "aud" },
     ];
 
     // Filter by keyword
@@ -5965,16 +5965,16 @@ const openCacheDir = (kind, label) => {
         .then((r) => r.json())
         .then((res) => {
             if (res && res.ok) {
-                status.textContent = label + ": " + res.path + "（" + (res.files ? res.files.length : 0) + " 个文件）";
-                if (!res.opened) console.warn("[H3 Extender] 目录已返回但无法自动打开", res.path);
+                status.textContent = label + ": " + res.path + " (" + (res.files ? res.files.length : 0) + " files)";
+                if (!res.opened) console.warn("[H3 Extender] directory returned but could not be opened automatically", res.path);
             } else {
-                status.textContent = label + " 打开失败" + (res && res.error ? ": " + res.error : "");
+                status.textContent = label + " open failed" + (res && res.error ? ": " + res.error : "");
             }
         })
-        .catch(() => { status.textContent = label + " 请求失败"; });
+        .catch(() => { status.textContent = label + " request failed"; });
 };
-openCacheBtn.addEventListener("click", (e) => { e.preventDefault(); openCacheDir("latent", "Latent缓存"); });
-openClipsBtn.addEventListener("click", (e) => { e.preventDefault(); openCacheDir("clips", "Clip输出"); });
+openCacheBtn.addEventListener("click", (e) => { e.preventDefault(); openCacheDir("latent", "Latent cache"); });
+openClipsBtn.addEventListener("click", (e) => { e.preventDefault(); openCacheDir("clips", "Clip output"); });
 
 const status = document.createElement("span");
 status.style.fontSize = "11px";
@@ -6013,7 +6013,7 @@ const sendRenderControl = (action) => {
 		.then((r) => r.json().catch(() => ({})))
 		.then((res) => {
 			if (res && res.state === "idle") {
-				console.warn("[H3 Extender] 当前无渲染进行", action);
+				console.warn("[H3 Extender] no render in progress", action);
 			}
 		})
 		.catch((err) => console.warn("[H3 Extender] render_control failed", action, err));
@@ -6635,30 +6635,30 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
     //    布尔: 点一下开/关；枚举: 点一下弹出下拉菜单直接选档（v14.147 起不再循环点击）。
     //    按钮状态实时读 widget.value。
     const QUICK_DEFS = [
-        { key: "refine_enable", zh: "二采", en: "Refine", desc: "Sol-H3 双采：latent 放大 + CONST 重噪 + 二采去噪，直出高清(1920×1088)。" },
-        { key: "upscale_per_clip", zh: "逐段超分", en: "Upx/Clip", desc: "每 CLIP 解码后逐段像素超分（单段显存可控）。" },
-        { key: "upscale_final", zh: "全片超分", en: "Upx/Final", desc: "全片合并后一次性像素超分（出片前统一处理，更快更省）。" },
-        { key: "block_cache", zh: "块缓存", en: "BlkCache", desc: "H3 Block Cache(F1B0 残差)加速，需 T8 插件；顺序画面稳定时显著提速。" },
-        { key: "ref_cache", zh: "参考缓存", en: "RefCache", desc: "Ref2VA 参考图编码磁盘缓存，调参重跑跳过重复编码。" },
-        { key: "output_mode", zh: "输出", en: "Output", desc: "输出模式循环：none(仅缓存)→per_clip(分段)→merged(合并)→both(两者)。", cycle: ["none", "per_clip", "merged", "both"] },
-        { key: "speed_preset", zh: "速度", en: "Speed", desc: "速度预设循环（7档）：custom→极速→均衡→精细→极速-VDN→均衡-VDN→精细-VDN（v14.172：模型配方档 FastH3-Trim/FastH3-4步VSA/Turbo-v4/DMAD-4步/武戏组合拳/Omni 已移至「渲染管道」选择）。", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }] },
-        { key: "refine_lipsync_mode", zh: "口型", en: "Lipsync", desc: "对口型×二采预设循环：锁定保口型→音频参与重绘0.7→音频全重绘1.0。", cycle: ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"] },
-        { key: "upscale_mode", zh: "超分模式", en: "UpxMode", desc: "超分模式循环：平衡(质量+速度)→质量优先→速度优先→自定义。", cycle: ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"] },
-        { key: "pause_enable", zh: "暂停", en: "Pause", desc: "每 CLIP 生成完自动暂停等待；无干预超时自动继续。" },
+        { key: "refine_enable", en: "Refine", desc_en: "Sol-H3 dual-pass: latent upscale + CONST renoise + second-pass denoise for direct HD output (1920x1088)." },
+        { key: "upscale_per_clip", en: "Upx/Clip", desc_en: "Pixel upscale per CLIP after decode (per-segment VRAM stays controllable)." },
+        { key: "upscale_final", en: "Upx/Final", desc_en: "Single pixel upscale after all clips are merged (faster and cheaper, applied before delivery)." },
+        { key: "block_cache", en: "BlkCache", desc_en: "H3 Block Cache (F1B0 residual) acceleration; requires the T8 plugin. Most effective on stable sequential shots." },
+        { key: "ref_cache", en: "RefCache", desc_en: "Ref2VA reference-image encoding disk cache; skips repeated encoding when re-running with new settings." },
+        { key: "output_mode", en: "Output", desc_en: "Output modes: none (cache only) -> per_clip (segmented) -> merged (combined) -> both.", cycle: ["none", "per_clip", "merged", "both"], cycleLabels: ["None", "Per clip", "Merged", "Both"] },
+        { key: "speed_preset", en: "Speed", desc_en: "Speed preset (7 tiers): custom -> Fast -> Balanced -> Fine -> Fast-VDN -> Balanced-VDN -> Fine-VDN. Model recipes now live in Render Pipeline (v14.172).", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"], cycleLabels: ["Custom", "Fast", "Balanced", "Fine", "Fast-VDN", "Balanced-VDN", "Fine-VDN"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }] },
+        { key: "refine_lipsync_mode", en: "Lipsync", desc_en: "Lip-sync x refine presets: lock lip-sync -> audio redraw 0.7 -> full audio redraw 1.0.", cycle: ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"], cycleLabels: ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"] },
+        { key: "upscale_mode", en: "UpxMode", desc_en: "Upscale mode: Balanced (quality+speed) -> Quality first -> Speed first -> Custom.", cycle: ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"], cycleLabels: ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"] },
+        { key: "pause_enable", en: "Pause", desc_en: "Pause automatically after each CLIP; resumes after the timeout when there is no input." },
         // v14.106: 全部 true/false 一键开关扩展（其余布尔参数全覆盖）
-        { key: "output_image_audio", zh: "预览", en: "Preview", desc: "每 CLIP 即时解码预览（图像+音频流出，可接超分等）。关闭则仅缓存、用 Final Decode 导出。" },
-        { key: "cache_dit", zh: "DiT缓存", en: "DiTCache", desc: "CacheDiT 步间缓存加速（H3 约1.4-1.5x，需装插件，未装自动回退）；与块缓存互斥。" },
-        { key: "clip_select_enable", zh: "CLIP选择", en: "ClipSel", desc: "仅渲染指定 CLIP（配合参数区 clip_select：如 1,3 / 2-5）；未选中的保留缓存不重生成。" },
-        { key: "upscale_fp16", zh: "超分FP16", en: "UpxFP16", desc: "像素超分半精度加速（N卡/XPU 支持时自动）。" },
-        { key: "upscale_face_restore", zh: "人脸修复", en: "FaceFix", desc: "超分后人脸修复（FaceRestore，需 GPFGAN/CodeFormer 权重，额外耗时）。" },
-        { key: "tiled_refine", zh: "分块二采", en: "Tiled", desc: "二采沿长空间轴分块采样（attention 显存线性下降，防 OOM 假死）；显存大保持关。" },
-        { key: "semantic_bridge_enable", zh: "语义桥", en: "SemBrg", desc: "Semantic-Bridge 语义桥（约11MB小MLP残差混合，让 H3 更听话：构图/空间/计数）。" },
-        { key: "semantic_bridge_magnitude_match", zh: "桥对齐", en: "MagMatch", desc: "语义桥向量模长对齐到原 hidden（原版默认开）。" },
-        { key: "face_lock_mode", zh: "保脸", en: "FaceLock", desc: "远景保脸模式（自动锁五官一致；@图1=全身，@图2.N=各人脸特写）。" },
+        { key: "output_image_audio", en: "Preview", desc_en: "Decode a preview for every CLIP (image + audio stream, can feed upscalers). Off = cache only; export with Final Decode." },
+        { key: "cache_dit", en: "DiTCache", desc_en: "CacheDiT step cache acceleration (about 1.4-1.5x for H3, requires the plugin; falls back automatically). Mutually exclusive with block cache." },
+        { key: "clip_select_enable", en: "ClipSel", desc_en: "Render only selected CLIPs (use the clip_select parameter, e.g. 1,3 / 2-5); unselected CLIPs keep their cache and are not re-rendered." },
+        { key: "upscale_fp16", en: "UpxFP16", desc_en: "Half-precision pixel upscale acceleration (automatic when the GPU/XPU supports it)." },
+        { key: "upscale_face_restore", en: "FaceFix", desc_en: "Face restore after upscale (FaceRestore; needs GPFGAN/CodeFormer weights, extra time)." },
+        { key: "tiled_refine", en: "Tiled", desc_en: "Second pass samples in tiles along the long spatial axis (attention VRAM drops linearly, prevents OOM hangs). Keep off with plenty of VRAM." },
+        { key: "semantic_bridge_enable", en: "SemBrg", desc_en: "Semantic Bridge (about 11MB small MLP residual mix; makes H3 follow composition/spatial/count cues better)." },
+        { key: "semantic_bridge_magnitude_match", en: "MagMatch", desc_en: "Match the Semantic Bridge vector magnitude to the original hidden state (on by default upstream)." },
+        { key: "face_lock_mode", en: "FaceLock", desc_en: "Distant face lock mode (automatic facial consistency; @img1 = full body, @img2.N = face close-ups)." },
         // v14.158 (2026-10-21): 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流）。
         // off=默认分镜剪辑(xfade 转场拼接)；on=无缝长镜头(注入不切场/不转场指令 + 强制
         // motion context(Add Guide 等效锚点) + 合并零转场 concat)。
-        { key: "one_shot_mode", zh: "一镜到底", en: "OneShot", desc: "一镜到底旁支模式：off=分镜剪辑（xfade转场）；on=无缝长镜头（注入不切场指令+强制motion context+零转场拼接）。", cycle: ["off (分镜模式)", "on (一镜到底)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#f472b6", border: "#be185d" }] },
+        { key: "one_shot_mode", en: "OneShot", desc_en: "One-shot branch: off = shot-by-shot editing (xfade transitions); on = seamless long take (no-cut instruction + forced motion context + zero-transition concat).", cycle: ["off (分镜模式)", "on (一镜到底)"], cycleLabels: ["Off (shot edit)", "On (one-shot)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#f472b6", border: "#be185d" }] },
         // v14.184 (2026-10-24): 回滚 v14.183 (10 步+音频0.9 致链 segment 音频崩
         // VAD 0 段 + 10 步违 8 步蒸馏契约画质退化) → 恢复 8+4 + 音频重绘继承 w33(0.7)
         // + denoise 0.45 已验证基线。
@@ -6667,7 +6667,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // 速度档仅留基础 7 档(custom/极速/均衡/精细/VDN×3); FastH3-Trim /
         // FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / 4K直出 秘制酱料 / Omni 8步单采 在此选择。
         // 选 Omni 时二采 15 行自动隐藏（syncOmniRefineRows），切回双采恢复。
-        { key: "render_pipeline", zh: "渲染管道", en: "Pipeline", desc: "渲染管道（模型配方档统一在此选择，v14.184）：Sol-H3 Self-Lift双采(默认) → FastH3-Trim(8+4) → FastH3-4步VSA(4+2) → Turbo-v4(6+4, shift12/3) → DMAD-4步(4+2, lcm) → 武戏组合拳(8+4, euler) → 4K直出 秘制酱料(自提升6+3, 潜空间x2.0→DLSS5像素超分4K) → FastH3 Omni 8步单采(跳过二采, 需Loader换Omni模型+VSA) → 双采2K(8+4, latent不放大+HyperVAE 2x解码像素2x直出2K, 音频重绘继承w33 0.7) → 直播带货（全自动）(12+4 一键档: audio_context_length=0 + clip2 起关上下文, 手动参数全部无效)", cycle: ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货（全自动）"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#86efac", border: "#16a34a" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#facc15", border: "#a16207" }, { color: "#22d3ee", border: "#0891b2" }, { color: "#a78bfa", border: "#7c3aed" }, { color: "#5eead4", border: "#0d9488" }, { color: "#4ade80", border: "#15803d" }] },
+        { key: "render_pipeline", en: "Pipeline", desc_en: "Render pipeline (all model recipes are selected here, v14.184): Sol-H3 Self-Lift dual-pass (default) -> FastH3-Trim (8+4) -> FastH3 4-step VSA (4+2) -> Turbo-v4 (6+4, shift 12/3) -> DMAD 4-step (4+2, lcm) -> action combo (8+4, euler) -> 4K direct secret sauce (self-lift 6+3, latent x2.0 -> DLSS5 pixel upscale to 4K) -> FastH3 Omni 8-step single-pass (skips refine; switch the loader to the Omni model + VSA) -> dual-pass 2K (8+4, latent not upscaled + HyperVAE 2x decode -> 2x pixels -> 2K, audio refine inherits w33 0.7) -> live commerce fully automatic (12+4 one-click tier: audio_context_length=0 + context off from clip2; manual parameters are ignored).", cycle: ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货（全自动）"], cycleLabels: ["Sol-H3 Self-Lift Dual-Pass (Default)", "Live Voice HD (Audio >=12 steps)", "FastH3-Trim", "FastH3 4-Step VSA", "Turbo-v4", "DMAD 4-Step", "Action Combo", "4K Direct (Secret Sauce)", "FastH3 Omni 8-Step Single-Pass", "Dual-Pass 2K (HyperVAE 2x)", "QAD-v2 8-Step", "Live Commerce (Auto)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#86efac", border: "#16a34a" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#facc15", border: "#a16207" }, { color: "#22d3ee", border: "#0891b2" }, { color: "#a78bfa", border: "#7c3aed" }, { color: "#5eead4", border: "#0d9488" }, { color: "#4ade80", border: "#15803d" }] },
         // v14.193: 视觉锚点已改为全自动（自动记录+自动注入）——
         // 不再有手动输入 widget（visual_anchor_notes 已移除），也不新增端口。
         // 每个分镜渲染时自动把"此前分镜正文的全部可见视觉元素状态"
@@ -6783,7 +6783,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         const S = shades ? shades[Math.min(i, shades.length - 1)] : null;
         const cur = (w && w.value === opt);
         const item = document.createElement("div");
-        item.textContent = opt;
+        item.textContent = (def.cycleLabels && def.cycleLabels[i]) ? def.cycleLabels[i] : opt;
         item.style.cssText = "font-size:9px;line-height:1.5;padding:3px 9px;border-radius:3px;cursor:pointer;white-space:nowrap;";
         item.style.color = S ? (cur ? "#ffffff" : S.text) : "#dbeafe";
         item.style.background = cur ? (S ? S.bg : C.on) : "transparent";
@@ -6801,11 +6801,11 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     // 这样"属于哪一类"和"开没开"两个信息互不打架（旧版只用绿/灰表示状态，
     // 19 个按钮挤在一起完全看不出功能分组）。
     const QUICK_CATEGORIES = {
-        quality: { zh: "画质", color: "#c4b5fd", border: "#8b5cf6", off: "rgba(124,58,237,.14)", on: "rgba(139,92,246,.40)" },
-        speed:   { zh: "加速", color: "#5eead4", border: "#14b8a6", off: "rgba(20,184,166,.13)",  on: "rgba(20,184,166,.38)" },
-        upscale: { zh: "超分", color: "#fcd34d", border: "#d97706", off: "rgba(217,119,6,.15)",  on: "rgba(217,119,6,.40)" },
-        sema:    { zh: "语义", color: "#f9a8d4", border: "#db2777", off: "rgba(219,39,119,.15)", on: "rgba(219,39,119,.40)" },
-        flow:    { zh: "流程", color: "#7dd3fc", border: "#0ea5e9", off: "rgba(14,165,233,.14)",  on: "rgba(14,165,233,.38)" },
+        quality: { zh: "画质", en: "Quality", color: "#c4b5fd", border: "#8b5cf6", off: "rgba(124,58,237,.14)", on: "rgba(139,92,246,.40)" },
+        speed:   { zh: "加速", en: "Speed", color: "#5eead4", border: "#14b8a6", off: "rgba(20,184,166,.13)",  on: "rgba(20,184,166,.38)" },
+        upscale: { zh: "超分", en: "Upscale", color: "#fcd34d", border: "#d97706", off: "rgba(217,119,6,.15)",  on: "rgba(217,119,6,.40)" },
+        sema:    { zh: "语义", en: "Semantic", color: "#f9a8d4", border: "#db2777", off: "rgba(219,39,119,.15)", on: "rgba(219,39,119,.40)" },
+        flow:    { zh: "流程", en: "Workflow", color: "#7dd3fc", border: "#0ea5e9", off: "rgba(14,165,233,.14)",  on: "rgba(14,165,233,.38)" },
     };
     // 参数名 → 分类。刻意做成独立映射表：改分类不用动 QUICK_DEFS 本体，
     // 也不会影响 H3_MANAGED_ROW_KEYS / 隐藏逻辑。
@@ -6854,20 +6854,20 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     const liveSellBtn = document.createElement("button");
     liveSellBtn.style.cssText = "font-size:9px;line-height:1.15;padding:3px 9px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;background:rgba(21,128,61,.28);border:1px solid #16a34a;border-left:3px solid #4ade80;transition:background .12s,box-shadow .12s;";
     const lsLab = document.createElement("span");
-    lsLab.textContent = "直播带货";
+    lsLab.textContent = "Live Commerce";
     lsLab.style.cssText = "font-weight:700;color:#86efac;white-space:nowrap;";
     const lsSub = document.createElement("span");
-    lsSub.textContent = "LiveSell 全自动";
+    lsSub.textContent = "LiveSell Auto";
     lsSub.style.cssText = "font-size:7px;color:#86efac;opacity:.65;";
     liveSellBtn.append(lsLab, lsSub);
-    liveSellBtn.title = "【一键】直播带货（全自动）档：12+4 步 / denoise 0.55 / latent x2.0 / 音频重绘 0.7 / shift 12-3 / TST 0.2 / 分块 4x128 / audio_context_length=0 / clip2 起关闭上下文。\n后端同名渲染管道档会再次强制覆盖全部参数，手动改参数无效。";
+    liveSellBtn.title = "One-click live-commerce (fully automatic) tier: 12+4 steps / denoise 0.55 / latent x2.0 / audio redraw 0.7 / shift 12-3 / TST 0.2 / tiles 4x128 / audio_context_length=0 / context off from clip2.\nThe backend render-pipeline tier forces all parameters again; manual changes are ignored.";
     const refreshLiveSell = () => {
         const rpw = node.widgets.find((x) => x && x.name === "render_pipeline");
         const on = !!(rpw && rpw.value === "直播带货（全自动）");
         _liveSellCtxOff = on;
         liveSellBtn.style.background = on ? "rgba(21,128,61,.62)" : "rgba(21,128,61,.28)";
         liveSellBtn.style.boxShadow = on ? "0 0 0 1px #16a34a, 0 0 9px rgba(74,222,128,.55)" : "none";
-        lsSub.textContent = on ? "已启用" : "LiveSell 全自动";
+        lsSub.textContent = on ? "Enabled" : "LiveSell Auto";
     };
     liveSellBtn.addEventListener("click", (ev) => {
         ev.stopPropagation();
@@ -6904,9 +6904,9 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         btn.style.cssText = "position:relative;overflow:hidden;font-size:9px;line-height:1.15;padding:2px 7px 3px 9px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;border:1px solid " + C.border + ";border-left:3px solid " + C.color + ";transition:background .12s,border-color .12s,box-shadow .12s;";
         const lab = document.createElement("span");
         const sub = document.createElement("span");
-        lab.textContent = def.zh;
+        lab.textContent = def.en;
         lab.style.cssText = "font-weight:700;color:" + C.color + ";white-space:nowrap;";
-        sub.textContent = def.en;
+        sub.textContent = "";
         sub.style.cssText = "font-size:7px;color:" + C.color + ";opacity:.6;";
         btn.append(lab, sub);
         // v14.136: 档位进度条（仅循环档位按钮）——底部细条按档位序号填充，
@@ -6917,8 +6917,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             posBar.style.cssText = "position:absolute;left:0;bottom:0;height:3px;width:0;border-radius:0 3px 3px 0;pointer-events:none;";
             btn.append(posBar);
         }
-        const baseTitle = "【" + C.zh + "】" + def.zh + " / " + def.en + "\n" + def.desc;
-        btn.title = baseTitle + "\n点击" + (def.cycle ? "打开下拉菜单直接选择档位" : "开/关") + "。";
+        const baseTitle = "[" + C.en + "] " + def.en + "\n" + def.desc_en;
+        btn.title = baseTitle + "\nClick to " + (def.cycle ? "open the dropdown and pick a tier" : "toggle on/off") + ".";
         const refresh = () => {
             let on = false;
             if (w) {
@@ -6931,9 +6931,10 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
                     const idx = cur >= 0 ? cur : 0;
                     on = cur > 0;
                     const curName = cur >= 0 ? def.cycle[cur] : String((w.value === undefined || w.value === null) ? "" : w.value);
-                    sub.textContent = curName;
+                    const curLabel = (def.cycleLabels && cur >= 0) ? def.cycleLabels[cur] : curName;
+                    sub.textContent = curLabel;
                     sub.style.cssText = "font-size:7px;color:" + C.color + ";opacity:" + (on ? "1" : ".55") + ";max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
-                    btn.title = baseTitle + "\n当前档位：" + curName + "（第 " + (idx + 1) + "/" + def.cycle.length + " 档）\n点击打开下拉菜单直接选择。";
+                    btn.title = baseTitle + "\nCurrent tier: " + curLabel + " (" + (idx + 1) + "/" + def.cycle.length + ")\nClick to open the dropdown and pick a tier.";
                     if (posBar) {
                         const pct = Math.round(((idx + 1) / def.cycle.length) * 100);
                         posBar.style.width = pct + "%";
@@ -6943,7 +6944,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
                     }
                 } else {
                     on = Boolean(w.value);
-                    sub.textContent = def.en;
+                    sub.textContent = on ? "ON" : "OFF";
                     sub.style.cssText = "font-size:7px;color:" + C.color + ";opacity:" + (on ? "1" : ".55") + ";max-width:96px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
                     if (posBar) { posBar.style.width = on ? "100%" : "0%"; }
                 }
@@ -7023,7 +7024,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             const _dot = document.createElement("i");
             _dot.style.cssText = "width:7px;height:7px;border-radius:2px;display:inline-block;background:" + _c.color + ";box-shadow:0 0 5px " + _c.color + "aa;";
             const _tx = document.createElement("span");
-            _tx.textContent = _c.zh;
+            _tx.textContent = _c.en || _c.zh;
             _tx.style.cssText = "color:" + _c.color + ";opacity:.9;font-weight:bold;";
             _item.append(_dot, _tx);
             legend.append(_item);
@@ -8278,7 +8279,7 @@ app.registerExtension({
                     payload = JSON.parse(localStorage.getItem("bsai_h3_last_restore") || "null");
                 } catch (_) {}
                 if (payload) {
-                    console.log("[H3 Extender] 本次刷新前已恢复 " + payload.clips_restored + " 个 CLIP 缓存（节点 " + payload.node_id + "）");
+                    console.log("[H3 Extender] restored " + payload.clips_restored + " cached CLIPs before this refresh (node " + payload.node_id + ")");
                 }
                 // 给用户一个明显提示, 避免"以为又回到空状态"
                 setTimeout(() => {
