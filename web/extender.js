@@ -984,6 +984,9 @@ function cssColorFilter(value) {
     return `saturate(${c.saturation}%) contrast(${c.contrast}%) brightness(${c.brightness}%)`;
 }
 
+// v14.202: 直播带货（全自动）档下新建的 CLIP 默认不带上下文（clip1 除外），
+// 让卡片 UI 与后端强制规则一致，避免"新增第 3 段又默认勾选"的误解。
+let _liveSellCtxOff = false;
 function newClip(index) {
     return {
         id: `clip_${index + 1}_${Date.now().toString(36)}`,
@@ -993,7 +996,7 @@ function newClip(index) {
         seed_mode: "randomize",
         duration: 15.0,
         validated: false,
-        context_enabled: true,
+        context_enabled: (index === 0) ? true : !_liveSellCtxOff,
         color_adjustment: normalizeColorAdjustment(),
         card_height: 0,
         collapsed: false,
@@ -6861,6 +6864,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     const refreshLiveSell = () => {
         const rpw = node.widgets.find((x) => x && x.name === "render_pipeline");
         const on = !!(rpw && rpw.value === "直播带货（全自动）");
+        _liveSellCtxOff = on;
         liveSellBtn.style.background = on ? "rgba(21,128,61,.62)" : "rgba(21,128,61,.28)";
         liveSellBtn.style.boxShadow = on ? "0 0 0 1px #16a34a, 0 0 9px rgba(74,222,128,.55)" : "none";
         lsSub.textContent = on ? "已启用" : "LiveSell 全自动";

@@ -28,6 +28,7 @@ import contextlib
 import secrets
 import shutil
 import subprocess
+import tempfile
 import time
 import uuid
 import zipfile
@@ -139,6 +140,16 @@ BUILD = "minimax-h3-extender-v14.82-lipaudio-exclusive-mix"
 # 静默错帧。正确的防线是让 cond_*_latents 与 layout 的预留严格同序同量。
 FPS = 24
 AUDIO_LATENT_FPS = 40
+
+# v14.205: 多视图参考图纪律。ref2va 的多参生视频普遍输入 3/4 视图角色设定拼版，
+# 模型会把拼版里其它视角的身体/手臂当成场景内容复制进画面（实测：主画面左侧
+# 悬浮一条白袖手臂）。不裁剪参考图（多视图是通用用法），改为在 @图N 解析后
+# 统一注入一次只取单一实体的约束，对单视图参考无副作用。
+_REF_SHEET_RULE = (
+    "【参考图纪律】<Picture N> 常为同一角色的多角度/多视图设定拼版：只采信其中一位角色的"
+    "外形、发型与服装，全片同一角色只出现一次、只保留两条手臂；参考图中的其他视角、"
+    "其他身体、半截肢体与局部特写仅供外形参考，绝不复制进画面。\n"
+)
 
 
 def _comfyui_temp_dir():
@@ -718,6 +729,50 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
         print(f"  ... 共 {len(segments)} 段")
 
     return segments
+
+
+def _ff_fit_audio_duration(audio, target_sec, max_ratio=0.20):
+    """v14.203: lip_voice 台词音频按视频总时长做 atempo 变速(不变调)。
+
+    lip_voice(TTS 口播稿) 的时长由合成引擎决定, 与分镜总时长几乎不可能正好相等:
+      - 比视频短 → _split_lip_audio_by_clips 按比例缩短每段, 每段尾部留静音,
+        口型在线尾前就闭合;
+      - 比视频长 → 单句台词被段边界截断, 或触发自动追加延续 CLIP。
+    这里用 ffmpeg atempo 把整条语音压/拉到视频总时长, 再交给切分, 段边界永远
+    落在整句台词之间。只对 lip_voice 生效(lip_audio 歌曲不做变速)。
+    比例超出 ±max_ratio 时不做处理, 交给原有缩放/追加 CLIP 逻辑兜底。
+    """
+    try:
+        wf = audio["waveform"]
+        sr = int(audio["sample_rate"])
+        dur = float(wf.shape[-1]) / float(sr)
+        if dur <= 0 or target_sec <= 0:
+            return None
+        ratio = float(target_sec) / dur
+        if abs(ratio - 1.0) <= 0.02:
+            return None
+        if abs(ratio - 1.0) > max_ratio:
+            print(f"[H3 LipSync] lip_voice 时长 {dur:.2f}s 与视频 {target_sec:.2f}s 相差 "
+                  f"{(ratio - 1.0) * 100:+.0f}%，超出 ±{max_ratio * 100:.0f}% 变速范围，按原速切分")
+            return None
+        ffmpeg = _find_ffmpeg()
+        tempo = 1.0 / ratio
+        with tempfile.TemporaryDirectory(prefix="bsai_lipvoice_fit_") as td:
+            src = os.path.join(td, "in.wav")
+            dst = os.path.join(td, "out.wav")
+            torchaudio.save(src, wf[0].detach().cpu().float(), sr)
+            subprocess.run(
+                [ffmpeg, "-y", "-loglevel", "error", "-i", src,
+                 "-filter:a", f"atempo={tempo:.5f}", dst],
+                check=True, capture_output=True,
+            )
+            out, out_sr = torchaudio.load(dst)
+        print(f"[H3 LipSync] ✅ lip_voice 时长自适应: {dur:.2f}s -> {target_sec:.2f}s "
+              f"(atempo={tempo:.3f}, 变速不变调)")
+        return {"waveform": out.unsqueeze(0), "sample_rate": int(out_sr)}
+    except Exception as _fit_err:
+        print(f"[H3 LipSync] lip_voice 时长自适应失败(按原速切分): {_fit_err}")
+        return None
 
 
 def _detect_speech_in_audio(audio, sr=32000, threshold_db=-35.0, min_duration=0.15):
@@ -2796,7 +2851,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                refine_mem_mode="spatial",
                temporal_chunk_tokens=0, temporal_overlap_tokens=8,
                dual_track_shift=True, shift_video=12.0, shift_audio=3.0,
-               tst_enable=True, tst_tau=0.2, omni_8step_mode=False):
+               tst_enable=True, tst_tau=0.2, omni_8step_mode=False,
+               honor_manual_steps=False):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -2856,10 +2912,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     # 档样本: 100-200Hz 占 59.5%, 全程无静音)。lip 锁定模式一采音频不采样
     # (mask=0), 步数不影响音频, 不提升(保持档位速度与画质)。
     if _has_audio and not _lip_locked and _audio_quality_on and int(steps) < 12:
-        print(f"[H3 Extender] v14.195 音频生成保护: 一采 {int(steps)} 步 < 官方音频 "
-              f"12 步下限, 自动提升到 12 步(根治低频轰鸣/含混配音; 如须回退 "
-              f"设 BSAI_H3_AUDIO_QUALITY=0)")
-        steps = 12
+        if honor_manual_steps:
+            print(f"[H3 Extender] v14.205 custom 手动步数优先: 一采 {int(steps)} 步 < 音频 12 步下限, "
+                  f"按用户设置执行(配音质量可能下降; 要干净配音请接 lip_voice 或设 12 步)")
+        else:
+            print(f"[H3 Extender] v14.195 音频生成保护: 一采 {int(steps)} 步 < 官方音频 "
+                  f"12 步下限, 自动提升到 12 步(根治低频轰鸣/含混配音; 如须回退 "
+                  f"设 BSAI_H3_AUDIO_QUALITY=0)")
+            steps = 12
 
     guider = _BasicGuider(model)
     # v14.169: FastH3 Omni 蒸馏契约 = guidance 1.0 单前向(无 CFG)。
@@ -6248,6 +6308,10 @@ class BSAIH3FilmFactory:
                 return "<Audio 1>"
             prompt = re.sub(r'@(?:音频|aud)(\d+)', _replace_audio_tag, prompt, flags=re.IGNORECASE)
 
+            # v14.205: 多视图参考图纪律（只加一次；无图片标签的 prompt 不加）
+            if "<Picture " in prompt and _REF_SHEET_RULE not in prompt:
+                prompt = _REF_SHEET_RULE + prompt
+
             if prompt != original_prompt:
                 print(f"[H3 Extender] clip[{clip_idx}] prompt resolved: '{original_prompt[:60]}' -> '{prompt[:60]}'")
             clip["prompt"] = prompt
@@ -6780,19 +6844,6 @@ class BSAIH3FilmFactory:
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
         clips = _parse_clips_json(clips_json)
         merge_output = _merge_output_from_state(clips_json)
-        # v14.202: 直播带货(全自动)档强制分镜上下文 —— 只保留 clip1 的上下文,
-        # clip2 起一律关闭。前端 UI 的勾选/分镜脚本里的 context_enabled 在本档
-        # 下不生效(用户要求"手动设置全部无效"), 避免硬切段被注入上一段尾部
-        # 39 帧后做 ≈2s 渐变, 渐变尾巴落在输出头 12 帧 → 首帧重影/马赛克。
-        if _rp_mode == "直播带货（全自动）" and clips:
-            _forced = 0
-            for _ci, _cc in enumerate(clips):
-                _want = (_ci == 0)
-                if bool(_cc.get("context_enabled", True)) != _want:
-                    _cc["context_enabled"] = _want
-                    _forced += 1
-            print(f"[H3 Extender] 🛒 直播带货(全自动)档: 上下文强制 clip1=开 / clip2+ 全关 "
-                  f"(覆盖 {_forced} 个分镜的手动勾选)")
 
         # v1.22: per-clip external prompt overrides (clip_prompt_1..clip_prompt_12).
         # Applied before @图N resolution so asset tags in the override are resolved too.
@@ -6846,6 +6897,21 @@ class BSAIH3FilmFactory:
                 stored_prompt_pack_signature,
             )
         )
+        # v14.202: 直播带货(全自动)档强制分镜上下文 —— 只保留 clip1 的上下文,
+        # clip2/clip3/clip4... 一律关闭。放在资产解析与 Prompt Pack 同步之后,
+        # 确保外部提示词包导入新增的 CLIP 也一并覆盖; 前端 UI 的勾选/分镜脚本
+        # 里的 context_enabled 在本档下不生效(用户要求"手动设置全部无效"),
+        # 避免硬切段被注入上一段尾部 39 帧后做 ≈2s 渐变, 渐变尾巴落在输出头
+        # 12 帧 → 首帧重影/马赛克。
+        if _rp_mode == "直播带货（全自动）" and clips:
+            _forced = 0
+            for _ci, _cc in enumerate(clips):
+                _want = (_ci == 0)
+                if bool(_cc.get("context_enabled", True)) != _want:
+                    _cc["context_enabled"] = _want
+                    _forced += 1
+            print(f"[H3 Extender] 🛒 直播带货(全自动)档: 上下文强制 clip1=开 / clip2+ 全关 "
+                  f"(共 {len(clips)} 个 CLIP, 覆盖 {_forced} 个手动/导入的勾选)")
         owner = str(unique_id if unique_id is not None else "h3_extender")
         _register_render_ctl(owner)
 
@@ -7469,6 +7535,22 @@ class BSAIH3FilmFactory:
                 _ctx_frames = int(str(context_length))
             except (TypeError, ValueError):
                 _ctx_frames = 0
+            # ── v14.203: lip_voice(TTS 口播稿) 时长自适应视频总长 ──
+            # 稿子时长由 TTS 引擎决定, 与分镜总长不等: 短了每段尾部留静音(口型
+            # 提前闭合), 长了台词被段边界截断/被迫追加延续 CLIP。先 atempo 变速
+            # 不变调拉到视频总长, 再进切分, 段边界始终落在整句之间。
+            if _lip_voice is not None and clips:
+                _vid_total_sec = 0.0
+                for _c in clips:
+                    _d = _c.get("duration", 5.0)
+                    try:
+                        _d = float(_d)
+                    except (TypeError, ValueError):
+                        _d = float(str(_d))
+                    _vid_total_sec += float(_duration_to_frames(_d)) / float(FPS)
+                _fit = _ff_fit_audio_duration(lip_audio, _vid_total_sec)
+                if _fit is not None:
+                    lip_audio = _fit
             # ── v14.175: 对口型驱动音频超长 → 自动追加延续分镜 CLIP ──
             # 外部音频总时长 > 分镜脚本 clips 总时长时(例: 音频35s / 脚本30s),
             # 自动追加一个延续上一个分镜画面的 CLIP 承载多余音频, 保证外部音频完整性,
@@ -8575,6 +8657,7 @@ class BSAIH3FilmFactory:
                     temporal_chunk_tokens=int(temporal_chunk_tokens),
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
                     omni_8step_mode=omni_8step_mode,
+                    honor_manual_steps=(str(speed_preset) == "custom"),
                 )
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
