@@ -3441,13 +3441,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 60x34 一采原始尺寸, attention workspace 从 4.47GB 降到
             # ~1.5GB, 24GB 卡稳过. 注意: 仅在 _r_factor > 1.0 时备份,
             # 省一份显存; 同时 audio latent 不备份 (audio 不放大不重画).
+            # v14.206: 备份逻辑对 AV NestedTensor 修正。comfy.nested_tensor.NestedTensor
+            # 没有 .clone(). 旧代码 hasattr(samples,"clone") 恒为 False, 于是二采这里
+            # 从来就没备份成功过 —— OOM fallback 与塌陷回退都拿不到一采 latent。
             _samples_pre_upscale = None
             if _r_factor > 1.0:
                 try:
-                    _samples_pre_upscale = samples.clone() if hasattr(samples, "clone") else None
-                    if _samples_pre_upscale is not None and isinstance(_samples_pre_upscale, dict):
-                        if "samples" in _samples_pre_upscale:
-                            _samples_pre_upscale["samples"] = _samples_pre_upscale["samples"].clone()
+                    if _ff_is_nested(samples):
+                        _samples_pre_upscale = comfy.nested_tensor.NestedTensor(
+                            [t.clone() for t in samples.unbind()])
+                    elif hasattr(samples, "clone"):
+                        _samples_pre_upscale = samples.clone()
                 except Exception as _bp_err:
                     print(f"[H3 Extender] Refine 备份一采 samples 失败(可忽略): {_bp_err}")
                     _samples_pre_upscale = None
@@ -4267,7 +4271,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] Refine fallback (v1.92 {_fb_label}) 完成: clip={clip_index}")
             except torch.cuda.OutOfMemoryError as _oom2:
                 print(f"[H3 Extender] Refine fallback 仍 OOM: {_oom2}")
-                print(f"[H3 Extender] 已回退到一采结果; 建议手动把 refine_upscale_factor 改成 1.0 重新跑")
+                # v14.206: 以前只打印"已回退到一采结果"却没有真的换回 samples,
+                # 实际交付的是放大后未去噪的 latent(灰片)。这里补上真正的赋值。
+                if _samples_pre_upscale is not None:
+                    samples = _samples_pre_upscale
+                    print(f"[H3 Extender] 已回退到一采 latent; 建议手动把 "
+                          f"refine_upscale_factor 改成 1.0 重新跑")
             finally:
                 # v1.65: 恢复 prepare_sampling, 防污染后续采样(下一 clip / 其它工作流)
                 try:
@@ -4328,6 +4337,58 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                       f"device_free={_f / 1024 ** 3:.2f}GB/{_t / 1024 ** 3:.2f}GB")
             except Exception as _ve2:
                 print(f"[H3 Extender] Refine 失败后兜底释放失败(可忽略): {_ve2}")
+
+    # v14.206 (2026-10-25): 二采 latent 塌陷兜底。
+    # 实测(2026-10-25 灰片排查): 二采偶发把 latent 采样成近似常数场 —— 每通道空间
+    # std 0.147、4x4 低通后 0.043, VAE 解码即灰雾/无画面; 健康 latent(一采 34x60)
+    # 为 0.68~1.13。判据: 通道内空间离散度中位数 < 0.30 且 4x4 低通 < 0.15。
+    # 命中且存在放大前一采备份时, 自动换回一采 latent(随后由 v1.74b 几何对齐到链上
+    # 尺寸), 并推送告警, 避免再静默交付灰片。检测自身失败一律不打断渲染。
+    try:
+        _pre_up = _samples_pre_upscale
+    except Exception:
+        _pre_up = None
+    if _pre_up is not None:
+        try:
+            _cm_v, _cm_nst = _ff_extract_members(samples)
+            _cv = _cm_v[0] if _cm_v else None
+            if _cv is not None and _cv.dim() == 5:
+                _cv = _cv.detach().to("cpu", dtype=torch.float32)
+                _ct = int(_cv.shape[2])
+                if _ct > 8:
+                    _cv = _cv[:, :, torch.linspace(0, _ct - 1, 8).long()]
+                _cb, _cc, _ct, _ch, _cw = _cv.shape
+                # 通道内空间离散度(每通道在 T/H/W 上的 std, 取中位数)
+                _cdisp = float(_cv.reshape(_cb, _cc, -1).std(dim=2).median())
+                # 4x4 低通后的离散度: 塌陷场只剩全局常量, 低通后几乎为 0
+                _clp = torch.nn.functional.avg_pool2d(
+                    _cv.permute(0, 2, 1, 3, 4).reshape(_cb * _ct, _cc, _ch, _cw),
+                    4, ceil_mode=True)
+                _clpdisp = float(
+                    _clp.reshape(_clp.shape[0], _cc, -1).std(dim=2).median())
+                if _cdisp < 0.30 and _clpdisp < 0.15:
+                    _pre_v, _pre_nst = _ff_extract_members(_pre_up)
+                    if _pre_v:
+                        _pre_hw = tuple(_pre_v[0].shape[-2:])
+                        samples = _ff_wrap_members(list(_pre_v), _pre_nst)
+                        print(f"[H3 Extender] ⚠ 二采 latent 塌陷(clip={clip_index} "
+                              f"通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}), "
+                              f"已自动回退一采 latent {_pre_hw[1]}x{_pre_hw[0]}")
+                        _send_extender_warning(
+                            owner_id,
+                            f"二采结果塌陷成灰片(通道内std={_cdisp:.3f})，"
+                            f"已自动回退一采 latent；建议降低 refine_denoise / "
+                            f"refine_steps，或关闭二采",
+                            clip_index=clip_index,
+                        )
+                    else:
+                        print(f"[H3 Extender] ⚠ 二采 latent 疑似塌陷(std={_cdisp:.3f}), "
+                              f"但一采备份无效, 无法回退")
+                else:
+                    print(f"[H3 Extender] v14.206 二采 latent 健康: clip={clip_index} "
+                          f"通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}")
+        except Exception as _coll_err:
+            print(f"[H3 Extender] 二采 latent 塌陷检测失败(可忽略): {_coll_err}")
 
     # v1.74b (2026-09-15 fix #10): 链几何对齐 —— 若链上已有段且本次 latent 几何不同
     # (per-clip 降级被拦截后仍可能 OOM fallback 到一采尺寸 / 异常路径),
@@ -9351,7 +9412,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.202 backend loaded (直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.206 backend loaded (v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",

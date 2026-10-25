@@ -14,6 +14,17 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.206 (2026-10-25) — 二采 latent 塌陷检测：自动回退一采 latent + 告警，杜绝静默灰片 / Refine latent-collapse guard: auto-rollback to first-pass latent + warning, no more silent gray clips
+
+**实测（2026-10-25 灰片排查）：二采偶发把 latent 采成近似常数场——每通道空间 std 0.147、4×4 低通后 0.043，VAE 解码即灰雾/无画面；同机一采健康 latent 为 0.68~1.13。** **/ Measured: the refine pass occasionally collapses into a near-constant latent (per-channel spatial std 0.147, 4×4 low-pass 0.043), which decodes as gray; healthy first-pass latents measure 0.68-1.13.**
+
+- **塌陷检测（`_sample_h3` 二采出口，v1.74b 几何对齐之前）：** 取二采视频 latent 的 8 个时间切片，计算每通道在 T/H/W 上的空间 std 中位数与 4×4 avg_pool 后的 std 中位数；两者同时 `< 0.30 / < 0.15` 即判塌陷。命中且有一采备份时换回一采 latent（随后由 v1.74b trilinear 对齐到链上几何），并 `_send_extender_warning` 推到节点状态栏；检测本身异常只打印、不打断渲染。健康段会打印 `v14.206 二采 latent 健康: 通道内std=...`，可据此复核阈值。** / Collapse detection samples 8 temporal slices, computes per-channel spatial std median and its 4×4 low-passed value; both under threshold = collapse → restore the first-pass latent (v1.74b then resizes to chain geometry) and warn on the node. Detection failures never interrupt rendering.**
+- **修「备份从来没成功过」：** `comfy.nested_tensor.NestedTensor` 没有 `.clone()`，旧 `samples.clone() if hasattr(...)` 对 AV 双成员 latent 恒为 False → `_samples_pre_upscale` 一直是 `None`，OOM fallback 与本次塌陷回退都拿不到一采 latent。改为对 NestedTensor 逐成员 clone 重建。** / Fixed the dead backup: NestedTensor has no clone(), so the old hasattr guard always yielded None for AV latents; now each member is cloned and re-wrapped.**
+- **补「二次 OOM 只打印不回退」：** 二采 fallback 仍 OOM 时分支持续走放大后未去噪的 latent（灰片来源之一），现在真正赋值 `samples = _samples_pre_upscale`。** / The double-OOM path now actually restores the first-pass latent instead of just printing that it did.**
+- **验证：** `extender.py` py_compile PASS；启动横幅 `v14.206 backend loaded`。** / Verified: py_compile PASS, banner shows v14.206.**
+
+---
+
 ### v14.202 (2026-10-25) — render_pipeline 新增「直播带货（全自动）」第 12 档 + 快捷条一键按钮；档内除分辨率外全部参数强制接管 / New all-in-one Live-Sell pipeline tier + one-click quick button; every parameter except resolution is forced
 
 **用户诉求：把直播带货专用模式做成一键档——选中后所有参数按固定配方，手动设置全部无效。** **/ User asked for a one-click live-commerce tier that ignores manual settings.**
