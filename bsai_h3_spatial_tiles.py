@@ -402,7 +402,6 @@ def _tiled_model_call(
     weight_shape = (1, 1, 1, full_h if axis == "H" else 1, full_w if axis == "W" else 1)
     weights = torch.zeros(weight_shape, dtype=dtype, device=device)
     audio_acc = None
-    audio_n = 0
     saved_shapes = base.latent_shapes
     saved_latent_image = getattr(model_k, "latent_image", None)
     saved_noise = getattr(model_k, "noise", None)
@@ -463,12 +462,11 @@ def _tiled_model_call(
                 win = window.view(1, 1, 1, 1, -1)
                 video_acc[:, :, :, :, ax_start:ax_end] += pred_video * win
                 weights[:, :, :, :, ax_start:ax_end] += win
-            if len(pred_streams) > 1:
-                if audio_acc is None:
-                    audio_acc = pred_streams[1].float()
-                else:
-                    audio_acc = audio_acc + pred_streams[1].float()
-                audio_n += 1
+            # 音频 latent 没有空间维度: 每块都会预测同一段完整音频, 但预测随
+            # 各块的视觉上下文不同而相位不同。求平均会把它们互相抵消成低频
+            # 轰鸣/发闷(v14.199 实测), 所以只取第一块的音频预测作为整帧结果。
+            if len(pred_streams) > 1 and audio_acc is None:
+                audio_acc = pred_streams[1].float()
             del tile_x, pred, pred_streams, pred_video
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -480,7 +478,7 @@ def _tiled_model_call(
 
     merged = [video_acc / weights.clamp(min=1e-8)]
     if audio_acc is not None and len(streams) > 1:
-        merged.append((audio_acc / float(max(1, audio_n))).to(dtype=streams[1].dtype))
+        merged.append(audio_acc.to(dtype=streams[1].dtype))
         merged[0] = merged[0].to(dtype=streams[0].dtype)
     else:
         merged[0] = merged[0].to(dtype=streams[0].dtype)

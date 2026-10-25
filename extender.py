@@ -664,78 +664,43 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
     #   - context_enabled=True  → 段头部含 overlap_samples 重叠(模型 latent 行需要)，
     #     同时把 overlap_samples 记进段 dict，解码混音时精确跳过 → 输出仍与原始对齐。
     #   - context_enabled=False → 纯净切分(零重叠)，输入/输出双侧都与原始音频对齐。
-    # v14.178 一镜到底全球方案落地 P0-4/P1-10: 删除 2s overlap 语义(旧: v2.0 1.2->2.0)。
-    # 2s 语音重叠在 19 段链上累积回声/口型提前错位, 且 join 时 PCM 硬切爆音。
-    # 现改 0 重叠 gap-free 切分: 音频时间轴与每段净渲染帧严格对齐; 音频连续性改由
-    # audio_context_length=24 帧的 audio latent 延续 + 接缝 15ms crossfade de-click 承担。
-    MOTION_CONTEXT_OVERLAP_SEC = 0.0
-    overlap_samples = int(MOTION_CONTEXT_OVERLAP_SEC * sr)
+    # v14.178 曾把重叠改成 0 (2s 重叠在长链上累积回声)。但实测 3 段成片:
+    # clip2 覆盖原曲 [13.55, 24.18], clip3 从 25.8 开始 —— 每个 ctx_on 边界
+    # 原曲被跳过 1.625s(39 帧@24fps), 听感"音频断了一截"。
+    # 根因: motion context 占用段头部 context_frames 帧(视频=上一段尾部,
+    # 音频也必须是上一段尾部对应的原曲), 模型净输出 = 标称 - context。零重叠
+    # 时输入/输出都缺这 1.625s → 段间缺口 + 尾对齐后新帧音频整体前移(口型错位)。
+    # 现按 context_frames/fps 精确切重叠:
+    #   段 = [current - overlap, current - overlap + N)  (N = 标称帧数)
+    #   推进 = N - overlap = 模型净输出 → 段间零缺口, 口型与音频严格同源。
+    _ctx_frames = 0
+    try:
+        _ctx_frames = max(0, int(context_frames))
+    except (TypeError, ValueError):
+        _ctx_frames = 0
+    _ctx_ov_samples = int(round(_ctx_frames / float(fps) * sr)) if _ctx_frames else 0
 
     segments = []
     current_sample = 0
     for idx, dur in enumerate(clip_durations):
-        seg_samples = max(1, int(round(dur * sr)))
+        nominal_samples = max(1, int(round(dur * sr)))
 
-        # Last clip gets whatever is left (to avoid gaps from rounding)
-        if idx == len(clip_durations) - 1:
-            seg_samples = max(1, total_samples - current_sample)
-
-        # v2.111: 上下文参考开关感知 — 只有该 CLIP 自身 context_enabled=True
-        # (渲染时接了上一段 motion context) 才需要往前扩展重叠音频；
-        # 关闭上下文参考时不再加重叠，切出的段与 lip_audio 原始音频精确对齐。
         _ctx_on = bool(clips[idx].get("context_enabled", True)) if idx < len(clips) else True
-        # v2.122: 解除 v2.117b 的强制关闭 — 对口型模式下允许每个 CLIP 手动开启
-        # 上下文参考。音频同步链路(v2.111 机制本来就已具备, 只是此前被强关):
-        #   ctx_on  → 段头部切 overlap_samples 重叠并记入段 dict
-        #          → AV latent 音频注入时尾对齐(重叠头自动丢弃)
-        #          → 解码混音按 overlap_samples 精确跳过段头 → 输出与原始歌曲逐帧对齐
-        #   ctx_off → 纯净零重叠切分(与原曲直接对齐)
-        _overlap = overlap_samples if (idx > 0 and _ctx_on) else 0
+        _overlap = min(_ctx_ov_samples, max(0, nominal_samples - 1)) if (idx > 0 and _ctx_on) else 0
+        _content_samples = max(1, nominal_samples - _overlap)
 
-        # v14.157 (fix): ctx_on 段按净时长推进。
-        # motion context 占用段头部 context_frames 帧(上一段尾部注入, join 时
-        # 裁掉), 模型净输出 = 标称 - context_frames/fps 秒。旧代码按标称全时长
-        # 推进 → 每个 ctx_on 段边界原曲被跳过 1.625s(39帧@24fps), 歌曲听感
-        # "断了一截"且逐段累积错位。现在: 段 = [current-overlap, current+净],
-        # 推进 = 净时长; 解码混音跳过 overlap 头后 lip 净长恰好等于模型音频
-        # 长度, 段间无缝。注意: 若渲染时前段缓存缺失(trim 被强制为 0), 该段
-        # 实际输出全时长, 下一边界会出现 1.625s 重复 — 属缓存缺失既有异常。
-        #
-        # v14.177 (fix): 上述"净时长推进"是配套旧渲染帧数(只含标称)的。渲染
-        # 侧已改为 渲染帧数 = 标称 + context 帧(解码裁 context 后净输出 = 标称),
-        # 因此这里必须改回按标称全时长推进 —— 否则 lip 段会短 context/fps 秒,
-        # 与视频净输出(标称)错位。overlap 头跳过逻辑不变。
-        _trim_samples = 0
-        _net_samples = max(1, seg_samples)
-        if _overlap > 0 and int(context_frames) > 0:
-            # v14.177: 推进仍按标称; 仅记录 context 帧样本数供解码跳过段头重叠。
-            # 注意: 音频 latent 行数由渲染帧数(标称+context)决定, lip 段需覆盖
-            # 该长度; 段头 overlap 由解码混音按 overlap_samples 跳过。
-            _trim_samples = min(
-                int(round(float(context_frames) / float(fps) * sr)),
-                max(0, seg_samples - 1),
-            )
-
-        end_sample = min(current_sample + _net_samples, total_samples)
-
-        if _overlap > 0:
-            seg_start = max(0, current_sample - _overlap)
-        else:
-            seg_start = current_sample
-
+        seg_start = max(0, current_sample - _overlap)
+        end_sample = min(current_sample + _content_samples, total_samples)
         actual_samples = end_sample - seg_start
 
         if actual_samples <= 0:
-            # Audio too short for this many clips — fill with silence
-            silent = torch.zeros(waveform.shape[0], waveform.shape[1], _net_samples,
+            silent = torch.zeros(waveform.shape[0], waveform.shape[1], nominal_samples,
                                  dtype=waveform.dtype, device=waveform.device)
             segments.append({"waveform": silent, "sample_rate": sr, "overlap_samples": 0})
         else:
             seg_wave = waveform[..., seg_start:end_sample].clone()
-            # If we got less than needed (end of audio), pad with silence
-            needed_samples = _net_samples + _overlap
-            if seg_wave.shape[-1] < needed_samples:
-                pad_len = needed_samples - seg_wave.shape[-1]
+            if seg_wave.shape[-1] < nominal_samples:
+                pad_len = nominal_samples - seg_wave.shape[-1]
                 pad = torch.zeros(waveform.shape[0], waveform.shape[1], pad_len,
                                   dtype=waveform.dtype, device=waveform.device)
                 seg_wave = torch.cat([seg_wave, pad], dim=-1)
@@ -2835,6 +2800,35 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
+    # v14.195: 音频渲染质量保护（渲染环节治本, 非渲染后处理）——
+    # 诊断(h3_clip_250 样本 + 5 个历史渲染): 所有电影工厂渲染输出均带恒定
+    # 低频轰鸣(100-200Hz 占全频 ~60%、全程无静音、200-400Hz 人声带被盖住),
+    # 而参考音频(lip_audio)本身干净(完美标准: 200-400Hz 占 73%)。根因:
+    # ① lip_audio 对口型模式一采音频=参考原声 latent 锁定(干净), 二采
+    #   refine_audio_denoise=0.7 把它 70% 重噪后仅 4 步重画(官方音频下限
+    #   12 步) → 干净参考被重绘成低频轰鸣; ② 非 lip 模式(ref_audio 条件
+    #   配音)一采 <12 步生成音频同样劣化。
+    # 修复: 音频要么锁定保持原声(lip 模式默认), 要么 ≥12 步生成/重绘;
+    # 环境变量 BSAI_H3_AUDIO_QUALITY=0 可一键关闭全部自动行为(回退旧参数)。
+    _has_audio = False
+    _lip_locked = False
+    try:
+        _m_probe = latent.get("samples")
+        _mem_probe, _nt_probe = _ff_extract_members(_m_probe)
+        if _nt_probe and len(_mem_probe) >= 2:
+            _has_audio = True
+            _nm_probe = latent.get("noise_mask")
+            if _nm_probe is not None:
+                _nmm_probe, _ = _ff_extract_members(_nm_probe)
+                if len(_nmm_probe) >= 2 and int(torch.count_nonzero(_nmm_probe[1])) == 0:
+                    _lip_locked = True
+    except Exception as _probe_err:
+        _has_audio, _lip_locked = False, False
+    _audio_quality_on = os.environ.get("BSAI_H3_AUDIO_QUALITY", "1") != "0"
+    if _has_audio:
+        print(f"[H3 Extender] v14.195 音频渲染质量保护: 检测到 AV 双成员 latent, "
+              f"lip_audio锁定={'是' if _lip_locked else '否'}, 自动保护={'开' if _audio_quality_on else '关(环境变量)'}")
+
     # v14.81: safety net for the payload row-order guard. The module installs
     # itself at import; re-asserting here puts it back on top in the rare case
     # something stacked over it after startup, and covers graphs that reached
@@ -2856,6 +2850,16 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     # P2 (2026-10-17): SelfLift H3 TST 少步数画质补偿 (时间状态传输).
     if tst_enable:
         model = _apply_h3_tst(model, True, float(tst_tau))
+
+    # v14.195: 一采音频步数保护 —— 音频由模型生成时(非 lip 锁定), 一采步数
+    # <12(官方音频可用下限)会把配音生成出恒定低频轰鸣/含混吞音(实测 8 步
+    # 档样本: 100-200Hz 占 59.5%, 全程无静音)。lip 锁定模式一采音频不采样
+    # (mask=0), 步数不影响音频, 不提升(保持档位速度与画质)。
+    if _has_audio and not _lip_locked and _audio_quality_on and int(steps) < 12:
+        print(f"[H3 Extender] v14.195 音频生成保护: 一采 {int(steps)} 步 < 官方音频 "
+              f"12 步下限, 自动提升到 12 步(根治低频轰鸣/含混配音; 如须回退 "
+              f"设 BSAI_H3_AUDIO_QUALITY=0)")
+        steps = 12
 
     guider = _BasicGuider(model)
     # v14.169: FastH3 Omni 蒸馏契约 = guidance 1.0 单前向(无 CFG)。
@@ -3091,6 +3095,28 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     except Exception as _bsai_ae:
         print(f"[H3 Extender] SDK allocate 异常(忽略): {_bsai_ae}", flush=True)
         _bsai_alloc = None
+    # v14.198 首步拆分诊断: 实测一采 step1=1217s, step2~12=45-48s。探针在首次
+    # DIFFUSION_MODEL 前向入口打印"采样开始→前向"间隔(= process_conds/编码),
+    # 前向返回后再打一次, 用来判定 1217s 花在 conds 还是首次前向(权重换页/op 编译).
+    _ff_probe198 = {"t0": time.time(), "t1": None, "done": False}
+    def _ff_first_forward_probe198(executor, x, timestep, context, transformer_options, **kwargs):
+        if _ff_probe198["t1"] is None:
+            _ff_probe198["t1"] = time.time()
+            print(f"[H3 Extender] v14.198 首步拆分: 采样开始→首次前向 "
+                  f"{_ff_probe198['t1'] - _ff_probe198['t0']:.1f}s (process_conds/编码)", flush=True)
+        out = executor(x, timestep, context, transformer_options, **kwargs)
+        if not _ff_probe198["done"]:
+            _ff_probe198["done"] = True
+            print(f"[H3 Extender] v14.198 首步拆分: 首次前向 "
+                  f"{time.time() - _ff_probe198['t1']:.1f}s (含权重换页/op 编译), "
+                  f"首步合计 {time.time() - _ff_probe198['t0']:.1f}s", flush=True)
+        return out
+    try:
+        import comfy.patcher_extension as _pe198
+        model.add_wrapper_with_key(_pe198.WrappersMP.DIFFUSION_MODEL,
+                                   "bsai_first_step_probe", _ff_first_forward_probe198)
+    except Exception as _e198:
+        print(f"[H3 Extender] v14.198 首步探针安装失败(忽略): {_e198}")
     try:
         samples = guider.sample(
             noise,
@@ -3103,6 +3129,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             seed=int(seed),
         )
     finally:
+        try:
+            model.model_options["wrappers"][_pe198.WrappersMP.DIFFUSION_MODEL].pop(
+                "bsai_first_step_probe", None)
+        except Exception:
+            pass
         if _bsai_alloc is not None:
             try:
                 _bsai_alloc.release()
@@ -3127,6 +3158,30 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _r_denoise = max(0.05, min(1.0, float(refine_denoise)))
             _r_audio = float(refine_audio_denoise)
             _r_align = max(8, int(refine_align_to))
+            # v14.195: 二采音频质量保护(渲染环节)——
+            # ① lip_audio 对口型模式: 一采音频=参考原声 latent 已锁定(完美),
+            #    二采音频重绘(0.7)会把干净参考 70% 重噪后低步数重画 → 低频
+            #    轰鸣(实测根因)。默认保持锁定(输出=参考原声, 即"完美标准");
+            #    环境变量 BSAI_H3_LIP_AUDIO_REDRAW=1 可恢复重绘(此时步数下限
+            #    12 兜底)。② 音频重绘开启且二采步数 <12 → 自动提升到 12(官方
+            #    音频下限), 根治"从噪声画 4 步音频"的轰鸣/崩坏。
+            if _has_audio and float(_r_audio) >= 0.5:
+                if _lip_locked and os.environ.get("BSAI_H3_LIP_AUDIO_REDRAW", "0") != "1":
+                    _r_audio = 0.0
+                    print(f"[H3 Extender] v14.195 lip_audio 对口型: 参考原声已锁定, "
+                          f"二采音频重绘 {float(refine_audio_denoise):.1f} 会把它重绘成 "
+                          f"低频轰鸣(实测根因), 已保持锁定(输出=参考原声)。如确需重绘 "
+                          f"设 BSAI_H3_LIP_AUDIO_REDRAW=1(此时步数自动 ≥12)")
+                elif _audio_quality_on and int(_r_steps) < 12:
+                    # v14.196: 不再把二采步数 4→12 (实测 4 步 324s/步 = 65 分钟/15秒片段,
+                    # 用户无法接受)。一采音频已按 12 步生成(上面的音频生成保护保证),
+                    # 二采只需锁住音频不再重绘即可保留同一份音频, 步数尊重用户设置。
+                    # 效果等同: 音频质量不降, 二采少跑 8 步。
+                    _r_audio = 0.0
+                    print(f"[H3 Extender] v14.196 音频重绘保护: 二采 {int(refine_steps)} 步 < "
+                          f"音频 12 步下限, 改为锁定音频(保留一采 12 步音频, 不重绘), "
+                          f"二采步数按设置 {int(_r_steps)} 步执行(不做 4→12 提升, 省 8 步)。"
+                          f"如须重绘并提升步数 设 BSAI_H3_AUDIO_QUALITY=0")
             # v1.44: 选了 3D upscaler 模型但 factor<=1.0 时自动提升到 1.5.
             # factor=1.0 会跳过 _ff_upscale_video_latent(), 3D upscaler
             # 白选了, 二采只是对同分辨率 latent 重加噪再去噪, 画质必糊.
@@ -3445,6 +3500,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] v2.02 temporal_chunk_tokens={int(temporal_chunk_tokens)} 过小, "
                       f"已按 16 执行 (T~107 建议 40~60, 0=关闭)", flush=True)
                 temporal_chunk_tokens = 16
+            # v14.200: 删除 v14.199 的"分块二采强制锁音频"。
+            # 根因不再靠锁定规避: bsai_h3_spatial_tiles.py 现在直接取第 1 块
+            # 的音频预测(音频 latent 无空间维度, 各块都给出完整音频估计),
+            # 不再把 N 块相位不一致的预测求平均 → 没有低频轰鸣, 音频也能照常
+            # 参与二采重绘。锁定会上游 v14.196 已按步数条件处理。
             if not _use_temporal:
                 _r_noise = comfy.sample.prepare_noise(samples, int(seed) + 1, None)
                 _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
@@ -4271,6 +4331,192 @@ def _default_clip(index: int = 0):
         "context_enabled": True,
         "color_adjustment": _normalize_color_adjustment(),
     }
+
+
+_DIALOGUE_AUDIO_LINE_RE = re.compile(
+    r"^\s*(?:"
+    r"【[^】]*(?:对白|台词|对话|旁白|音效|配音|配乐|voiceover|dialogue)[^】]*】"
+    r"|\[[^\]\[]*(?:对白|台词|对话|旁白|音效|配音|配乐|voiceover|dialogue)[^\]\[]*\]"
+    r"|[对白台词对话旁白音效配音配乐][：:]"
+    r"|\([^)]*(?:对白|台词|对话|旁白|音效|配音|配乐)[^)]*\)"
+    r"|（[^）]*(?:对白|台词|对话|旁白|音效|配音|配乐)[^）]*）"
+    r")"
+)
+_ANCHOR_QUOTE_CHARS = '“”"「」『』‘’'
+
+
+def _is_quote_dominated(seg):
+    """句子中引号内对白内容占多数 → 纯对白句, 不参与视觉状态提取。"""
+    try:
+        _m = re.findall(
+            r"[" + _ANCHOR_QUOTE_CHARS + r"]([^" + _ANCHOR_QUOTE_CHARS + r"]{0,80})[" + _ANCHOR_QUOTE_CHARS + r"]",
+            seg,
+        )
+        _quoted = sum(len(x) for x in _m)
+        return _quoted * 2 > len(seg)
+    except Exception:
+        return False
+
+
+_VISUAL_ELEMENT_KEYWORDS = (
+    # 角色形象/人物
+    "人物", "角色", "主角", "男人", "女人", "男孩", "女孩", "少年", "少女", "老人",
+    "男子", "女子", "女郎", "姑娘", "小伙", "演员", "歌手", "舞者", "士兵", "警察",
+    "医生", "学生", "老师", "仆人", "士兵",
+    # 外观/长相
+    "面容", "脸庞", "脸色", "脸", "眼神", "眼睛", "眉毛", "鼻子", "嘴唇", "皮肤",
+    "肤色", "皱纹", "胡须", "胡子", "雀斑", "妆容", "泪痕", "伤疤", "疤痕", "脸型",
+    "面色", "苍白", "通红", "晒黑", "素颜", "浓妆", "淡妆",
+    # 发型
+    "头发", "发丝", "发髻", "刘海", "马尾", "辫子", "短发", "长发", "卷发", "直发",
+    "发型", "白发", "黑发", "金发", "棕发", "盘发", "光头", "秃头",
+    # 服装/服饰
+    "服装", "衣着", "穿着", "衣服", "衣裳", "衣", "裙", "裤", "衫", "袍", "外套",
+    "大衣", "夹克", "风衣", "毛衣", "衬衫", "T恤", "领带", "领结", "皮带", "腰带",
+    "袖子", "袖口", "衣领", "领口", "制服", "校服", "礼服", "婚纱", "汉服", "旗袍",
+    "背心", "睡衣", "披肩", "斗篷", "雨衣", "军装", "西装", "牛仔裤",
+    # 鞋帽配饰
+    "鞋", "靴", "袜", "帽", "头盔", "头巾", "围巾", "手套", "耳环", "项链", "戒指",
+    "手镯", "眼镜", "口罩", "徽章", "胸针", "发卡", "发饰", "耳钉", "墨镜", "帽子",
+    "腰带扣", "荷包", "香囊", "玉佩",
+    # 伤势/状态变化（可见）
+    "伤", "血", "绷带", "纱布", "疤", "淤青", "青紫", "肿", "破", "撕裂", "缝补",
+    "补丁", "包扎", "擦伤", "伤口", "血迹", "流血", "渗血", "骨折", "断", "烧伤",
+    "烫伤", "红肿",
+    # 道具
+    "道具", "刀", "剑", "枪", "伞", "油纸伞", "包", "袋", "杯", "瓶", "书", "手机",
+    "相机", "乐器", "吉他", "琵琶", "小提琴", "钢琴", "麦克风", "话筒", "花", "灯笼",
+    "蜡烛", "烛", "香烟", "酒瓶", "望远镜", "拐杖", "斧头", "绳索", "旗帜", "盾牌",
+    "弓箭", "扇子", "折扇", "手帕", "钥匙", "信", "画卷",
+    # 场景/布景
+    "场景", "布景", "房间", "屋子", "客厅", "卧室", "厨房", "办公室", "教室", "街道",
+    "马路", "巷", "广场", "公园", "森林", "树林", "山", "河", "海", "湖", "沙漠",
+    "雪地", "草地", "田野", "桥", "阶梯", "台阶", "窗", "门", "墙", "桌", "椅",
+    "床", "沙发", "柜", "窗帘", "地毯", "壁炉", "招牌", "路灯", "霓虹", "亭子",
+    "楼", "塔", "寺庙", "教堂", "宫殿", "车站", "码头", "集市", "瀑布", "悬崖",
+    "山洞", "稻田", "竹林", "花丛", "草地",
+    # 天候/光影（可见）
+    "光", "影", "暗", "明亮", "黄昏", "夜晚", "白天", "傍晚", "夕阳", "月光", "日光",
+    "阳光", "雨", "雪", "雾", "烟", "云", "天空", "水面", "倒影", "反光", "剪影",
+    "色调", "颜色", "色彩", "灰暗", "阴沉", "晨曦", "破晓", "彩虹",
+)
+
+# 可见视觉元素关键词的补充: 常用量词/方位 + 元素词组合过于发散, 这里仅做
+# 优先级判定: 命中任一关键词的句子视为"含可见视觉元素", 预算紧张时优先保留,
+# 保证角色形象/外观/服装/服饰/发型/鞋帽/场景/道具/布景等所有可见元素都被记录。
+
+
+def _is_visual_element_sentence(seg):
+    """句子是否包含可见视觉元素关键词（用于预算紧张时优先保留）。"""
+    try:
+        return any(_k in seg for _k in _VISUAL_ELEMENT_KEYWORDS)
+    except Exception:
+        return False
+
+
+def _extract_visual_state(text, max_len=300):
+    """v14.193 自动记录: 从分镜正文提取『全部可见视觉元素』状态。
+
+    视觉锚点自动化的记录侧 —— 每个分镜的正文本身就是该分镜建立的视觉状态。
+    按用户确认口径（v14.193），必须覆盖**所有可见视觉元素**：角色形象、外观、
+    服装、服饰、发型、鞋帽、伤势、场景、道具、布景、天候光影等，全部记录为
+    锚点，而不是只取末尾句子。
+
+    策略：逐句保留所有非对白陈述句（对白/台词/旁白/音效是声音不是画面, 不参与
+    锚点），保持原序；正文总长在预算（默认 300 字符）内时全量保留（分镜正文
+    通常 <300 字符，即默认覆盖全部可见元素）；超预算时优先保留含可见视觉元素
+    关键词的句子（_VISUAL_ELEMENT_KEYWORDS），再按原序补足其余句子，确保元素
+    不因截断而丢失。
+
+    返回清洗后的状态文本; 无可提取内容时返回 None。
+    """
+    try:
+        if not text or not str(text).strip():
+            return None
+        raw = []
+        for _ln in str(text).splitlines():
+            _ln = _ln.strip()
+            # 行级先做引号对白判定: 引号内的 。！？ 会把整行切成无配对引号的
+            # 碎片, 若先切句再判引号会漏检纯对白行(如 『“快走！别管我！”』)。
+            if not _ln or _DIALOGUE_AUDIO_LINE_RE.match(_ln) or _is_quote_dominated(_ln):
+                continue
+            for _seg in re.split(r"(?<=[。！？!?；;])", _ln):
+                _seg = _seg.strip()
+                if not _seg or _is_quote_dominated(_seg):
+                    continue
+                raw.append(_seg)
+        if not raw:
+            return None
+        if sum(len(s) for s in raw) <= max_len:
+            chosen = raw
+        else:
+            _vis = [s for s in raw if _is_visual_element_sentence(s)]
+            _idx = {s: i for i, s in enumerate(raw)}
+            chosen = []
+            _used = 0
+            for _s in _vis:  # 含可见元素的句子优先保底
+                if _used + len(_s) <= max_len:
+                    chosen.append(_s)
+                    _used += len(_s)
+            for _s in raw:  # 其余句子按原序补足剩余预算
+                if _s in chosen:
+                    continue
+                if _used + len(_s) <= max_len:
+                    chosen.append(_s)
+                    _used += len(_s)
+            chosen.sort(key=lambda _s: _idx[_s])  # 恢复原序
+        state = re.sub(r"\s+", " ", "".join(chosen)).strip(" 　,，、;；:：")
+        return state or None
+    except Exception as _va_err:
+        print(f"[H3 Extender] v14.193 视觉锚点自动记录解析失败(本次跳过): {_va_err}")
+        return None
+
+
+def _build_visual_anchor_snapshot(states, clip_index, max_total=1000):
+    """v14.193 (2026-10-24): 视觉锚点自动注入 —— 为指定 CLIP 生成状态快照注入文本。
+
+    参考 B站《MiniMax-H3 一键短剧导演台 V9》(BV1m2HK6DEPX) 的视觉锚点机制：
+    多段连续剧情中，道具/场景/人物外观状态必须随剧情演进且持续延续，禁止漂移
+    （如分镜3左臂受伤袖口破 → 后续各分镜必须保持受伤状态；分镜6医好/缝补 →
+    后续保持新状态；绑纱布则延续纱布；缝补不同颜色布则延续该补丁布）。
+
+    与 v14.186 的区别: 不再读取用户手写的『分镜N: 状态声明』文本（该手动输入
+    widget 已移除，也不新增任何输入端口），改为自动记录 —— states 为与 clips
+    对齐的列表（每项 = _extract_visual_state 从该分镜正文提取的全部可见视觉元素
+    状态，或 None），本函数注入 clip_index 之前的**全部已建立状态**（自旧到新；
+    总长超预算 max_total 时从最旧开始丢弃，最新状态最相关），确保每个分镜都
+    携带此前全部可见视觉元素锚点。
+
+    返回：为 clip_index（0-based）构造的注入文本；无有效状态时返回 None。
+    """
+    try:
+        if not states:
+            return None
+        active = [(n, s) for n, s in enumerate(states[:clip_index], start=1) if s]
+        if not active:
+            return None
+        keep = []
+        _used = 0
+        for _n, _s in reversed(active):  # 从最新往最旧装, 超预算丢最旧
+            _cost = len(_s) + 14  # "自分镜N起: " 前缀开销
+            if _used + _cost > max_total and keep:
+                break
+            keep.append((_n, _s))
+            _used += _cost
+        keep = keep[::-1]
+        parts = [f"自分镜{n}起: {s}" for n, s in keep]
+        snapshot = "；".join(parts)
+        return (
+            "\n[视觉锚点延续] 本段必须严格延续此前分镜已建立的视觉状态："
+            + snapshot
+            + "。禁止改变任何已建立的角色形象、外观、服装、服饰、发型、鞋帽、"
+            "场景、道具、布景与伤势状态，除非本段正文明确声明了新的状态变化"
+            "（如伤势治愈/包扎/缝补/换装等）；本段若声明新状态，则自本段起该"
+            "新状态成为后续所有分镜的视觉锚点并强制延续，后续分镜不得回到旧状态。"
+        )
+    except Exception as _va_err:
+        print(f"[H3 Extender] v14.193 视觉锚点注入失败(本次跳过注入): {_va_err}")
+        return None
 
 
 def _parse_clips_json(value: str):
@@ -5853,10 +6099,10 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）"],
+            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货（全自动）"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
-                "tooltip": "v14.184 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); ⑩双采2K = v14.184 T8 思路(BV1aiaL61Eyu): 一采 8 步(FastH3 蒸馏契约) + 二采 4 步(denoise 0.45) + latent 不放大(factor=1.0, 二采提速~4x) + HyperVAE 2x 解码像素 2x(encoder 16x 不变, decoder 32x, 全程只解码一次, 不增采样显存; 权重自动探测 models/vae 中 hyper*2x*.safetensors) + 音频重绘继承 w33(0.7) —— 直播带货配音档变体, 直出 2K 无分块接缝。⚠️ v14.183 曾试 10 步+音频0.9 致链 segment 音频崩(VAD 0 段)+画质退化, 已回滚。",
+                "tooltip": "v14.184 渲染管道(模型配方档统一在此选择, 速度档仅留基础 7 档): ①Sol-H3 Self-Lift 双采(默认, 二采高清); ②直播配音高清 = v14.179 直播带货 ref_audio 配音专用: 一采 12 步(官方音频≥12步可用下限) + 二采 4 步 + 音频参与重绘 0.7(二采精修中文人声, 根治6~8步乱配音/含混吞音; 需配非8步蒸馏模型, 如 minimax_h3_ref2va_int8_convrot); ③FastH3-Trim = nvfp4 剪枝模型 8+4 双采; ④FastH3-4步VSA = 4步蒸馏+VSA LoRA 4+2 双采; ⑤Turbo-v4 = Turbo LoRA v4 step600 EMA 6+4 双采(shift 12/3); ⑥DMAD-4步 = DMAD 4步蒸馏 LoRA 4+2 双采(强制 lcm, shift 12/2); ⑦武戏组合拳 = 8+4 双采(euler, 武戏/DMAD LoRA 由 H3LoraStack 注入); ⑧4K直出 秘制酱料 = 自提升渐进采样(一采6步低分辨率构图 + boost x2 二采3步细节 + DLSS5 像素超分 4K, 参考 B站 BV18Vnb6UEPv); ⑨FastH3 Omni 8步单采 = 跳过二采, 一采 8 步蒸馏直出(guidance 1.0 + shift 12/3, 需 Loader 换 fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); ⑩双采2K = v14.184 T8 思路(BV1aiaL61Eyu): 一采 8 步(FastH3 蒸馏契约) + 二采 4 步(denoise 0.45) + latent 不放大(factor=1.0, 二采提速~4x) + HyperVAE 2x 解码像素 2x(encoder 16x 不变, decoder 32x, 全程只解码一次, 不增采样显存; 权重自动探测 models/vae 中 hyper*2x*.safetensors) + 音频重绘继承 w33(0.7) —— 直播带货配音档变体, 直出 2K 无分块接缝。⚠️ v14.183 曾试 10 步+音频0.9 致链 segment 音频崩(VAD 0 段)+画质退化, 已回滚。⑪QAD-v2-8步 = 2026-10-20 海螺 AI Lab 发布 FastH3-QAD-v2(量化感知蒸馏整套 NVFP4, 118GB→30GB, 质量不降反升): 一采 8 步蒸馏直出(video shift 10 / audio shift 3 官方 V2 NVFP4 schedule, 注意 Omni 档是 12/3, 本档 10/3 是 QAD-v2 专属), 跳过二采(单采无缝); 需 Loader 换 QAD-v2 整套 NVFP4 模型(transformer + 50层文本编码器 qwen3vl_32b_minimax_h3_nvfp4_awq + 新 NVFP4 VAE 解码器 36层/8层) + BlockSparseAttention VSA keep_percent=10; RTX 5090 实测 5s 480P 仅 12.6~14.8s(8层解码器)。⑫直播带货（全自动） = v14.202 直播带货 ref_audio 一站式配方: 选中后除 width/height(分辨率沿用工作流, 防一采像素暴涨)外全部参数由本档接管, 手动设置一律无效 —— 一采 12 步 + 二采 4 步(denoise 0.55) + 3D latent upscaler x2.0 + 音频重绘 0.7(4 步时由 v14.196 自动锁一采 12 步音频) + shift 12/3 + TST tau 0.2 + 分块二采 4x128 + audio_context_length=0(不注入上一段语音) + clip2 起关闭 motion context(防硬切段首帧拖影)。配 minimax_h3_ref2va_int8_convrot + 4步lora。",
             },
         )
         # v14.185 (2026-10-24): 一镜到底采样档 —— 追加在 render_pipeline 之后（optional
@@ -5870,6 +6116,12 @@ class BSAIH3FilmFactory:
                 "tooltip": "一镜到底采样档（仅 one_shot_mode=on 时生效）：单采无缝 = 跳过二采(refine)，链式 latent 不重绘，接缝零漂移，推荐配 turbo 8 步 LoRA + beta 调度器 + 6-8 步；双采高清 = 保留二采放大/精修（可出 2K），但参考工作流实测双采续链会在接缝引入像素漂移（段间模糊/抖动），仅在需要高清放大时选用。",
             },
         )
+        # v14.193: 视觉锚点改为全自动（自动记录 + 自动注入）—— 手动输入 widget
+        # visual_anchor_notes（v14.186 曾置于 optional 最末尾 index 67）已移除：
+        # 锚点状态自动从各分镜正文提取全部可见视觉元素（_extract_visual_state，
+        # 角色形象/外观/服装/服饰/发型/鞋帽/场景/道具/布景等）并自动注入后续
+        # 分镜，不再需要（也不新增）任何手动输入参数端口。移除的是最末尾
+        # widget，不挤占/不移位任何既有 widget index（现役布局与旧 CUR68 一致）。
 
 
         # v1.21: INPUT_TYPES keys kept as pure English for workflow compatibility.
@@ -6070,6 +6322,20 @@ class BSAIH3FilmFactory:
             refine_audio_denoise = 1.0
         else:
             refine_audio_denoise = 0.0
+        # v14.194 音频重绘防护: 官方音频≥12步可用下限——一采步数<12 时二采音频重绘
+        # (≥0.5) 会在低步数上重画音频 latent, 实测产出恒定低频轰鸣/底噪/失真
+        # (h3_clip_250: ~95-200Hz 占~60%能量, 全程无静音帧)。不改行为,
+        # 仅提示改走"直播配音高清"(一采12步+音频0.7) 或对口型×二采=锁定音频。
+        if refine_enable and float(refine_audio_denoise) >= 0.5:
+            try:
+                _fp_steps = max(1, int(steps))
+            except Exception:
+                _fp_steps = 12
+            if _fp_steps < 12:
+                print(f"[H3 Extender] ⚠ v14.194: 一采 {_fp_steps} 步(<官方音频12步下限) + "
+                      f"二采音频重绘 {float(refine_audio_denoise):.1f} —— 低步数重画音频 latent "
+                      f"易产恒定低频轰鸣/底噪/失真; 建议改用\"直播配音高清\"管道 "
+                      f"(一采12步+音频0.7) 或对口型×二采=锁定音频", flush=True)
         # v14.83 像素超分旁支（双开关，默认关）+ v14.84 模式预设
         upscale_per_clip = bool(kwargs.get("upscale_per_clip", False))
         upscale_final = bool(kwargs.get("upscale_final", False))
@@ -6324,6 +6590,68 @@ class BSAIH3FilmFactory:
                     denoise = 1.0
                     shift_video, shift_audio = 12.0, 3.0
                     print(f"[H3 Extender] v14.172 FastH3 Omni 8步单采(渲染管道): 跳过二采, 一采 8 步蒸馏直出")
+            elif _rp_mode == "QAD-v2-8步":
+                # v14.201 (2026-10-25): FastH3-QAD-v2 —— 2026-10-20 海螺 AI Lab 发布,
+                # 量化感知蒸馏整套 NVFP4(118GB→30GB, 质量不降反升)。8 步蒸馏直出
+                # 单采(同 Omni 管道, 复用 7115 一采钳制健康区防 OOM); shift 10/3 为
+                # 官方 V2 NVFP4 schedule(区别于 Omni 12/3, 不可混用); 需 Loader 换
+                # QAD-v2 整套 NVFP4 模型 + BlockSparseAttention VSA keep_percent=10,
+                # VAE 可选 36层(1.29GB 高质量)/8层(0.31GB 快15x) 新 NVFP4 解码器。
+                steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
+                if not omni_8step_mode:
+                    omni_8step_mode = True
+                    refine_enable = False
+                    denoise = 1.0
+                    shift_video, shift_audio = 10.0, 3.0
+                    print(f"[H3 Extender] v14.201 QAD-v2-8步(渲染管道): 跳过二采, 一采 8 步蒸馏直出, "
+                          f"shift 10/3 (官方 QAD-v2 NVFP4 schedule; Loader 需 QAD-v2 整套 NVFP4 模型)")
+            elif _rp_mode == "直播带货（全自动）":
+                # v14.202 (2026-10-25): 直播带货 ref_audio 一站式档。
+                # 用户诉求"选中这一档后所有设置按固定配方, 手动设置全部无效"。
+                # 配方 = v3 参考音频版工作流(v14.200 修复后)的已验证参数:
+                #   一采 12 步(官方音频≥12步下限) + 二采 4 步 denoise 0.55
+                #   + 3D latent upscaler x2.0(输出 2 倍像素) + 音频重绘 0.7
+                #   (二采 4 步时由 v14.196 自动锁一采 12 步音频, 不重画)
+                #   + shift 12/3 + TST tau 0.2 + 分块二采 4x128
+                #   + audio_context_length=0(不把上一段语音当音频上下文)
+                #   + clip2 起关闭 motion context(硬切段不再做 2s 渐变 → 首帧无拖影)
+                # width/height 不锁: 分辨率决定一采像素, 锁死 1920 会让一采
+                # 直接涨到 1920x1088(耗时 4x), 与用户"15秒必须 1 小时内"冲突。
+                steps, refine_steps, tile_count, refine_denoise = 12, 4, 4, 0.55
+                refine_enable = True
+                refine_audio_denoise = 0.7
+                refine_upscale_factor = 2.0
+                refine_upscaler_model = "minimax_h3_latent_upscaler_3d_fp32.pth"
+                refine_align_to = 40
+                shift_video, shift_audio = 12.0, 3.0
+                dual_track_shift = True
+                denoise = 1.0
+                context_length = "39"
+                audio_context_length = 0
+                tiled_refine = False
+                tile_overlap = 128
+                refine_mem_mode = "spatial (分块,兼容)"
+                selflift_tst_enable = True
+                selflift_tst_tau = 0.2
+                upscale_per_clip = True
+                upscale_final = True
+                upscale_mode = "质量优先"
+                upscale_engine = "dlss5"
+                upscale_factor = 2.0
+                _up_factor, _up_engine = _ff_resolve_upscale_mode(
+                    upscale_mode, upscale_factor, upscale_engine
+                )
+                output_mode = "both"
+                output_image_audio = True
+                one_shot_mode = "off (分镜模式)"
+                one_shot_enabled = False
+                one_shot_single_pass = False
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                scheduler = "simple"
+                print("[H3 Extender] 🛒 直播带货(全自动)档: 12+4 / denoise 0.55 / latent x2.0 / "
+                      "音频重绘 0.7 / shift 12-3 / TST 0.2 / 分块 4x128 / audio_context_length=0 / "
+                      "clip2+ 关闭上下文 —— 除分辨率外手动参数全部由本档接管")
             else:
                 _rp_handled = False
             if _rp_handled:
@@ -6433,6 +6761,18 @@ class BSAIH3FilmFactory:
                 denoise = 1.0
                 shift_video, shift_audio = 12.0, 3.0
                 print(f"[H3 Extender] v14.172 FastH3 Omni 8步单采(旧速度档遗留值兼容): 渲染管道已切 Omni, 跳过二采, 一采 8 步蒸馏直出")
+        elif speed_preset == "QAD-v2-8步":
+            # v14.196 (2026-10-25): QAD-v2-8步 也支持速度档遗留值兼容 —— 行为与
+            # 渲染管道档完全一致(8 步蒸馏直出单采, shift 10/3 官方 QAD-v2 schedule)。
+            # 新工作流请从「渲染管道」下拉选择 QAD-v2-8步。
+            steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
+            if not omni_8step_mode:
+                omni_8step_mode = True
+                _render_pipeline = "QAD-v2-8步"
+                refine_enable = False
+                denoise = 1.0
+                shift_video, shift_audio = 10.0, 3.0
+                print(f"[H3 Extender] v14.201 QAD-v2-8步(旧速度档遗留值兼容): 渲染管道已切 QAD-v2, 跳过二采, 一采 8 步蒸馏直出, shift 10/3 (官方 QAD-v2 NVFP4 schedule)")
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
@@ -6440,6 +6780,19 @@ class BSAIH3FilmFactory:
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
         clips = _parse_clips_json(clips_json)
         merge_output = _merge_output_from_state(clips_json)
+        # v14.202: 直播带货(全自动)档强制分镜上下文 —— 只保留 clip1 的上下文,
+        # clip2 起一律关闭。前端 UI 的勾选/分镜脚本里的 context_enabled 在本档
+        # 下不生效(用户要求"手动设置全部无效"), 避免硬切段被注入上一段尾部
+        # 39 帧后做 ≈2s 渐变, 渐变尾巴落在输出头 12 帧 → 首帧重影/马赛克。
+        if _rp_mode == "直播带货（全自动）" and clips:
+            _forced = 0
+            for _ci, _cc in enumerate(clips):
+                _want = (_ci == 0)
+                if bool(_cc.get("context_enabled", True)) != _want:
+                    _cc["context_enabled"] = _want
+                    _forced += 1
+            print(f"[H3 Extender] 🛒 直播带货(全自动)档: 上下文强制 clip1=开 / clip2+ 全关 "
+                  f"(覆盖 {_forced} 个分镜的手动勾选)")
 
         # v1.22: per-clip external prompt overrides (clip_prompt_1..clip_prompt_12).
         # Applied before @图N resolution so asset tags in the override are resolved too.
@@ -7142,6 +7495,10 @@ class BSAIH3FilmFactory:
                 _new_clip["prompt"] = _last.get("prompt", "")
                 _new_clip["validated"] = False
                 _new_clip["seed_mode"] = "randomize"
+                if _rp_mode == "直播带货（全自动）":
+                    # v14.202: 本档 clip2+ 一律无 motion context, 自动追加的
+                    # 延续段同样继承该规则(否则会从上一段尾部渐变出首帧拖影)。
+                    _new_clip["context_enabled"] = False
                 clips.append(_new_clip)
                 # v14.189 (fix): 自动追加延续 CLIP 后必须同步扩展 clip_ref_plans ——
                 # clip_ref_plans 在函数前部按原始 clips 构建(len=N), 此处 append 使
@@ -7687,6 +8044,19 @@ class BSAIH3FilmFactory:
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
         _os_pass_notice_done = False  # v14.185: 一镜到底采样档提示每次执行只打印一次
+        # v14.193: 视觉锚点自动记录 —— 渲染前按故事顺序预提取每个分镜的
+        # 全部可见视觉元素状态（来源 = 分镜正文, 与渲染提示词同源: 外部 prompt
+        # 覆盖优先）。覆盖角色形象/外观/服装/服饰/发型/鞋帽/场景/道具/布景等
+        # 所有可见元素。不读取任何手动输入（visual_anchor_notes 已移除），
+        # 也不新增输入端口。
+        _va_auto_states = []
+        for _va_ci, _va_cfg in enumerate(clips):
+            _va_src = str(_va_cfg.get("prompt") or "")
+            if clip_ref_plans is not None and _va_ci < len(clip_ref_plans):
+                _va_ov = (clip_ref_plans[_va_ci] or {}).get("clip_prompt")
+                if _va_ov:
+                    _va_src = str(_va_ov)
+            _va_auto_states.append(_extract_visual_state(_va_src))
         for i, cfg in enumerate(clips[:loop_end]):
             # v2.68 fix: 渲染本 CLIP 之前先消费已完成的 async encode（预览实时推送）。
             _flush_pending_enc(paused_break)
@@ -7874,6 +8244,14 @@ class BSAIH3FilmFactory:
                 gp = _strip_archive_sections(str(_gp_for_cond)).strip()
                 if gp:
                     effective_prompt = gp + "\n" + effective_prompt
+            # v14.193: 视觉锚点自动注入（参考 B站短剧导演台 V9 BV1m2HK6DEPX）。
+            # 在 effective_prompt 组装早期注入状态快照（global prompt 之后、本段内容
+            # 与 lip-audio/一镜到底指令之前），让"延续已建立状态"指令优先被模型读到。
+            # 快照内容 = 本分镜前全部已自动记录的全部可见视觉元素状态（自旧到新, 有界）。
+            _va_snap = _build_visual_anchor_snapshot(_va_auto_states, i)
+            if _va_snap:
+                effective_prompt = str(effective_prompt) + _va_snap
+                print(f"[H3 Extender] v14.193 视觉锚点 clip[{i + 1}]: 已注入状态快照（自动记录·全部可见元素·延续约束）")
             # v2.120 lip-audio: 强化音频驱动提示词。
             # 参考B站最佳实践: 提示词必须明确告诉模型"人物在跟着音频唱",
             # 否则模型可能 lip-sync to nothing 或乱张嘴。
@@ -8136,7 +8514,10 @@ class BSAIH3FilmFactory:
             # 开头裁掉 → 段与段之间累积出空白帧)。ctx_on 且 motion.apply 已执行
             # 时保留其返回的 trim(上下文帧数), 由 join 裁掉上下文头, 与音频
             # overlap 跳过互补对齐。
-            if lip_audio is not None and not _applied_ctx:
+            # v14.200: 不再限定 lip_audio —— ref_audio(参考音频版)下 clip 关闭
+            # context_enabled 时同样必须 trim=0, 否则 join 回退 22 帧, 硬切段
+            # 开头 0.9s 会被静默裁掉。
+            if not _applied_ctx:
                 trim_frames = 0
 
             _send_extender_progress(
@@ -8887,7 +9268,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.171 backend loaded (Omni 单采: render_pipeline/speed_preset 13档联动 + guidance 1.0 + 一采分辨率钳制≤960x544 健康区(修复1376x768直出OOM) + upscale_final超分兜底; 双采: Sol-Attn token上限门350k + 自动分块n6 + 二采 delegate KJNodes 重建; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.202 backend loaded (直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",

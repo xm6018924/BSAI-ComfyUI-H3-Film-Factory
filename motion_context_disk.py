@@ -1707,6 +1707,174 @@ def _finish_process(proc, log_f, log_path, label):
         raise RuntimeError(f"{label} failed with code {code}.\n{tail}")
 
 
+def _audio_dirty_score(x_mix, sr):
+    """v14.195: 病态音频门控 —— 仅在"恒定低频轰鸣"信号上启用清洗。
+
+    渲染侧修复(v14.195 extender 音频质量保护)后, 音频要么是锁定的参考原声
+    (干净), 要么是 ≥12 步生成的达标配音 —— 两者都不该被后处理改变音色/响度
+    (完美标准: 参考原声 100-200Hz 仅 3.6%、200-400Hz 人声占 73%、有停顿静音)。
+    旧渲染的低步数伪影特征: 100-250Hz 能量 >25% 且 200ms 窗 min RMS>0.02
+    (全程无静音帧)。两者同时满足才视为病态(重低音音乐/男低音通常有动态与
+    停顿, min RMS 低, 不会误判)。
+    """
+    if x_mix is None or int(x_mix.shape[0]) < 4096:
+        return False
+    try:
+        seg = x_mix[: int(sr * 10)] if x_mix.shape[0] > int(sr * 10) else x_mix
+        sp = np.abs(np.fft.rfft(seg * np.hanning(len(seg))))
+        fr = np.fft.rfftfreq(len(seg), 1.0 / float(sr))
+        tot = np.sum(sp ** 2) + 1e-30
+        m = (fr >= 100.0) & (fr < 250.0)
+        lf_ratio = float(np.sum(sp[m] ** 2) / tot)
+        fl = int(sr * 0.2)
+        nf = int(x_mix.shape[0]) // fl
+        frm = np.sqrt(np.mean(x_mix[: nf * fl].reshape(nf, fl) ** 2, axis=1))
+        return bool(lf_ratio > 0.25 and float(frm.min()) > 0.02)
+    except Exception:
+        return False
+
+
+def _clean_audio_waveform(wave, sr, enabled=True):
+    """v14.194: H3 audio latent 解码后的波形后处理 —— 消除恒定低频轰鸣/底噪/失真。
+
+    诊断依据(h3_clip_250_1_1792842036, 一采8步+二采音频重绘0.7): 解码音频带
+    恒定低频噪声底, ~95-200Hz 占全频能量~60%、50/100/150Hz 呈密集谐波串、全程
+    无静音帧, 低频把人声盖在下面; AAC 编码/段间拼接/削波均排除, 噪声源头在
+    模型侧 audio latent 解码输出, 旧管线无任何后处理滤波。
+
+    处理(纯 numpy, CPU 秒级, <1s/15s音频):
+      ① 去 DC(全局均值, 无瞬态);
+      ② 低频轰鸣削减: STFT 域平滑增益曲线(≤50Hz -22dB → 150Hz -11.5dB →
+         200Hz -9dB → 350Hz 0dB, 人声/音乐主体不动), 实测该信号各频点幅度
+         无静音间隙(噪声估计≈中位数一半), 谱减/逐 bin min 估计会吞人声,
+         故用确定性低频削减;
+      ③ 语音带(300-3000Hz)噪声门: 包络 p3 估底×2.2 阈值, 停顿帧衰减 0.15,
+         增益 ~0.13s 时间平滑防泵浦/爆音, 恢复停顿处静音;
+      ④ 输出: 目标 RMS≈0.12(-18.4dBFS) 归一 + 峰值≤0.95 硬限。
+    """
+    if not enabled or wave is None or int(wave.shape[-1]) < 256:
+        return wave
+    try:
+        _device = wave.device
+        _dtype = wave.dtype
+        x = wave.detach().float().cpu().numpy()
+        orig_shape = x.shape
+        if x.ndim == 1:
+            x = x.reshape(1, 1, -1)
+        elif x.ndim == 2:
+            x = x.reshape(1, x.shape[0], x.shape[1])
+        elif x.ndim != 3:
+            return wave
+        # v14.195: 病态门控 —— 渲染侧修复后音频已干净(参考原声/≥12步配音),
+        # 非病态信号原样返回(不动音色/响度, 即"以完美音频为标准");
+        # 仅恒定低频轰鸣(旧低步数渲染伪影)才进清洗兜底。
+        if not _audio_dirty_score(np.mean(x, axis=(0, 1)), int(sr)):
+            return wave
+        B, C, _T = x.shape
+        out = np.empty_like(x)
+        for _b in range(B):
+            for _c in range(C):
+                out[_b, _c] = _clean_audio_channel(x[_b, _c], int(sr))
+        return torch.from_numpy(out).to(device=_device, dtype=_dtype).reshape(orig_shape)
+    except Exception:
+        # 后处理失败绝不影响成片: 回退原始波形。
+        return wave
+
+
+def _lf_cut_gain(freqs, sr):
+    """低频轰鸣削减曲线(纯增益, 无硬零 → 无时域瞬态):
+       ≤50Hz  -22dB;  100Hz ≈ -15dB;  150Hz ≈ -11.5dB;  200Hz ≈ -9dB;
+       250Hz ≈ -3.5dB;  300Hz ≈ -1dB;  350Hz 以上 ≈ 0dB(人声/音乐主体不动)。
+       log-f 分段线性。
+    """
+    f = np.maximum(np.asarray(freqs, dtype=np.float64), 1e-3)
+    g = np.ones_like(f)
+    lo1, hi1 = 50.0, 200.0
+    lo2, hi2 = 200.0, 350.0
+    g_lo = 0.08
+    g_mid = 0.35
+    t1 = np.clip((np.log(f) - np.log(lo1)) / (np.log(hi1) - np.log(lo1)), 0.0, 1.0)
+    t2 = np.clip((np.log(f) - np.log(lo2)) / (np.log(hi2) - np.log(lo2)), 0.0, 1.0)
+    g = np.where(f < hi1, g_lo + (g_mid - g_lo) * t1, g_mid + (1.0 - g_mid) * t2)
+    g[f <= lo1] = g_lo
+    g[f >= hi2] = 1.0
+    return g.astype(np.float32)
+
+
+def _gate_gain(mag, freqs, sr, hop):
+    """语音带(300-3000Hz)噪声门: 恒定低频噪声让全程无静音, 语音带包络在
+    停顿处有真实低谷(声道随内容移动)。以包络 p3 估噪声底, 阈值=底×2.2,
+    停顿帧衰减到 0.15, 增益做 ~0.13s 时间平滑防泵浦/爆音。"""
+    band = (freqs >= 300.0) & (freqs <= 3000.0)
+    if not np.any(band):
+        return None
+    env = np.sqrt(np.mean(mag[:, band] ** 2, axis=1))
+    n = int(env.shape[0])
+    fps_f = float(sr) / float(hop)
+    w_sm = max(3, min(n, int(round(0.16 * fps_f))))
+    # 包络平滑(移动平均)
+    c = np.cumsum(np.concatenate([[0.0], env]))
+    sm = np.empty_like(env)
+    h = w_sm // 2
+    for _i in range(n):
+        lo = max(0, _i - h); hi = min(n, _i + h + 1)
+        sm[_i] = (c[hi] - c[lo]) / float(hi - lo)
+    thr = max(0.0025, float(np.percentile(sm, 3)) * 2.2)
+    g = np.where(sm < thr, 0.15, 1.0).astype(np.float32)
+    # 增益时间平滑(~0.13s)防帧间跳变
+    w_g = max(3, min(n, int(round(0.13 * fps_f))))
+    cg = np.cumsum(np.concatenate([[0.0], g.astype(np.float64)]))
+    hg = w_g // 2
+    gs = np.empty_like(g)
+    for _i in range(n):
+        lo = max(0, _i - hg); hi = min(n, _i + hg + 1)
+        gs[_i] = np.float32((cg[hi] - cg[lo]) / float(hi - lo))
+    return gs
+
+
+def _clean_audio_channel(x, sr):
+    n_fft = 2048 if int(sr) >= 32000 else 1024
+    hop = n_fft // 2
+    if x.shape[0] < n_fft:
+        x = np.pad(x, (0, n_fft - x.shape[0]))
+    x = x - float(np.mean(x))  # ① 去 DC(全局均值, 无瞬态)
+    win = np.hanning(n_fft).astype(np.float32)
+    n_frames = 1 + (x.shape[0] - n_fft) // hop
+    frames = np.lib.stride_tricks.sliding_window_view(x, n_fft)[::hop][:n_frames]
+    S = np.fft.rfft(frames * win, axis=1)
+    mag = np.abs(S)
+    freqs = np.fft.rfftfreq(n_fft, 1.0 / float(sr))
+
+    # ② 低频轰鸣削减 + ③ 语音带噪声门(恢复停顿处静音)。
+    #    谱减/min-stat 在此信号上不可行(实测各频点幅度无静音间隙,
+    #    噪声估计≈中位数一半, 逐 bin 减法必然吞人声)。
+    g = _lf_cut_gain(freqs, sr)
+    gg = _gate_gain(mag, freqs, sr, hop)
+    if gg is not None:
+        g = g * gg[:, None]
+    S_out = S * g
+
+    # ISTFT (50% overlap-add, win² 归一)。
+    out = np.zeros(x.shape[0], dtype=np.float32)
+    wsum = np.zeros(x.shape[0], dtype=np.float32)
+    for _i in range(n_frames):
+        seg = np.fft.irfft(S_out[_i], n=n_fft)
+        _s = _i * hop
+        out[_s:_s + n_fft] += seg * win
+        wsum[_s:_s + n_fft] += win * win
+    wsum[wsum < 1e-8] = 1.0
+    out = out / wsum
+
+    # ④ 归一限幅: 目标 RMS≈0.12(-18.4dBFS), 峰值≤0.95。
+    rms = float(np.sqrt(np.mean(out * out)))
+    if rms > 1e-6:
+        out = out * (0.12 / rms)
+    peak = float(np.max(np.abs(out)))
+    if peak > 0.95:
+        out = out * (0.95 / peak)
+    return out
+
+
 def _decode_audio_latent(audio_vae, latent, frames, fps):
     waveform = audio_vae.decode(latent).movedim(-1, 1)
     std = torch.std(waveform, dim=[1, 2], keepdim=True) * 5.0
@@ -1719,6 +1887,10 @@ def _decode_audio_latent(audio_vae, latent, frames, fps):
             getattr(audio_vae, "audio_sample_rate", 32000),
         )
     )
+    # v14.194: 解码后处理——去恒定低频轰鸣/底噪/失真(纯 numpy, 秒级)。
+    # 环境变量 BSAI_H3_AUDIO_CLEAN=0 可关闭以便 A/B 对比。
+    if os.environ.get("BSAI_H3_AUDIO_CLEAN", "1") != "0":
+        waveform = _clean_audio_waveform(waveform, sr)
     return _audio_exact_frames(
         {"waveform": waveform, "sample_rate": sr}, int(frames), float(fps)
     )
@@ -2559,7 +2731,7 @@ def _rescale_segment_blob(owner_id, clip_index, target_w, target_h, fps, ffmpeg=
 
         curr["latent_end"] = latent_end
         curr["decoded_mp4_blob"] = render_spec
-        curr["decoded_mp4_version"] = 4
+        curr["decoded_mp4_version"] = 5  # v14.194: v5 = 含音频后处理(去低频轰鸣/底噪); v4 blob 不再复用
         curr["decoded_mp4_width"] = target_w
         curr["decoded_mp4_height"] = target_h
         segments[i] = curr
@@ -2642,7 +2814,7 @@ def _decode_single_clip_to_blob(
     # v14.141: decoded_mp4_version 升到 3 —— v2 blob 的编码 GOP=250(10.4s) 导致
     # 预览/成片尾部无 IDR 关键帧而雪花；升版后旧 blob 全部失效、按 GOP=48(2s)
     # 重新编码，预览/渐进全片/最终成片尾部均可独立解码。
-    if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 4:
+    if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 5:
         _cur_w = int(curr.get("decoded_mp4_width", 0) or 0)
         _cur_h = int(curr.get("decoded_mp4_height", 0) or 0)
         if _tgt_w <= 0 or _tgt_h <= 0 or (_cur_w == _tgt_w and _cur_h == _tgt_h):
@@ -2981,7 +3153,7 @@ def _decode_single_clip_to_blob(
         # Update manifest
         curr["latent_end"] = latent_end
         curr["decoded_mp4_blob"] = render_spec
-        curr["decoded_mp4_version"] = 4  # v14.190: v4 = 含色度去斑(去彩点)；v3 blob 不再复用，自动重编码
+        curr["decoded_mp4_version"] = 5  # v14.194: v5 = 含音频后处理(去低频轰鸣/底噪)；v4 blob 不再复用，自动重编码
         curr["decoded_mp4_width"] = int(video_u8.shape[2])
         curr["decoded_mp4_height"] = int(video_u8.shape[1])
         curr["decoded_mp4_has_audio"] = has_audio

@@ -6664,7 +6664,13 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // 速度档仅留基础 7 档(custom/极速/均衡/精细/VDN×3); FastH3-Trim /
         // FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / 4K直出 秘制酱料 / Omni 8步单采 在此选择。
         // 选 Omni 时二采 15 行自动隐藏（syncOmniRefineRows），切回双采恢复。
-        { key: "render_pipeline", zh: "渲染管道", en: "Pipeline", desc: "渲染管道（模型配方档统一在此选择，v14.184）：Sol-H3 Self-Lift双采(默认) → FastH3-Trim(8+4) → FastH3-4步VSA(4+2) → Turbo-v4(6+4, shift12/3) → DMAD-4步(4+2, lcm) → 武戏组合拳(8+4, euler) → 4K直出 秘制酱料(自提升6+3, 潜空间x2.0→DLSS5像素超分4K) → FastH3 Omni 8步单采(跳过二采, 需Loader换Omni模型+VSA) → 双采2K(8+4, latent不放大+HyperVAE 2x解码像素2x直出2K, 音频重绘继承w33 0.7)", cycle: ["Sol-H3 Self-Lift 双采 (默认)", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#facc15", border: "#a16207" }, { color: "#22d3ee", border: "#0891b2" }, { color: "#a78bfa", border: "#7c3aed" }] },
+        { key: "render_pipeline", zh: "渲染管道", en: "Pipeline", desc: "渲染管道（模型配方档统一在此选择，v14.184）：Sol-H3 Self-Lift双采(默认) → FastH3-Trim(8+4) → FastH3-4步VSA(4+2) → Turbo-v4(6+4, shift12/3) → DMAD-4步(4+2, lcm) → 武戏组合拳(8+4, euler) → 4K直出 秘制酱料(自提升6+3, 潜空间x2.0→DLSS5像素超分4K) → FastH3 Omni 8步单采(跳过二采, 需Loader换Omni模型+VSA) → 双采2K(8+4, latent不放大+HyperVAE 2x解码像素2x直出2K, 音频重绘继承w33 0.7) → 直播带货（全自动）(12+4 一键档: audio_context_length=0 + clip2 起关上下文, 手动参数全部无效)", cycle: ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货（全自动）"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#86efac", border: "#16a34a" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#facc15", border: "#a16207" }, { color: "#22d3ee", border: "#0891b2" }, { color: "#a78bfa", border: "#7c3aed" }, { color: "#5eead4", border: "#0d9488" }, { color: "#4ade80", border: "#15803d" }] },
+        // v14.193: 视觉锚点已改为全自动（自动记录+自动注入）——
+        // 不再有手动输入 widget（visual_anchor_notes 已移除），也不新增端口。
+        // 每个分镜渲染时自动把"此前分镜正文的全部可见视觉元素状态"
+        // （角色形象/外观/服装/服饰/发型/鞋帽/场景/道具/布景等，全部已建立
+        // 状态自旧到新，总长有界）注入为『[视觉锚点延续]』快照，
+        // 强制模型延续不漂移；分镜正文声明的新状态自该分镜起成为后续锚点。
         // v14.127: restore_cache 已从 QUICK_DEFS 移除——后端 INPUT_TYPES 同步移除
         // 该参数（1.55 toggle 行无法前端隐藏，根治：参数不存在则行不存在）。
         // 恢复缓存功能由节点底部"恢复缓存"按钮（直调后端 /h3_extender/restore_cache
@@ -6823,6 +6829,69 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     quickTitle.title = "One-click quick toggles: click to toggle (boolean); enum buttons open a dropdown to pick a tier directly. Parameter order is unchanged — zero impact on old workflows.\n\nColor = function category (purple=quality / cyan=acceleration / orange=upscale / pink=semantic / blue=workflow).\nMulti-tier buttons (e.g. output none/per_clip/merged/both): same-hue gradient + tier progress bar at the bottom, brighter = further tier; first tier is dim/off. Click the button to open a dropdown and pick any tier.\nSpeed tiers (8): gray=custom manual / cyan=FastH3 standard (Turbo/Balanced/Fine) / purple=VDN / orange=FastH3-Trim (8 steps + 4 refine); within a chain, brighter = further tier.";
     quickTitle.style.cssText = "font-size:9px;color:#8ab4f8;white-space:nowrap;margin-right:2px;font-weight:bold;text-shadow:0 0 6px rgba(138,180,248,.45);";
     quickBar.append(quickTitle);
+    // ── v14.202: 直播带货（全自动）一键档 ──────────────────────────────
+    // 一次点击把整套已验证配方写进 widget（与后端同名渲染管道档严格一致），
+    // 并把 clip2+ 的 Context Reference 关闭。后端同名档会再次强制覆盖全部
+    // 参数，所以用户在参数区手改任何值都不影响实际渲染。
+    const LIVE_SELL_VALUES = [
+        ["render_pipeline", "直播带货（全自动）"],
+        ["steps", 12], ["sampler_name", "euler"], ["scheduler", "simple"], ["denoise", 1],
+        ["context_length", "39"], ["audio_context_length", 0],
+        ["refine_enable", true], ["refine_steps", 4], ["refine_denoise", 0.55],
+        ["refine_upscale_factor", 2], ["refine_upscaler_model", "minimax_h3_latent_upscaler_3d_fp32.pth"],
+        ["refine_lipsync_mode", "音频参与重绘0.7"],
+        ["shift_video", 12], ["shift_audio", 3], ["dual_track_shift", true],
+        ["tiled_refine", false], ["tile_count", 4], ["tile_overlap", 128],
+        ["selflift_tst_enable", true], ["selflift_tst_tau", 0.2],
+        ["upscale_per_clip", true], ["upscale_final", true], ["upscale_mode", "质量优先"],
+        ["upscale_engine", "dlss5"], ["upscale_factor", 2],
+        ["output_mode", "both"], ["output_image_audio", true],
+        ["one_shot_mode", "off (分镜模式)"],
+    ];
+    const liveSellBtn = document.createElement("button");
+    liveSellBtn.style.cssText = "font-size:9px;line-height:1.15;padding:3px 9px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;background:rgba(21,128,61,.28);border:1px solid #16a34a;border-left:3px solid #4ade80;transition:background .12s,box-shadow .12s;";
+    const lsLab = document.createElement("span");
+    lsLab.textContent = "直播带货";
+    lsLab.style.cssText = "font-weight:700;color:#86efac;white-space:nowrap;";
+    const lsSub = document.createElement("span");
+    lsSub.textContent = "LiveSell 全自动";
+    lsSub.style.cssText = "font-size:7px;color:#86efac;opacity:.65;";
+    liveSellBtn.append(lsLab, lsSub);
+    liveSellBtn.title = "【一键】直播带货（全自动）档：12+4 步 / denoise 0.55 / latent x2.0 / 音频重绘 0.7 / shift 12-3 / TST 0.2 / 分块 4x128 / audio_context_length=0 / clip2 起关闭上下文。\n后端同名渲染管道档会再次强制覆盖全部参数，手动改参数无效。";
+    const refreshLiveSell = () => {
+        const rpw = node.widgets.find((x) => x && x.name === "render_pipeline");
+        const on = !!(rpw && rpw.value === "直播带货（全自动）");
+        liveSellBtn.style.background = on ? "rgba(21,128,61,.62)" : "rgba(21,128,61,.28)";
+        liveSellBtn.style.boxShadow = on ? "0 0 0 1px #16a34a, 0 0 9px rgba(74,222,128,.55)" : "none";
+        lsSub.textContent = on ? "已启用" : "LiveSell 全自动";
+    };
+    liveSellBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        for (const [k, v] of LIVE_SELL_VALUES) {
+            const w = node.widgets.find((x) => x && x.name === k);
+            if (!w) continue;
+            w.value = v;
+            if (typeof w.callback === "function") { try { w.callback(v); } catch (e) {} }
+        }
+        runtime.state.clips.forEach((clip, i) => {
+            const want = (i === 0);
+            clip.context_enabled = want;
+            clip.validated = false;
+            const cb = document.getElementById(`ctx_${clip.id}`);
+            if (cb) cb.checked = want;
+            const tg = document.getElementById(`rfe_toggle_${clip.id}`);
+            if (tg) tg.style.opacity = want ? "1" : "0.5";
+            const ct = document.getElementById(`rfe_content_${clip.id}`);
+            if (ct) { ct.style.opacity = want ? "1" : "0.4"; ct.style.pointerEvents = want ? "" : "none"; }
+        });
+        refreshLiveSell();
+        try { invalidateFrom(runtime.state, 0); } catch (e) {}
+        try { updateHidden(node, runtime); } catch (e) {}
+        try { render(node, runtime); } catch (e) {}
+        try { node.setDirtyCanvas(true, true); } catch (e) {}
+    });
+    refreshLiveSell();
+    quickBar.append(liveSellBtn);
     for (const def of QUICK_DEFS) {
         const w = node.widgets.find((x) => x.name === def.key);
         const C = QUICK_CATEGORIES[QUICK_CAT[def.key]] || QUICK_CATEGORIES.flow;
@@ -7020,6 +7089,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             const _oc = rpw.callback;
             rpw.callback = function () {
                 try { syncOmniRefineRows(node); } catch (e) {}
+                try { refreshLiveSell(); } catch (e) {}
                 if (typeof _oc === "function") _oc.apply(this, arguments);
             };
         }
@@ -7591,6 +7661,11 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             // v14.159: 66 键 = 现役 + one_shot_clip_duration(64) + timeline(65)。
             // v14.168: 67 键 = 现役 + render_pipeline(65) + timeline(66)。
             // v14.185: 68 键 = 现役 + render_pipeline(65) + one_shot_sampling(66) + timeline(67)。
+            // v14.186: 69 键 = 现役 + render_pipeline(65) + one_shot_sampling(66) + visual_anchor_notes(67) + timeline(68)。
+            // v14.192: 现役 68 键 = render_pipeline(65) + one_shot_sampling(66) + timeline(67)
+            //          （visual_anchor_notes 手动输入已移除, 现役布局与旧 CUR68 相同,
+            //          n===68 即 CUR68; n===69 仍为旧 CUR69 文件, 映射时丢弃 w[67]）。
+            if (n === 69) return "CUR69";
             if (n === 68) return "CUR68";
             if (n === 67) return "CUR67";
             if (n === 66) return "CUR66";
@@ -7654,15 +7729,18 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         }
         function mapTo(w) {
             const L = detect(w);
-            // v14.185 修正: 统一输出 68 位(对齐 KEYS): 0..61 后端 widget,
-            // 62 = refine_mem_mode, 63 = one_shot_mode, 64 = one_shot_clip_duration,
-            // 65 = render_pipeline, 66 = one_shot_sampling, 67 = h3_extender_timeline(dom, applyToNode 跳过)。
+            // v14.192 修正: 统一输出 68 位(对齐 KEYS, visual_anchor_notes 已移除):
+            // 0..61 后端 widget, 62 = refine_mem_mode, 63 = one_shot_mode,
+            // 64 = one_shot_clip_duration, 65 = render_pipeline, 66 = one_shot_sampling,
+            // 67 = h3_extender_timeline(dom, applyToNode 跳过)。
             const out = new Array(68).fill(null);
-            if (L === "CUR68" || L === "CUR67" || L === "CUR66" || L === "CUR65" || L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
+            if (L === "CUR69" || L === "CUR68" || L === "CUR67" || L === "CUR66" || L === "CUR65" || L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
                 // 新纪元(48..52 已有 P0/P2): 0..61 与 KEYS 完全同键, 直接照抄。
                 for (let i = 0; i < 62 && i < w.length; i++) out[i] = w[i];
-                // CUR68: w[62..66] = rmm/one_shot/clip_dur/render_pipeline/one_shot_sampling 用户值; timeline 丢弃。
-                if (L === "CUR68" && w.length > 66) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; out[66] = w[66]; }
+                // CUR69(旧版含 visual_anchor_notes): w[62..66] 用户值保留;
+                // visual_anchor_notes(67)+timeline(68) 丢弃(锚点已自动记录, 旧手写值不再使用)。
+                // CUR68(现役, 与 v14.192 布局相同): w[62..66] 用户值; timeline(67) 丢弃。
+                if ((L === "CUR69" || L === "CUR68") && w.length > 66) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; out[66] = w[66]; }
                 // CUR67: w[62..65] = rmm/one_shot/clip_dur/render_pipeline 用户值; one_shot_sampling 缺 → DEFAULTS; timeline 丢弃。
                 else if (L === "CUR67" && w.length > 65) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; }
                 // CUR66: w[62]=rmm 用户值, w[63]=one_shot 用户值, w[64]=clip_dur 用户值; timeline 丢弃。

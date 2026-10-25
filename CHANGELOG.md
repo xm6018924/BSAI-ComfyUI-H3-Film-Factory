@@ -14,6 +14,131 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.202 (2026-10-25) — render_pipeline 新增「直播带货（全自动）」第 12 档 + 快捷条一键按钮；档内除分辨率外全部参数强制接管 / New all-in-one Live-Sell pipeline tier + one-click quick button; every parameter except resolution is forced
+
+**用户诉求：把直播带货专用模式做成一键档——选中后所有参数按固定配方，手动设置全部无效。** **/ User asked for a one-click live-commerce tier that ignores manual settings.**
+
+- **`extender.py` render_pipeline：** 追加第 12 档 `直播带货（全自动）`。配方 = v3 参考音频版工作流（v14.200 修复后）已验证参数：一采 12 步 + 二采 4 步（denoise 0.55）+ 3D latent upscaler x2.0 + 音频重绘 0.7（4 步时由 v14.196 自动改为锁定一采 12 步音频）+ shift 12/3 + TST tau 0.2 + 分块二采 4x128 + `audio_context_length=0` + euler/simple + denoise 1.0 + 输出 both / 预览开 / 一镜到底关。命中该档时 `speed_preset` 置 custom，手动改这些参数不会生效。** / New tier forces the verified 12+4 recipe; manual values are overwritten.**
+- **分镜上下文强制：** 该档下 `clip1` 上下文保持开启，`clip2` 起一律 `context_enabled=False`（覆盖分镜脚本与 UI 勾选）；外部音频超长自动追加的延续 CLIP 也继承关闭状态。这一条直接对应 clip2 首帧拖影/马赛克的根因。** / Clip 2+ motion context is forced off, including auto-appended continuation clips.**
+- **分辨率不锁：** `width/height/resolution_mode` 沿用工作流。锁 1920x1088 会把一采从 960x544 抬到 1920x1088（耗时约 4x），与"15 秒一小时内"的验收冲突。** / Resolution is intentionally left to the workflow; locking it would quadruple first-pass cost.**
+- **`web/extender.js`：** 快捷条最左侧新增绿色「直播带货 / LiveSell 全自动」按钮：一键写入整套配方值 + 同步关闭 clip2+ 的 Context Reference 复选框 + 清缓存重绘；参数区下拉切到该档时按钮同步点亮。`render_pipeline` 快捷下拉菜单补全此前缺失的「直播配音高清」「QAD-v2-8步」并加入新档（cycle 12 项）。** / Added the one-click button and completed the 12-item pipeline dropdown.**
+- **验证：** `extender.py` py_compile PASS；`extender.js` `node --check` PASS。** / Verified: py_compile + node --check pass.**
+
+---
+
+### v14.201 (2026-10-25) — QAD-v2-8步 新档（render_pipeline 第 11 档 + speed_preset 兼容）；VAERouter 加 NVFP4 Decoder 推荐映射 / FastH3-QAD-v2 8-step preset added; VAERouter NVFP4 decoder mapping documented
+
+**依据一手视频（BV16onF6dEWf，UP「AI绘画KK」2026-10-20）：海螺 AI Lab 发布 FastH3-QAD-v2——量化感知蒸馏整套 NVFP4（BF16 118GB→30GB，质量不降反升），RTX 5090 5s 480P 全流程 12.6~14.8s，配套两款新 NVFP4 VAE 解码器（36层 1.29GB/33.63dB 高质量、8层 0.31GB 快 15 倍极速）。官方 V2 NVFP4 schedule 已确认：8 forwards、video shift 10 / audio shift 3。** **/ Based on BV16onF6dEWf: FastH3-QAD-v2 QAT 4-bit stack (118→30GB), RTX 5090 5s 480P 12.6-14.8s, new NVFP4 decoders (36L 1.29GB/33.63dB, 8L 0.31GB 15x faster). Official V2 schedule: 8 steps, shift 10/3.**
+
+- **H3-Film-Factory `extender.py`：** render_pipeline 选项列表追加 `QAD-v2-8步`（第 11 档），tooltip ⑪说明（shift 10/3 为 QAD-v2 专属，区别于 Omni 12/3）；分支逻辑 `elif _rp_mode == "QAD-v2-8步"` → 8 步单采、denoise 1.0、refine_enable=False、shift_video=10.0/shift_audio=3.0、复用 Omni 一采钳制（≤960x544 健康区）+ upscale_final 超分兜底；`speed_preset == "QAD-v2-8步"` 兼容分支联动同一管道；启动横幅升 v14.201。需 Loader 换 QAD-v2 整套 NVFP4 模型 + BlockSparseAttention（VSA keep_percent=10），VAE 可选 36/8 层新解码器。** / Added QAD-v2-8步 to render_pipeline and speed_preset compat; single-pass 8-step distillation, shift 10/3, reuses Omni clamp + upscale fallback. Requires QAD-v2 NVFP4 stack in Loader.**
+- **BSAI-ComfyUI-VAERouter：** README 新增「NVFP4 Decoder 推荐映射」双语章节（36层 1.29GB 高质量档 / 8层 0.31GB 极速档 / LightVAE-Lite 旧档兜底，配 QAD-v2-8步 食用最佳）；nodes.py docstring 同步；未动 INPUT_TYPES/widget 结构（保护旧工作流对齐）。** / VAERouter README + docstring document the 36L/8L NVFP4 decoder mapping; node structure untouched.**
+- **示例工作流：** `BSAI_H3_Film_Factory电影工厂-QAD-v2-8步-P0双轨迹-v14.201.json`（基于直播带货 12+4 最新底版生成：render_pipeline=QAD-v2-8步、一采 steps=8、shift 10/3、单采无缝；68 widgets 结构对齐），已复制到 `user\default\workflows` 与插件 `example_workflows\` 两处。** / Example workflow generated from the latest 12+4 template (render_pipeline=QAD-v2-8步, steps 8, shift 10/3), copied to both workflow dirs.**
+- **验证：** extender.py / VAERouter nodes.py py_compile PASS；ComfyUI `--quick-test-for-ci`（8193/8194）exit 0，`v14.201 backend loaded` 正常打印；工作流 JSON 回读校验通过。**QAD-v2 模型文件下载链接公开通道暂不可得（硬阻塞），等官方放链接后按 large-file-download 拉取。** **/ Verified: py_compile PASS, quick-test exit 0, workflow JSON re-read OK. QAD-v2 weights link still unavailable publicly (hard blocker).**
+
+---
+
+### v14.200 (2026-10-25) — 分块二采改为「取第 1 块音频」不再求平均；硬切段 trim=0；clip2 首帧拖影与台词串段归因 / tiled refine keeps tile-1 audio instead of averaging; hard-cut clips trim 0; clip2 head ghost and cross-clip speech attributed
+
+**实测 clip2（`_clippv_250_1_947c29a0.mp4`，1920×1088/24fps）：前 12 帧 Laplacian 方差 84~95，第 11 帧起骤降 17~20；blockiness 1.13→1.33；首帧视觉=主播全景与蜡烛特写双曝。同批 clip1（无上下文）全程 35~42，无异常。** **/ Measured clip2: first 12 frames Laplacian 84-95, then 17-20; blockiness 1.13→1.33; frame 0 is a double exposure of the host wide shot and the candle close-up. clip1 (no context) stays 35-42 with no anomaly.**
+
+- **首帧拖影根因：** clip2 prompt 是硬切（0-3s 蜡烛特写），但 `context_enabled=True` 给它注入了上一段尾部 39 帧 motion context。模型被要求"续接上一段"，只能在段头把主播全景渐变成蜡烛特写；`trim_frames=39` 只裁掉 1.625s，而这次渐变约 2s，剩下的过渡尾巴正好落在输出头 12 帧 → 重影/马赛克。与 v14.188 的 noise_mask 头部锁定无关（该锁定区全部落在被裁掉的 39 帧内）。 **/ Root cause: clip2 is hard cut but context_enabled injects 39 context frames; the model morphs the host shot into the candle shot over ~2s, and trim 39 (1.625s) leaves the morph tail in the first 12 output frames.**
+- **trim=0 修正（`_sample_h3` 采样循环）：** 原来只在 `lip_audio` 模式下把"未应用 motion context"的段强制 `trim_frames=0`；ref_audio（参考音频版）关闭 context 时 trim 保持 `None`，join 会回退默认 22 帧（0.9s）把新段开头静默裁掉。改为 `if not _applied_ctx: trim_frames = 0`。 **/ Fix: trim is forced to 0 for every segment without motion context, not only lip_audio ones; otherwise join silently trims 22 frames.**
+- **配音串段根因：** `audio_context_length=24` 把上一段生成的语音尾部当音频上下文注入，clip2 prompt 又写着"台词0:15.0起"，模型顺理成章继续/混入上一段台词 → 用户听到的"乱配/自己加配音稿"。官方《配音修复》示例工作流该项就是 `0`。 **/ Root cause: audio_context_length 24 injects the previous clip's generated speech and the prompt says "台词0:15.0起", so the model continues or blends the previous lines; the official voice-fix example uses 0.**
+- **分块二采音频（取代 v14.199 的锁定方案）：** 音频 latent 无空间维度，每个空间块都给出完整音频预测，但相位互不一致；求平均即互相抵消（低频轰鸣/发闷/削波）。现在直接取第 1 块预测（`bsai_h3_spatial_tiles.py`），v14.199 的"分块即锁音频"随之删除 —— 音频可以照常参与二采重绘，不再被平均毁掉。 **/ Audio latents have no spatial extent; averaging per-tile predictions cancels their phases. Keep tile-1 audio instead, and drop v14.199's forced audio lock.**
+- **验证：** py_compile PASS；待用户重跑 clip2 验收（日志应出现 `v14.200`，且不再有 `v14.199 分块二采音频锁定`）。 **/ Verified by py_compile; awaiting a rerun of clip2.**
+
+---
+
+### v14.199 (2026-10-24) — 根因：分块二采把 4 块独立预测的音频 latent 求平均 → 低频轰鸣/发闷/削波（12 步也救不回）/ root cause: tiled refine averages 4 independently predicted audio latents → rumble, muffled mids, clipping (12 steps cannot fix it)
+
+**实测成片（15.07s）vs 用户提供的参考音频（34.57s）：<200Hz 21.8% vs 5.4%；400-1000Hz 37.9% vs 16.9%；峰值 +2.2dBFS（削波 0.13%）vs -1.0dBFS；帧底噪 -78dB（无真实停顿）vs -200dB（有静音）。** **/ Measured on the delivered clip vs the user's reference: sub-200Hz 21.8% vs 5.4%, 400-1k 37.9% vs 16.9%, peak +2.2dBFS (clipped) vs -1.0, noise floor -78dB (no real pauses) vs -200dB.**
+
+- **根因：** `bsai_h3_spatial_tiles._tiled_model_call`（L482）把每个空间块独立预测的音频 latent 直接求平均。4 块的空间上下文不同，音频预测相位互不一致，平均后在 latent 域就是抵消+糊化，解码后=低频轰鸣、中频发闷、完全没有静音；二采步数再高也只是把"平均后的错误音频"画得更干净。** / Root cause: tile merge averages per-tile audio predictions; differing spatial contexts give inconsistent phases, so the averaged latent decodes as rumble/mud with no silence.**
+- **修复（`_sample_h3` 二采，L3503-3523）：** 只要二采走空间分块（`tiled_refine` 或 tokens>350k 自动分块），音频一律锁定（`audio_denoise→0.0`，`noise_mask` 音频=0），完整保留一采 12 步生成的音频；与用户的"音频参与重绘0.7"无关。全局模式（`refine_mem_mode=global`）不受影响；需要旧行为时设 `BSAI_H3_TILED_AUDIO_REDRAW=1`。**⚠️ 该锁定方案已被 v14.200 取代（改为保留第 1 块音频预测，不再求平均）。** **/ Fix, superseded by v14.200 (keep tile-1 audio instead of averaging).**
+- **对照（参考音频里内嵌的原始工作流）：** 该"好音频"来自 `电影工厂真实皮肤组合\Minimax-h3_Singularity_ref2va_v2_int8.safetensors`、steps=4+FastH3 8步增强、`audio_context_length=0`、且**没有二采**。当前工作流用的是 `H3\minimax_h3_ref2va_int8_convrot.safetensors`、`audio_context_length=24`、二采音频重绘 0.7。若锁定后仍不达标，下一步按这两项 A/B。 **/ The reference's own embedded workflow used the Singularity v2 checkpoint, 4 steps + FastH3, audio_context_length=0, and no second pass; current uses a different checkpoint, audio_context 24, and a 0.7 audio redraw.**
+
+---
+
+### v14.198 (2026-10-24) — 首步耗时拆分诊断：定位一采 step1 的 1217s 花在 conds 还是首次前向 / first-step timing probe: split the 1217s first step into conds vs first forward
+
+**实测一采 12 步 = 28:53：进度条 144.46s/it 是含首步的平均值，真实逐步为 step1=1217s、step2~12=45-48s。** **/ Pass 1 = 12 steps in 28:53; 144.46s/it is the average including step 1. Real per-step: step 1 = 1217s, steps 2-12 = 45-48s.**
+
+- **探针（`_sample_h3`，仅一采挂一次 DIFFUSION_MODEL wrapper，采样结束即摘除）：** 首次前向入口打印"采样开始→前向"间隔（= process_conds/文本与参考编码），前向返回再打印前向耗时（含权重换页/op 编译）与首步合计。日志前缀 `v14.198 首步拆分`。 **/ Probe prints two timings around the first DIFFUSION_MODEL forward, then is removed from model_options after sampling.**
+- 目的：区分"前置编码慢"与"首次前向慢"，再决定是缓存/预编码还是提高驻留/异步搬运。无行为变更，卸载失败不影响采样。 **/ Diagnostic only, no behavior change.**
+
+---
+
+### v14.197 (2026-10-24) — 段间接缝修复：音频按 motion-context 帧数精确重叠，原曲零缺口 + 口型同源 / seam fix: audio overlap now equals motion-context frames, so the song has no gap and lip-sync shares the same source
+
+**用户实测 3 段成片：clip2 覆盖原曲 [13.55s, 24.18s]，clip3 从 25.8s 开始 —— 每个段间接缝原曲被跳过 ~1.6s，听感"音频断了一截"。** **/ Measured: clip2 covers song [13.55, 24.18], clip3 starts at 25.8 — every seam skips ~1.6s of the song.**
+
+- **根因：** v14.178 把 `MOTION_CONTEXT_OVERLAP_SEC` 改成 0，但 motion context 仍占据段头部 `context_frames`(39 帧 = 1.625s) 的视频与音频行 —— 模型净输出 = 标称 − context。零重叠时输入缺上一段尾部 1.625s、输出又少 1.625s，且尾对齐注入使新帧音频整体前移 → 段间缺口 + 口型错位。 **/ Root cause: overlap was zeroed in v14.178, but motion context still occupies context_frames (39 = 1.625s) rows at the head; model net output = nominal − context. Zero overlap loses 1.625s on both input and output, and tail-aligned injection shifts new-frame audio.**
+- **修复（`_split_lip_audio_by_clips`，新增 `context_frames` 入参）：** ctx_on 段的段头按 `context_frames/fps` 精确重叠，段长保持标称帧数 N，推进按净时长 N−overlap；解码混音跳过段头 overlap 后与原曲逐样本对齐。ctx_off 段保持零重叠全时长（行为不变）。 **/ Fix: ctx_on segments prepend exactly context_frames/fps of overlap, keep nominal length N, advance by N−overlap; mixer skips the overlap head so output stays sample-aligned with the song.**
+- **验证：** ramp 信号仿真 4 组用例（3 段全 ctx_on / 3 段全 ctx_off / 混合开关 / 8 段压力）拼接后逐样本连续、0 跳变点；py_compile PASS。 **/ Verified by ramp-signal simulation: 4 cases, sample-continuous, zero discontinuities.**
+- 说明：前段缓存缺失时 trim 会被强制为 0，该边界仍会多出 context 秒（既有异常，非本次引入）。 **/ Note: when the previous cache is missing, trim is 0 and that boundary duplicates the context span (pre-existing edge case).**
+
+---
+
+### v14.196 (2026-10-24) — 二采提速：音频保护不再把二采 4 步强制提升到 12 步（实测省 8 步 ≈ 43 分钟/片段）/ refine speed: audio guard no longer forces pass-2 steps 4→12 (saves 8 steps ≈ 43 min per clip)
+
+**实测日志：** 一采 12 步 × ~45s/步（在可接受区间），二采被 v14.195 从 4 步提升到 12 步 × 324s/步 = 65 分钟，15 秒片段总耗时 >1 小时。 **/ Measured: pass 1 12×45s (acceptable), pass 2 was raised 4→12 by v14.195 → 12×324s = 65 min; >1h total for a 15s clip.**
+
+- **改法：** v14.195 的"二采音频重绘步数下限 12"改为**锁定音频**——一采已按 12 步生成音频（v14.195 的音频生成保护保证），二采把 `refine_audio_denoise` 覆盖为 0.0 保留同一份音频，步数完全按用户设置执行。音频质量不变（不重绘就不会出现 4 步重画的低频轰鸣），二采少跑 8 步。 **/ The pass-2 audio step floor is replaced by locking the audio: pass 1 already generated it at 12 steps, so pass 2 keeps it (`refine_audio_denoise=0.0`) and runs the user's step count. Same audio quality, 8 fewer steps.**
+- 保留：一采 <12 步自动提升（音频生成质量）、lip_audio 锁定模式二采不重绘、`BSAI_H3_AUDIO_QUALITY=0` 一键关闭全部自动行为（回退旧参数：二采重绘且 4→12）。 **/ Kept: pass-1 <12 auto-raise, lip-locked pass-2 no-redraw, env switch to restore old behavior.**
+
+---
+
+### v14.195 (2026-10-24) — 渲染环节音频质量修复（治本）：音频要么锁定保持原声，要么 ≥12 步生成/重绘；以参考音频（完美标准）为基准 / render-side audio quality fix (root cause): audio is either locked to the reference voice or generated/redrawn at ≥12 steps; user's reference audio is the acceptance standard
+
+**用户否决 v14.194 后处理方案（"完全无效，要修的是电影工厂本身渲染声音的能力，不是渲染后再修复"），并给出完美声音基准 `ComfyUI\input\.ComfyUI_temp_gntqn_00001.mp3` 要求以其为标准。** **/ v14.194 post-processing was rejected (ineffective; must fix the render-side audio capability itself), with the provided perfect-audio reference as the acceptance standard.**
+
+- **基准分析（完美音频 = 工作流参考音频/lip_audio 原声）：** 200-400Hz 占全频 **73.3%**（人声主体）、<200Hz 仅 3.6%、有真实停顿静音（min 200ms RMS=0.0000）—— **干净口播标准**。**/ The "perfect" audio IS the workflow reference audio (lip_audio original voice): 200-400Hz = 73.3% (voice), <200Hz = 3.6%, real pauses (min 200ms RMS=0).**
+- **根因（对比 5 个历史渲染输出全部同症）：** 电影工厂渲染音频 100-200Hz 占 **45-60%**、全程无静音（min 200ms RMS 0.03-0.11）→ 恒定低频轰鸣。生成链：**① lip_audio 对口型模式** 一采音频=参考原声 latent 已锁定（干净）→ **二采 `refine_audio_denoise=0.7` 把干净参考 70% 重噪后仅 4 步重画**（官方音频下限 12 步，v14.183 已证 4 步重画崩音频）→ 低频轰鸣劣质品替换参考原声；**② 非 lip 模式**（ref_audio 条件配音）一采 <12 步生成音频同样劣化。 **/ Root cause (all 5 historical renders share it): ① lip-sync mode locks the clean reference into pass 1, then pass-2 audio redraw 0.7 re-noises 70% and redraws it in only 4 steps (official audio floor = 12) → rumble replaces the reference; ② non-lip voice mode generates audio in <12 pass-1 steps → same degradation.**
+- **修复 A（extender.py `_sample_h3`，渲染环节，无参数端口变更）：** ① 检测到 AV 双成员 latent 的 **lip_audio 锁定**时，二采音频重绘自动保持锁定（`refine_audio_denoise` 覆盖为 0.0）→ **输出音轨=参考原声（即完美标准）**，日志说明；如确需重绘设 `BSAI_H3_LIP_AUDIO_REDRAW=1`（此时步数自动 ≥12）。② 音频重绘开启且二采步数 <12 → 自动提升到 12。③ 非 lip 音频生成模式一采 <12 → 自动提升到 12。④ `BSAI_H3_AUDIO_QUALITY=0` 一键关闭全部自动行为（回退旧参数）。 **/ Fix A (render side, no new ports): lip-locked mode keeps audio locked in pass 2 (output = reference voice = the perfect standard; env BSAI_H3_LIP_AUDIO_REDRAW=1 to force redraw with ≥12 steps); audio-redraw pass-2 steps <12 auto-raise to 12; non-lip voice generation pass-1 <12 auto-raise to 12; BSAI_H3_AUDIO_QUALITY=0 disables all auto behavior.**
+- **修复 B（motion_context_disk.py 病态门控）：** v14.194 清洗函数加"病态门控"——仅在**恒定低频轰鸣**（100-250Hz 能量 >25% **且** 200ms 窗 min RMS>0.02 全程无静音）信号上生效；干净音频（参考原声/≥12 步配音，有停顿、低频正常）**原样通过，不改变音色与响度**（避免后处理破坏完美标准；重低音音乐/男低音有动态与停顿不会误判）。 **/ Fix B (dirty-audio gate): v14.194 cleanup now only runs on truly pathological constant-rumble signals; clean audio (reference voice / ≥12-step voice-over) passes through untouched so post-processing never alters the perfect standard.**
+- **验证（本机无渲染条件，逻辑层全过）：** 渲染保护 13 项断言（lip 判定/一采提升/二采锁定/步数下限/环境变量开关）全过；门控 6 项断言（病态样本仍清洗、完美音频逐采样相等原样通过）全过；py_compile PASS。**渲染验收需用户用原工作流重渲染一版对比。** **/ Verified (logic-level, render needs user re-render): 13 render-guard assertions + 6 dirty-gate assertions + py_compile all pass.**
+- 无参数/端口变更（延续用户既有约束）；未做任何 git 操作（铁律）。 / No param/port changes; no git ops (iron rule).
+
+---
+
+### v14.194 (2026-10-24) — 音频输出修复：去恒定低频轰鸣/底噪/失真，恢复正常音频输出 / audio output fix: remove constant low-frequency rumble / noise floor / distortion, restore normal audio output
+
+**用户问题（h3_clip_250_1_1792842036.mp4，15s 单段）：** 电影工厂音频输出失真、噪音、低频杂音。**/ Reported issue (15s single-clip sample): distorted, noisy, low-frequency-rumble audio output.**
+
+- **诊断（ffmpeg+手写 numpy 频谱，无 scipy）：** ① 100-200Hz 占全频能量 **59.5%**、<250Hz 占 90%+，50/100/150Hz 谐波串密集无规律（非单一工频）；② 低频噪声 **全程恒定**（200ms 窗 min RMS=0.042，0 静音帧），中段人声带(300-3000Hz)从 0.081 掉到 0.027 而低频带(100-250Hz)始终 0.11-0.14 → 噪声把人声盖在下面；③ 无削波（峰值 0.77）、无爆音（相邻跳变仅 1 处）、12-16kHz 仅 0.01% → **排除 AAC 编码/削波/段间拼接，源头在 H3 audio latent 解码输出，旧管线无任何滤波后处理**；④ 本次渲染参数：一采 **8 步**（<官方音频 12 步下限）+ 二采 4 步 + **音频参与重绘 0.7**（音频 latent 低步数重画）。 **/ Diagnosis: 100-200Hz = 59.5% of energy; constant LF noise floor (min 200ms RMS 0.042, zero silence frames); no clipping / clicks / high-freq noise → source is the audio-latent decode output, pipeline had zero audio post-processing; render used 8-step first pass + 0.7 audio redraw (below the official ≥12-step audio floor).**
+- **修复（motion_context_disk.py）** `_clean_audio_waveform()` 接入音频解码漏斗 `_decode_audio_latent()`（单段/成对/逐CLIP/最终封装全部路径生效，纯 numpy CPU 秒级，环境变量 `BSAI_H3_AUDIO_CLEAN=0` 可关闭 A/B）：① 去 DC；② STFT 域低频轰鸣削减（≤50Hz -22dB → 150Hz -11.5dB → 200Hz -9dB → 350Hz 0dB，人声/音乐主体不动）；③ 语音带(300-3000Hz)噪声门（包络 p3 估底×2.2 阈值，停顿帧衰减 0.15，增益 ~0.13s 平滑防泵浦/爆音）；④ 目标 RMS 0.12 归一 + 峰值≤0.95 限幅。**实测该信号各频点无静音间隙（噪声估计≈中位数一半），逐 bin 谱减必吞人声 → 弃用谱减法。** **/ Fix: audio post-processing added at the decode funnel (all output paths), DC removal + LF-rumble cut + voice-band noise gate (restores pauses) + normalize/limiter; spectral subtraction was tested and rejected (dense speech, per-bin noise ≈ median/2 → eats voice).**
+- **验证（h3_clip_250 样本 A/B）：** 静音 200ms min RMS **0.042→0.003**（停顿恢复静音）；低频(100-250)/人声(300-3000) RMS 比 **4.69→1.57**；100-200Hz 能量占比 **59.5%→28.9%**，400Hz+ 人声占比 **3.9%→23.8%**；峰值 0.62 无削波、无瞬态、立体声保留。**/ Verified on the reported sample: silence restored (0.042→0.003), LF/voice ratio 4.69→1.57, spectrum rebalanced to voice, no clipping, stereo preserved.**
+- **缓存失效：** `decoded_mp4_version` 4 → **5**（2 处写入 + 1 处判定），旧 v4 blob（脏音频）自动重解码。 **/ Cache invalidation: decoded_mp4_version 4→5 so legacy dirty-audio blobs re-decode.**
+- **二采音频重绘防护（extender.py，仅提示不改行为）：** 一采步数 <12 且 `refine_audio_denoise≥0.5` 时打印警告，提示改走『直播配音高清』（12+4+音频0.7）或锁定音频 —— v14.183 已验证 10 步+音频0.9 崩音频，勿重复低步数+重绘组合。 **/ Refine guard (warning only): prints when first-pass <12 steps with audio redraw ≥0.5, advising the 12+4+0.7 pipeline or locked audio.**
+- **离线试听工具** `_bsai_fix\fix_mp4_audio.py`：对已渲染 mp4 应用同一清洗并重封装（仅 numpy，任意 python），无需重渲染即可试听修复效果（已对样本产出 `h3_clip_250_1_1792842036_audiofix.mp4`）。 **/ Offline tool fix_mp4_audio.py applies the same cleanup to any rendered mp4 (numpy-only), no re-render needed to preview the fix.**
+- 无参数/端口变更（延续用户既有约束）；未做任何 git 操作（铁律）。 / No param/port changes; no git ops (iron rule).
+
+---
+
+---
+
+### v14.193 (2026-10-24) — 视觉锚点覆盖升级：记录**全部可见视觉元素**（角色形象/外观/服装/服饰/发型/鞋帽/场景/道具/布景等），快照注入全部已建立状态 / visual anchor coverage upgrade: record ALL visible elements (character look/appearance/clothing/accessories/hairstyle/shoes & hats/scene/props/set dressing etc.), snapshot injects every established state
+
+**用户确认口径（v14.193）：** 锚点记录必须包含所有可见视觉元素，而非只取分镜正文的收尾句子 —— v14.192 的"末尾 1~2 句"记录侧升级为**全量记录**。**/ Per user confirmation: anchors must cover every visible element, not just the tail sentences of the clip text — the v14.192 tail-only recording is upgraded to full coverage.**
+
+- **自动记录** `_extract_visual_state()`：逐句保留分镜正文中所有非对白陈述句（对白/台词/旁白/音效行与引号对白句照旧剔除），保持原序；正文 ≤300 字符时**全量保留**（分镜正文通常在此范围内，即默认覆盖全部可见元素）；超预算时优先保留含可见视觉元素关键词（`_VISUAL_ELEMENT_KEYWORDS`，覆盖角色形象/外观/发型/服装/服饰/鞋帽/伤势/道具/场景/布景/天候光影等类别）的句子，再按原序补足，确保元素不因截断丢失。 **/ Auto-record: keeps every non-dialogue sentence of the clip text in order; within 300 chars the whole text is kept (covers all elements by default); over budget, sentences matching the visible-element lexicon are kept first, then the rest in order — elements are never dropped by truncation.**
+- **自动注入** `_build_visual_anchor_snapshot()`：快照由"最近 3 段"升级为**全部已建立状态**（自旧到新；总长超 1000 字符预算时才从最旧开始丢弃），延续规则文本同步列出全部可见元素类别（角色形象/外观/服装/服饰/发型/鞋帽/场景/道具/布景/伤势）。 **/ Auto-inject: snapshot upgraded from 'last 3' to ALL established states (oldest first; only drops from the oldest when the 1000-char budget is exceeded); the continuity rule now enumerates all visible-element categories.**
+- **无参数变更**：widget 布局与 v14.192 相同（visual_anchor_notes 已移除，无新增端口，现役 68 键布局与旧 CUR68 一致，旧 69 键工作流兼容）。 **/ No param changes: same layout as v14.192 (manual widget gone, no new ports, 68-key current layout = old CUR68, old 69-key workflows compatible).**
+- 验证：py_compile PASS；功能断言覆盖"全量保留/元素句优先/对白剔除/全量快照/超预算丢最旧"等。 / Verified: py_compile PASS; functional assertions cover full-keep, element-sentence priority, dialogue filtering, full snapshot, oldest-drop on over-budget.
+
+---
+
+### v14.192 (2026-10-24) — 视觉锚点全自动：自动记录+自动注入，移除手动输入（不新增任何参数端口）/ visual anchors fully automatic: auto-record + auto-inject, manual widget removed (no new ports)
+
+**设计变更：** v14.186 的手动『分镜N: 状态声明』widget（`visual_anchor_notes`，optional 最末尾 index 67）已移除 —— 锚点不再需要用户逐行手写，改为**自动记录 + 自动注入**：**/ Design change: the v14.186 manual 『分镜N: 状态声明』widget (`visual_anchor_notes`, last optional slot index 67) is removed — anchors are now auto-recorded and auto-injected with zero manual input and zero new ports.**
+
+- **自动记录** `_extract_visual_state_tail()`：每个分镜的正文本身就是它建立的视觉状态（道具/场景/人物外观/伤势）。从分镜正文自动提取『收尾视觉状态』——跳过【对白】/台词/旁白/音效行与引号对白占多数的句子，取末尾 1~2 句非对白陈述句（≤90 字符），渲染前按故事顺序预提取（与渲染提示词同源，外部 prompt 覆盖优先）。 **/ Auto-record: each clip's own text IS its visual state; extracts the ending non-dialogue sentences (≤90 chars) as the tail visual state, precomputed in story order from the same source as the render prompt.**
+- **自动注入** `_build_visual_anchor_snapshot()`：本分镜提示词组装早期自动注入『[视觉锚点延续]』快照 = 此前分镜已记录的收尾视觉状态（最近 3 段，快照有界不撑爆提示词），格式同 v14.186（自分镜N起: 状态），强制模型延续不漂移。 **/ Auto-inject: the '[视觉锚点延续]' snapshot (last 3 recorded tail states) is injected early into each clip's prompt, same format as v14.186, keeping the prompt bounded.**
+- **无参数变更**：移除的是 optional 最末尾 widget，不挤占/不移位任何既有 index；现役布局 = 旧 CUR68（68 键），前端 `H3LegacyCompat` 的 KEYS/DEFAULTS/mapTo 同步收窄到 68 位，旧 69 键工作流映射时丢弃 w[67]（旧手写值不再使用）。 **/ No widget-index shifts (removed the last slot); current layout equals old CUR68; frontend KEYS/DEFAULTS/mapTo narrowed to 68; old 69-key workflows drop w[67].**
+- 验证：py_compile PASS；node --check PASS；提取/快照逻辑 11 项断言 0 fail（对白行跳过、引号对白句跳过、全对白→None、句边界截断、最近3段、clip0 无前置→None 等）。 / Verified: py_compile PASS; node --check PASS; 11 functional assertions on extraction/snapshot logic, 0 fail.
+
+---
+
 ### v14.191 (2026-10-24) — 一镜到底中段切镜（阶段一）：分拍时间标记反切镜指令 / one-shot mid-clip cut fix (phase 1): anti-cut directive for time-beat prompts
 
 **实测定位：** clip1 预览（287 帧 / 11.96s）场景检测（scene>0.18）发现 **2 个硬切：t=2.67s（帧64）正面中景→侧后方、t=6.46s（帧155）侧后方→正面手持相机**。两个切点与提示词 "0-3秒 / 3-6秒" 分拍边界（3s/6s）对齐 → 模型把分拍脚本当成镜头清单，在拍点按 MV 蒙太奇先验自行分镜覆盖。 **/ Measured: two hard cuts in the 11.96s clip at 2.67s and 6.46s, aligned with the prompt's 0-3s/3-6s beat boundaries — the model read the beat list as a shot list and montage-covered the beats.**

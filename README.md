@@ -131,7 +131,8 @@
 | `shift_audio` | Audio flow shift | `3.0` | 官方默认 3；DMAD 配方 2 |
 | `selflift_tst_enable` | P2 SelfLift H3 TST 补偿 | `true` | 时间状态传输（arXiv:2609.08505）校正闪烁/身份漂移/不合理运动，开销 1-2%；需已安装 `comfyui-SelfLift`（随本版已装） |
 | `selflift_tst_tau` | TST 校正强度 | `0.2` | 论文推荐 0.2；0.5 过强；0=仅诊断 |
-| `speed_preset`（新增档）| 加速预设 | `custom` | **`Turbo-v4`**=6+4 步、shift 12/3（Turbo LoRA v4 step600 EMA 舒适区，建议手动切 `res_multistep` 采样器贴合官方配方）；**`DMAD-4步`**=4+2 步、shift 12/2、采样器强制 `lcm`（DMAD 官方配方 LCM+simple，无 CFG≈1，需挂 DMAD LoRA） |
+| `speed_preset`（新增档）| 加速预设 | `custom` | **`Turbo-v4`**=6+4 步、shift 12/3（Turbo LoRA v4 step600 EMA 舒适区，建议手动切 `res_multistep` 采样器贴合官方配方）；**`DMAD-4步`**=4+2 步、shift 12/2、采样器强制 `lcm`（DMAD 官方配方 LCM+simple，无 CFG≈1，需挂 DMAD LoRA）；**`QAD-v2-8步`**=8 步单采直出、shift 10/3（FastH3-QAD-v2 官方 V2 NVFP4 schedule，2026-10-20 海螺发布；推荐从「渲染管道」下拉选 QAD-v2-8步，本档仅供旧工作流兼容） |
+| `render_pipeline`（v14.184+）| 渲染管道 | `Sol-H3 Self-Lift 双采 (默认)` | 双采默认档；**`FastH3 Omni 8步单采`**=8 步蒸馏直出、shift 12/3；**`双采2K`**=8+4 步直出 2K；**`QAD-v2-8步`**=8 步单采直出、shift 10/3（FastH3-QAD-v2 官方 schedule，需 Loader 换 QAD-v2 整套 NVFP4 模型 + BlockSparseAttention VSA keep_percent=10，VAE 可选 36层/8层 新 NVFP4 解码器） |
 
 **配套 LoRA（已下载，loras/ 目录）** / Companion LoRAs (already downloaded):
 - `minimax_h3_DMAD_4step_full_lora_avg_rank_39_bf16.safetensors`（Kijai 降秩版，DMAD-4步 档用）
