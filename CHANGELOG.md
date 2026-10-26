@@ -14,6 +14,17 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.215 (2026-10-26) — 新增一镜到底第三档「双采无缝 (8+4)」：一镜到底 + 二采(1采8步+2采4步) + 接缝锚点修复 / New one-shot tier "Dual-pass seamless (8+4)": dual-pass one-shot with a repaired inter-segment anchor
+
+**实测根因：双采「接缝风险」不是模型漂移，是段头锁 keep 在双采下整块静默失效。** 一镜到底的接缝靠「上一段尾 latent → 本段头部 `noise_mask` 锁 keep」续接（v14.188 重叠区噪声延续）。单采时上一段尾 latent 是 1x，与本段一采 latent 同尺寸 → 锁 keep 生效；**双采时上一段尾 latent 是二采放大后的 2x**（`previous_proxy` = join 后的二采结果），本段 latent 仍是 1x → 赋值 `shape 不匹配` 抛异常 → 整块被外层 `except` 吞掉 → 噪声延续与段头锁 keep **全部失效** → 裁掉 22~39 帧重叠区后，接缝处画面跳变（段间模糊/抖动）。
+**/ Root cause of the dual-pass seam drift: not model drift but the head keep-lock dying silently. In single-pass the previous clip's tail latent is 1x and matches the current latent, so the keep-lock works. In dual-pass the previous tail is the refined 2x latent while the current clip is still 1x, so the assignment raises a shape error that is swallowed by the outer except, disabling both the noise continuation and the head keep-lock; after the overlap trim the seam jumps.**
+
+- **新增第三档：** `one_shot_sampling` 下拉增加「双采无缝 (8+4)」—— 一镜到底照跑二采（推荐 `steps=8` / `refine_steps=4` / `refine_denoise=0.45` / `refine_upscale_factor=2.0`），不跳二采。** / New third tier `双采无缝 (8+4)`: one-shot keeps the refine pass (8 + 4 steps, denoise 0.45, x2.0 upscale).**
+- **接缝锚点修复：** 段头锁 keep 之前先比较锚点与本段 latent 的空间尺寸，不一致时按本段尺寸做 trilinear 重采样（口径与 `motion.apply` 对 keyframe 的重采样一致），再赋值为「上一段尾 latent × 0.9 + 10% 扰动」并锁 keep。** / Anchor repair: resize the previous clip's tail latent to the current clip's latent geometry (trilinear, same rule as motion.apply keyframes) before the keep-lock assignment.**
+- **步数不强制：** 该档只提示推荐 8+4，不改写用户的 `steps / refine_steps`（沿用 `speed_preset="custom"` 语义）；调度器同样只提示 beta；`refine` 开关关着时只告警不自动打开。** / The tier never overrides the widget step counts or the refine switch; it only prints recommendations/warnings.**
+- **同时受益：** 「双采高清 (接缝风险)」档也会拿到同一锚点修复（属通用 bug 修复），仍保留二采重采样本身的提示文案。** / The same anchor repair also benefits the existing dual-pass HD tier.**
+- **注意：** 本档真跑二采（x2.0 latent 放大），24GB 卡需配合 v14.214 的 TE 释放补丁（重启 ComfyUI 后生效）；显存不足时插件按既有策略降倍率或回退一采。** / This tier really runs the refine pass at x2.0; on 24GB it needs the v14.214 TE-release patch (effective after a ComfyUI restart).**
+- **新增示例工作流：** `example_workflows/BSAI_H3_Film_Factory电影工厂-MV一镜到底版-Omni自Lift超分-双采无缝8+4档.json`（103 节点 / 96 连线；一镜到底 + 「双采无缝 (8+4)」档 + refine 打开 + beta 调度 + denoise 0.45 + x2.0 二采）。** / New example workflow added to `example_workflows/`.**
 ### 📦 示例工作流 / Example Workflow (2026-10-26) — 一镜到底 MV · accel-selector 组合 · 4090 · 自定义 8+4 档（修复「界面设 8+4 实跑 1 采 6 步」）/ Example workflow: one-shot MV + accel-selector combo on 4090 with a custom 8+4 tier (fixes "UI says 8+4, run does 6 steps")
 
 **实测：界面把一采设 8 步 / 二采设 4 步，实际只跑一采 6 步、二采被完全跳过。** 根因是两层静默覆盖，与模型/显存无关：`render_pipeline` 非默认档会在 `extender.py` 末尾无条件改写 `steps / refine_steps / tile_count / refine_denoise`，而 `one_shot_sampling="单采无缝 (推荐)"` 会让一镜到底模式整段跳过二采。

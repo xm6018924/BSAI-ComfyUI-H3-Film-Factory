@@ -1265,7 +1265,7 @@ const BSAI_BILINGUAL_LABELS = {
     "refine_mem_mode": "Refine VRAM-saving mode (spatial = tiling-compatible / global = full context)",
     "one_shot_mode": "One-shot mode (off = shot-by-shot editing / on = seamless long take: no-cut instruction + forced motion context + zero-transition concat)",
     "one_shot_clip_duration": "One-shot target seconds per segment (0 disables auto CLIP split; with a song, CLIP count = song duration / this value)",
-    "one_shot_sampling": "One-shot sampling preset (single-pass seamless = skip refine, zero seam drift, recommended turbo 8-step LoRA + beta 6-8 steps / dual-pass HD = keep refine for 2K but seams may drift)",
+    "one_shot_sampling": "One-shot sampling preset (single-pass seamless = skip refine, zero seam drift, recommended turbo 8-step LoRA + beta 6-8 steps / dual-pass HD = keep refine for 2K but seams may drift / v14.215 dual-pass seamless 8+4 = keep the refine pass and repair the inter-segment anchor so the join stays seamless)",
     "render_pipeline": "Render pipeline (all model recipes are selected here, v14.184): Sol-H3 Self-Lift dual-pass (default) -> FastH3-Trim (8+4) -> FastH3 4-step VSA (4+2) -> Turbo-v4 (6+4, shift 12/3) -> DMAD 4-step (4+2, lcm) -> action combo (8+4, euler) -> 4K direct secret sauce (self-lift 6+3, latent x2.0 -> DLSS5 pixel upscale to 4K) -> FastH3 Omni 8-step single-pass (skips refine; switch the loader to the Omni model + VSA) -> dual-pass 2K (8+4, latent not upscaled + HyperVAE 2x decode -> 2x pixels -> 2K, audio refine inherits w33 0.7) -> live commerce fully automatic (12+4 one-click tier: audio_context_length=0 + context off from clip2; manual parameters are ignored).",
 };
 function bsaiApplyBilingualLabels(node) {
@@ -7649,7 +7649,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             env_audio_enable: ["global_inherit","on","off"],
             refine_mem_mode: ["spatial (分块,兼容)","global (全上下文省显存)"],
             one_shot_mode: ["off (分镜模式)","on (一镜到底)"],
-            one_shot_sampling: ["单采无缝 (推荐)","双采高清 (接缝风险)"],
+            one_shot_sampling: ["单采无缝 (推荐)","双采高清 (接缝风险)","双采无缝 (8+4)"],
             render_pipeline: ["Sol-H3 Self-Lift 双采 (默认)","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳","4K直出 秘制酱料","FastH3 Omni 8步单采","双采2K（HyperVAE 2x 解码）"],
         };
         function detect(w) {
