@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.209-refine-residency-patch"
+BUILD = "minimax-h3-extender-v14.210-default-pipeline-enables-refine"
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -6767,9 +6767,21 @@ class BSAIH3FilmFactory:
         # v14.182: HyperVAE 2x 像素翻倍因子 —— 仅「双采2K」档在分支内置 2.0,
         # 其余档保持 1.0 (声明输出尺寸 = 实际解码像素, 不放大)。
         _hv2x_decl = 1.0
-        if _rp_mode and _rp_mode != "Sol-H3 Self-Lift 双采 (默认)":
+        # v14.210: 默认管道 "Sol-H3 Self-Lift 双采 (默认)" 名字里就是 "双采",
+        # 理应自动 enable refine_enable——之前被行 6686 显式排除(作为"无管道"回退),
+        # 导致用户选了默认管道但 UI toggle refine_enable=false 时二采被跳过。
+        # 现在把默认管道也纳入 handler, 显式开 refine_enable 并保留用户其余参数。
+        if _rp_mode:
             _rp_handled = True
-            if _rp_mode == "直播配音高清（音频≥12步）":
+            if _rp_mode == "Sol-H3 Self-Lift 双采 (默认)":
+                # v14.210: 默认管道 = 双采, 强制 enable refine.
+                # 不覆盖 steps/denoise 等数值——保留用户手动档设置, 只开关 enable.
+                if not refine_enable:
+                    refine_enable = True
+                    print(f"[H3 Extender] v14.210 默认管道 Sol-H3 Self-Lift 双采: refine_enable=False -> True (双采管道理应开二采)")
+                else:
+                    print(f"[H3 Extender] v14.210 默认管道 Sol-H3 Self-Lift 双采: refine_enable 已 True")
+            elif _rp_mode == "直播配音高清（音频≥12步）":
                 # v14.179 (2026-10-23): 直播带货 ref_audio 配音模式专用配方。
                 # 根因: H3 官方/社区实证 —— 音频 8 步最差, ≥12 步才可用;
                 # 旧默认档 6~8 步一采 + 二采 audio_denoise=0.0 锁定音频 → 中文人声
