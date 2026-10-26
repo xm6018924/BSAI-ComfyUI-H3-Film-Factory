@@ -151,6 +151,18 @@ _REF_SHEET_RULE = (
     "其他身体、半截肢体与局部特写仅供外形参考，绝不复制进画面。\n"
 )
 
+# v14.221 服装锁定纪律：H3 文本指令优先于参考图，分镜正文一旦出现与参考图相悖的
+# 服装词（如写了"针织开衫"而 @图1 是运动套装），模型会照文本画而丢弃参考图。
+# 在 @图N 解析后统一注入本纪律，声明画面主体人物的真实穿着以 <Picture N> 为准，
+# 正文服装描述仅作补充、不得改款改色改材质。对场景/道具/无人物参考无害。
+_OUTFIT_LOCK_RULE = (
+    "【服装锁定纪律】画面主体人物（主播/主角）的实际穿着必须以 <Picture N> 参考图中"
+    "该人物的真实服装为准：款式、颜色、材质、上下装搭配全部复刻参考图，人物与参考图"
+    "同框时穿着不可改变。分镜正文中出现的衣着描述仅为补充说明，凡与 <Picture N> 参考"
+    "图服装相冲突的，一律以参考图为准，禁止另起新款、改换颜色或更换开衫/外套/裙装等"
+    "与参考图不符的服装。\n"
+)
+
 
 def _comfyui_temp_dir():
     """插件安装的 ComfyUI 根目录/temp——不依赖 folder_paths.get_temp_directory(),
@@ -6717,6 +6729,10 @@ class BSAIH3FilmFactory:
             # v14.205: 多视图参考图纪律（只加一次；无图片标签的 prompt 不加）
             if "<Picture " in prompt and _REF_SHEET_RULE not in prompt:
                 prompt = _REF_SHEET_RULE + prompt
+            # v14.221: 服装锁定纪律（紧随参考图纪律一并注入，只加一次）。
+            # 声明主体人物穿着以参考图为准，压制正文中与 @图N 相悖的服装指令。
+            if "<Picture " in prompt and _OUTFIT_LOCK_RULE not in prompt:
+                prompt = prompt + "\n" + _OUTFIT_LOCK_RULE
 
             if prompt != original_prompt:
                 print(f"[H3 Extender] clip[{clip_idx}] prompt resolved: '{original_prompt[:60]}' -> '{prompt[:60]}'")
