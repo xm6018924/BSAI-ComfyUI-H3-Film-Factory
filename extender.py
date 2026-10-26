@@ -9486,7 +9486,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.212 backend loaded (v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.213 backend loaded (v14.213 前端补丁: web/extender.js 的 render_pipeline cycle/cycleLabels 补上第13档「FastH3 Omni × SelfLift 超分」(此前只加了 .py 选项, 前端自定义下拉仍只画 12 项); v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",

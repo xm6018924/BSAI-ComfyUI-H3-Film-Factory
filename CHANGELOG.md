@@ -29,6 +29,17 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.213 (2026-10-26) — 修「渲染管道下拉看不到第 13 档」：前端 `web/extender.js` 的 `cycle`/`cycleLabels` 漏了新档 / Fix the missing 13th render-pipeline tier in the frontend dropdown
+
+**实测（用户 2026-10-26 报）：后端 `/object_info/BSAIH3FilmFactory` 的 `render_pipeline` 已返回 13 项（含第13档），但节点上的 Pipeline 下拉只画 12 项（英文名）。** **/ Measured: the backend already returns 13 tiers, but the node's Pipeline dropdown rendered only 12.**
+
+- **根因：** 该节点的 Pipeline 下拉是插件**自定义下拉**（`web/extender.js` 中 `render_pipeline` 表项里的 `cycle`（值=中文）/ `cycleLabels`（显示=英文）两份**硬编码列表**），**并非** ComfyUI 原生 combo。v14.211 只往 `extender.py` 的 INPUT_TYPES 追加了第13档，**漏改这两份前端列表**，于是下拉仍旧 12 项。** / Root cause: the dropdown is a custom widget driven by two hardcoded lists (`cycle`/`cycleLabels`) in `web/extender.js`; v14.211 only appended the tier to the Python INPUT_TYPES and missed these.**
+- **修复：** `cycle` 追加 `"FastH3 Omni × SelfLift 超分"`（与 Python 端值逐字一致），`cycleLabels` 追加 `"FastH3 Omni x SelfLift Upscale"`。** / Fix: append the tier to both lists.**
+- **验证：** `node --check web/extender.js` PASS；两列表末项分别为 `FastH3 Omni × SelfLift 超分` / `FastH3 Omni x SelfLift Upscale`；后端 API 亦为 13 项。** / Verified: node --check PASS; both lists end with the new tier; backend returns 13.**
+- **约定（写进规矩）：** 今后新增 `render_pipeline` 档位**必须同时改三处**：① `extender.py` INPUT_TYPES 选项；② `extender.py` 档位分支（`elif _rp_mode == ...`）；③ `web/extender.js` 的 `cycle` + `cycleLabels`。** / Convention: adding a tier requires all three edits.**
+
+---
+
 ### v14.212 (2026-10-26) — 修 Omni 一采「保底」竖版误放大：判据由单边改面积，竖版 544×960 不再被拉成 960×1696（每步 350s → 恢复健康区） / Fix the Omni first-pass "floor" upscaling portrait clips: switch the test from one-sided to area-based
 
 **实测（用户 2026-10-26 报）：竖版直播带货 clip，请求 544×960，一采却被"保底"到 960×1696（1.63MP、latent ≈2.7M tokens），每步 350s、8 步 46 分钟。** **/ Measured: a portrait clip requested 544×960 got "floored" to 960×1696 (~2.7M tokens), 350s/step.**
