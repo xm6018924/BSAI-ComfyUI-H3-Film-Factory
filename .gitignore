@@ -6,3 +6,6 @@ __pycache__/
 cache/
 
 *.bak*
+
+# 运行时崩溃日志(第三方节点启动期 native crash 的 faulthandler 落盘)
+_crash_faulthandler.log

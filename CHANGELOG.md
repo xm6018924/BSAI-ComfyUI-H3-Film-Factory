@@ -14,6 +14,30 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.218 (2026-10-26) — 前端枚举与后端严格同步：双语枚举收敛到规范值 + 修遗留兼容层白名单（修「渲染管道档位被静默重置」）/ Front-end enums strictly synced with the backend: canonical values + legacy whitelist repaired
+
+**问题**：`refine_lipsync_mode` 与 `upscale_mode` 的后端枚举是**中英双语**的（英文规范值 + 旧中文别名都合法，v2.120c 起为兼容老工作流），而前端快捷按钮的 `cycle` 表只写了旧中文别名 → 与后端 `INPUT_TYPES` 字面量对不上（新增的一致性自检判定 DESYNC）。更要命的是遗留兼容层 `H3LegacyCompat` 的 `OPTIONS` 白名单同样只认旧中文：**英文规范值（也就是后端 default）会被当成「选项外」静默改写成旧中文标签**。自检工具进一步查出 `render_pipeline` 白名单**漏了 4 档**（直播配音高清 / QAD-v2-8步 / 直播带货（全自动）/ FastH3 Omni × SelfLift 超分）—— 载入这类工作流会被**静默重置成默认档**，该档语义整体丢失。
+**/ Problem: two backend enums are bilingual (canonical English + legacy Chinese aliases), but the quick-button cycle table only carried the legacy Chinese strings, so the front end no longer matched the backend literals. Worse, the legacy compatibility layer's OPTIONS whitelist only knew the Chinese aliases, so a canonical English value (which is also the backend default) was treated as "not an option" and silently rewritten. The new checker then found the render_pipeline whitelist missing four tiers — loading such a workflow silently reset it to the default tier.**
+
+- **快捷下拉收敛到规范值**：`cycle` 改为后端规范值（英文），旧中文别名改由新增的 `cycleAliases` 映射表换算。此前只有中文别名在表里 → ① 快捷下拉**永远写不出**规范值；② 工作流存着英文规范值（后端 default）时 `indexOf` 命中不了，档位序号 / 进度条 / 高亮全部退化成「1/N + 显示原始值」，非默认档看起来跟默认档一样。现在别名也能算出正确档位，而写回值永远是后端合法规范值。** / The cycle now carries canonical values and legacy Chinese aliases are mapped through a new cycleAliases table: tier indices stay correct for old workflows, and every write-back is a canonical backend literal.**
+- **遗留兼容层白名单补全**：`OPTIONS` 补到后端枚举全集（`refine_lipsync_mode` 6 项 / `upscale_mode` 8 项 / `render_pipeline` 13 项）→ 英文规范值不再被静默改写；`render_pipeline` 漏掉的 4 档补齐，载入直播带货 / QAD-v2-8步 / Omni×SelfLift 等工作流不再被重置成默认档。** / The whitelist now matches the backend enums, so canonical values survive and the four missing render_pipeline tiers are no longer reset.**
+- **speed_preset 遗留配方名清掉**：白名单里 `FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳` 后端已不接受（v14.172 起模型配方改由渲染管道决定），保留只会让老工作流校验失败 → 现回退 `custom`（合法值，配方由渲染管道决定）。** / Removed speed_preset leftovers the backend no longer accepts; old workflows now fall back to the valid "custom" tier.**
+- **老布局默认值合法化**：老布局缺失槽补的默认值 `sampler_name=""` / `scheduler=""` / `semantic_bridge_adapter=""` 不是后端合法枚举值 → 改为 `euler` / `simple` / `(off: no weights)`。** / Defaults for missing slots in legacy layouts are now valid backend values.**
+- **别名归一化**：载入老工作流时，旧中文值统一归一化成规范值（`ALIAS_CANON`，与 `cycleAliases` 同源）—— 语义完全等价，只是前端存的值与后端 default 逐字一致。** / Legacy Chinese values are normalized to canonical values on load (semantically identical).**
+- **自检工具升级**：`tools/check_quickbar_enum_sync.py` 现在还会校验 `cycleAliases`、遗留兼容层 `OPTIONS` 白名单与 `DEFAULTS` 位置表 —— 一条命令查全「后端有前端没有 / 前端有后端没有 / 白名单漏档 / 默认值非法」。** / The checker now also validates the alias table, the legacy whitelist and the legacy defaults table.**
+- **验证**：`node --check` + `py_compile` 通过；一致性自检 **SYNC OK**（7/7 快捷枚举项、15 项遗留白名单、默认值全部合法）；从线上文件里**原样抽出** `QUICK_DEFS` / `_h3qkCanon` / `_h3qkIndex` / `H3LegacyCompat` 跑功能断言 **33/33 通过**（含「`render_pipeline=直播带货（全自动）` 载入后不再被重置」「旧中文档位序号与规范值一致」「58 槽老布局载入不报错」）。** / Validated end-to-end against the shipped file: 33/33 functional assertions pass.**
+
+### v14.217 (2026-10-26) — 一镜到底采样档补进快捷按钮下拉（OneShotSmp）：三档一屏切换 / Expose the one-shot sampling tier in the quick-button bar
+
+**问题**：`one_shot_sampling`（单采无缝 / 双采高清 / 双采无缝 8+4）此前**只在节点体内**能选，快捷栏上只有 `OneShot`（一镜到底 on/off 分支），用户以为双采档没生效。根因不是后端——后端枚举 v14.215 起就有三档（`/object_info` 实测确认），而是**这个 widget 从来没进过 `QUICK_DEFS` 快捷按钮表**。
+**/ Problem: the sampling tier was only reachable inside the node body; the quick bar only had the OneShot on/off button. The backend already exposed all three tiers — the widget simply was never registered in the quick-button table.**
+
+- **新增快捷下拉 `OneShotSmp`**：`web/extender.js` 的 `QUICK_DEFS` 表新增 `one_shot_sampling` 表项，与 `OneShot` 相邻。**两份硬编码列表同时补齐** —— `cycle` 写的是实际写回 widget 的值（必须与后端 `INPUT_TYPES` 的枚举字面量逐字一致），`cycleLabels` 是按钮上显示的英文；只加后端选项而漏这两份表，下拉里就选不到新档（与 v14.213「渲染管道下拉看不到第 13 档」同源）。** / Added the quick dropdown with both hard-coded lists updated.**
+- **分类映射**：`QUICK_CAT` 里 `one_shot_sampling: "flow"`（与 OneShot / Pipeline 同组，蓝色系）。** / Category mapping.**
+- **同步校验脚本**：`patches/seedvr2_bf16_probe/` 同级新增前端/后端枚举一致性核对（见下条工具），可一条命令查出所有「后端有、前端硬编码表没有」的档位。** / A consistency checker was added.**
+
+> **给后续改动的硬规则（本次踩过的坑）**：任何在 `web/extender.js` 的 `QUICK_DEFS` 里做成下拉的 widget，后端新增枚举项时必须**同时**改 `cycle` 与 `cycleLabels` 两份列表，且字面量要与后端 `INPUT_TYPES` 完全一致；只改后端会出现「下拉里没有这一档」。
+
 ### v14.216 (2026-10-26) — prestartup 收录第三方节点 SeedVR2 的启动期崩溃补丁（自动重打）/ prestartup: host the third-party SeedVR2 startup-crash patch (auto re-applied)
 
 **症状**：ComfyUI 启动到一半进程被杀，端口 8181 不监听，启动器 `.bat` 走到 `pause`。崩在 `custom_nodes/seedvr2_videoupscaler/src/optimization/compatibility.py` 的 `_probe_bfloat16_support()`（模块级 `BFLOAT16_SUPPORTED = _probe_bfloat16_support()`）里的 `torch.randn(8,8,bfloat16,device='cuda:0')` → **Windows fatal exception: access violation**（原生崩溃，Python 的 try/except 接不住）。该节点与本插件无关，但它会把整个 ComfyUI 杀掉，连带本插件一起不可用。

@@ -6642,8 +6642,8 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "ref_cache", en: "RefCache", desc_en: "Ref2VA reference-image encoding disk cache; skips repeated encoding when re-running with new settings." },
         { key: "output_mode", en: "Output", desc_en: "Output modes: none (cache only) -> per_clip (segmented) -> merged (combined) -> both.", cycle: ["none", "per_clip", "merged", "both"], cycleLabels: ["None", "Per clip", "Merged", "Both"] },
         { key: "speed_preset", en: "Speed", desc_en: "Speed preset (7 tiers): custom -> Fast -> Balanced -> Fine -> Fast-VDN -> Balanced-VDN -> Fine-VDN. Model recipes now live in Render Pipeline (v14.172).", cycle: ["custom", "极速", "均衡", "精细", "极速-VDN", "均衡-VDN", "精细-VDN"], cycleLabels: ["Custom", "Fast", "Balanced", "Fine", "Fast-VDN", "Balanced-VDN", "Fine-VDN"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }] },
-        { key: "refine_lipsync_mode", en: "Lipsync", desc_en: "Lip-sync x refine presets: lock lip-sync -> audio redraw 0.7 -> full audio redraw 1.0.", cycle: ["锁定保口型(推荐)", "音频参与重绘0.7", "音频全重绘1.0"], cycleLabels: ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"] },
-        { key: "upscale_mode", en: "UpxMode", desc_en: "Upscale mode: Balanced (quality+speed) -> Quality first -> Speed first -> Custom.", cycle: ["平衡(质量+速度)", "质量优先", "速度优先", "自定义"], cycleLabels: ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"] },
+        { key: "refine_lipsync_mode", en: "Lipsync", desc_en: "Lip-sync x refine presets: lock lip-sync -> audio redraw 0.7 -> full audio redraw 1.0.", cycle: ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"], cycleLabels: ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"], cycleAliases: { "锁定保口型(推荐)": "Lock lip-sync (recommended)", "音频参与重绘0.7": "Audio redraw 0.7", "音频全重绘1.0": "Full audio redraw 1.0" } },
+        { key: "upscale_mode", en: "UpxMode", desc_en: "Upscale mode: Balanced (quality+speed) -> Quality first -> Speed first -> Custom.", cycle: ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"], cycleLabels: ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"], cycleAliases: { "平衡(质量+速度)": "Balanced (quality+speed)", "质量优先": "Quality first", "速度优先": "Speed first", "自定义": "Custom" } },
         { key: "pause_enable", en: "Pause", desc_en: "Pause automatically after each CLIP; resumes after the timeout when there is no input." },
         // v14.106: 全部 true/false 一键开关扩展（其余布尔参数全覆盖）
         { key: "output_image_audio", en: "Preview", desc_en: "Decode a preview for every CLIP (image + audio stream, can feed upscalers). Off = cache only; export with Final Decode." },
@@ -6659,6 +6659,11 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // off=默认分镜剪辑(xfade 转场拼接)；on=无缝长镜头(注入不切场/不转场指令 + 强制
         // motion context(Add Guide 等效锚点) + 合并零转场 concat)。
         { key: "one_shot_mode", en: "OneShot", desc_en: "One-shot branch: off = shot-by-shot editing (xfade transitions); on = seamless long take (no-cut instruction + forced motion context + zero-transition concat).", cycle: ["off (分镜模式)", "on (一镜到底)"], cycleLabels: ["Off (shot edit)", "On (one-shot)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#f472b6", border: "#be185d" }] },
+        // v14.215 (2026-10-26): 一镜到底采样档快捷下拉(单采无缝/双采高清/双采无缝 8+4)。
+        // cycle  = 实际写回 widget 的值, 必须与后端 INPUT_TYPES 的枚举字面量逐字一致;
+        // cycleLabels = 按钮上显示的英文; 两份列表必须同时增删 —— 只改后端而漏掉这两份
+        // 硬编码表, 下拉里就选不到新档(与 v14.213 "渲染管道下拉看不到第13档" 同源)。
+        { key: "one_shot_sampling", en: "OneShotSmp", desc_en: "One-shot sampling tier (only effective when OneShot = On): Single-pass seamless = skip the refine pass, chained latents are never redrawn, zero seam drift / Dual-pass HD = keep the refine upscale (2K) but the reference workflow shows pixel drift at segment joins / Dual-pass seamless 8+4 (v14.215) = run the refine pass with 8 first-pass + 4 refine steps AND repair the inter-segment anchor, so the join stays seamless.", cycle: ["单采无缝 (推荐)", "双采高清 (接缝风险)", "双采无缝 (8+4)"], cycleLabels: ["Single (seamless)", "Dual-pass HD (seam risk)", "Dual-pass seamless (8+4)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#34d399", border: "#059669" }] },
         // v14.184 (2026-10-24): 回滚 v14.183 (10 步+音频0.9 致链 segment 音频崩
         // VAD 0 段 + 10 步违 8 步蒸馏契约画质退化) → 恢复 8+4 + 音频重绘继承 w33(0.7)
         // + denoise 0.45 已验证基线。
@@ -6775,13 +6780,34 @@ function _h3qkCloseMenu() {
 }
 // 在按钮正下方生成下拉面板：列出 cycle 全部档位，每项按该档位的深浅渐变着色，
 // 当前档位高亮；点击任意项直接选中（立即回调 refresh/updateHidden）。
+// v14.218 档位索引解析(别名感知):
+//   cycle 里只放后端的**规范值**(英文), 但历史工作流可能存着旧的中文别名
+//   (后端 v2.120c 起仍接受中文)。cycleAliases 把旧别名映射回规范值, 于是:
+//     1) 档位序号 / 进度条 / 高亮 对"旧中文值"也算得对 —— 默认档不会被
+//        误判成"非默认档"(此前 indexOf 命中不了, 整个档位指示会退化成 1/N);
+//     2) 快捷下拉写回的永远是后端规范值(逐字合法, 且等于后端 default);
+//     3) 每个别名都必须来自后端枚举、且指向一个真实 cycle 项(tools 自检)。
+const _h3qkCanon = (def, v) => {
+    if (!def || !def.cycle || typeof v !== "string") return null;
+    if (def.cycle.indexOf(v) >= 0) return v;
+    const al = def.cycleAliases;
+    if (al && typeof al === "object") {
+        const hit = al[v];
+        if (hit && def.cycle.indexOf(hit) >= 0) return hit;
+    }
+    return null;
+};
+const _h3qkIndex = (def, v) => {
+    const c = _h3qkCanon(def, v);
+    return (c == null) ? -1 : def.cycle.indexOf(c);
+};
 function _h3qkMakeMenu(def, C, w, shades, onPick) {
     const menu = document.createElement("div");
     menu.style.cssText = "position:fixed;z-index:99999;min-width:130px;background:rgba(15,23,42,.97);border:1px solid " + C.border + ";border-radius:4px;box-shadow:0 6px 18px rgba(0,0,0,.55);padding:3px;";
     for (let i = 0; i < def.cycle.length; i++) {
         const opt = def.cycle[i];
         const S = shades ? shades[Math.min(i, shades.length - 1)] : null;
-        const cur = (w && w.value === opt);
+        const cur = (w && _h3qkCanon(def, w.value) === opt);
         const item = document.createElement("div");
         item.textContent = (def.cycleLabels && def.cycleLabels[i]) ? def.cycleLabels[i] : opt;
         item.style.cssText = "font-size:9px;line-height:1.5;padding:3px 9px;border-radius:3px;cursor:pointer;white-space:nowrap;";
@@ -6823,6 +6849,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 流程：输出 / 预览 / 暂停 / CLIP选择 / 一镜到底 / 渲染管道
         output_mode: "flow", output_image_audio: "flow",
         pause_enable: "flow", clip_select_enable: "flow", one_shot_mode: "flow",
+        one_shot_sampling: "flow",
         render_pipeline: "flow",
     };
     const quickBar = document.createElement("div");
@@ -6842,11 +6869,11 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         ["context_length", "39"], ["audio_context_length", 0],
         ["refine_enable", true], ["refine_steps", 4], ["refine_denoise", 0.55],
         ["refine_upscale_factor", 2], ["refine_upscaler_model", "minimax_h3_latent_upscaler_3d_fp32.pth"],
-        ["refine_lipsync_mode", "音频参与重绘0.7"],
+        ["refine_lipsync_mode", "Audio redraw 0.7"],
         ["shift_video", 12], ["shift_audio", 3], ["dual_track_shift", true],
         ["tiled_refine", false], ["tile_count", 4], ["tile_overlap", 128],
         ["selflift_tst_enable", true], ["selflift_tst_tau", 0.2],
-        ["upscale_per_clip", true], ["upscale_final", true], ["upscale_mode", "质量优先"],
+        ["upscale_per_clip", true], ["upscale_final", true], ["upscale_mode", "Quality first"],
         ["upscale_engine", "dlss5"], ["upscale_factor", 2],
         ["output_mode", "both"], ["output_image_audio", true],
         ["one_shot_mode", "off (分镜模式)"],
@@ -6927,7 +6954,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
                     // 按钮下方实时显示当前档位名（不再恒绿"像点不动"）。
                     // v14.136: 不再"非默认档一律同色"——按档位序号取深浅渐变，
                     // 否则 none/per_clip/merged/both 看起来一模一样。
-                    const cur = def.cycle.indexOf(w.value);
+                    const cur = _h3qkIndex(def, w.value);
                     const idx = cur >= 0 ? cur : 0;
                     on = cur > 0;
                     const curName = cur >= 0 ? def.cycle[cur] : String((w.value === undefined || w.value === null) ? "" : w.value);
@@ -6951,7 +6978,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             }
             // 颜色=分类；循环按钮再按档位取深浅渐变；布尔按钮=开/关两态
             if (def.cycle && w) {
-                const idx = Math.max(0, def.cycle.indexOf(w.value));
+                const idx = Math.max(0, _h3qkIndex(def, w.value));
                 const S = shades[Math.min(idx, shades.length - 1)];
                 btn.style.background = S.bg;
                 btn.style.border = "1px solid " + S.border;
@@ -7632,7 +7659,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 现役 64 位: 0..61 = run_mode..face_lock_mode(62 个后端 widget),
         // 62 = refine_mem_mode, 63 = h3_extender_timeline(dom, applyToNode 跳过)。
         const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","one_shot_mode","one_shot_clip_duration","render_pipeline","one_shot_sampling","h3_extender_timeline"];
-        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"","",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.55,6,2.0,"(bilinear插值, 无需模型)",40,0.0,"锁定保口型(推荐)",false,false,"平衡(质量+速度)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"","0.15",true,"global_inherit",0.15,false,"spatial (分块,兼容)","off (分镜模式)",12,"Sol-H3 Self-Lift 双采 (默认)","单采无缝 (推荐)",""];
+        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"euler","simple",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.55,6,2.0,"(bilinear插值, 无需模型)",40,0.0,"Lock lip-sync (recommended)",false,false,"Balanced (quality+speed)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"(off: no weights)","0.15",true,"global_inherit",0.15,false,"spatial (分块,兼容)","off (分镜模式)",12,"Sol-H3 Self-Lift 双采 (默认)","单采无缝 (推荐)",""];
         const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain","one_shot_clip_duration"]);
         const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match","face_lock_mode"]);
         const OPTIONS = {
@@ -7642,15 +7669,15 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             resolution_mode: ["auto_from_ref","manual"],
             output_mode: ["none","per_clip","merged","both"],
             block_cache_device: ["cpu","gpu"],
-            refine_lipsync_mode: ["锁定保口型(推荐)","音频参与重绘0.7","音频全重绘1.0"],
-            upscale_mode: ["平衡(质量+速度)","质量优先","速度优先","自定义"],
+            refine_lipsync_mode: ["Lock lip-sync (recommended)","锁定保口型(推荐)","Audio redraw 0.7","音频参与重绘0.7","Full audio redraw 1.0","音频全重绘1.0"],
+            upscale_mode: ["Balanced (quality+speed)","平衡(质量+速度)","Quality first","质量优先","Speed first","速度优先","Custom","自定义"],
             upscale_engine: ["auto","dlss5","realesr","bicubic"],
-            speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳"],
+            speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN"],
             env_audio_enable: ["global_inherit","on","off"],
             refine_mem_mode: ["spatial (分块,兼容)","global (全上下文省显存)"],
             one_shot_mode: ["off (分镜模式)","on (一镜到底)"],
             one_shot_sampling: ["单采无缝 (推荐)","双采高清 (接缝风险)","双采无缝 (8+4)"],
-            render_pipeline: ["Sol-H3 Self-Lift 双采 (默认)","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳","4K直出 秘制酱料","FastH3 Omni 8步单采","双采2K（HyperVAE 2x 解码）"],
+            render_pipeline: ["Sol-H3 Self-Lift 双采 (默认)","直播配音高清（音频≥12步）","FastH3-Trim","FastH3-4步VSA","Turbo-v4","DMAD-4步","武戏组合拳","4K直出 秘制酱料","FastH3 Omni 8步单采","双采2K（HyperVAE 2x 解码）","QAD-v2-8步","直播带货（全自动）","FastH3 Omni × SelfLift 超分"],
         };
         function detect(w) {
             const n = w.length;
@@ -7704,8 +7731,17 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             if (n === 17) return "L17";
             return "UNKNOWN";
         }
+        // v14.218: 旧工作流中文别名 -> 后端规范值(与 QUICK_DEFS.cycleAliases 同源)。
+        // 后端 v2.120c 起中英文都合法, 但规范值(英文)才是后端 default; 前端统一
+        // 存规范值 —— 否则英文规范值会被下面的 OPTIONS 白名单当成"选项外", 静默
+        // 改写成旧中文标签(这正是 v14.218 修的 desync 根因)。语义完全等价。
+        const ALIAS_CANON = {
+            refine_lipsync_mode: { "锁定保口型(推荐)": "Lock lip-sync (recommended)", "音频参与重绘0.7": "Audio redraw 0.7", "音频全重绘1.0": "Full audio redraw 1.0" },
+            upscale_mode: { "平衡(质量+速度)": "Balanced (quality+speed)", "质量优先": "Quality first", "速度优先": "Speed first", "自定义": "Custom" },
+        };
         function norm(k, v, d) {
-            if (k === "upscale_mode" && typeof v === "string" && ["custom","手动","全手动"].includes(v.trim().toLowerCase())) return "自定义";
+            if (ALIAS_CANON[k] && typeof v === "string" && ALIAS_CANON[k][v]) return ALIAS_CANON[k][v];
+            if (k === "upscale_mode" && typeof v === "string" && ["custom","手动","全手动"].includes(v.trim().toLowerCase())) return "Custom";
             const o = OPTIONS[k];
             if (o) {
                 if (typeof v !== "string") v = String(v);
