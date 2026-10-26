@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.210-default-pipeline-enables-refine"
+BUILD = "minimax-h3-extender-v14.211-pixel-upscale-comfyui-upgrade"
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -254,82 +254,6 @@ def _release_dynamic_vram(tag=""):
         _f81, _t81b = _t81.cuda.mem_get_info()
         print(f"[H3 Extender] v1.81 显存释放[{tag}]: "
               f"free={_f81/1024**3:.2f}GB/{_t81b/1024**3:.2f}GB")
-    except Exception:
-        pass
-
-
-def _release_text_encoder(clip, tag=""):
-    """v14.214 (2026-10-26): 采样前强制释放文本编码器(TE)在 GPU 上的权重。
-
-    实测根因(本机 RTX 4090 24GB / 一镜到底 19 段, 2026-10-26 13:32 那次):
-      · 第 1 段采样前 free=22.27GB → DiT 20.6GB 走 DynamicVRAM 流式, 8 步跑通;
-      · 第 2 段采样前 free 只剩 15.57GB —— TE(qwen3vl_32b_minimax_h3_nvfp4_awq,
-        量化权重 14.6GB) 仍以 "loaded partially; 8905.26 MB loaded" 常驻显存,
-        可用余量 15.6-4.0=11.6GB 装不下 DiT, 第一次 int8_linear 的 torch.empty
-        权重块分配失败 → "CUDA error: out of memory"。
-
-    为什么现有两条释放逻辑都漏了 TE:
-      · extender.py 的 TE 释放块对带 comfy_kitchen 量化权重的模型直接 continue
-        (_mp_has_ck_quant_weights) —— 实测 TE 正是 comfy_kitchen 量化
-        (patcher=ModelPatcher / MiniMaxH3TEModel_, is_dynamic()=False);
-      · _release_dynamic_vram() 的 free_memory(..., for_dynamic=True) 只能扫到
-        ComfyUI current_loaded_models 里的模型, 而 v1.53 块早已把 clip.patcher
-        从该表摘除, 下一段重新加载后并不保证能被扫到。
-
-    这里按"身份"(clip.patcher)释放而不是扫注册表, 不依赖 ComfyUI 的卸载分支。
-    实测(复现"部分加载"状态: 占用 12GB 后 TE 载入 8522MB):
-      te.partially_unload(offload_device, 1e32) → 释放 8522MB, loaded_size 归零, 进程存活
-      te.detach(True)                               → 释放 8522MB, loaded_size 归零, 进程存活
-    下一段需要 TE 时 ComfyUI 会自动重新加载(CLIP.load_model → load_models_gpu),
-    不影响文本编码, 代价约 6s。
-    """
-    try:
-        import torch as _t214
-    except Exception:
-        return
-    te = getattr(clip, "patcher", None)
-    if te is None:
-        return
-    try:
-        before = int(te.loaded_size())
-    except Exception:
-        before = 0
-    if before <= 0:
-        return
-    try:
-        te.partially_unload(te.offload_device, 1e32)
-    except Exception:
-        try:
-            te.detach(True)
-        except Exception as _te_err:
-            print(f"[H3 Extender] v14.214 文本编码器释放失败(忽略, 不影响采样): {_te_err}")
-    try:
-        after = int(te.loaded_size())
-    except Exception:
-        after = 0
-    try:
-        import comfy.model_management as _cmm214
-        for _lm in list(_cmm214.current_loaded_models):
-            try:
-                if getattr(_lm, "model", None) is te:
-                    _cmm214.current_loaded_models.remove(_lm)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    try:
-        import gc as _gc214
-        _gc214.collect()
-        _t214.cuda.synchronize()
-        _t214.cuda.empty_cache()
-        _t214.cuda.ipc_collect()
-    except Exception:
-        pass
-    try:
-        _f214, _tt214 = _t214.cuda.mem_get_info()
-        print(f"[H3 Extender] v14.214 文本编码器显存释放[{tag}]: "
-              f"TE {before / 1024 ** 2:.0f}MB -> {after / 1024 ** 2:.0f}MB, "
-              f"GPU free={_f214 / 1024 ** 3:.2f}GB/{_tt214 / 1024 ** 3:.2f}GB")
     except Exception:
         pass
 
@@ -2707,28 +2631,49 @@ def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_
 def _ff_realesr_available(model):
     """检查 ComfyUI 的 UpscaleModelLoader 链路是否可用（bicubic 无需模型）。"""
     try:
-        import importlib.util as _ilu_r
         import comfy_extras.nodes_upscale_model as _num
-        import comfy.ldm.modules.upscale as _lmu
-        return bool(model and _num.UpscaleModelLoader and _lmu.ImageUpscaleWithModel)
+        # v14.211: ComfyUI 新版删掉了 comfy.ldm.modules.upscale,
+        # UpscaleModelLoader / ImageUpscaleWithModel 已全在 comfy_extras.nodes_upscale_model.
+        return bool(model and _num.UpscaleModelLoader and _num.ImageUpscaleWithModel)
     except Exception:
         return False
 
 
+def _ff_load_upscale_model(model_path):
+    """v14.211: 适配新版 UpscaleModelLoader API ——
+    旧: UpscaleModelLoader().load_model(name).to(dev) -> nn.Module
+    新: UpscaleModelLoader().execute(name) -> ImageModelDescriptor (spandrel),
+        descriptor.model = nn.Module, descriptor.patcher = CoreModelPatcher.
+    返回 (model_module, scale) 或抛出异常。"""
+    import comfy_extras.nodes_upscale_model as _num
+    import folder_paths as _fp
+    import comfy.utils as _cu
+    from spandrel import ModelLoader as _SpandrelLoader  # type: ignore
+    # 新版 UpscaleModelLoader.execute 需要 node schema 上下文, 直接走底层更稳
+    full = _fp.get_full_path_or_raise("upscale_models", model_path)
+    sd = _cu.load_torch_file(full, safe_load=True)
+    if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
+        sd = _cu.state_dict_prefix_replace(sd, {"module.": ""})
+    descriptor = _SpandrelLoader().load_from_state_dict(sd).eval()
+    model_mod = descriptor.model
+    scale = getattr(descriptor, "scale", 1.0) or 1.0
+    return model_mod, float(scale)
+
+
 def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, batch):
-    """realesr 逐帧超分：ffmpeg 抽帧(rgb24) → torch → UpscaleModelLoader → 重编码。"""
+    """realesr 逐帧超分：ffmpeg 抽帧(rgb24) → torch → UpscaleModelLoader → 重编码。
+    v14.211: 适配新版 ComfyUI —— comfy.ldm.modules.upscale 已不存在,
+    UpscaleModelLoader 返回 spandrel ImageModelDescriptor, forward 直接调 descriptor.model."""
     import numpy as np
     import torch
-    import torch.nn.functional as F
-    import comfy_extras.nodes_upscale_model as _num
-    import comfy.ldm.modules.upscale as _lmu
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loader = _num.UpscaleModelLoader()
-    up_model = loader.load_model(model).to(dev)
+    import comfy.model_management as _mm211
+    model_mod, _native_scale = _ff_load_upscale_model(model)
+    dev = _mm211.get_torch_device()
+    model_mod = model_mod.to(dev).eval()
+    # fp16 提速: upscale 模型大多是 conv, fp16 安全
     if fp16 and dev.type == "cuda":
-        up_model = up_model.half()
+        model_mod = model_mod.half()
     raw = str(tmp) + ".raw"
-    # 抽原始帧
     subprocess.run(
         [ff, "-y", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgb24", raw],
         check=True, capture_output=True, timeout=7200,
@@ -2742,16 +2687,25 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
     bs = max(1, int(batch))
     arr = np.frombuffer(open(raw, "rb").read(), dtype=np.uint8)
     out_frames = []
+    # tile_size: 新版 upscale 模型 forward 只接受 tile_size/tile_overlap,
+    # 不接受 scale 走模型内部. scale 由模型本身决定.
+    _tile_size = int(tile) if int(tile) > 0 else 512
+    _tile_overlap = 16
     with torch.inference_mode():
         for s in range(0, n_frames, bs):
             chunk = arr[s * per_frame:(s + bs) * per_frame]
+            # N, H, W, 3 uint8 -> N, 3, H, W float32
             t = torch.from_numpy(chunk).reshape(-1, fh_in, fw_in, 3).permute(0, 3, 1, 2).float().div_(255.0).to(dev)
             if fp16 and dev.type == "cuda":
                 t = t.half()
-            t = up_model(t, tile_size=int(tile) if int(tile) > 0 else None, tile_overlap=16, scale=1.0)
+            # 模型原生 tile 式 forward. 若不支持 tile_size 参数, 回退全帧.
+            try:
+                up = model_mod(t, tile_size=_tile_size, tile_overlap=_tile_overlap)
+            except TypeError:
+                up = model_mod(t)
             if fp16 and dev.type == "cuda":
-                t = t.float()
-            out_frames.append(t.clamp_(0.0, 1.0).mul_(255.0).byte().cpu())
+                up = up.float()
+            out_frames.append(up.clamp_(0.0, 1.0).mul_(255.0).byte().cpu())
     os.unlink(raw)
     if not out_frames:
         raise RuntimeError("realesr: 无输出帧")
@@ -6392,13 +6346,11 @@ class BSAIH3FilmFactory:
         # 最末尾），不挤占任何既有 widget index。
         # 参考 B站 Motion Context V2 (BV1T9ho6HEKP) 实测结论：双采 latent 续链在接缝
         # 产生像素漂移，单采接缝干净——一镜到底默认单采。
-        # v14.215 (2026-10-26): 新增第三档「双采无缝 (8+4)」—— 一镜到底 + 二采
-        # (1采8步 + 2采4步), 并修掉双采接缝漂移的根因(段头锁 keep 在双采分辨率下静默失效)。
         optional["one_shot_sampling"] = (
-            ["单采无缝 (推荐)", "双采高清 (接缝风险)", "双采无缝 (8+4)"],
+            ["单采无缝 (推荐)", "双采高清 (接缝风险)"],
             {
                 "default": "单采无缝 (推荐)",
-                "tooltip": "One-shot sampling tier (only effective when one_shot_mode=on): Single-pass seamless = skip the refine pass, chained latents are never redrawn, seams have zero drift; recommended with the turbo 8-step LoRA + beta scheduler + 6-8 steps. Dual-pass HD = keep the refine upscale/refinement (can reach 2K), but the reference workflow shows dual-pass chaining introduces pixel drift at seams (blur/jitter between segments), so pick it only when you need HD upscaling. v14.215 adds 'Dual-pass seamless (8+4)': runs the refine pass (8 first-pass steps + 4 refine steps, denoise 0.45) AND repairs the inter-segment anchor so the join stays seamless - the head keep-lock used to die silently whenever the previous clip's tail was at the refined 2x resolution, which is exactly why dual-pass drifted. The 8+4 counts still come from the widget (speed_preset=custom); this tier never overrides them.",
+                "tooltip": "One-shot sampling tier (only effective when one_shot_mode=on): Single-pass seamless = skip the refine pass, chained latents are never redrawn, seams have zero drift; recommended with the turbo 8-step LoRA + beta scheduler + 6-8 steps. Dual-pass HD = keep the refine upscale/refinement (can reach 2K), but the reference workflow shows dual-pass chaining introduces pixel drift at seams (blur/jitter between segments), so pick it only when you need HD upscaling.",
             },
         )
         # v14.193: 视觉锚点改为全自动（自动记录 + 自动注入）—— 手动输入 widget
@@ -6654,12 +6606,6 @@ class BSAIH3FilmFactory:
         # 产生像素漂移(段间模糊/抖动), 单采接缝干净。
         one_shot_sampling = str(kwargs.get("one_shot_sampling", "单采无缝 (推荐)") or "单采无缝 (推荐)")
         one_shot_single_pass = one_shot_enabled and not one_shot_sampling.startswith("双采")
-        # v14.215 (2026-10-26): 新增第三档「双采无缝 (8+4)」—— 一镜到底照跑二采,
-        # 同时修掉双采接缝漂移的根因: 段头锁 keep 用的"上一段尾 latent"在双采下是
-        # 二采放大后的 2x, 本段一采 latent 是 1x, 直接赋值 shape 不匹配 → 整块被
-        # except 吞掉 → 噪声延续 + 段头锁 keep 全部失效 → 裁掉重叠区后接缝画面跳变。
-        # one_shot_seamless_dual = 双采 + 接缝锚点修复(不跳过二采)
-        one_shot_seamless_dual = one_shot_enabled and one_shot_sampling.startswith("双采无缝")
         # v14.159: 一镜到底×歌曲自动分 CLIP 的每段目标时长(秒); 0=关闭自动分
         try:
             one_shot_clip_duration = int(kwargs.get("one_shot_clip_duration", 12) or 12)
@@ -8437,23 +8383,6 @@ class BSAIH3FilmFactory:
                                   f"(参考标准: 6-8 步 + beta; 低动态内容可 6 步, 高动态 8 步)")
                         if _os_sched != "beta":
                             print(f"[H3 Extender] ℹ️ v14.185 一镜到底·单采: 当前调度器={_os_sched}, 参考工作流标准为 beta(仅提示, 不强制)")
-                    elif one_shot_seamless_dual:
-                        # v14.215: 双采无缝档 = 蒸馏底模 8 步一采 + 4 步二采(不是老链的 >=20 步)
-                        if _os_steps >= 20:
-                            print(
-                                f"[H3 Extender] ⚠️ v14.215 一镜到底·双采无缝: 当前 steps={_os_steps} >= 20 —— "
-                                f"蒸馏底模过采样会烧穿上下文一致性, 推荐 8 步一采 + 4 步二采。"
-                            )
-                        else:
-                            print(f"[H3 Extender] ✅ v14.215 一镜到底·双采无缝: 一采 steps={_os_steps} "
-                                  f"+ 二采 {int(refine_steps)} 步 (denoise {float(refine_denoise):.2f}), "
-                                  f"接缝锚点已修复(双采段头锁 keep 真正生效)")
-                        if _os_sched != "beta":
-                            print(f"[H3 Extender] ℹ️ v14.215 一镜到底·双采无缝: 当前调度器={_os_sched}, "
-                                  f"参考工作流标准为 beta(仅提示, 不强制)")
-                        if not bool(refine_enable):
-                            print("[H3 Extender] ⚠️ v14.215 一镜到底·双采无缝: refine 开关当前是关闭的, "
-                                  "二采不会跑(该档不自动改写 refine 开关), 请手动打开 refine 再重渲")
                     elif _os_steps < 20:
                         print(
                             f"[H3 Extender] ⚠️ v14.178 一镜到底·双采: 当前一采 steps={_os_steps} < 20 "
@@ -8851,35 +8780,6 @@ class BSAIH3FilmFactory:
                                 if _n_head >= 1:
                                     _vv2 = _vv.clone()
                                     _src = _tail_v[:, :, -_n_head:].to(_vv2.device, dtype=_vv2.dtype)
-                                    # v14.215: 双采时"上一段尾 latent"是二采放大后的 2x,
-                                    # 本段一采 latent 是 1x —— 直接赋值 shape 不匹配会抛异常,
-                                    # 整块被 except 吞掉 → 噪声延续 + 段头锁 keep 全部失效 →
-                                    # 裁掉重叠区后接缝处画面跳变(双采"接缝风险"的真根因)。
-                                    # 这里把锚点按本段 latent 的空间尺寸重采样后再锁 keep,
-                                    # 与 motion.apply 对 keyframe 的重采样口径保持一致。
-                                    if tuple(_src.shape[-2:]) != tuple(_vv2.shape[-2:]):
-                                        try:
-                                            _src_r = _src
-                                            if _src_r.dim() == 4:
-                                                _src_r = _src_r.unsqueeze(0)
-                                            _src_r = torch.nn.functional.interpolate(
-                                                _src_r,
-                                                size=(int(_src_r.shape[2]),
-                                                      int(_vv2.shape[-2]),
-                                                      int(_vv2.shape[-1])),
-                                                mode="trilinear",
-                                                align_corners=False,
-                                            )
-                                            if _src_r.dim() == 5:
-                                                _src_r = _src_r.squeeze(0)
-                                            _src = _src_r.to(_vv2.device, dtype=_vv2.dtype)
-                                            print(f"[H3 Extender] v14.215 接缝锚点重采样: 上一段尾 latent "
-                                                  f"{int(_tail_v.shape[-2]) * 16}x{int(_tail_v.shape[-1]) * 16} "
-                                                  f"-> 本段 {int(_vv2.shape[-2]) * 16}x{int(_vv2.shape[-1]) * 16} "
-                                                  f"(双采二采倍率所致, 已修正段头锁 keep)")
-                                        except Exception as _rs_err:
-                                            print(f"[H3 Extender] v14.215 接缝锚点重采样失败(可忽略): {_rs_err}")
-                                            raise
                                     _vv2[:, :, :_n_head] = _src * 0.9 + torch.randn_like(_src) * 0.1
                                     latent["samples"] = comfy.nested_tensor.NestedTensor((_vv2, _aa))
                                     _m_old = latent.get("noise_mask")
@@ -8941,30 +8841,10 @@ class BSAIH3FilmFactory:
                             print("[H3 Extender] 一镜到底·单采无缝：已跳过二采（refine），链式 latent 不重绘，"
                                   "接缝零漂移（对齐 Motion Context V2 单遍采样方案）；"
                                   "如需 2K/高清放大请改用「双采高清」档或分镜模式")
-                    elif one_shot_seamless_dual:
-                        # v14.215: 双采无缝档 —— 二采照跑(1采8步+2采4步), 接缝靠
-                        # v14.215 的锚点重采样修复(段头锁 keep 真正生效)。
-                        if not _os_pass_notice_done:
-                            _os_pass_notice_done = True
-                            print("[H3 Extender] ✅ 一镜到底·双采无缝(8+4)：二采照跑"
-                                  f"(一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步, denoise {float(refine_denoise):.2f})，"
-                                  "v14.215 已修复双采段头锚点(上一段尾 latent 按本段尺寸重采样后再锁 keep)，"
-                                  "接缝不再因锁 keep 失效而跳变")
                     elif not _os_pass_notice_done:
                         _os_pass_notice_done = True
                         print("[H3 Extender] ⚠️ 一镜到底·双采高清：二采重采样会在接缝引入像素漂移"
                               "（参考工作流实测），如出现段间模糊/抖动请改用「单采无缝」档")
-                # v14.214 (2026-10-26): 采样前强制释放文本编码器(TE)显存 ——
-                # 长链从第 2 段起 TE 常驻 8~15GB, 采样前 free 从 22GB 掉到 15GB;
-                # 而 H3 DiT 权重 20.6GB 在 24GB 卡上必须走 DynamicVRAM 流式,
-                # 余量不足时第一次 int8_linear 权重块 torch.empty 分配失败 →
-                # "CUDA error: out of memory"(实测 19 段长链崩在第 2 段第 1 步)。
-                # 现有两条释放逻辑都漏了 TE: comfy_kitchen 量化被跳过,
-                # free_memory 又只能扫 current_loaded_models(v1.53 块已把 TE 摘除)。
-                try:
-                    _release_text_encoder(clip, tag=f"clip{i + 1}/{len(clips)}")
-                except Exception as _te_rel_err:
-                    print(f"[H3 Extender] v14.214 文本编码器释放异常(忽略): {_te_rel_err}")
                 sampled = _sample_h3(
                     sampling_model,
                     positive,
@@ -9689,7 +9569,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.216 backend loaded (v14.216 prestartup 收录第三方节点 SeedVR2 的启动期崩溃补丁: 它的 import 期 bf16 探针在 ComfyUI 全量环境(同进程已加载 xformers/flash_attn/sageattention/comfy_kitchen 等多个 CUDA 扩展)会触发 native access violation 直接杀掉整个进程 -> ComfyUI 起不来(实测两次崩在同一行); 已把探针换成不分配显存的设备能力查询(sm_80+ 支持 bf16), 并由 prestartup.py 在启动前自动重打, SeedVR2 节点更新后也不用手动补; v14.215 新增一镜到底第三档「双采无缝 (8+4)」: 一镜到底照跑二采(1采8步+2采4步, denoise0.45), 并修复双采接缝漂移根因(段头锁 keep 因上一段尾 latent 为二采 2x 尺寸而 shape 不匹配整块失效, 现按本段尺寸重采样后再锁 keep, 与 motion.apply keyframe 同口径); v14.214 修长链第2段起 CUDA OOM: 每段采样前按身份释放文本编码器 TE 的 GPU 权重(clip.patcher, 量化 TE 被 ck-quant 跳过 + free_memory 扫不到已摘除的 TE), 实测第2段采样前 free 从 15.6GB 回到 22GB; v14.213 前端补丁: web/extender.js 的 render_pipeline cycle/cycleLabels 补上第13档「FastH3 Omni × SelfLift 超分」(此前只加了 .py 选项, 前端自定义下拉仍只画 12 项); v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.213 backend loaded (v14.213 前端补丁: web/extender.js 的 render_pipeline cycle/cycleLabels 补上第13档「FastH3 Omni × SelfLift 超分」(此前只加了 .py 选项, 前端自定义下拉仍只画 12 项); v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
