@@ -7076,9 +7076,14 @@ class BSAIH3FilmFactory:
             if (os.environ.get("BSAI_H3_AUTO_HV2X", "1") != "0"
                     and bool(refine_enable)
                     and float(refine_upscale_factor or 1.0) > 1.0
-                    and _rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)")):
-                # 仅默认双采档自动降级: 此档 factor 由用户手动控制且最易触发 x2.0 换页超时。
-                # 4K直出 / FastH3 Omni×SelfLift / 直播带货 等显式配方档保持原样, 不破坏其像素契约。
+                    and (_rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)")
+                         or _rp_mode == "直播带货（全自动）")):
+                # 覆盖默认双采档 + 直播带货(全自动)档。直播带货档原本强制
+                # 3D latent upscaler x2.0(873k tokens -> 24GB 换页 -> 每块 ~400s),
+                # 有 HyperVAE 2x 权重时自动降 factor=1.0(218k tokens, 等价一采规模,
+                # 每步 ~80-90s) + HyperVAE 2x 解码直出 2K, 输出像素与像素契约一致
+                # (一采像素 x2), 无 tiles 接缝。音频配方(12 步/重绘)保持不变。
+                # 4K直出 / FastH3 Omni×SelfLift 等显式配方档保持原样, 不破坏其像素契约。
                 _hv2x_probe = None
                 for _hv2x_dir in folder_paths.get_folder_paths("vae"):
                     for _hv2x_file in os.listdir(_hv2x_dir):
@@ -7094,11 +7099,11 @@ class BSAIH3FilmFactory:
                     _r_new_factor = 1.0
                     if refine_upscaler_model and not str(refine_upscaler_model).startswith("("):
                         refine_upscaler_model = "(bilinear interpolation, no model)"
-                    print(f"[H3 Extender] v14.221 自动提速: 检测到 HyperVAE 2x 权重 "
+                    print(f"[H3 Extender] v14.221 自动提速(含直播带货档): 检测到 HyperVAE 2x 权重 "
                           f"({os.path.basename(_hv2x_probe)}), 二采 factor "
                           f"{float(refine_upscale_factor or 1.0):.1f} -> 1.0 (latent 不放大, 由 "
-                          f"HyperVAE 2x 解码直出 2K, 二采 token 回 Sol-Attn 健康区, 每步 ~80-90s)。"
-                          f"设 BSAI_H3_AUTO_HV2X=0 可关闭。")
+                          f"HyperVAE 2x 解码直出 2K, 二采 token 873k->218k 回 Sol-Attn 健康区, "
+                          f"每步 ~80-90s)。设 BSAI_H3_AUTO_HV2X=0 可关闭。")
                     refine_upscale_factor = _r_new_factor
         except Exception as _hv2x_auto_err:
             print(f"[H3 Extender] v14.221 自动提速探测失败(可忽略): {_hv2x_auto_err}")
