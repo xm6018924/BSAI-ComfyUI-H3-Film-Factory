@@ -29,6 +29,16 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.212 (2026-10-26) — 修 Omni 一采「保底」竖版误放大：判据由单边改面积，竖版 544×960 不再被拉成 960×1696（每步 350s → 恢复健康区） / Fix the Omni first-pass "floor" upscaling portrait clips: switch the test from one-sided to area-based
+
+**实测（用户 2026-10-26 报）：竖版直播带货 clip，请求 544×960，一采却被"保底"到 960×1696（1.63MP、latent ≈2.7M tokens），每步 350s、8 步 46 分钟。** **/ Measured: a portrait clip requested 544×960 got "floored" to 960×1696 (~2.7M tokens), 350s/step.**
+
+- **根因：** v14.171 的保底分支用单边判据 `resolved_width < 960 or resolved_height < 544`，再 `_s = max(960/宽, 544/高)`。竖版 544×960 的**面积 522,240 恰好等于健康区上限**（960×544 = 522,240），本应原样不动，却因 `宽 544 < 960` 命中 → 按宽度凑到 960、高度等比跟到 1696 → 面积暴涨 3.1×。** / Root cause: the floor test was one-sided; portrait 544×960 has area exactly equal to the health cap but hit the `width < 960` branch and got scaled to 960×1696.**
+- **修复：** 判据改为 **面积**（`elif _area < _omni_max_px:`），等比缩放到健康区面积；面积达标即不动（竖版/横版都对），只有真正偏小的请求才被提到健康区。** / Fix: test by area; scale to the health-cap area; anything at/above the cap is left untouched.**
+- **验证：** `extender.py` py_compile PASS；竖版 544×960 → 不触发保底（面积相等），横版 960×544 → 同样不动，480×480 → 提到约 0.52MP。** / Verified: py_compile PASS.**
+
+---
+
 ### v14.211 (2026-10-26) — 渲染管道新增档「FastH3 Omni × SelfLift 超分」：落地 B站《FastH3 Omni 全流程教学》配方 / New render-pipeline tier "FastH3 Omni × SelfLift upscale": the Bilibili FastH3 Omni recipe
 
 **来源：B站《FastH3 Omni 全流程教学:90秒直出10s高清视频、告别塑料假脸与全能参考实测》(BV1rtnQ6qErJ)。配方 = FastH3 Omni 8 步蒸馏 + SelfLift 渐进式超分 + sol-attn 替代 VSA。** **/ Source: Bilibili BV1rtnQ6qErJ (FastH3 Omni + SelfLift progressive upscale + sol-attn over VSA).**

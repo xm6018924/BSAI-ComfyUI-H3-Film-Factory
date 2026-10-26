@@ -7414,13 +7414,21 @@ class BSAIH3FilmFactory:
                 resolution["height"] = _nh
                 resolution["requested_width"] = _nw
                 resolution["requested_height"] = _nh
-            elif resolved_width < 960 or resolved_height < 544:
-                # 低请求(老 0.5MP=960x544 以下) → 等比提到健康区, 直出更清晰
-                _s = max(960 / float(resolved_width or 1), 544 / float(resolved_height or 1))
+            elif _area < _omni_max_px:
+                # v14.212 (fix): 保底判据由"单边"改为"面积" —— 旧逻辑 (宽<960 或 高<544)
+                # 会把竖版 544x960 (面积 522,240 本已 = 健康区上限 960x544) 误判为"太小",
+                # 按宽度凑到 960 后高度等比跟到 1696 -> 960x1696 (1.63MP, ~2.7M tokens),
+                # 一采每步 350s。改按面积等比放大: 面积达标即不动, 仅真正偏小的才提到健康区。
+                _s = (_omni_max_px / float(_area or 1)) ** 0.5
                 _nw = max(32, int(round(resolved_width * _s / 32)) * 32)
                 _nh = max(32, int(round(resolved_height * _s / 32)) * 32)
-                print(f"[H3 Extender] v14.171 Omni 一采保底: {resolved_width}x{resolved_height} "
-                      f"-> {_nw}x{_nh} (官方健康区, 直出更清晰)")
+                while _nw > 32 and _nh > 32 and _nw * _nh > _omni_max_px:
+                    if _nw > _nh:
+                        _nw -= 32
+                    else:
+                        _nh -= 32
+                print(f"[H3 Extender] v14.212 Omni 一采保底: {resolved_width}x{resolved_height} "
+                      f"({_area/1e6:.2f}MP) -> {_nw}x{_nh} (官方健康区 {_omni_max_px/1e6:.2f}MP, 直出更清晰)")
                 resolved_width, resolved_height = _nw, _nh
                 resolution["width"] = _nw
                 resolution["height"] = _nh
@@ -9478,7 +9486,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.211 backend loaded (v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.212 backend loaded (v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
