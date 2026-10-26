@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.210-default-pipeline-enables-refine"
+BUILD = "minimax-h3-extender-v14.218-pixel-upscale-comfyui-upgrade"
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -2707,28 +2707,49 @@ def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_
 def _ff_realesr_available(model):
     """检查 ComfyUI 的 UpscaleModelLoader 链路是否可用（bicubic 无需模型）。"""
     try:
-        import importlib.util as _ilu_r
         import comfy_extras.nodes_upscale_model as _num
-        import comfy.ldm.modules.upscale as _lmu
-        return bool(model and _num.UpscaleModelLoader and _lmu.ImageUpscaleWithModel)
+        # v14.211: ComfyUI 新版删掉了 comfy.ldm.modules.upscale,
+        # UpscaleModelLoader / ImageUpscaleWithModel 已全在 comfy_extras.nodes_upscale_model.
+        return bool(model and _num.UpscaleModelLoader and _num.ImageUpscaleWithModel)
     except Exception:
         return False
 
 
+def _ff_load_upscale_model(model_path):
+    """v14.211: 适配新版 UpscaleModelLoader API ——
+    旧: UpscaleModelLoader().load_model(name).to(dev) -> nn.Module
+    新: UpscaleModelLoader().execute(name) -> ImageModelDescriptor (spandrel),
+        descriptor.model = nn.Module, descriptor.patcher = CoreModelPatcher.
+    返回 (model_module, scale) 或抛出异常。"""
+    import comfy_extras.nodes_upscale_model as _num
+    import folder_paths as _fp
+    import comfy.utils as _cu
+    from spandrel import ModelLoader as _SpandrelLoader  # type: ignore
+    # 新版 UpscaleModelLoader.execute 需要 node schema 上下文, 直接走底层更稳
+    full = _fp.get_full_path_or_raise("upscale_models", model_path)
+    sd = _cu.load_torch_file(full, safe_load=True)
+    if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
+        sd = _cu.state_dict_prefix_replace(sd, {"module.": ""})
+    descriptor = _SpandrelLoader().load_from_state_dict(sd).eval()
+    model_mod = descriptor.model
+    scale = getattr(descriptor, "scale", 1.0) or 1.0
+    return model_mod, float(scale)
+
+
 def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, batch):
-    """realesr 逐帧超分：ffmpeg 抽帧(rgb24) → torch → UpscaleModelLoader → 重编码。"""
+    """realesr 逐帧超分：ffmpeg 抽帧(rgb24) → torch → UpscaleModelLoader → 重编码。
+    v14.211: 适配新版 ComfyUI —— comfy.ldm.modules.upscale 已不存在,
+    UpscaleModelLoader 返回 spandrel ImageModelDescriptor, forward 直接调 descriptor.model."""
     import numpy as np
     import torch
-    import torch.nn.functional as F
-    import comfy_extras.nodes_upscale_model as _num
-    import comfy.ldm.modules.upscale as _lmu
-    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    loader = _num.UpscaleModelLoader()
-    up_model = loader.load_model(model).to(dev)
+    import comfy.model_management as _mm211
+    model_mod, _native_scale = _ff_load_upscale_model(model)
+    dev = _mm211.get_torch_device()
+    model_mod = model_mod.to(dev).eval()
+    # fp16 提速: upscale 模型大多是 conv, fp16 安全
     if fp16 and dev.type == "cuda":
-        up_model = up_model.half()
+        model_mod = model_mod.half()
     raw = str(tmp) + ".raw"
-    # 抽原始帧
     subprocess.run(
         [ff, "-y", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgb24", raw],
         check=True, capture_output=True, timeout=7200,
@@ -2742,16 +2763,25 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
     bs = max(1, int(batch))
     arr = np.frombuffer(open(raw, "rb").read(), dtype=np.uint8)
     out_frames = []
+    # tile_size: 新版 upscale 模型 forward 只接受 tile_size/tile_overlap,
+    # 不接受 scale 走模型内部. scale 由模型本身决定.
+    _tile_size = int(tile) if int(tile) > 0 else 512
+    _tile_overlap = 16
     with torch.inference_mode():
         for s in range(0, n_frames, bs):
             chunk = arr[s * per_frame:(s + bs) * per_frame]
+            # N, H, W, 3 uint8 -> N, 3, H, W float32
             t = torch.from_numpy(chunk).reshape(-1, fh_in, fw_in, 3).permute(0, 3, 1, 2).float().div_(255.0).to(dev)
             if fp16 and dev.type == "cuda":
                 t = t.half()
-            t = up_model(t, tile_size=int(tile) if int(tile) > 0 else None, tile_overlap=16, scale=1.0)
+            # 模型原生 tile 式 forward. 若不支持 tile_size 参数, 回退全帧.
+            try:
+                up = model_mod(t, tile_size=_tile_size, tile_overlap=_tile_overlap)
+            except TypeError:
+                up = model_mod(t)
             if fp16 and dev.type == "cuda":
-                t = t.float()
-            out_frames.append(t.clamp_(0.0, 1.0).mul_(255.0).byte().cpu())
+                up = up.float()
+            out_frames.append(up.clamp_(0.0, 1.0).mul_(255.0).byte().cpu())
     os.unlink(raw)
     if not out_frames:
         raise RuntimeError("realesr: 无输出帧")
@@ -9689,7 +9719,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.218 backend loaded (v14.218 前端枚举与后端严格同步: refine_lipsync_mode / upscale_mode 这两个后端双语枚举(英文规范值 + 旧中文别名)的快捷下拉统一收敛到规范值, 旧中文别名改由 cycleAliases 映射(档位序号/进度条/高亮对旧工作流仍然算得对), 遗留兼容层 OPTIONS 白名单补全后端枚举全集(此前只认旧中文, 英文规范值会被静默改写回中文); 同时修掉自检工具查出的三处遗留层 desync: 补齐漏掉的 4 个渲染管道档(直播配音高清 / QAD-v2-8步 / 直播带货全自动 / FastH3 Omni × SelfLift 超分 —— 此前载入这类工作流会被静默重置成默认档)、清掉 speed_preset 里后端已不接受的 5 个遗留配方名(老工作流回退 custom, 由渲染管道决定配方)、把老布局缺失槽的默认值改成后端合法值(sampler_name=euler / scheduler=simple / semantic_bridge_adapter=(off: no weights)); v14.217 新增一镜到底采样档快捷下拉(OneShotSmp: 单采无缝 / 双采高清 / 双采无缝 8+4); v14.216 prestartup 收录第三方节点 SeedVR2 的启动期崩溃补丁: 它的 import 期 bf16 探针在 ComfyUI 全量环境(同进程已加载 xformers/flash_attn/sageattention/comfy_kitchen 等多个 CUDA 扩展)会触发 native access violation 直接杀掉整个进程 -> ComfyUI 起不来(实测两次崩在同一行); 已把探针换成不分配显存的设备能力查询(sm_80+ 支持 bf16), 并由 prestartup.py 在启动前自动重打, SeedVR2 节点更新后也不用手动补; v14.215 新增一镜到底第三档「双采无缝 (8+4)」: 一镜到底照跑二采(1采8步+2采4步, denoise0.45), 并修复双采接缝漂移根因(段头锁 keep 因上一段尾 latent 为二采 2x 尺寸而 shape 不匹配整块失效, 现按本段尺寸重采样后再锁 keep, 与 motion.apply keyframe 同口径); v14.214 修长链第2段起 CUDA OOM: 每段采样前按身份释放文本编码器 TE 的 GPU 权重(clip.patcher, 量化 TE 被 ck-quant 跳过 + free_memory 扫不到已摘除的 TE), 实测第2段采样前 free 从 15.6GB 回到 22GB; v14.213 前端补丁: web/extender.js 的 render_pipeline cycle/cycleLabels 补上第13档「FastH3 Omni × SelfLift 超分」(此前只加了 .py 选项, 前端自定义下拉仍只画 12 项); v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.218 backend loaded (v14.218 像素放大适配新版 ComfyUI API(comfy.ldm.modules.upscale 已删除 -> 改走 comfy_extras.nodes_upscale_model + spandrel 直接加载, 同时并入远端 70e9776 的 upscale 修复并保留本分支的 v14.214/v14.215 修复); v14.218 前端枚举与后端严格同步: refine_lipsync_mode / upscale_mode 这两个后端双语枚举(英文规范值 + 旧中文别名)的快捷下拉统一收敛到规范值, 旧中文别名改由 cycleAliases 映射(档位序号/进度条/高亮对旧工作流仍然算得对), 遗留兼容层 OPTIONS 白名单补全后端枚举全集(此前只认旧中文, 英文规范值会被静默改写回中文); 同时修掉自检工具查出的三处遗留层 desync: 补齐漏掉的 4 个渲染管道档(直播配音高清 / QAD-v2-8步 / 直播带货全自动 / FastH3 Omni × SelfLift 超分 —— 此前载入这类工作流会被静默重置成默认档)、清掉 speed_preset 里后端已不接受的 5 个遗留配方名(老工作流回退 custom, 由渲染管道决定配方)、把老布局缺失槽的默认值改成后端合法值(sampler_name=euler / scheduler=simple / semantic_bridge_adapter=(off: no weights)); v14.217 新增一镜到底采样档快捷下拉(OneShotSmp: 单采无缝 / 双采高清 / 双采无缝 8+4); v14.216 prestartup 收录第三方节点 SeedVR2 的启动期崩溃补丁: 它的 import 期 bf16 探针在 ComfyUI 全量环境(同进程已加载 xformers/flash_attn/sageattention/comfy_kitchen 等多个 CUDA 扩展)会触发 native access violation 直接杀掉整个进程 -> ComfyUI 起不来(实测两次崩在同一行); 已把探针换成不分配显存的设备能力查询(sm_80+ 支持 bf16), 并由 prestartup.py 在启动前自动重打, SeedVR2 节点更新后也不用手动补; v14.215 新增一镜到底第三档「双采无缝 (8+4)」: 一镜到底照跑二采(1采8步+2采4步, denoise0.45), 并修复双采接缝漂移根因(段头锁 keep 因上一段尾 latent 为二采 2x 尺寸而 shape 不匹配整块失效, 现按本段尺寸重采样后再锁 keep, 与 motion.apply keyframe 同口径); v14.214 修长链第2段起 CUDA OOM: 每段采样前按身份释放文本编码器 TE 的 GPU 权重(clip.patcher, 量化 TE 被 ck-quant 跳过 + free_memory 扫不到已摘除的 TE), 实测第2段采样前 free 从 15.6GB 回到 22GB; v14.213 前端补丁: web/extender.js 的 render_pipeline cycle/cycleLabels 补上第13档「FastH3 Omni × SelfLift 超分」(此前只加了 .py 选项, 前端自定义下拉仍只画 12 项); v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
