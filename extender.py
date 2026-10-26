@@ -6017,6 +6017,120 @@ def _bsai_list_upscale_models():
         return ["realesr-general-x4v3.pth"]
 
 
+# ---------------------------------------------------------------------------
+# v14.221 保脸-小脸修复：复用本机 BSAI-ComfyUI-FaceRefine 引擎。
+# 视频(BV133nh6fEMm)方案 = H3 FaceRefine 局部人脸重绘：检测裁剪人脸 -> H3 潜空间
+# 重绘 -> 逐帧去噪 -> 羽化缝合回原帧。远景小脸崩坏时全帧 H3 会结构塌陷（脸太小，
+# 放大后无足够像素重建五官）；局部裁剪到 ~768 画布并自动用视频里的近景大脸做
+# ref2v 锚点后，H3 有清晰参考即可还原完整五官。这里把该引擎接到电影工厂出片前的
+# 分镜段，作为「小脸修复」后处理。任何异常/无人脸都原样返回，绝不破坏画面。
+# ---------------------------------------------------------------------------
+_FR_ENGINE = None
+_FR_ENGINE_ERR = None
+_FR_DETECTOR = None
+
+
+def _ff_face_detector():
+    """从本机已装的 ultralytics bbox 模型里挑一个可用的人脸检测器。"""
+    global _FR_DETECTOR
+    if _FR_DETECTOR:
+        return _FR_DETECTOR
+    _FR_DETECTOR = "face_yolov8m.pt"
+    try:
+        import folder_paths as _fp
+        _cands = ["face_yolov8m.pt", "face_yolov8s.pt", "face_yolov8n.pt", "face_yolov9c.pt"]
+        for _key in ("ultralytics_bbox", "ultralytics"):
+            try:
+                _names = set(_fp.get_filename_list(_key))
+            except Exception:
+                _names = set()
+            for _c in _cands:
+                if _c in _names:
+                    _FR_DETECTOR = _c
+                    return _FR_DETECTOR
+    except Exception:
+        pass
+    return _FR_DETECTOR
+
+
+def _load_facerefine_engine():
+    """延迟加载 BSAI-ComfyUI-FaceRefine 插件的 BSAIFaceRefine 节点类（复用其完整链路）。"""
+    global _FR_ENGINE, _FR_ENGINE_ERR
+    if _FR_ENGINE is not None:
+        return _FR_ENGINE
+    if _FR_ENGINE_ERR is not None:
+        raise _FR_ENGINE_ERR
+    import importlib.util as _ilu
+    _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _path = os.path.join(_base, "BSAI-ComfyUI-FaceRefine", "nodes.py")
+    if not os.path.isfile(_path):
+        _FR_ENGINE_ERR = FileNotFoundError("BSAI-ComfyUI-FaceRefine 插件未安装，小脸修复跳过。")
+        raise _FR_ENGINE_ERR
+    try:
+        _spec = _ilu.spec_from_file_location("bsai_ff_facerefine", _path)
+        _mod = _ilu.module_from_spec(_spec)
+        _spec.loader.exec_module(_mod)
+        _FR_ENGINE = _mod.NODE_CLASS_MAPPINGS.get("BSAIFaceRefine")
+        if _FR_ENGINE is None:
+            _FR_ENGINE_ERR = RuntimeError("BSAI FaceRefine 节点未注册。")
+            raise _FR_ENGINE_ERR
+    except Exception as _e:
+        _FR_ENGINE_ERR = _e
+        raise _FR_ENGINE_ERR
+    return _FR_ENGINE
+
+
+def _ff_run_segment_face_refine(frames, model, clip, vae, audio_vae):
+    """对单个分镜的解码帧 [T,H,W,C] 做 H3 局部人脸重绘并返回重绘后的帧。
+
+    复用 BSAIFaceRefine 单节点完整链路（自动检测最大脸 + 小脸自动降倍 + 近景锚点
+    ref2v + 逐帧去噪 + 羽化缝合）。任何异常或不适用都原样返回，保证不破坏出片。
+    """
+    if frames is None or int(getattr(frames, "shape", [0])[0]) == 0:
+        return frames
+    try:
+        _cls = _load_facerefine_engine()
+        _node = _cls()
+        _refined, _report, _faces = _node.run(
+            images=frames,
+            model=model,
+            clip=clip,
+            vae=vae,
+            audio_vae=audio_vae,
+            detector=_ff_face_detector(),
+            steps=8,
+            denoise=0.35,
+            canvas_size=768,
+            small_face_denoise=1.0,
+            confidence=0.35,
+            crop_factor=2.5,
+            smooth_window=21,
+            scheduler="beta",
+            sampler_name="euler",
+            seed=0,
+            prompt=("ultra high definition close-up of a human face, crystal clear facial details, "
+                    "natural realistic skin texture, sharp detailed eyes, correct natural facial "
+                    "features, photorealistic, professional portrait quality"),
+            enable_audio_lock=False,
+            paste_region="face_ellipse",
+            mask_dilation=24,
+            feather=24,
+            colour_match=1.0,
+            blend=1.0,
+            stage2_enable=False,
+            undetected_frames="fade_out",
+            person_fallback=False,
+            use_npu_face_detect=True,
+        )
+        if _faces and _refined is not None and getattr(_refined, "shape", None) == getattr(frames, "shape", None):
+            print("[H3 Extender] 小脸修复：%d 张人脸已重绘 | %s" % (_faces, (str(_report) or "")[:160].replace("\n", " ")))
+            return _refined
+        return frames
+    except Exception as _e:
+        print("[H3 Extender] ⚠️ 小脸修复跳过（不影响出片）: %s" % _e)
+        return frames
+
+
 class BSAIH3FilmFactory:
     @classmethod
     def INPUT_TYPES(cls):
@@ -6358,9 +6472,13 @@ class BSAIH3FilmFactory:
                 "FLOAT",
                 {"default": 0.15, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Model ambient volume (0 = silent, 1 = full, default 0.15 as a floor)."},
             ),
+            # v14.221: 保脸模式升级为三态枚举 ——
+            #   off   = 关闭(默认，不额外处理)
+            #   auto  = 常规保脸锁定(依靠 @img2.N 脸部特写参考注入 ref2v conditioning 维持五官一致)
+            #   refine= 小脸修复(出片前对每个分镜做 H3 FaceRefine 局部人脸重绘，专治远景小脸崩坏)
             "face_lock_mode": (
-                "BOOLEAN",
-                {"default": False, "tooltip": "Far-shot face preservation mode (automatically locks facial-feature consistency; @imgN: @img1=full body, @img2.N=each person's face close-up)."},
+                ["off (关闭)", "auto (常规保脸锁定)", "refine (小脸修复·H3局部重绘)"],
+                {"default": "off (关闭)", "tooltip": "保脸/小脸修复模式：off=关闭(默认，不额外处理)；auto=常规保脸锁定(依靠 @img2.N 脸部特写参考注入 ref2v conditioning 维持五官一致)；refine=小脸修复·H3局部重绘(出片前对每个分镜检测人脸、对脸区做 H3 局部重绘并缝合回去，修复远景小脸崩坏；需已安装 BSAI-ComfyUI-FaceRefine 插件，开销较大，仅在你确认画面小脸崩坏时开启)。"},
             ),
             # v14.153 修正: refine_mem_mode 移出 required —— 它在 widget 序列中必须
             # 排在 optional 的 prompt_pack 之后（即所有 widget 的最末尾），否则会让
@@ -6705,7 +6823,14 @@ class BSAIH3FilmFactory:
         # v2.24 模型环境音开关 / face_lock_mode（v14.83 起参数化；读取并传入渲染配置）
         env_audio_enable = str(kwargs.get("env_audio_enable", "global_inherit"))
         env_audio_gain = float(kwargs.get("env_audio_gain", 0.15))
-        face_lock_mode = bool(kwargs.get("face_lock_mode", False))
+        # v14.221: 保脸模式三态枚举。兼容旧工作流布尔值：true->auto(常规保脸)，false->off。
+        face_lock_mode = kwargs.get("face_lock_mode", "off (关闭)")
+        if isinstance(face_lock_mode, bool):
+            face_lock_mode = "auto (常规保脸锁定)" if face_lock_mode else "off (关闭)"
+        face_lock_mode = str(face_lock_mode or "off (关闭)")
+        face_refine_enabled = face_lock_mode.startswith("refine")
+        if face_refine_enabled:
+            print("[H3 Extender] 🎭 保脸-小脸修复模式开启：出片前对每个分镜运行 H3 FaceRefine 局部重绘")
         # v14.158 (2026-10-21): BSAI 一镜到底旁支模式。off 时零影响（默认）；
         # on 时：①强制段间 motion context（Add Guide 等效锚点引导）
         #       ②每段提示词自动注入一镜到底镜头指令
@@ -7128,7 +7253,20 @@ class BSAIH3FilmFactory:
                 _hv2x_path = None
             if _hv2x_path:
                 try:
-                    from bsai_h3_hypervae_2x import load_hyper_vae_2x as _load_hv2x
+                    # v14.221c: 按相对 __file__ 的绝对文件路径加载, 修复 ComfyUI 动态
+                    #   加载插件时 "No module named 'bsai_h3_hypervae_2x'" —— 插件目录
+                    #   未必在 sys.path, 裸 import 会失败并回退原生 VAE(二采虽提速但
+                    #   解码仍是 1x 像素, 2K 契约落空)。路径由 __file__ 相对推导,
+                    #   绝不写死盘符, 整合包换盘符/升级版本号仍可移植。
+                    import importlib.util as _ilu_hv
+                    _hv2x_mod_path = os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)), "bsai_h3_hypervae_2x.py")
+                    _hv2x_spec = _ilu_hv.spec_from_file_location("bsai_h3_hypervae_2x", _hv2x_mod_path)
+                    if _hv2x_spec is None or _hv2x_spec.loader is None:
+                        raise ImportError(f"spec_from_file_location 失败: {_hv2x_mod_path}")
+                    _hv2x_mod = _ilu_hv.module_from_spec(_hv2x_spec)
+                    _hv2x_spec.loader.exec_module(_hv2x_mod)
+                    _load_hv2x = _hv2x_mod.load_hyper_vae_2x
                     _hv_vae, _hv_report = _load_hv2x(_hv2x_path)
                     _hv_vae.model_name = os.path.basename(_hv2x_path)  # ref2va cache key 区分
                     vae = _hv_vae
@@ -9733,6 +9871,13 @@ class BSAIH3FilmFactory:
                             out_audios.append(caud)
             except Exception as _av2:
                 print(f"[H3 Extender] cached-clip AV decode failed: {_av2}")
+
+        # v14.221 保脸-小脸修复：出片前对每个分镜段做 H3 局部人脸重绘。
+        if face_refine_enabled and len(out_images) > 0:
+            out_images = [
+                _ff_run_segment_face_refine(im, model, clip, vae, audio_vae) if im is not None else im
+                for im in out_images
+            ]
 
         out_images_t, out_audios_t = _concat_clip_av(out_images, out_audios)
 

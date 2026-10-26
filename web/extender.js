@@ -1261,7 +1261,7 @@ const BSAI_BILINGUAL_LABELS = {
     "upscale_face_restore": "Face restore after upscale (requires GPFGAN/CodeFormer)",
     "env_audio_enable": "Ambient audio toggle (global_inherit = follow global, on = mix in, off = voice only)",
     "env_audio_gain": "Ambient audio gain (default 0.15)",
-    "face_lock_mode": "Distant face lock mode (@img1 full body + @img2.N face close-ups)",
+    "face_lock_mode": "Face lock modes: off=disabled / auto=normal face lock (@img2.N face close-ups drive ref2v conditioning) / refine=small-face repair (H3 FaceRefine local face-crop redraw on every segment before output, fixes broken faces in wide shots; needs BSAI-ComfyUI-FaceRefine, slower)",
     "refine_mem_mode": "Refine VRAM-saving mode (spatial = tiling-compatible / global = full context)",
     "one_shot_mode": "One-shot mode (off = shot-by-shot editing / on = seamless long take: no-cut instruction + forced motion context + zero-transition concat)",
     "one_shot_clip_duration": "One-shot target seconds per segment (0 disables auto CLIP split; with a song, CLIP count = song duration / this value)",
@@ -6654,7 +6654,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "tiled_refine", en: "Tiled", desc_en: "Second pass samples in tiles along the long spatial axis (attention VRAM drops linearly, prevents OOM hangs). Keep off with plenty of VRAM." },
         { key: "semantic_bridge_enable", en: "SemBrg", desc_en: "Semantic Bridge (about 11MB small MLP residual mix; makes H3 follow composition/spatial/count cues better)." },
         { key: "semantic_bridge_magnitude_match", en: "MagMatch", desc_en: "Match the Semantic Bridge vector magnitude to the original hidden state (on by default upstream)." },
-        { key: "face_lock_mode", en: "FaceLock", desc_en: "Distant face lock mode (automatic facial consistency; @img1 = full body, @img2.N = face close-ups)." },
+        // v14.221 (2026-10-26): 保脸由布尔升级为三态枚举。cycle 必须与后端 INPUT_TYPES
+        // 枚举字面量逐字一致；cycleLabels 为按钮显示名。Old booleans normalized in H3LegacyCompat.norm.
+        { key: "face_lock_mode", en: "FaceLock", desc_en: "Face lock modes (v14.221): Off = disabled; Auto = normal face lock (@img2.N face close-up refs drive ref2v conditioning for facial consistency); Small-face refine = run H3 FaceRefine local face-crop redraw on every segment before output, fixing broken/collapsed faces in wide shots (needs BSAI-ComfyUI-FaceRefine installed; slower).", cycle: ["off (关闭)", "auto (常规保脸锁定)", "refine (小脸修复·H3局部重绘)"], cycleLabels: ["Off", "Auto (lock)", "Small-face refine"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#f472b6", border: "#be185d" }] },
         // v14.158 (2026-10-21): 一镜到底旁支模式（参考B站 MinimaxH3 长视频一镜到底工作流）。
         // off=默认分镜剪辑(xfade 转场拼接)；on=无缝长镜头(注入不切场/不转场指令 + 强制
         // motion context(Add Guide 等效锚点) + 合并零转场 concat)。
@@ -7660,9 +7662,9 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 现役 64 位: 0..61 = run_mode..face_lock_mode(62 个后端 widget),
         // 62 = refine_mem_mode, 63 = h3_extender_timeline(dom, applyToNode 跳过)。
         const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","one_shot_mode","one_shot_clip_duration","render_pipeline","one_shot_sampling","h3_extender_timeline"];
-        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"euler","simple",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.55,6,2.0,"(bilinear插值, 无需模型)",40,0.0,"Lock lip-sync (recommended)",false,false,"Balanced (quality+speed)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"(off: no weights)","0.15",true,"global_inherit",0.15,false,"spatial (分块,兼容)","off (分镜模式)",12,"Sol-H3 Self-Lift 双采 (默认)","单采无缝 (推荐)",""];
+        const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"euler","simple",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.55,6,2.0,"(bilinear插值, 无需模型)",40,0.0,"Lock lip-sync (recommended)",false,false,"Balanced (quality+speed)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"(off: no weights)","0.15",true,"global_inherit",0.15,"off (关闭)","spatial (分块,兼容)","off (分镜模式)",12,"Sol-H3 Self-Lift 双采 (默认)","单采无缝 (推荐)",""];
         const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain","one_shot_clip_duration"]);
-        const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match","face_lock_mode"]);
+        const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match"]);
         const OPTIONS = {
             run_mode: ["clip_by_clip","full_batch"],
             ref_image_size: ["match","max"],
@@ -7675,6 +7677,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             upscale_engine: ["auto","dlss5","realesr","bicubic"],
             speed_preset: ["custom","极速","均衡","精细","极速-VDN","均衡-VDN","精细-VDN"],
             env_audio_enable: ["global_inherit","on","off"],
+            face_lock_mode: ["off (关闭)","auto (常规保脸锁定)","refine (小脸修复·H3局部重绘)"],
             refine_mem_mode: ["spatial (分块,兼容)","global (全上下文省显存)"],
             one_shot_mode: ["off (分镜模式)","on (一镜到底)"],
             one_shot_sampling: ["单采无缝 (推荐)","双采高清 (接缝风险)","双采无缝 (8+4)"],
@@ -7743,6 +7746,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         function norm(k, v, d) {
             if (ALIAS_CANON[k] && typeof v === "string" && ALIAS_CANON[k][v]) return ALIAS_CANON[k][v];
             if (k === "upscale_mode" && typeof v === "string" && ["custom","手动","全手动"].includes(v.trim().toLowerCase())) return "Custom";
+            // v14.221: 保脸由布尔升级为三态枚举；旧工作流的布尔值归一为字符串档位。
+            if (k === "face_lock_mode" && typeof v === "boolean") return v ? "auto (常规保脸锁定)" : "off (关闭)";
             const o = OPTIONS[k];
             if (o) {
                 if (typeof v !== "string") v = String(v);

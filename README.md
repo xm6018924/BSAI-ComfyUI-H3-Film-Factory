@@ -163,7 +163,7 @@
 |---|---|---|---|
 | `env_audio_enable` | 模型环境音开关 | `global_inherit` | global_inherit 跟随全局 / on 混入 H3 自生成环境音 / off 只留主唱/克隆语音 |
 | `env_audio_gain` | 环境音音量 | `0.15` | 0=无声，1=满音量 |
-| `face_lock_mode` | 远景保脸模式 | `false` | 自动锁五官一致 |
+| `face_lock_mode` | 保脸/小脸修复模式 | `off (关闭)` | v14.221 三态枚举：`off (关闭)`=不额外处理 / `auto (常规保脸锁定)`=依靠 @img2.N 脸部特写参考注入 ref2v conditioning 维持五官一致（兼容旧布尔 true）/ `refine (小脸修复·H3局部重绘)`=出片前对每个分镜做 H3 FaceRefine 局部人脸重绘并缝合回去，专治远景小脸崩坏（需安装 BSAI-ComfyUI-FaceRefine 插件，开销较大）。旧工作流布尔 `false`→off，`true`→auto |
 
 ### CLIP 级超分开关（v14.85，前端按钮 v14.90 待恢复）
 - 后端已支持每个 CLIP 的 `upscale` 三态字段（`跟随`/`强制超分`/`强制不超分`），**CLIP 级优先于总开关 `upscale_per_clip`**。

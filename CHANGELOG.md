@@ -14,7 +14,19 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
-### v14.218 (2026-10-26) — 前端枚举与后端严格同步：双语枚举收敛到规范值 + 修遗留兼容层白名单（修「渲染管道档位被静默重置」）/ Front-end enums strictly synced with the backend: canonical values + legacy whitelist repaired
+### v14.221 (2026-10-26) — 保脸模式三态枚举 + 小脸修复（H3 FaceRefine 局部重绘）/ FaceLock becomes a 3-mode enum + small-face repair via H3 FaceRefine local redraw
+
+**参考 B站《如何利用Minimax H3的Face Refine进行小脸崩坏修复》(BV133nh6fEMm)：远景小脸崩坏时全帧 H3 会结构塌陷（脸太小、放大后无足够像素重建五官），解法是把脸区裁剪出来做 H3 局部重绘再缝合回去。现把该方案接进电影工厂出片前，作为「小脸修复」后处理档。**
+**/ Based on the Bilibili H3 FaceRefine guide: wide-shot small faces collapse because full-frame H3 has too few pixels to rebuild the features. The fix is local face-crop H3 redraw + stitch-back, now wired into the film factory as a pre-output small-face repair tier.**
+
+- **`face_lock_mode` 由布尔升级为三态枚举**：`off (关闭)`（默认，不额外处理）/ `auto (常规保脸锁定)`（依靠 @img2.N 脸部特写参考注入 ref2v conditioning 维持五官一致，兼容旧布尔 `true`）/ `refine (小脸修复·H3局部重绘)`（出片前对每个分镜检测人脸，对脸区做 H3 局部重绘并缝合回去）。旧工作流布尔 `false`→off、`true`→auto，零破坏。** / face_lock_mode upgraded from boolean to a 3-mode enum: off / auto (normal face lock) / refine (small-face repair). Old boolean values are auto-mapped (false→off, true→auto).**
+- **小脸修复实现**：新增 `_ff_run_segment_face_refine()`，延迟加载并复用本机 `BSAI-ComfyUI-FaceRefine` 插件的 `BSAIFaceRefine` 完整链路（自动检测最大脸 + 小脸自动降倍到 512 + 近景大脸做 ref2v 锚点 + 逐帧去噪 + 羽化缝合）。在出片前对所有已解码分镜段统一跑一遍（汇总循环结束后，不与采样抢显存）；任一分镜无脸/异常都原样返回，绝不破坏出片。** / New small-face repair pass runs H3 FaceRefine on every decoded segment right before output, reusing the installed BSAI-ComfyUI-FaceRefine engine; failures/non-face segments pass through untouched.**
+- **前端同步**：`extender.js` 中 `face_lock_mode` 移出 `BOOLS`、加入 `OPTIONS` 白名单，快捷条增加三态下拉（Off / Auto lock / Small-face refine），`H3LegacyCompat.norm` 对旧布尔值归一。** / Front end: face_lock_mode moved from BOOLS to the OPTIONS enum whitelist, quick-bar cycle dropdown added, legacy booleans normalized.**
+- **前置要求**：小脸修复档需已安装 `BSAI-ComfyUI-FaceRefine` 插件与至少一个 `models/ultralytics/bbox/face_yolov8*.pt`；未安装时档位自动跳过并提示，不影响出片。** / The refine tier requires the BSAI-ComfyUI-FaceRefine plugin and a face detector model; otherwise it skips gracefully.**
+- **验证**：`py_compile` + `node --check` 通过。** / Validated with py_compile + node --check.**
+
+---
+
 
 **问题**：`refine_lipsync_mode` 与 `upscale_mode` 的后端枚举是**中英双语**的（英文规范值 + 旧中文别名都合法，v2.120c 起为兼容老工作流），而前端快捷按钮的 `cycle` 表只写了旧中文别名 → 与后端 `INPUT_TYPES` 字面量对不上（新增的一致性自检判定 DESYNC）。更要命的是遗留兼容层 `H3LegacyCompat` 的 `OPTIONS` 白名单同样只认旧中文：**英文规范值（也就是后端 default）会被当成「选项外」静默改写成旧中文标签**。自检工具进一步查出 `render_pipeline` 白名单**漏了 4 档**（直播配音高清 / QAD-v2-8步 / 直播带货（全自动）/ FastH3 Omni × SelfLift 超分）—— 载入这类工作流会被**静默重置成默认档**，该档语义整体丢失。
 **/ Problem: two backend enums are bilingual (canonical English + legacy Chinese aliases), but the quick-button cycle table only carried the legacy Chinese strings, so the front end no longer matched the backend literals. Worse, the legacy compatibility layer's OPTIONS whitelist only knew the Chinese aliases, so a canonical English value (which is also the backend default) was treated as "not an option" and silently rewritten. The new checker then found the render_pipeline whitelist missing four tiers — loading such a workflow silently reset it to the default tier.**
