@@ -9034,6 +9034,39 @@ class BSAIH3FilmFactory:
                 except Exception as _me:
                     print(f"[H3 Extender] 显存清理失败(可忽略): {_me}")
 
+                # v14.223 (2026-10-26): 采样前把已解码、待最终拼接的 out_images/out_audios
+                # 中的 GPU 张量迁到 CPU，恢复 DiT 整块驻留所需的显存。
+                # 根因: clip0 解码产出的 IMAGE(约5.76GB) 被 out_images 活引用驻留显存, 空缓存
+                # 清不掉, 使 clip1+ 采样前 free 只剩 ~16GB, 装不下 H3 DiT 20.6GB → 触发
+                # DynamicVRAM 逐层流式换页(600-900s/步); 首段无上段积累所以快(~70s/步)。
+                # 迁移后 GPU 归零, clip1+ 采样恢复整块驻留(~100-200s/步)。最终 _concat_clip_av
+                # 内部本就末尾 .cpu(), 对 CPU 输入安全。
+                if (i > 0) and (out_images or out_audios):
+                    try:
+                        import torch as _t223
+                        _moved223 = 0
+                        for _oi223, _im223 in enumerate(out_images):
+                            try:
+                                if _im223 is not None and getattr(_im223, "is_cuda", False):
+                                    out_images[_oi223] = _im223.detach().to("cpu")
+                                    _moved223 += 1
+                            except Exception:
+                                pass
+                        for _oa223 in out_audios:
+                            try:
+                                _w223 = _oa223.get("waveform") if isinstance(_oa223, dict) else None
+                                if _w223 is not None and getattr(_w223, "is_cuda", False):
+                                    _oa223["waveform"] = _w223.detach().to("cpu")
+                                    _moved223 += 1
+                            except Exception:
+                                pass
+                        if _moved223:
+                            _t223.cuda.synchronize()
+                            _t223.cuda.empty_cache()
+                            print(f"[H3 Extender] v14.223 采样前已把 {_moved223} 个上段解码 GPU 张量迁出显存, 恢复 DiT 整块驻留", flush=True)
+                    except Exception:
+                        pass
+
             # v14.162 (2026-10-22 fix): 4090 clip3 CUDA launch failure 修复 ——
             # 等待上一段异步编码线程完全结束再进入本段 TE 文本编码。
             # 实机根因: clip2 的异步编码(后台线程: VAE decode + NVENC)在 clip3 的
@@ -9882,14 +9915,40 @@ class BSAIH3FilmFactory:
                             continue
                         cimg, caud = _decode_clip_to_av(owner, ci, vae, audio_vae, float(FPS))
                         if cimg is not None and int(cimg.shape[0]) > 0:
+                            # v14.223b: 与主循环迁移一致——补录 decode 产出的 GPU 张量也统一
+                            # 迁 CPU, 避免与先前已迁 CPU 的 out_images 混合设备, 使 concat 处
+                            # torch.cat(imgs) 因跨设备抛错(concat 内部本就末尾 .cpu(), 迁后安全)。
+                            try:
+                                if getattr(cimg, "is_cuda", False):
+                                    cimg = cimg.detach().to("cpu")
+                            except Exception:
+                                pass
                             out_images.append(cimg)
                         if caud is not None:
+                            try:
+                                _cw = caud.get("waveform") if isinstance(caud, dict) else None
+                                if _cw is not None and getattr(_cw, "is_cuda", False):
+                                    caud = dict(caud)
+                                    caud["waveform"] = _cw.detach().to("cpu")
+                            except Exception:
+                                pass
                             out_audios.append(caud)
             except Exception as _av2:
                 print(f"[H3 Extender] cached-clip AV decode failed: {_av2}")
 
-        # v14.221 保脸-小脸修复：出片前对每个分镜段做 H3 局部人脸重绘。
+        # v14.223: 采样前曾把 out_images 迁到 CPU 释放显存给 DiT; 小脸修复在 GPU 上算,
+        # 这里把需要处理的张量迁回 GPU。face_refine 是可选档(需 BSAI-ComfyUI-FaceRefine),
+        # 用不上时 CPU 张量直接喂 _concat_clip_av(.cpu() 安全)。
         if face_refine_enabled and len(out_images) > 0:
+            try:
+                import torch as _t223b
+                _dev223 = _t223b.cuda.current_device()
+                out_images = [
+                    (im.to(_dev223) if (im is not None and not getattr(im, "is_cuda", False)) else im)
+                    for im in out_images
+                ]
+            except Exception:
+                pass
             out_images = [
                 _ff_run_segment_face_refine(im, model, clip, vae, audio_vae) if im is not None else im
                 for im in out_images
