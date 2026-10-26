@@ -14,6 +14,17 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.216 (2026-10-26) — prestartup 收录第三方节点 SeedVR2 的启动期崩溃补丁（自动重打）/ prestartup: host the third-party SeedVR2 startup-crash patch (auto re-applied)
+
+**症状**：ComfyUI 启动到一半进程被杀，端口 8181 不监听，启动器 `.bat` 走到 `pause`。崩在 `custom_nodes/seedvr2_videoupscaler/src/optimization/compatibility.py` 的 `_probe_bfloat16_support()`（模块级 `BFLOAT16_SUPPORTED = _probe_bfloat16_support()`）里的 `torch.randn(8,8,bfloat16,device='cuda:0')` → **Windows fatal exception: access violation**（原生崩溃，Python 的 try/except 接不住）。该节点与本插件无关，但它会把整个 ComfyUI 杀掉，连带本插件一起不可用。
+**/ Symptom: ComfyUI dies mid-startup (port 8181 never listens, the launcher .bat falls through to `pause`). The fault is a native access violation inside the third-party SeedVR2 node's import-time bfloat16 probe; the node is unrelated to this plugin, but it takes the whole ComfyUI process down with it.**
+
+- **根因**：ComfyUI 全量环境里（同一进程已加载 xformers / flash_attn / sageattention / comfy_kitchen 等多个 CUDA 扩展）这次**首次 bf16 分配**触发原生 access violation；独立进程里 flash_attn→bf16 / sageattention→bf16 / triton→bf16 / 纯 bf16 matmul **全部正常**，与模型、显存容量、驱动版本均无关（本机 16:04 与 16:09 两次启动崩在同一行，faulthandler 精确指向 `compatibility.py:688`）。** / Root cause: the first bf16 allocation in the full ComfyUI process faults natively; every isolated combination passes, so it is unrelated to the model, VRAM size or driver.**
+- **修法**：把探针换成**只查设备计算能力、不分配任何显存** —— sm_80(Ampere) 及以后原生支持 bf16，对 4090(sm_89) 结论一致，与原探针等价。** / Fix: probe the device capability instead of allocating, so no VRAM is touched at import time.**
+- **自动重打**：`patches/seedvr2_bf16_probe/apply_seedvr2_bf16_probe_patch.py` 由 `prestartup.py` 在 ComfyUI 启动前调用 → **SeedVR2 节点更新把补丁冲掉后，下次启动自动重打**。应用器幂等；上游改动导致原始代码块匹配不上时**不强行改写**、只打印提示。** / The applier is wired into `prestartup.py`, so a node update that reverts the patch is re-patched on the next start; it is idempotent and refuses to force-write when upstream changed the block.**
+- **兜底**：万一补丁没生效又崩，把节点目录 `Rename-Item` 加 `.disabled` 后缀即可正常启动（ComfyUI 跳过 `.disabled` 目录）。** / Fallback: rename the node folder with a `.disabled` suffix to get ComfyUI back up.**
+- **新增文件**：`patches/seedvr2_bf16_probe/`（`apply_seedvr2_bf16_probe_patch.py` + `compatibility.py.patch` + `README.md`）。** / New files under `patches/seedvr2_bf16_probe/`.**
+
 ### v14.215 (2026-10-26) — 新增一镜到底第三档「双采无缝 (8+4)」：一镜到底 + 二采(1采8步+2采4步) + 接缝锚点修复 / New one-shot tier "Dual-pass seamless (8+4)": dual-pass one-shot with a repaired inter-segment anchor
 
 **实测根因：双采「接缝风险」不是模型漂移，是段头锁 keep 在双采下整块静默失效。** 一镜到底的接缝靠「上一段尾 latent → 本段头部 `noise_mask` 锁 keep」续接（v14.188 重叠区噪声延续）。单采时上一段尾 latent 是 1x，与本段一采 latent 同尺寸 → 锁 keep 生效；**双采时上一段尾 latent 是二采放大后的 2x**（`previous_proxy` = join 后的二采结果），本段 latent 仍是 1x → 赋值 `shape 不匹配` 抛异常 → 整块被外层 `except` 吞掉 → 噪声延续与段头锁 keep **全部失效** → 裁掉 22~39 帧重叠区后，接缝处画面跳变（段间模糊/抖动）。

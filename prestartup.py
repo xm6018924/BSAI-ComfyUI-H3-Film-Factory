@@ -145,7 +145,30 @@ def _patch_fileresponse_sendfile():
         print(f"[H3 Extender] v2.62 FileResponse patch failed: {_e}")
 
 
+def _apply_seedvr2_bf16_probe_patch():
+    """SeedVR2 视频超分节点在 import 期的 bf16 探针会触发 native access violation,
+    直接杀掉整个 ComfyUI 进程(连带本插件一起不可用)。这里在 ComfyUI 启动前把
+    探针换成不分配显存的设备能力查询; 节点更新冲掉补丁后下次启动会自动重打。
+    详见 patches/seedvr2_bf16_probe/README.md。"""
+    try:
+        import importlib.util
+        import os
+
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _mod = os.path.join(_here, "patches", "seedvr2_bf16_probe",
+                            "apply_seedvr2_bf16_probe_patch.py")
+        if not os.path.isfile(_mod):
+            return
+        _spec = importlib.util.spec_from_file_location("bsai_h3_seedvr2_bf16_patch", _mod)
+        _m = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_m)
+        _m.apply()
+    except Exception as _e:
+        print(f"[H3 Extender] seedvr2 bf16 probe patch failed: {_e}")
+
+
 # Apply patches on prestartup
 _patch_aiohttp_default_executor()
 _patch_aiohttp_static()
 _patch_fileresponse_sendfile()
+_apply_seedvr2_bf16_probe_patch()

@@ -1,0 +1,28 @@
+--- a/src/optimization/compatibility.py
++++ b/src/optimization/compatibility.py
+@@ -685,14 +685,18 @@
+     if not torch.cuda.is_available():
+         return True
+     try:
+-        a = torch.randn(8, 8, dtype=torch.bfloat16, device='cuda:0')
+-        _ = torch.matmul(a, a)
+-        del a
++        # local patch 2026-10-26: seedvr2 bf16 probe
++        # 原实现在这里做 torch.randn(8, 8, dtype=torch.bfloat16, device='cuda:0')
++        # + matmul 来探测 cuBLAS 是否支持 bf16。在 ComfyUI 启动期(进程内已加载
++        # xformers / flash_attn / sageattention / comfy_kitchen 等多个 CUDA 扩展)
++        # 做这次首次 bf16 分配会触发 native access violation, 直接杀掉整个进程
++        # -> ComfyUI 起不来(faulthandler 精确指向本行)。
++        # 改为只查设备计算能力: sm_80(Ampere)及以后原生支持 bf16, 不分配任何显存,
++        # 因此不会在 import 期触发 CUDA 分配崩溃。对 40 系(4090 sm_89)结论一致。
++        major, minor = torch.cuda.get_device_capability(0)
++        return (major, minor) >= (8, 0)
++    except Exception:
+         return True
+-    except RuntimeError as e:
+-        if "CUBLAS_STATUS_NOT_SUPPORTED" in str(e):
+-            return False
+-        raise
+ 
+ BFLOAT16_SUPPORTED = _probe_bfloat16_support()
+ COMPUTE_DTYPE = torch.bfloat16 if BFLOAT16_SUPPORTED else torch.float16
