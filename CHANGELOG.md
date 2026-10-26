@@ -14,6 +14,18 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.211 (2026-10-26) — 渲染管道新增档「FastH3 Omni × SelfLift 超分」：落地 B站《FastH3 Omni 全流程教学》配方 / New render-pipeline tier "FastH3 Omni × SelfLift upscale": the Bilibili FastH3 Omni recipe
+
+**来源：B站《FastH3 Omni 全流程教学:90秒直出10s高清视频、告别塑料假脸与全能参考实测》(BV1rtnQ6qErJ)。配方 = FastH3 Omni 8 步蒸馏 + SelfLift 渐进式超分 + sol-attn 替代 VSA。** **/ Source: Bilibili BV1rtnQ6qErJ (FastH3 Omni + SelfLift progressive upscale + sol-attn over VSA).**
+
+- **新增档位：** render_pipeline 新增第 13 档「FastH3 Omni × SelfLift 超分」—— 一采 4 步低分辨率(≈0.4x, 由 `refine_upscale_factor=2.5` 表达)搭骨架 → 3D latent 放大 → 二采 4 步高分辨率精修; 总 8 NFE 仍满足 Omni 8 步蒸馏契约; shift 12/3、denoise 1.0、euler、TST 开。** / New tier: 4-step ~0.4x skeleton → 3D latent upscale → 4-step hi-res refine (8 NFE total), shift 12/3, denoise 1.0, euler, TST on.**
+- **与现有档⑨ 的区别：** 档⑨ 是"单采 8 步 + 一采钳制 960×544 + 外部超分兜底"; 本档改为**插件内自持的渐进双采**(免外部超分, 无二采漂移)。因此 `omni_8step_mode` 判定已排除本档, 不再用单采强制覆盖二采。** / Unlike tier 9 (single pass + external upscale), this tier does in-plugin progressive dual-pass; `omni_8step_mode` excludes it so the single-pass force does not clobber refine.**
+- **注意力建议：** 视频实测把 VSA 换成 **sol-attn** 后画面瞬间清亮通透、速度不变(默认 VSA 偏暗偏闷)。切换需在**工作流层**把 `BlockSparseAttention(VSA)` 换成 Sol-Attn 节点——本档只改采样管道 + 打印提示。** / Prefer sol-attn over VSA (a workflow-level node swap; this tier only prints a hint).**
+- **模型要求：** Loader 需换 `fasth3_omniref_8step_pruned_int8_convrot.safetensors`。** / Loader must use the Omni checkpoint.**
+- **验证：** `extender.py` py_compile PASS。** / Verified: py_compile PASS.**
+
+---
+
 ### v14.207 (2026-10-25) — 修二采 OOM 兜底的 shape mismatch 崩溃：keyframe 几何随 fallback 收缩 + fallback 非 OOM 异常不再打死整个 prompt / Fix the OOM-fallback shape-mismatch crash: keyframe geometry follows the fallback, and a non-OOM fallback error no longer kills the whole prompt
 
 **实测（用户 2026-10-25 16:12 报错，`clip2`）：`RuntimeError: shape mismatch: value tensor of shape [51648, 96] cannot be broadcast to indexing result of shape [14928, 96]`（`comfy/ldm/minimax/model.py:576 all_video_rows[~img_update] = cond_video_rows`），1 小时 34 分的作业在二采兜底里直接失败。** **/ Measured: clip 2's refine OOM fallback crashed with a cond-row shape mismatch, killing a 1h34m job.**
