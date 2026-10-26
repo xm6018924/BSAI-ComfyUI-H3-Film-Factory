@@ -14,6 +14,21 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### 📦 示例工作流 / Example Workflow (2026-10-26) — 一镜到底 MV · accel-selector 组合 · 4090 · 自定义 8+4 档（修复「界面设 8+4 实跑 1 采 6 步」）/ Example workflow: one-shot MV + accel-selector combo on 4090 with a custom 8+4 tier (fixes "UI says 8+4, run does 6 steps")
+
+**实测：界面把一采设 8 步 / 二采设 4 步，实际只跑一采 6 步、二采被完全跳过。** 根因是两层静默覆盖，与模型/显存无关：`render_pipeline` 非默认档会在 `extender.py` 末尾无条件改写 `steps / refine_steps / tile_count / refine_denoise`，而 `one_shot_sampling="单采无缝 (推荐)"` 会让一镜到底模式整段跳过二采。
+**/ Measured: the UI was set to 8 first-pass + 4 refine steps, but only 6 first-pass steps ran and the refine pass was skipped entirely. Root cause is two layers of silent override, unrelated to model or VRAM.**
+
+- **第 1 层覆盖（档位改写步数）：** `render_pipeline` 只有 `Sol-H3 Self-Lift 双采 (默认)` 不会进入 `extender.py` 的档位分支（`if _rp_mode and _rp_mode != "Sol-H3 Self-Lift 双采 (默认)"`）；选其它档，末尾一律硬改写采样参数，例如「4K直出 秘制酱料」→ `steps, refine_steps, tile_count, refine_denoise = 6, 3, 4, 0.45`，用户的 8+4 被无声改写为 6+3。** / Override layer 1: only the default tier skips the tier branch; every other tier hard-rewrites steps (e.g. "4K直出 秘制酱料" forces 6+3).**
+- **第 2 层覆盖（一镜到底单采跳过二采）：** `one_shot_mode="on (一镜到底)"` + `one_shot_sampling="单采无缝 (推荐)"` → `one_shot_single_pass=True` → `_eff_refine=False`，二采整段不跑。** / Override layer 2: one-shot + "单采无缝 (推荐)" sets `_eff_refine=False` and skips the whole refine pass.**
+- **本示例工作流的生效组合：** `render_pipeline="Sol-H3 Self-Lift 双采 (默认)"`（唯一不改写步数的档）+ `one_shot_sampling="双采高清 (接缝风险)"`（唯一让二采真跑的选项）+ `speed_preset="custom"` + `scheduler="beta"` + `sampler_name="euler"` + 一采 `steps=8` / 二采 `refine_steps=4` / `refine_denoise=0.45` / `refine_upscale_factor=2.0` / `tile_count=4` / shift 12/3。** / The combination that actually takes effect: default tier + dual-pass one-shot + custom speed preset.**
+- **取舍说明（已知风险，非缺陷）：** 一镜到底 + 双采会有段间像素漂移（接缝风险），这正是 v14.185 单采档被设计出来规避的问题；本示例按用户明确要求选择「跑满二采」，接缝零漂移请改用「单采无缝 (推荐)」。** / Known trade-off: one-shot + dual-pass can drift at segment joins; that is exactly what the single-pass tier avoids.**
+- **新增示例工作流：** `example_workflows/BSAI_H3_Film_Factory电影工厂-MV一镜到底版-accel-selector组合-4090-自定义8+4档.json`（103 节点 / 96 连线）。** / New example workflow added to `example_workflows/`.**
+- **验证：** 按 `INPUT_TYPES` 实际 widget 顺序（90 项，`model/clip/vae` 为 forceInput 故数组偏移 3）逐项核对 `widgets_values` 数组与 `widgets_values_named` 字典 —— 两份副本一致率 **100%（68/68，0 处冲突）**，与已发布 5090 参照工作流同口径；按 `extender.py` 真实优先级逻辑仿真复算，一采 8 步 / 二采 4 步 / denoise 0.45 / `_eff_refine=True` / `honor_manual_steps=True` 全部命中。** / Verified: array and named widget maps agree 100% (68/68) against the plugin's real widget order; simulating the real override precedence yields 8 + 4 steps with refine enabled.**
+- **缓存提示：** 旧的 6 步单采链缓存（`bsai_h3_chain_cache/chain_extender_250.json`，几何 60×34）与新配置期望的 120×68 不符，`requested_mismatch=True` 会自动清链重渲，不会复用旧 latent。** / Cache note: the stale 6-step single-pass chain cache does not match the new geometry and is auto-cleared.**
+
+---
+
 ### v14.211 (2026-10-26) — 渲染管道新增档「FastH3 Omni × SelfLift 超分」：落地 B站《FastH3 Omni 全流程教学》配方 / New render-pipeline tier "FastH3 Omni × SelfLift upscale": the Bilibili FastH3 Omni recipe
 
 **来源：B站《FastH3 Omni 全流程教学:90秒直出10s高清视频、告别塑料假脸与全能参考实测》(BV1rtnQ6qErJ)。配方 = FastH3 Omni 8 步蒸馏 + SelfLift 渐进式超分 + sol-attn 替代 VSA。** **/ Source: Bilibili BV1rtnQ6qErJ (FastH3 Omni + SelfLift progressive upscale + sol-attn over VSA).**
