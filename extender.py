@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.82-lipaudio-exclusive-mix"
+BUILD = "minimax-h3-extender-v14.208-global-attention-fallback"
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -3925,11 +3925,32 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     if _venv_dir not in _sys_g.path:
                         _sys_g.path.insert(0, _venv_dir)
                     _gt = _ilg.import_module("selflift_avatar.h3_global_tiling")
+                    _r_original_refine_model = _refine_model
                     _refine_model = _gt.tiled_model(_refine_model, 4096)
                     _fb = getattr(_refine_model, "_selflift_global_fallback", None)
                     print(f"[H3 Extender] v14.153 二采省显存模式: global 全上下文路径已包装 "
                           f"(token_chunk=4096, 无空间分块)"
                           + (f", 上游回退: {_fb}(检测到自制注意力 override, 走全序列 attention+分块 MLP)" if _fb else ""))
+                    if _fb:
+                        # v14.208: tiled_model 成功但被检测出 attention override,
+                        # 自动回退到 dense full-sequence attention——1.3M tokens 的
+                        # dense attention workspace 在 24GB 卡上 OOM.
+                        # 恢复原模型 + 切 spatial 分块 (tile 级 token 在 Sol-Attn 健康区).
+                        _refine_model = _r_original_refine_model
+                        del _r_original_refine_model
+                        refine_mem_mode = "spatial"
+                        _r_global_fallback_tiles = True
+                        print(f"[H3 Extender] v14.208 global 回退 attention override({_fb}), "
+                              f"恢复原模型 + 切 spatial 分块以避免全序列 attention OOM")
+                        # tiled_model 内部 model.clone() 会创建权重副本 / cast buffer,
+                        # 显式 GC + empty_cache 回收 VRAM, 防止后续 spatial 分块 forward
+                        # 因碎片伪 OOM (allocated 低但 free=0).
+                        try:
+                            import gc as _gc208, torch as _t208
+                            _gc208.collect()
+                            _t208.cuda.empty_cache()
+                        except Exception:
+                            pass
                 except Exception as _eg15:
                     print(f"[H3 Extender] v14.153 global 包装失败, 回退 spatial 分块保底: {_eg15}")
                     refine_mem_mode = "spatial"
@@ -3944,6 +3965,18 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _r_restore_tiles = _tiles_mod4.wrap_sampler_spatial_tiles(
                         _r_sampler, n_tiles=4, overlap_pixels=int(tile_overlap))
                     print(f"[H3 Extender] v14.180 回退保底: 已补启用 spatial 分块 n_tiles=4 overlap={tile_overlap}px")
+                    # v14.208: 与 v14.173 同逻辑——spatial fallback 装好后,
+                    # 若 transformer_options 里有之前注入的 sol_max_tokens (来自 v14.148),
+                    # 必须清掉, 否则每个 tile (~262k tokens) 被强制 dense attention,
+                    # 比稀疏 Sol-Attn 慢 60x 且可能再次 OOM.
+                    try:
+                        _r_to_clean4 = _refine_model.model_options.get("transformer_options", {})
+                        if isinstance(_r_to_clean4, dict) and "sol_max_tokens" in _r_to_clean4:
+                            _r_to_clean4.pop("sol_max_tokens", None)
+                            print(f"[H3 Extender] v14.208 spatial fallback: 清理残留 sol_max_tokens="
+                                  f"已移除 (tile 级 token 在健康区, Sol-Attn 稀疏保留)")
+                    except Exception as _ec208:
+                        pass
                 except Exception as _te_t4:
                     print(f"[H3 Extender] v14.153 回退补分块失败(仅 v14.148 dense 门兜底): {_te_t4}")
             _r_guider = _BasicGuider(_refine_model)
