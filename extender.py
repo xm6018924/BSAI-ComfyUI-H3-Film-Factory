@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.208-global-attention-fallback"
+BUILD = "minimax-h3-extender-v14.209-refine-residency-patch"
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -3996,12 +3996,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] v1.64 跳过prepare-load失败, 回退原路径: {_pe59}")
                     return _bsai_orig_prepare(model, noise_shape, conds, model_options=model_options,
                                               force_full_load=force_full_load, force_offload=force_offload)
-            if not (tile_count and int(tile_count) > 1):
-                # v1.65: 仅非分块安装驻留补丁. 分块时 DynamicVRAM 会在
-                # 12.9GB 驻留基础上把模型全量加载到 21.7GB -> sol_attn
-                # workspace OOM(v1.64 实测). 分块走原生 prepare 全流式
-                # (0 驻留逐 block 换页, 313s/it 稳).
-                _sh59._prepare_sampling = _bsai_refine_prepare
+            # v14.209: 总是安装驻留补丁, 包括分块/spatial fallback.
+            # v1.65 曾因 DynamicVRAM 分块驻留 OOM 跳过分块路径——但 v14.142
+            # 已用 clone(disable_dynamic=True) 生成 non-dynamic delegate,
+            # 彻底消除 DynamicVRAM staged 全量加载根因.
+            # 原 guard `if not (tile_count and int(tile_count) > 1)` 还有两个 bug:
+            #   a) tile_count 默认就是 4(函数签名), 导致非分块场景补丁也装不上;
+            #   b) 即使 tiled_refine=False 且 tile_count=4, 用户走 v14.208 spatial
+            #      fallback 装了 _r_restore_tiles 但驻留仍被跳过, 每 step 从 0MB
+            #      全流式换页 21GB -> 797s/it.
+            # 修复后: 跳过原生 prepare 的 load_models_gpu/free_memory, 保持已驻留
+            # 的 13.8GB 在 GPU, 仅 offload 尾部 6.8GB 换页 -> 预计 200-300s/it.
+            _sh59._prepare_sampling = _bsai_refine_prepare
+            print(f"[H3 Extender] v14.209 驻留补丁已安装 (tile_count={tile_count}, "
+                  f"跳过原生 prepare 的全卸, 保持已驻留权重在 GPU)")
             # v1.91: 解除 torch allocator 人为 16GB fraction 限制——运行中
             # 某库调用过 set_per_process_memory_fraction, 使 torch 可用上限
             # 仅 16GB, 二采全帧 staged 15.25GB + 4K workspace 3.05GB = 18.3GB
