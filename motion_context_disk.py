@@ -2837,24 +2837,39 @@ def _decode_single_clip_to_blob(
 
     # Decode video latent
     print(f"[H3 Extender]   step 1: loading segment video...")
-    # v1.69: free VRAM before decode - unload all staged models (diffusion/TE/VAE)
-    # so the VAE decode SDPA has headroom after a 1920x1088 double-pass render.
-    # (v1.25 曾重复两遍, 已删其一, 功能不变)
+    # v14.225 (2026-10-27): decode VRAM 加固 —— 解码前把 DiT 完全请出 GPU。
+    # 旧逻辑 partially_unload + 跳过 ck-quant(量化 DiT), 导致 17.5GB 量化 DiT 仍
+    # 驻留 GPU; 叠加 HyperVAE 2x 解码(allocated 13.31GB) 峰值超 24GB 卡, 解码
+    # 陷入 DynamicVRAM 换页泥潭 → vae.decode 停滞(实测 1h+ 无产物、前端断连)。
+    # 现摘除除 VAE 外全部 LoadedModel(含量化 DiT; 安全: DynamicVRAM staged 权重
+    # 在 RAM, forward 按需搬运, 不丢失) + GC + 双重清缓存, 给解码腾满显存;
+    # 后续 clip 采样前插件驻留补丁会自动重载 DiT。
     try:
         import comfy.model_management as _mm
         import torch as _torch
-        for _lm in list(_mm.current_loaded_models):
+        import gc as _gc_dv
+        _popped = 0
+        for _i in range(len(_mm.current_loaded_models) - 1, -1, -1):
             try:
-                if _mp_has_ck_quant_weights(_lm.model):
+                _lm_model = getattr(_mm.current_loaded_models[_i], "model", None)
+                if _lm_model is None:
                     continue
-                _lm.model.partially_unload(_lm.model.offload_device, 1e32)
+                # 保留 VAE 本体(含内部 model), 其余全部摘除注册(不触碰 .to(),
+                # 防量化权重竞态闪退; 权重 staged 在 RAM 不丢失)
+                if _lm_model is vae or _lm_model is getattr(vae, "model", None):
+                    continue
+                _mm.current_loaded_models.pop(_i)
+                _popped += 1
             except Exception:
                 pass
+        _gc_dv.collect()
         _mm.soft_empty_cache(force=True)
         _torch.cuda.synchronize()
         _torch.cuda.empty_cache()
+        _torch.cuda.synchronize()
         _a = _torch.cuda.memory_allocated() / 1024 ** 3
-        print(f"[H3 Extender]   decode VRAM prepared: allocated={_a:.2f}GB")
+        _free = _torch.cuda.mem_get_info()[0] / 1024 ** 3
+        print(f"[H3 Extender]   decode VRAM prepared (popped={_popped}): allocated={_a:.2f}GB free={_free:.2f}GB")
     except Exception as _e:
         print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
 

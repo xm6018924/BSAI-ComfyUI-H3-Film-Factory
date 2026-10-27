@@ -16,6 +16,17 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.225 (2026-10-27) — decode VRAM 加固：解码前把量化 DiT 完全请出 GPU，根治 vae.decode 停滞 / Decode VRAM hardening: evict the quantized DiT before vae.decode to fix decode stalls
+
+**根因（真机实测）：** 解码前清理用 `partially_unload` + 跳过 ck-quant（量化权重），int8 DiT（驻留 17.5GB）被跳过仍留在 GPU；叠加 HyperVAE 2x 解码（allocated=13.31GB）峰值超 24GB 卡 → 解码陷入 DynamicVRAM 换页泥潭：CPU/GPU 满载但 1h+ 无产物、前端 websocket 断连（`preview_committed_count=0`）。
+**/ Root cause (field-tested): pre-decode cleanup used `partially_unload` and skipped ck-quant weights, so the int8 DiT (17.5GB resident) stayed on GPU; plus HyperVAE 2x decode (13.31GB allocated) the peak exceeds the 24GB card -> DynamicVRAM thrashing: busy but no output for 1h+, frontend disconnect.**
+
+- **本次改动（1 项）：** `motion_context_disk.py` `_decode_single_clip_to_blob` 解码前清理改为：摘除除 VAE 外全部 LoadedModel（含量化 DiT；安全：DynamicVRAM staged 权重在 RAM、forward 按需搬运不丢失）+ GC + 双重清缓存；日志升级为 `decode VRAM prepared (popped=N): allocated=X free=Y`，显存余量可观测；解码后下一 clip 采样前由驻留补丁自动重载 DiT。** / Change: pre-decode cleanup evicts all LoadedModels except VAE (incl. quantized DiT; weights stay staged in RAM) + GC + double cache-clear; upgraded log with popped count and free VRAM; next clip re-residents DiT before sampling.**
+- **验证（逻辑层）：** py_compile PASS（C 盘运行实例 + G 盘仓库双环境）；无残留 `_mp_has_ck_quant_weights` 引用。** / Verified: py_compile PASS in both the running instance (C:) and this repo (G:).**
+- **渲染验收需用户重渲染：** 重启 8181 实例后重跑，解码阶段日志应为 `decode VRAM prepared (popped≈N): allocated≈0.5GB free≈22GB`（旧逻辑 allocated=13.31GB）；解码正常出产物即根治。** / Acceptance: after restarting the 8181 instance, decode-stage log should show popped count + ~22GB free; decode producing output = fixed.**
+
+---
+
 ### v14.223 (2026-10-27) — 渲染管道新增第17档「H25 Hybrid 8步 多参考单采」/ render_pipeline tier 17: H25 Hybrid 8-step multi-ref single-pass (Bilibili BV1dygg6EE6W)
 
 **对照《MiniMax H3 多参考终于测出最优解，H25 Hybrid 混合架构胜出，高动态依然清晰不易糊，音频Reference完整保留》(AI-KSK, BV1dygg6EE6W)：多参考正式生产档 = H25 Hybrid 混合加载（Base=FL2VA + Overlay=Ref2VA，Block Range Additive 区间 25-49，社区共识非 50/50）配 LightX2V 8 步 FL2V 加速 LoRA，8 步单采直出。**
