@@ -4528,7 +4528,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             if _fb_loaded_gb < 2.0:
                 try:
                     _ff_unregister_model(model, label="v1.92-fallback")
-                    _mm.EXTRA_RESERVED_VRAM = int(10.0 * 1024 ** 3)
+                    # v1.94: reserve 10->14GB, 强制更激进 offload 降 resident.
+                    # 旧 10GB 时 resident 仍 14.5GB, tile forward 1.81GB 还是 OOM.
+                    _mm.EXTRA_RESERVED_VRAM = int(14.0 * 1024 ** 3)
                     _mm.load_models_gpu([model])
                     print(f"[H3 Extender] v1.92 fallback: 模型已全卸({_fb_loaded_gb:.1f}GB), 重新驻留后重跑")
                 except Exception:
