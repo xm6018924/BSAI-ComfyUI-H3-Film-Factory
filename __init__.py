@@ -167,6 +167,17 @@ try:
 except Exception as e:
     print(f"[H3 Film Factory] bsai_h3_3dlatent_upscale.py import failed: {e}")
 
+# v14.233: 透明视频管道 —— 抠像台 + 透明导出（B站 BV1arJX69E7L 配方）
+try:
+    from .bsai_h3_transparent import (
+        NODE_CLASS_MAPPINGS as TRANSPARENT_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as TRANSPARENT_DISPLAY,
+    )
+    NODE_CLASS_MAPPINGS.update(TRANSPARENT_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(TRANSPARENT_DISPLAY)
+except Exception as e:
+    print(f"[H3 Film Factory] bsai_h3_transparent.py import failed: {e}")
+
 # === Server-side API endpoints ===
 try:
     from . import server

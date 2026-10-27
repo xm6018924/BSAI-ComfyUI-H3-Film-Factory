@@ -14,6 +14,19 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+
+### v14.234 (2026-10-27) — 全部渲染管道统一加速「4合1终极加速」第21档 + 参考输入降分 half + SegAttention 协同检测 / global pipeline accel: tier 21 "4-in-1 Ultimate Accel" + ref-input half downscale + SegAttention co-detection (Bilibili BV1WWxT6cEdY)
+
+**对照《MiniMax H3终极加速！4合1的加速方法，速度直接起飞！》(小黄瓜, BV1WWxT6cEdY) 四大核心加速方案配方落地：① DMAD MiniMax H3 4step LoRA（官方 20 步 → 8 步，实测 -57.5%）② SegAttention 2.2.0（KJNodes PatchSegAttentionKJ，叠加 -81%）③ 参考输入降分辨率（叠加 -93.25%，保留动作/轮廓）④ SelfLift 二采（6 步半分辨率草稿 + 2 步全分辨率精修 = 8 NFE，latent upscale 放大）。**
+**/ Against the guide (BV1WWxT6cEdY): 4-in-1 accel = DMAD 4-step LoRA (official 20 steps -> 8, -57.5%) + SegAttention 2.2.0 (-81% stacked) + reference-input half downscale (-93.25% stacked) + SelfLift 6+2 dual-pass (8 NFE).**
+
+- **新第21档「4合1终极加速 (DMAD 8步 SelfLift 6+2 + 参考降分 + SegAttention)」：** 一采 **6 步**半分辨率草稿 + 二采 **2 步**全分辨率精修（refine_upscale_factor=2.0，latent 等效 upscale）+ euler/simple + shift 12/3 + denoise 1.0；强制参考输入降分 `half (4合1加速)`；打印提示 Loader 挂 DMAD 4step LoRA + 8 步蒸馏基模、SegAttention 2.2.0 叠加。** / Tier 21: 6 half-res draft steps + 2 full-res refine steps (latent x2.0), ref-input forced to half, DMAD 4-step LoRA + SegAttention 2.2.0 hints.**
+- **参考输入降分 `half (4合1加速)`（对全部档位可选生效）：** `ref_image_size` 新增第 3 选项，`_prepare_shared_refs` 在 max（短边 768）基础上再降 50%（面积 -75%）——VAE 编码与生成参考数据处理大减，保留动作/轮廓（B 站方案③）。** / New ref_image_size "half" option (-75% ref area) usable on every tier.**
+- **SegAttention 协同检测（全档位统一注入）：** 采样配方确定后检测 ComfyUI 节点注册表（`nodes.NODE_CLASS_MAPPINGS`）是否含 KJNodes `PatchSegAttentionKJ`——已装则打印让位协同提示，未装则提示安装 KJNodes + SegAttention 2.2.0 环境包（匹配 Python/Torch/CUDA）。** / Co-detects PatchSegAttentionKJ and prints cooperation/install hint on every tier.**
+- **本次改动（5 项）：** ① `extender.py` render_pipeline 第21档（optional 最末尾追加，不挤占既有 widget index）+ tooltip ⑲说明；② `_prepare_shared_refs` half 降分分支 + `ref_image_size` 枚举第 3 选项；③ SegAttention 协同检测统一注入；④ `web/extender.js` QUICK_DEFS cycle/cycleLabels/tints/desc_en 第21项 + H3LegacyCompat OPTIONS 白名单 + `ref_image_size` 白名单同步；⑤ CHANGELOG 登记 + 示例工作流 `example_workflows/BSAI_H3_Film_Factory电影工厂-4合1终极加速-DMAD8步SelfLift62.json`（克隆 4K 档示例改造）。** / Changes: backend tier 21 + half downscale + SegAttention detection; front-end QUICK_DEFS + OPTIONS + ref_image_size sync; docs + example workflow.**
+- **验证：** G: 版 py_compile / node --check PASS；C: 实机同步后 md5 与 G: 完全一致；render_pipeline 后端 21 档 ↔ 前端两份硬编码表一致。渲染验收需用户实机跑 4合1 档（判据：日志 `v14.234 4合1终极加速` + `参考输入已降分 half` + `refine耗时诊断` 距上步显著缩短）。** / Verified: py/JS syntax PASS, C==G md5, tier 21 sync. Render acceptance needs a real run.**
+
+---
 ### v14.233 (2026-10-27) — 渲染管道新增第20档「透明视频 单采抠像 (H3 Transparent)」+ 透明视频抠像/导出双节点 / render_pipeline tier 20: Transparent Single-Pass keying + H3 transparent keying & export nodes (Bilibili BV1arJX69E7L)
 
 **对照《在 ComfyUI 中使用 MiniMax-H3 轻松制作透明视频（中文字幕）》(治部少辅哈库, BV1arJX69E7L / SatoDive Minimax-H3-Transparent-Video) 配方落地：H3 在纯色背景（绿幕/蓝幕/纯黑）上生成 → 节点内自动抠像（Matte + Edges 去溢色）→ 输出带真实 Alpha 通道的专业格式（ProRes 4444 / WebM VP9 / RGBA PNG 序列），可直接拖入 PR/AE/DaVinci/FCP。**

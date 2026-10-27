@@ -28,6 +28,7 @@
 - **字幕系统**：`BSAI_SubtitleConfig` + `BSAI_SubtitleRenderer` 支持旁白/对白字幕渲染。/ Subtitle config + renderer (narration / dialogue).
 - **上下文帧提取/加载**：从长视频提取上下文帧建立运动连贯链（RAM/磁盘两种方案）。/ Contextual frame extraction & loading for motion continuity (RAM & disk backends).
 - **3D Latent Upscaler**：`BSAI_H3_3DLatentUpscale` 神经网络语义放大 latent，比插值保留更多细节。/ Neural 3D latent upscaling.
+- **透明视频管道（v14.233）**：`render_pipeline` 第20档「透明视频 单采抠像」+ `BSAI_H3_TransparentKey` 抠像台 + `BSAI_H3_SaveTransparentVideo` 导出：纯色背景（绿幕/蓝幕/纯黑）生成 → 一键抠像（Matte 预设 + 边缘去溢色）→ 输出带真 Alpha 的 ProRes 4444 / WebM VP9 / RGBA PNG 序列（B站 BV1arJX69E7L 配方）。/ Transparent video pipeline (v14.233): tier-20 single-pass + keying studio + alpha export (ProRes 4444 / WebM VP9 / RGBA PNG) per Bilibili BV1arJX69E7L.
 
 ---
 
@@ -55,6 +56,8 @@
 | **BSAI_VideoCombiner** | 视频拼接（最多 16 段）。/ Concatenate up to 16 video clips. |
 | **BSAI_AudioCombiner** | 音频拼接（最多 16 轨）。/ Concatenate up to 16 audio streams. |
 | **BSAI_H3_3DLatentUpscale** | 3D latent 神经网络语义放大（比插值更清晰）。/ Neural 3D latent upscale. |
+| **BSAI_H3_TransparentKey** | 透明视频抠像台：绿幕/蓝幕/纯黑/纯白背景一键抠成 Alpha（Matte 预设 + 边缘柔化/choke + 去溢色），输出 straight-alpha RGBA + Matte + 棋盘格预览。/ Transparent keying studio (chroma/luma key + edge refine + de-spill). |
+| **BSAI_H3_SaveTransparentVideo** | 透明视频导出：ProRes 4444（真 12bit Alpha）/ WebM VP9 / RGBA PNG 序列，可选音频合流，输出到 `output/H3_transparent_video/<子文件夹>/alpha/` + `preview/`。/ Transparent video writer with real alpha (ProRes 4444 / WebM VP9 / PNG). |
 
 ---
 
@@ -315,6 +318,20 @@ Each CLIP card has per-card controls; left border color shows status. Card butto
 ### 工作流 3：`BSAI_H3_ClipSelect_Pause.json` — CLIP 选择/暂停示例 / Clip Select & Pause
 
 与工作流 2 相同生成链，演示 `clip_select_enable/clip_select`（只渲染指定镜头段）与 `pause_enable/pause_timeout`（每 clip 生成完暂停等待）的用法。适合做「先生成第 2-5 镜」或「每镜生成完检查一遍」的交互式生产流程。
+
+### 工作流 4：`BSAI_H3_Film_Factory电影工厂-透明视频-单采抠像直出.json` — 透明视频渲染管道示例（极简版）/ Transparent Video Pipeline · Minimal (v14.233)
+
+**B站《在 ComfyUI 中使用 MiniMax-H3 轻松制作透明视频》配方（BV1arJX69E7L）落地·最小链路**：`UNETLoader`（FL2VA int8 底模）→ `LoraLoaderModelOnly`（`minimax_h3_fl2v_turbo_4step_*.safetensors`，强度 0.8）→ `BSAIH3FilmFactory`（`render_pipeline`=「透明视频 单采抠像 (H3 Transparent)」，10 步单采直出、跳过二采、euler/simple）→ `BSAI_H3_TransparentKey`（绿幕/蓝幕/纯黑一键抠像）→ `BSAI_H3_SaveTransparentVideo`（ProRes 4444 真 Alpha / WebM VP9 / RGBA PNG 序列，自动另存棋盘格预览）。`audios` 自动接入导出节点合流声音。8 节点，新手 3 分钟上手；完整链路示例见工作流 5。
+
+**使用步骤 / How to use**:
+1. **提示词纪律**：内置绿幕纪律（`flat solid green screen background, no floor, no horizon, no shadows, no props`）；如需蓝幕/纯黑（火焰/烟雾），改分镜提示词并把 `BSAI_H3_TransparentKey` 的 `backdrop_color` 一并切换。
+2. **抠像**：保持「绿幕 Green + 平衡（毛发/烟雾）Balanced」即可出片；毛发/烟雾素材调大 `key_strength`，边缘残留绿边提 `de_spill`，内部透底孔洞调大 `fill_holes`。
+3. **导出**：剪辑软件（PR/AE/DaVinci/FCP）选 `ProRes 4444 (.mov, 真Alpha)`（straight alpha）；网页/H5 用 `WebM VP9`；逐帧无损用 `RGBA PNG 序列`。
+4. 产物目录：`ComfyUI/output/H3_transparent_video/<时间戳_前缀>/alpha/`（透明成品）+ `preview/`（棋盘格预览 MP4）。
+
+### 工作流 5：`BSAI_H3_Film_Factory+透明视频单采抠像-Singularityx10Eros-Max-竖版-H3配音5090_072style.json` — 透明视频渲染管道示例（完整链路改造版）/ Transparent Video Pipeline · Full (v14.233)
+
+**配方同工作流 4，由用户《PRISM10步运动强化-Singularityx10Eros-Max-直播带货竖版-H3配音5090_072style》工作流直接改造**：保留原模型加载链路（Singularityx10Eros-Max PRISM / Sol-H3 Loader + H3Accel LoRA 选配 + qwen3vl 32B + 双 VAE），主节点 `render_pipeline` 切换为「透明视频 单采抠像 (H3 Transparent)」（10 步单采直出、跳过二采、euler/simple），分镜/全局脚本改写为绿幕透明素材配方（纯色背景纪律 + @图1 角色），输出链路追加 `BSAI_H3_TransparentKey`（抠像台）→ `BSAI_H3_SaveTransparentVideo`。104 节点，含参考图/素材库/LoRA 堆栈/直播带货旁支（不接线即不生效）。
 
 ---
 
