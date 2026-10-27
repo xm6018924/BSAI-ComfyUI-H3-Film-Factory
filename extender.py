@@ -4469,7 +4469,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             #      (x1.0) 兜底, 绝不再回退到一采无增强结果.
             _fb_use_tiles = False
             try:
-                if not (tile_count and int(tile_count) > 1):
+                # v1.93 fix: 总是包装 tiles 重跑放大版 samples(120x68)。
+                # 旧逻辑 if not (tile_count>1) 导致 tile_count>1 时跳过包装 ->
+                # 退回 _fb_samples(60x34) 重跑 -> 二采马赛克 + bicubic 拉伸。
+                if True:  # v1.93: always tile-wrap the upscaled samples
                     import os as _os_t2, importlib.util as _ilu_t2
                     _tiles_path2 = _os_t2.path.join(_os_t2.path.dirname(_os_t2.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
                     _tiles_spec2 = _ilu_t2.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path2)
@@ -4479,7 +4482,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _r_restore_tiles = _tiles_mod2.wrap_sampler_spatial_tiles(
                         _r_sampler, n_tiles=_r_tiles_n164b, overlap_pixels=int(tile_overlap))
                     _fb_use_tiles = True
-                    print(f"[H3 Extender] v1.92 fallback: 降级分块重跑放大版 n_tiles={_r_tiles_n164b} (v14.164 健康区自适应)")
+                    print(f"[H3 Extender] v1.92 fallback: 降级分块重跑放大版 n_tiles={_r_tiles_n164b} (v14.164 健康区自适应, v1.93 fix: 保留 120x68 不退回 60x34)")
             except Exception as _te2:
                 _fb_use_tiles = False
                 print(f"[H3 Extender] v1.92 fallback 分块包装失败, 用原始尺寸兜底: {_te2}")
