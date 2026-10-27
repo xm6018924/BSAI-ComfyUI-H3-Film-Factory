@@ -14,7 +14,27 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.233 (2026-10-27) — 渲染管道新增第20档「透明视频 单采抠像 (H3 Transparent)」+ 透明视频抠像/导出双节点 / render_pipeline tier 20: Transparent Single-Pass keying + H3 transparent keying & export nodes (Bilibili BV1arJX69E7L)
+
+**对照《在 ComfyUI 中使用 MiniMax-H3 轻松制作透明视频（中文字幕）》(治部少辅哈库, BV1arJX69E7L / SatoDive Minimax-H3-Transparent-Video) 配方落地：H3 在纯色背景（绿幕/蓝幕/纯黑）上生成 → 节点内自动抠像（Matte + Edges 去溢色）→ 输出带真实 Alpha 通道的专业格式（ProRes 4444 / WebM VP9 / RGBA PNG 序列），可直接拖入 PR/AE/DaVinci/FCP。**
+**/ Based on the guide (BV1arJX69E7L / SatoDive Minimax-H3-Transparent-Video): generate H3 over a flat solid backdrop (green/blue/pure black) -> auto keying (Matte + Edges de-spill) -> export real-alpha ProRes 4444 / WebM VP9 / RGBA PNG.**
+
+- **采样配方（新第20档）：** 一采 **10 步** 单采直出（教程默认 10 步 + 4 步 turbo LoRA；无 LoRA 用 ~20 步）+ euler/simple + shift 12/3 + denoise 1.0，**跳过二采** —— 二采重绘会扰动底色均匀性，导致抠像破洞/边缘闪烁。建议 Loader 挂 `minimax_h3_fl2v_turbo_4step_*.safetensors`（强度 ~0.8）。提示词纪律：明确写纯色背景（如 "green screen background, flat solid green backdrop, no floor, no horizon"），避免地板/地平线/道具被误抠进主体。** / Tier 20 sampling: 10-step single-pass (default 10 steps with the 4-step turbo LoRA; ~20 without), euler/simple, shift 12/3, denoise 1.0, refine skipped (a redraw would disturb backdrop uniformity and break the key). Pair with minimax_h3_fl2v_turbo_4step LoRA (~0.8). Prompt must state the flat backdrop.**
+- **新节点① `BSAI_H3_TransparentKey`（透明视频抠像台）：** backdrop_color（绿幕/蓝幕/纯黑/纯白）+ matte_preset（平衡（毛发/烟雾）/硬边/火焰·绿幕/暗黑转白）+ key_strength/clip_white/shadow_retention/fill_holes + edge_softness/edge_choke/de_spill 精修 + keep_mask（直接用外部蒙版做 Alpha）；输出 straight-alpha RGBA + Matte + 棋盘格预览。** / New node: Transparent Keying Studio (chroma-key/luma-key + presets + edge refine + de-spill; outputs straight-alpha RGBA + matte + checkerboard preview).**
+- **新节点② `BSAI_H3_SaveTransparentVideo`（透明视频导出）：** format（ProRes 4444 .mov 真 12bit Alpha / WebM VP9 / RGBA PNG 序列）+ fps + 可选 AUDIO 合流；输出到 `output/H3_transparent_video/<时间戳子文件夹>/alpha/` + `preview/`（棋盘格预览 MP4），返回 folder/alpha_file/preview_file 路径。注：WebM VP9 的 Alpha 依赖 FFmpeg 构建的 libvpx-vp9（libvpx>=1.10）支持——当前构建不支持时节点读回校验后删除文件并明确报错，绝不静默产出无 Alpha 的假透明视频。** / New node: Transparent Video Writer (ProRes 4444 / WebM VP9 / RGBA PNG with real alpha + optional audio mux; saves to output/H3_transparent_video/<subfolder>/alpha + preview; WebM alpha depends on the FFmpeg build — if unsupported the node verifies via read-back, deletes the file and raises a clear error instead of silently writing a non-alpha WebM).**
+- **本次改动（5 项）：** ① `extender.py` render_pipeline 第20档（optional 最末尾追加，不挤占既有 widget index）+ tooltip ⑱说明；② 新模块 `bsai_h3_transparent.py`（torch/PyAV/numpy/Pillow 全为 ComfyUI 自带依赖，与 SatoDive 原版同款依赖集）；③ `__init__.py` 注册双节点；④ `web/extender.js` QUICK_DEFS cycle/cycleLabels/tints/desc_en 第20项 + H3LegacyCompat OPTIONS 白名单同步；⑤ CHANGELOG/README 登记 + 示例工作流两份：极简版 `example_workflows/BSAI_H3_Film_Factory电影工厂-透明视频-单采抠像直出.json`（8 节点：FL2VA 底模 + 4 步 turbo LoRA + 主节点透明档 + 抠像台 + 导出，生成器 `tools/build_transparent_workflow.py`）；完整链路版 `example_workflows/BSAI_H3_Film_Factory+透明视频单采抠像-Singularityx10Eros-Max-竖版-H3配音5090_072style.json`（由用户 PRISM 直播带货竖版工作流直接改造：保留原模型加载链路，主节点切透明档 + 分镜改绿幕配方 + 追加抠像台/导出节点）。** / Changes: backend tier 20 + tooltip; new bsai_h3_transparent.py module; __init__ registration; front-end QUICK_DEFS + OPTIONS sync; docs + 2 example workflows (minimal + converted from the user's PRISM live-commerce vertical workflow).**
+- **验证：** `tools/check_quickbar_enum_sync.py` 自检通过（render_pipeline OK 20 项）；extender.py / bsai_h3_transparent.py py_compile PASS；抠像算法合成帧冒烟测试（绿幕/纯黑背景 alpha 正确性）+ PyAV 三格式导出冒烟测试通过。渲染验收需用户用真实 H3 出片后跑完整链路。** / Verified: enum-sync self-check OK (20 items), py_compile PASS, synthetic-frame keying + PyAV export smoke tests PASS. Full render acceptance needs a real H3 run.**
+
 ---
+
+### v14.232 (2026-10-27) — VAE decode 时间维分块（防 HyperVAE 2x 整段 decode 换页卡死）/ tiled time-dimension VAE decode to avoid HyperVAE 2x whole-segment decode thrash
+
+**用户实测：`step 2: vae.decode (shape=(1,24,107,60,34))...` 停滞无产物。** **/ User: step 2 vae.decode stalled.**
+
+- **根因：** HyperVAE 2x（5GB）整段 107 帧一次性 decode，峰值激活巨大；DiT 残留 9.43GB（int8 dynamic 量化模型 v14.227 跳过卸载）+ VAE decode 13GB 峰值 ≈ 22.4GB 逼近 24GB 卡上限 → 换页泥潭停滞。
+- **修复（motion_context_disk.py `_decode_single_clip_to_blob`）：** T 维切 32 latent 帧/块逐块 decode，每块 decode 完立即 `.cpu()` 释放 GPU，GPU 峰值显存降为单块级（107 帧切 4 块）。H3 VAE 已验证逐段独立 decode 可行（4940 行），块边界帧轻微时间模糊可接受（对比整段卡死）。
+- **验证：** py_compile PASS。渲染验收需用户重渲染：decode 阶段应见 `decode block [0:32/107] done ...` 逐块推进。
+- 无参数端口变更；未做 git 操作。
 
 ---
 

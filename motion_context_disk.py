@@ -2849,24 +2849,30 @@ def _decode_single_clip_to_blob(
         import torch as _torch
         import gc as _gc_dv
         _popped = 0
+        _evict_targets = []
         for _i in range(len(_mm.current_loaded_models) - 1, -1, -1):
             try:
-                _lm_model = getattr(_mm.current_loaded_models[_i], "model", None)
+                _lm = _mm.current_loaded_models[_i]
+                _lm_model = getattr(_lm, "model", None)
                 if _lm_model is None:
                     continue
-                # 保留 VAE 本体(含内部 model), 其余全部摘除注册(不触碰 .to(),
-                # 防量化权重竞态闪退; 权重 staged 在 RAM 不丢失)
+                # 保留 VAE 本体(含内部 model), 其余全部摘除注册
                 if _lm_model is vae or _lm_model is getattr(vae, "model", None):
                     continue
+                _evict_targets.append(_lm)
                 _mm.current_loaded_models.pop(_i)
                 _popped += 1
             except Exception:
                 pass
-        # v14.227 (2026-10-27): pop 注册表不释放 GPU 权重 —— 5090 非 DynamicVRAM,
-        # DiT 权重真驻留 GPU, 实测 pop=1 后 allocated 仍 13.31GB -> VAE decode
-        # 请求 19.56GB 超限 OOM, 成片 0 clip ready. 复用 v1.81 二采前已验证的
-        # free_memory(for_dynamic=True) 真正卸载: 非动态模型走标准卸载把权重移回
-        # CPU(dynamic 量化模型跳过, 交 DynamicVRAM 调度), 卸载后 decode 峰值可装.
+        # v14.232: free_memory(for_dynamic=True) 跳过 dynamic 量化 DiT -> 权重仍驻留
+        # GPU(实测 allocated=17.58GB free=0) -> VAE decode OOM。强制把被摘除的
+        # DiT 模型权重移到 CPU RAM(decode 期间不用, 下 clip 采样前自动重载)。
+        for _lm in _evict_targets:
+            try:
+                _m = getattr(_lm, "model", _lm)
+                _m.to('cpu')
+            except Exception:
+                pass
         try:
             _mm.free_memory(1e30, _mm.get_torch_device(), for_dynamic=True)
         except Exception:
@@ -2898,7 +2904,26 @@ def _decode_single_clip_to_blob(
     if _od_overridden:
         vae.output_device = vae.device
     try:
-        video = vae.decode(v)
+        # v14.232: 时间维分块 decode —— 整段 107 帧 decode_tiled_3d 预分配
+        # 8.45GB output buffer, DiT 残留 17.58GB + 8.45GB 超 24GB OOM。
+        # 切 16 latent 帧/块逐块 decode, 每块 output 仅 ~1.3GB, 峰值可控。
+        _dec_t_block = 16
+        _dec_t_total = int(v.shape[2])
+        if _dec_t_total > _dec_t_block:
+            _dec_parts = []
+            for _t0 in range(0, _dec_t_total, _dec_t_block):
+                _t1 = min(_t0 + _dec_t_block, _dec_t_total)
+                _vk = v[:, :, _t0:_t1].contiguous()
+                _dec_k = vae.decode(_vk)
+                if _dec_k.ndim == 5:
+                    _dec_k = _dec_k.reshape(-1, _dec_k.shape[-3], _dec_k.shape[-2], _dec_k.shape[-1])
+                _dec_parts.append(_dec_k.detach().cpu())
+                print(f"[H3 Extender]   decode block [{_t0}:{_t1}/{_dec_t_total}] done")
+                import gc as _gc_dec; _gc_dec.collect()
+            video = torch.cat(_dec_parts, dim=0)
+            del _dec_parts
+        else:
+            video = vae.decode(v)
     finally:
         if _od_overridden:
             vae.output_device = _od_prev
