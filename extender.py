@@ -3715,6 +3715,31 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] v2.02 temporal_chunk_tokens={int(temporal_chunk_tokens)} 过小, "
                       f"已按 16 执行 (T~107 建议 40~60, 0=关闭)", flush=True)
                 temporal_chunk_tokens = 16
+            # v14.228 (2026-10-27): 二采提速 —— temporal_chunk_tokens=0(未启用)时按
+            # latent T 自动时间分块. 根因: 实机 218K tokens 整段二采 + spatial 分块 4
+            # 后每块仍 ~113K(overlap 128px 膨胀), dense attention workspace ~51GB
+            # 超 24GB 卡 -> 每块换页 ~87s -> 348s/步. 时间分块把每段降到 ~22 帧,
+            # 与空间分块组合后每块 ~23K tokens, dense workspace ~2GB 可装, 总计算量
+            # 守恒(tokens 均摊到段*块, 不膨胀), 预期 4 步总量 50-100s.
+            if not _use_temporal:
+                try:
+                    _t_cand226 = None
+                    try:
+                        _mem226, _ = _ff_extract_members(samples)
+                        _t_cand226 = int(_mem226[0].shape[2])
+                    except Exception:
+                        try:
+                            _t_cand226 = int(samples["samples"].tensors[0].shape[2])
+                        except Exception:
+                            pass
+                    if _t_cand226 is not None and _t_cand226 >= 50:
+                        temporal_chunk_tokens = max(20, int(round(_t_cand226 / 5)))
+                        _use_temporal = True
+                        print(f"[H3 Extender] v14.228 自动时间分块: T={_t_cand226} -> "
+                              f"chunk={temporal_chunk_tokens} ({max(1, int(round(_t_cand226 / int(temporal_chunk_tokens))))} 段), "
+                              f"与空间分块组合降每块 tokens", flush=True)
+                except Exception as _e226:
+                    print(f"[H3 Extender] v14.228 自动时间分块失败(可忽略): {_e226}")
             # v14.200: 删除 v14.199 的"分块二采强制锁音频"。
             # 根因不再靠锁定规避: bsai_h3_spatial_tiles.py 现在直接取第 1 块
             # 的音频预测(音频 latent 无空间维度, 各块都给出完整音频估计),

@@ -2862,6 +2862,15 @@ def _decode_single_clip_to_blob(
                 _popped += 1
             except Exception:
                 pass
+        # v14.227 (2026-10-27): pop 注册表不释放 GPU 权重 —— 5090 非 DynamicVRAM,
+        # DiT 权重真驻留 GPU, 实测 pop=1 后 allocated 仍 13.31GB -> VAE decode
+        # 请求 19.56GB 超限 OOM, 成片 0 clip ready. 复用 v1.81 二采前已验证的
+        # free_memory(for_dynamic=True) 真正卸载: 非动态模型走标准卸载把权重移回
+        # CPU(dynamic 量化模型跳过, 交 DynamicVRAM 调度), 卸载后 decode 峰值可装.
+        try:
+            _mm.free_memory(1e30, _mm.get_torch_device(), for_dynamic=True)
+        except Exception:
+            pass
         _gc_dv.collect()
         _mm.soft_empty_cache(force=True)
         _torch.cuda.synchronize()
