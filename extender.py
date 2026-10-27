@@ -7348,7 +7348,7 @@ class BSAIH3FilmFactory:
                       "采样器 CFG 设为 1.0; 3D 卷积 latent 上采样器(BF16) 可挂 refine_upscaler_model; "
                       "官方 3 步 sigmas [0.909375, 0.857143, 0.666667, 0]")
             elif _rp_mode == "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)":
-                # v14.227 (2026-10-27): B站《Singularity v2 × 10Eros-Max 合并模型,
+                # v14.231 (2026-10-27): B站《Singularity v2 × 10Eros-Max 合并模型,
                 # 提升运动效果》(BV1Vino6qE2F, plphy-up) 配方落地。
                 # PRISM = Ref2VA 系合并模型(HuggingFace OliviaRossi/
                 # Minimax-h3_Singularity-x-10Eros-Max_PRISM, int8 20.3GB): 官方
@@ -7366,7 +7366,7 @@ class BSAIH3FilmFactory:
                 shift_video, shift_audio = 12.0, 3.0
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
-                    print(f"[H3 Extender] v14.227 PRISM 10步(渲染管道): 采样器强制 euler + simple (PRISM 官方配方)")
+                    print(f"[H3 Extender] v14.231 PRISM 10步(渲染管道): 采样器强制 euler + simple (PRISM 官方配方)")
                 scheduler = "simple"
                 print("[H3 Extender] 🚀 PRISM 10步 运动强化单采: 一采 10 步直出 (BV1Vino6qE2F 配方) — "
                       "确认 Loader=Minimax-h3_Singularity_x_10Eros-Max_PRISM_int8.safetensors, "

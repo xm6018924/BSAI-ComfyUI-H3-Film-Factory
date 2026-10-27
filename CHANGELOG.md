@@ -16,6 +16,30 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+---
+
+### v14.231 (2026-10-27) — 渲染管道新增第19档「PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)」/ render_pipeline tier 19: PRISM 10-step motion-boost single-pass (Bilibili BV1Vino6qE2F)
+
+**对照《Singularity v2 × 10Eros-Max 合并模型，提升运动效果》(plphy-up, BV1Vino6qE2F) 官方工作流配方：PRISM = Ref2VA 系合并模型（HuggingFace OliviaRossi/Minimax-h3_Singularity-x-10Eros-Max_PRISM，int8 20.3GB），官方 workflow 直接替换 ref2va 模板的 UNETLoader 模型，提升运动流畅度与连贯性（动画战斗场景实测）。**
+**/ Against the guide (plphy-up, BV1Vino6qE2F): PRISM = merged Ref2VA-family model (HuggingFace OliviaRossi/Minimax-h3_Singularity-x-10Eros-Max_PRISM, int8 20.3GB) swapped directly into the ref2va template's UNETLoader for smoother, more coherent motion.**
+
+- **官方采样配方：** euler + simple + **10 步** + denoise 1.0，BasicGuider 默认 CFG 1.0，**无 LoRA**，单采直出（不跑二采）；建议搭配 5 段式长提示词（subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music）与参考图驱动（ref2va）。** / Official sampling: euler/simple 10 steps, denoise 1.0, CFG 1.0, no LoRA, single-pass; 5-part prompt recommended.**
+- **本次改动（3 项）：** ① `extender.py` render_pipeline 新增第19档（optional 最末尾追加，不挤占任何既有 widget index）：steps=10 / refine 跳过（refine_enable=False）/ denoise 1.0 / shift 12-3 / euler 强制 + simple；打印提示确认 Loader 换 `Minimax-h3_Singularity_x_10Eros-Max_PRISM_int8.safetensors`（只改采样管道，不碰模型图）；② `web/extender.js` QUICK_DEFS `render_pipeline` 的 cycle/cycleLabels/tints/desc_en 同步追加第19项 + H3LegacyCompat OPTIONS 白名单同步（同时顺带补齐此前 QUICK_DEFS 漏掉的第18档 4K 项）；③ CHANGELOG 登记。** / Changes: backend tier 19 (10-step single-pass) + front-end QUICK_DEFS cycle/cycleLabels/tints/desc_en + OPTIONS whitelist sync (also backfilled tier-18 4K entry that was missing from QUICK_DEFS) + docs.**
+- **验证：** `tools/check_quickbar_enum_sync.py` 自检通过（render_pipeline OK 19 项，前端两份硬编码表 + 遗留兼容层与后端枚举完全一致）；extender.py py_compile PASS。** / Verified: enum-sync self-check OK (19 items), py_compile PASS.**
+
+---
+
+### v14.230 (2026-10-27) — 直播带货 03 lip_voice 对口型档提速：一采 12→8 步 + 二采健康区跳过 global 包装不切 8 块 / 03 lip_voice speedup: pass1 12→8 steps, pass2 skips global wrap when tokens healthy
+
+**用户实测日志（clip 10.96s，直播带货 03 lip_voice）：一采 12 步×68.6s=13:43 + 二采 4 步×171s=11:25，要求提速。** **/ User log: pass1 12 steps × 68.6s + pass2 4 steps × 171s on a 10.96s clip — asked for speedup.**
+
+- **提速 A（一采 12→8 步，省 ~4.5 分钟/clip）：** 直播带货档配方 12 步是给"模型自生成音频≥12步下限"保质量的；03 lip_voice 模式音频由外部 lip_voice 提供且 `audio_denoise=0.0` 锁定（日志确认"模型不生成音频，完全由外部音频驱动"），12 步纯属过度采样。现 03 档自动降回 8 步蒸馏契约（v14.183 实测 10 步掉画质）；01/02 模型自生成音频仍保持 12 步不动。
+- **提速 B（二采不切 8 块，省 ~6 分钟/clip）：** 二采 factor=1.0 后 tokens=218k（Sol-Attn 健康区，基准 0.97s/步），但 global 包装检测到 Sol-Attn override → 回退 dense → 触发 v14.208 切 spatial 8 块 + overlap 128px 重复计算 → 实测 171s/步。现 tokens≤350k 健康区时跳过 global 包装，稀疏 Sol-Attn 直接跑全帧（不分块、无 overlap 重复），预期二采回到 ~80-90s/步。
+- **验证：** py_compile PASS。渲染验收需用户重渲染对比。
+- 无参数端口变更；未做 git 操作。
+
+---
+
 ### v14.229 (2026-10-27) — 渲染管道新增第18档「4K重生成 OpenH3Regenerate2K (768P草稿直出2560)」/ render_pipeline tier 18: OpenH3Regenerate2K 4K regeneration (Bilibili BV13uxT66EWq)
 
 **对照《MinimaxH3 进入4K分辨率开源时代 768P草稿直接升2560 比官方还高清》(AI绘画KK, BV13uxT66EWq)：NVLabs Sana 仓库 OpenH3Regenerate2K 开放模型 = 闭源 H3Regenerate2K 的首个可复现开放替代——768P 草稿(1344x768, 121帧) -> 三步精修重生成 -> 2560x1440 2K。**
