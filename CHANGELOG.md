@@ -15,6 +15,15 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 ---
 
 
+### v14.235 (2026-10-27) — SolarRenderer 结构控制「逐帧驱动」第22档 / tier 22 "SolarRenderer Structure Control" (Bilibili BV1Phxu6PE93)
+
+**对照《全新 FastH3-Omni + Singularity V2 动画管线！SolarRenderer 逐帧控制，单卡直出〈刺客信条〉级电影短片！》(BV1Phxu6PE93) 配方落地：SolarRenderer 跑在 Minimax H3 上带两个 LoRA —— 控制 LoRA 逐帧读取结构视频（3D 灰盒/法线贴图/DW 姿态骨架/OpenPose 线框/深度图/边界框 = 视频版 ControlNet）+ 4 步 LoRA（采样压到 4 步）；因果版逐块实时生成（每块只读前 5 块结构+渲染结果）。**
+**/ Against the guide (BV1Phxu6PE93): control LoRA reads a structure video frame-by-frame (greybox/normal map/pose/OpenPose/depth/bbox = video ControlNet) + 4-step LoRA; causal version generates block-by-block reading only the previous 5 blocks.**
+
+- **新第22档「SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)」：** 一采 **4 步**（SelfLift 低分辨率草稿 ~720P）+ 二采 **4 步**（latent x2.0 全分辨率精修）= 8 NFE；euler/simple + shift 12/3 + denoise 1.0；**ref_image_size 强制 max**（结构细节不降分，与第21档 half 相反）；打印提示：Loader 挂 solarrenderer 控制LoRA + 4步LoRA（强度 ~0.8，基模 FastH3-Omni/Singularity V2）、参考输入接结构视频抽帧序列（灰盒/法线/骨架/深度）、提示词纪律（务必详细描述镜头切换/落地细节/环境层次，否则模型只输出参考里的 3D 方块）、出片后可接 NVIDIA RTX VFX（RTX Video Frame Generation 24→48FPS + RTX Video Super Resolution 2K）。** / Tier 22: 4 low-res SelfLift draft steps + 4 full-res refine steps (latent x2.0) = 8 NFE, ref forced to max (structure kept), solarrenderer control LoRA + 4-step LoRA hints, RTX VFX post hints.**
+- **本次改动（5 项）：** ① `extender.py` 第22档枚举 + tooltip ⑳ + elif 接管分支（steps=4 / refine=4 / upscale=2.0 / ref=max / euler+simple / 控制LoRA+4步LoRA 提示注入）；② `web/extender.js` QUICK_DEFS desc_en + cycle + cycleLabels + tints 与 OPTIONS 白名单五处同步（22 档）；③ `CHANGELOG.md` 本条；④ 示例工作流 `BSAI_H3_Film_Factory电影工厂-SolarRenderer结构控制-控制LoRA4步LoRA.json`（基于 4合1 基线复制改档）；⑤ 备份。** / Files: extender.py enum+tooltip+elif, web/extender.js 5-sync, CHANGELOG, example workflow, backup.**
+- **外部资产提示：** 控制 LoRA 与 4 步 LoRA 为 HuggingFace SolarRenderer 框架模型（`huggingface.co` SolarRenderer），需用户自行下载挂 Loader；因果实时版为上游框架能力，本插件落地为批处理采样配方档。** / SolarRenderer LoRAs are external HF assets the user must download into the Loader; causal real-time is an upstream capability, this tier is the batch recipe.**
+
 ### v14.234 (2026-10-27) — 全部渲染管道统一加速「4合1终极加速」第21档 + 参考输入降分 half + SegAttention 协同检测 / global pipeline accel: tier 21 "4-in-1 Ultimate Accel" + ref-input half downscale + SegAttention co-detection (Bilibili BV1WWxT6cEdY)
 
 **对照《MiniMax H3终极加速！4合1的加速方法，速度直接起飞！》(小黄瓜, BV1WWxT6cEdY) 四大核心加速方案配方落地：① DMAD MiniMax H3 4step LoRA（官方 20 步 → 8 步，实测 -57.5%）② SegAttention 2.2.0（KJNodes PatchSegAttentionKJ，叠加 -81%）③ 参考输入降分辨率（叠加 -93.25%，保留动作/轮廓）④ SelfLift 二采（6 步半分辨率草稿 + 2 步全分辨率精修 = 8 NFE，latent upscale 放大）。**
