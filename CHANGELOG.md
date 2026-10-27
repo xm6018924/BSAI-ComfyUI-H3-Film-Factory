@@ -16,6 +16,18 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.223 (2026-10-27) — 渲染管道新增第17档「H25 Hybrid 8步 多参考单采」/ render_pipeline tier 17: H25 Hybrid 8-step multi-ref single-pass (Bilibili BV1dygg6EE6W)
+
+**对照《MiniMax H3 多参考终于测出最优解，H25 Hybrid 混合架构胜出，高动态依然清晰不易糊，音频Reference完整保留》(AI-KSK, BV1dygg6EE6W)：多参考正式生产档 = H25 Hybrid 混合加载（Base=FL2VA + Overlay=Ref2VA，Block Range Additive 区间 25-49，社区共识非 50/50）配 LightX2V 8 步 FL2V 加速 LoRA，8 步单采直出。**
+**/ Against the guide "H25 Hybrid wins for multi-reference, high-dynamic remains clear": production tier = H25 Hybrid blend (base FL2VA + overlay Ref2VA, block-range additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass.**
+
+- **视频实测结论（落地依据）：** ① FL2VA 保留主体 = 清晰/细节/运动流畅/稳定性强，Ref2VA 引入参考控制 = 参考强度 25→49 更强更像参考、动作更保守；② **8 步 = 正式生产档**（H25+LightX2V 8步实测最舒服），20 步仅作质量基准（太慢非生产档）；③ 4 步 Ref2V 加速 LoRA 弃用（音频劣化、动态被约束）；④ 建议 25-49 区间从 25 起 49 止。** / Video conclusions: 8-step is the production tier, 20-step is only a quality baseline, 4-step Ref2V LoRA is abandoned (audio degradation / constrained motion).**
+- **本次改动（4 项）：** ① `extender.py` render_pipeline 新增第17档「H25 Hybrid 8步 多参考单采」（optional 最末尾追加，不挤占任何既有 widget index）：命中后强制 8 步单采（refine_enable=False）+ denoise 1.0 + euler/simple + shift 12/3，只改采样管道不碰模型图；BUILD 与启动横幅升 v14.223；② `web/extender.js` cycle/cycleLabels/tints/OPTIONS 白名单/desc 三处枚举同步追加（沿用 v14.218 前后端严格同步纪律）；③ 新增示例工作流 `example_workflows/BSAI_H3_Film_Factory电影工厂-H25Hybrid-8步多参考单采.json`（基于 H3组合_C03 改造：Loader 加速槽换 LightX2V 8步 FL2V LoRA、render_pipeline 换新档、scheduler beta→simple、refine_enable 关/denoise 0.5/refine 2 步对齐档位接管值）；④ README 参数表与本文档登记。** / Changes: backend tier 17 + front-end enum sync (3 places) + example workflow (derived from H3组合_C03) + docs.**
+- **验证（逻辑层）：** py_compile PASS；`tools/check_quickbar_enum_sync.py` 前后端枚举 17/17 + 遗留兼容层 17 项全 OK（SYNC OK）；示例工作流 JSON 回读校验通过（95 节点/89 链路保持，329 加速槽/250 管道档值正确）。** / Verified: py_compile PASS, enum-sync check 17/17 OK, workflow JSON round-trip OK.**
+- **渲染验收需用户重渲染：** 拖入 `example_workflows/BSAI_H3_Film_Factory电影工厂-H25Hybrid-8步多参考单采.json` 直接开跑多参考（Loader 需为 `minimax_h3_hybrid_fl2va_ref2va_b25-49-int8` + 加速 LoRA `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16` 强度 1.0）；建议与 H3组合_C03（Turbo-v4 8+4 双采）同分镜对比动态清晰度与参考跟随度。** / Acceptance: render the new example workflow and compare against C03.**
+
+---
+
 ### v14.222 (2026-10-27) — 对齐 B 站教程 BV1fahB6XEKY：一镜到底上下文潜空间注入微噪（防无限长链参考复用过度平滑/劣化）/ Align BV1fahB6XEKY: inject micro-noise into motion-context keyframes to prevent long-chain degradation
 
 **对照教程《第005集：FAN_Comfyui_MinimaxH3_SelfLift双采_MotionContext上下文参考无限循环_一镜到底1080P直出狂飙版》(说人话的樊, 16G 显存直出 1080P 无限长镜头)：**

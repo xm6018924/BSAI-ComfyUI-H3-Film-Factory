@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.222-h25-hybrid-8step"
+BUILD = "minimax-h3-extender-v14.223-h25-hybrid-8step"
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -7261,7 +7261,7 @@ class BSAIH3FilmFactory:
                       "二采 4 步高分辨精修 (总 8 NFE); 确认 Loader=fasth3_omniref_8step_pruned_int8_convrot "
                       "+ 注意力换 sol-attn(替代 VSA)。")
             elif _rp_mode == "H25 Hybrid 8步 多参考单采":
-                # v14.222 (2026-10-27): B站《MiniMax H3 多参考终于测出最优解,
+                # v14.223 (2026-10-27): B站《MiniMax H3 多参考终于测出最优解,
                 # H25 Hybrid混合架构胜出》(BV1dygg6EE6W, AI-KSK) 配方落地。
                 # H25 Hybrid = Base FL2VA + Overlay Ref2VA, Block Range Additive
                 # 区间 25-49(社区共识, 非 50/50): 保留 FL2VA 清晰/细节/运动流畅,
@@ -7278,7 +7278,7 @@ class BSAIH3FilmFactory:
                 shift_video, shift_audio = 12.0, 3.0
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
-                    print(f"[H3 Extender] v14.222 H25 Hybrid 8步(渲染管道): 采样器强制 euler + simple (LightX2V 8步配方)")
+                    print(f"[H3 Extender] v14.223 H25 Hybrid 8步(渲染管道): 采样器强制 euler + simple (LightX2V 8步配方)")
                 scheduler = "simple"
                 print("[H3 Extender] 🚀 H25 Hybrid 8步 多参考单采: 一采 8 步直出 (BV1dygg6EE6W 配方) — "
                       "确认 Loader=minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors, "
@@ -10207,7 +10207,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
-print("[BSAI-H3-Film-Factory] v14.218 backend loaded (v14.218 像素放大适配新版 ComfyUI API(comfy.ldm.modules.upscale 已删除 -> 改走 comfy_extras.nodes_upscale_model + spandrel 直接加载, 同时并入远端 70e9776 的 upscale 修复并保留本分支的 v14.214/v14.215 修复); v14.218 前端枚举与后端严格同步: refine_lipsync_mode / upscale_mode 这两个后端双语枚举(英文规范值 + 旧中文别名)的快捷下拉统一收敛到规范值, 旧中文别名改由 cycleAliases 映射(档位序号/进度条/高亮对旧工作流仍然算得对), 遗留兼容层 OPTIONS 白名单补全后端枚举全集(此前只认旧中文, 英文规范值会被静默改写回中文); 同时修掉自检工具查出的三处遗留层 desync: 补齐漏掉的 4 个渲染管道档(直播配音高清 / QAD-v2-8步 / 直播带货全自动 / FastH3 Omni × SelfLift 超分 —— 此前载入这类工作流会被静默重置成默认档)、清掉 speed_preset 里后端已不接受的 5 个遗留配方名(老工作流回退 custom, 由渲染管道决定配方)、把老布局缺失槽的默认值改成后端合法值(sampler_name=euler / scheduler=simple / semantic_bridge_adapter=(off: no weights)); v14.217 新增一镜到底采样档快捷下拉(OneShotSmp: 单采无缝 / 双采高清 / 双采无缝 8+4); v14.216 prestartup 收录第三方节点 SeedVR2 的启动期崩溃补丁: 它的 import 期 bf16 探针在 ComfyUI 全量环境(同进程已加载 xformers/flash_attn/sageattention/comfy_kitchen 等多个 CUDA 扩展)会触发 native access violation 直接杀掉整个进程 -> ComfyUI 起不来(实测两次崩在同一行); 已把探针换成不分配显存的设备能力查询(sm_80+ 支持 bf16), 并由 prestartup.py 在启动前自动重打, SeedVR2 节点更新后也不用手动补; v14.215 新增一镜到底第三档「双采无缝 (8+4)」: 一镜到底照跑二采(1采8步+2采4步, denoise0.45), 并修复双采接缝漂移根因(段头锁 keep 因上一段尾 latent 为二采 2x 尺寸而 shape 不匹配整块失效, 现按本段尺寸重采样后再锁 keep, 与 motion.apply keyframe 同口径); v14.214 修长链第2段起 CUDA OOM: 每段采样前按身份释放文本编码器 TE 的 GPU 权重(clip.patcher, 量化 TE 被 ck-quant 跳过 + free_memory 扫不到已摘除的 TE), 实测第2段采样前 free 从 15.6GB 回到 22GB; v14.213 前端补丁: web/extender.js 的 render_pipeline cycle/cycleLabels 补上第13档「FastH3 Omni × SelfLift 超分」(此前只加了 .py 选项, 前端自定义下拉仍只画 12 项); v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
+print("[BSAI-H3-Film-Factory] v14.223 backend loaded (v14.223 渲染管道新增第17档「H25 Hybrid 8步 多参考单采」: B站《MiniMax H3 多参考终于测出最优解，H25 Hybrid 混合架构胜出》(BV1dygg6EE6W, AI-KSK) 配方落地 —— H25 Hybrid 混合架构(Base=FL2VA+Overlay=Ref2VA, Block Range Additive 区间 25-49) + LightX2V 8 步 FL2V 加速 LoRA, 一采 8 步单采直出(euler+simple, shift 12/3, denoise 1.0, 跳过二采); 视频实测 8 步=正式生产档, 20 步仅质量基准, 4 步 Ref2V LoRA 弃用(音频劣化+动态被约束); 需 Loader=minimax_h3_hybrid_fl2va_ref2va_b25-49-int8 + 加速LoRA槽=minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16; 前端 web/extender.js cycle/cycleLabels/OPTIONS 白名单已同步, 自检 check_quickbar_enum_sync.py 通过; v14.218 像素放大适配新版 ComfyUI API(comfy.ldm.modules.upscale 已删除 -> 改走 comfy_extras.nodes_upscale_model + spandrel 直接加载, 同时并入远端 70e9776 的 upscale 修复并保留本分支的 v14.214/v14.215 修复); v14.218 前端枚举与后端严格同步: refine_lipsync_mode / upscale_mode 这两个后端双语枚举(英文规范值 + 旧中文别名)的快捷下拉统一收敛到规范值, 旧中文别名改由 cycleAliases 映射(档位序号/进度条/高亮对旧工作流仍然算得对), 遗留兼容层 OPTIONS 白名单补全后端枚举全集(此前只认旧中文, 英文规范值会被静默改写回中文); 同时修掉自检工具查出的三处遗留层 desync: 补齐漏掉的 4 个渲染管道档(直播配音高清 / QAD-v2-8步 / 直播带货全自动 / FastH3 Omni × SelfLift 超分 —— 此前载入这类工作流会被静默重置成默认档)、清掉 speed_preset 里后端已不接受的 5 个遗留配方名(老工作流回退 custom, 由渲染管道决定配方)、把老布局缺失槽的默认值改成后端合法值(sampler_name=euler / scheduler=simple / semantic_bridge_adapter=(off: no weights)); v14.217 新增一镜到底采样档快捷下拉(OneShotSmp: 单采无缝 / 双采高清 / 双采无缝 8+4); v14.216 prestartup 收录第三方节点 SeedVR2 的启动期崩溃补丁: 它的 import 期 bf16 探针在 ComfyUI 全量环境(同进程已加载 xformers/flash_attn/sageattention/comfy_kitchen 等多个 CUDA 扩展)会触发 native access violation 直接杀掉整个进程 -> ComfyUI 起不来(实测两次崩在同一行); 已把探针换成不分配显存的设备能力查询(sm_80+ 支持 bf16), 并由 prestartup.py 在启动前自动重打, SeedVR2 节点更新后也不用手动补; v14.215 新增一镜到底第三档「双采无缝 (8+4)」: 一镜到底照跑二采(1采8步+2采4步, denoise0.45), 并修复双采接缝漂移根因(段头锁 keep 因上一段尾 latent 为二采 2x 尺寸而 shape 不匹配整块失效, 现按本段尺寸重采样后再锁 keep, 与 motion.apply keyframe 同口径); v14.214 修长链第2段起 CUDA OOM: 每段采样前按身份释放文本编码器 TE 的 GPU 权重(clip.patcher, 量化 TE 被 ck-quant 跳过 + free_memory 扫不到已摘除的 TE), 实测第2段采样前 free 从 15.6GB 回到 22GB; v14.213 前端补丁: web/extender.js 的 render_pipeline cycle/cycleLabels 补上第13档「FastH3 Omni × SelfLift 超分」(此前只加了 .py 选项, 前端自定义下拉仍只画 12 项); v14.212 修 Omni 一采保底: 判据由单边改面积, 修竖版 544x960 被误放大到 960x1696(2.7M tokens, 每步350s)的慢速 bug; v14.211 渲染管道新增档「FastH3 Omni × SelfLift 超分」: Omni 8步蒸馏 + SelfLift 渐进式超分(一采4步≈0.4x搭骨架→3D latent放大→二采4步精修, 总8NFE), 建议 sol-attn 替代 VSA(画面清亮通透); v14.207 二采 OOM fallback 走一采时同步收缩 keyframe 几何 + fallback 非 OOM 异常不再打死 prompt; v14.206 二采 latent 塌陷检测→自动回退一采+告警; 直播带货（全自动）: render_pipeline 第12档, 12+4/denoise0.55/latent x2.0/音频重绘0.7/audio_context_length=0/clip2+ 强制关上下文, 除分辨率外手动参数全部失效; v14.201 QAD-v2-8步; Omni 单采: 13档联动 + guidance 1.0 + 一采钳制≤960x544; 双采: Sol-Attn token上限门350k + 自动分块n6; v14.154 对口型纯歌曲重叠切割先于重采样)")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
