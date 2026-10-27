@@ -6756,11 +6756,11 @@ class BSAIH3FilmFactory:
         """Resolve @图N/@视频N/@音频N tags in clip prompts against the connected Asset Library.
         Replaces @图N with <Picture N>, @视频N with <Video N>, @音频N with <Audio 1>.
         Also loads referenced images as internal refs and audio as ref_audio path.
-        Returns (clips_with_resolved_prompts, resolved_image_paths, resolved_audio_paths).
+        Returns (clips_with_resolved_prompts, resolved_image_paths, resolved_audio_paths, clip_asset_paths).
         """
         if not asset_library:
             print("[H3 Extender] asset_library is empty or None, skipping @图N resolution")
-            return clips, [], []
+            return clips, [], [], []
 
         # asset_library can be a dict with 'images'/'videos'/'audios' lists
         if isinstance(asset_library, dict):
@@ -6773,7 +6773,7 @@ class BSAIH3FilmFactory:
             audios = []
         else:
             print(f"[H3 Extender] asset_library is unexpected type: {type(asset_library)}")
-            return clips, [], []
+            return clips, [], [], []
 
         print(f"[H3 Extender] asset_library received: {len(images)} images, {len(videos)} videos, {len(audios)} audios")
         for i, img in enumerate(images[:3]):
