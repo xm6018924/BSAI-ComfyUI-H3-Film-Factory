@@ -16,6 +16,17 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.226 (2026-10-27) — HyperVAE 2x 解码 OOM 根治：回退走官方时间+空间分块（decode_tiled_3d）/ HyperVAE 2x decode OOM fix: fall back to official temporal+spatial tiling (decode_tiled_3d)
+
+**根因（v14.225 实测后确认）：** v14.225 让 DiT 让位后（popped=1, free=8.42GB），VAE 体系（HyperVAE 2x + H3 Video/AudioVAE 全量加载）仍占 13.31GB；HyperVAE 2x 解码输出 12 通道 packed 张量 ~8.45GB，ComfyUI 常规解码 OOM 后自动回退到 `handles_tiling=True` 的 `_decode_tiled_owned`（**纯空间分块**，完整输出仍在 GPU 累积）→ 峰值 21GB+ 依然 OOM（实测 clip0/clip1 均 OOM，0 clip ready）。
+**/ Root cause (confirmed after v14.225 field test): with DiT evicted, the VAE family still holds 13.31GB; HyperVAE 2x outputs ~8.45GB 12-channel packed; ComfyUI's OOM fallback used handles_tiling=True (_decode_tiled_owned, spatial-only, full output accumulated on GPU) -> still OOM.**
+
+- **本次改动（1 项）：** `bsai_h3_hypervae_2x.py` `load_hyper_vae_2x` 置 `vae.handles_tiling = False` + `vae.output_channels = 12` → ComfyUI OOM 回退走官方 `decode_tiled_3d`（`tiled_scale_multidim`：`tile_t` 时间分块 + `tile_x/y` 空间分块 + 渐进拼装 + 自适应 tile 尺寸），解码峰值 = VAE 权重 + 单 tile，24GB 卡可容纳；`output_channels=12` 保证 12 通道 packed 拼装正确；显存充足时常规整段解码路径不受影响。** / Change: set handles_tiling=False + output_channels=12 in load_hyper_vae_2x -> OOM fallback uses official decode_tiled_3d (tile_t temporal + tile_x/y spatial, adaptive tile sizing); peak = VAE weights + one tile; regular path unaffected when VRAM is ample.**
+- **验证（逻辑层）：** py_compile PASS（C 盘运行实例 + G 盘仓库双环境）；路径核对：sd.py L1341 `handles_tiling=False` → L1346-1357 预算自适应 + `decode_tiled_3d`；L1208 `out_channels=self.output_channels` 与 12ch 解码头一致。** / Verified: py_compile PASS in both environments; sd.py branch check confirms decode_tiled_3d path with correct out_channels.**
+- **渲染验收需用户重渲染：** 重启 8181 实例后重跑；解码阶段应出现 `Ran out of memory when regular VAE decoding, retrying with tiled VAE decoding.` 后**成功产出**（tiled_3d 时间分块，无 OOM traceback），`clip preview decode` 成功、`H3_Extender_clip*.mp4` 落盘即根治。** / Acceptance: restart 8181 and re-run; decode should fall back to tiled_3d and succeed (no OOM traceback), preview MP4s land in output.**
+
+---
+
 ### v14.225 (2026-10-27) — decode VRAM 加固：解码前把量化 DiT 完全请出 GPU，根治 vae.decode 停滞 / Decode VRAM hardening: evict the quantized DiT before vae.decode to fix decode stalls
 
 **根因（真机实测）：** 解码前清理用 `partially_unload` + 跳过 ck-quant（量化权重），int8 DiT（驻留 17.5GB）被跳过仍留在 GPU；叠加 HyperVAE 2x 解码（allocated=13.31GB）峰值超 24GB 卡 → 解码陷入 DynamicVRAM 换页泥潭：CPU/GPU 满载但 1h+ 无产物、前端 websocket 断连（`preview_committed_count=0`）。

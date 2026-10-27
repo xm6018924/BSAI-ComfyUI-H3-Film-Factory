@@ -119,6 +119,14 @@ def load_hyper_vae_2x(path: str | Path):
     projection.to(dtype=vae.vae_dtype).eval()
     inner.decoder.proj_out = projection
     inner.decoder.out_channels = 12
+    # v14.226 (2026-10-27): 24GB 卡解码 OOM 修复 —— HyperVAE 2x 整段解码峰值
+    # (VAE 体系 ~13GB + 12通道 packed 输出 ~8.45GB) 超 24GB, ComfyUI OOM 回退走
+    # handles_tiling=True 的 _decode_tiled_owned(纯空间分块, out 仍在 GPU 完整累积)
+    # 依然 OOM。置 handles_tiling=False → 回退走官方 decode_tiled_3d(tile_t 时间分块
+    # + tile_x/y 空间分块 + tiled_scale_multidim 渐进拼装), 峰值 = VAE 权重 + 单 tile;
+    # output_channels 同步 12 通道 packed, 保证 tiled 拼装正确。
+    vae.handles_tiling = False
+    vae.output_channels = 12
     # 权重存储 RGB phase 分组: RRRR GGGG BBBB. 统计只在 decode 阶段展开;
     # encoder 仍需要 RGB。
     inner._finalize_pixels = MethodType(_finalize_hyper_pixels, inner)
