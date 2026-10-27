@@ -14,6 +14,21 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+---
+
+### v14.222 (2026-10-27) — 对齐 B 站教程 BV1fahB6XEKY：一镜到底上下文潜空间注入微噪（防无限长链参考复用过度平滑/劣化）/ Align BV1fahB6XEKY: inject micro-noise into motion-context keyframes to prevent long-chain degradation
+
+**对照教程《第005集：FAN_Comfyui_MinimaxH3_SelfLift双采_MotionContext上下文参考无限循环_一镜到底1080P直出狂飙版》(说人话的樊, 16G 显存直出 1080P 无限长镜头)：**
+**/ Against the guide "SelfLift dual-pass + MotionContext infinite-loop one-shot, 1080P direct-out, 16GB VRAM".**
+
+- **教程 5 要点对照结论：** ① 参考图一采二采全程注入 → 已实现（二采 `_r_guider.set_conds(conditioning)` 复用一采 conditioning，ref2va blocks 全程在）；② 分块(tile)下潜空间上下文参考仍注入 → 已实现（分块包装 sampler，conditioning/keyframes 不动）；③ **上下文潜空间注入噪声（防长链劣化）→ 本次补齐**；④ 上下文长度图像 22 / 音频 24 → 默认一致；⑤ 裁掉上下文段 → 已实现（join trim）。
+- **本次改动（extender.py motion.apply 之后）：** 教程核心方法之一 = "给潜空间图像注入噪声……因为噪声的加入会引发采样的真实发生，对画质进行修复"。插件现状 overlap 延续区（采样起点）已有 10% 噪声（v14.178/188），但 conditioning 的 minimax_keyframes（前文参考段）是干净复用上一段尾 latent —— 无限长链多次复用时会累积过度平滑/劣化。现按教程精神对 keyframes 参考注入 **0.05σ 自适应微噪**（noise = 0.05 × keyframe_std），环境变量 `BSAI_H3_CTX_NOISE=0.05`（默认），设 `0` 关闭；**不加参数端口**（铁律）。
+- **验证（逻辑层）：** 8 断言全过——shape 不变、数值微变（mean|Δ|=0.028 ≪ latent 幅度）、0.05σ 比例自适应（std 1x vs 5x → Δ 5 倍）、CTX_NOISE=0 原样通过、无 keyframes/None/空 latent 容错不炸、原 dict 隔离不污染；py_compile PASS。
+- **渲染验收需用户重渲染：** 建议开一镜到底跑 3+ 段长链，对比段间画质劣化程度；若接缝偏糊可把 `BSAI_H3_CTX_NOISE` 调到 0.02，若长链劣化明显可调到 0.08。
+- 教程第 6 点（片段间轻微不连续 → 第二个插帧工作流 RIFE 补首尾过渡帧）是外部独立 ComfyUI 工作流，不在插件内；需要时可作为后处理。
+
+---
+
 ### v14.221 (2026-10-26) — 保脸模式三态枚举 + 小脸修复（H3 FaceRefine 局部重绘）/ FaceLock becomes a 3-mode enum + small-face repair via H3 FaceRefine local redraw
 
 **参考 B站《如何利用Minimax H3的Face Refine进行小脸崩坏修复》(BV133nh6fEMm)：远景小脸崩坏时全帧 H3 会结构塌陷（脸太小、放大后无足够像素重建五官），解法是把脸区裁剪出来做 H3 局部重绘再缝合回去。现把该方案接进电影工厂出片前，作为「小脸修复」后处理档。**

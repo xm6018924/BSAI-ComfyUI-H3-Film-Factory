@@ -3927,15 +3927,35 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             pass
                         # v1.65: 验证 Sol-Attn workspace 空间, 不足时醒目提示(采样走
                         # lowvram 换页兜底, 不会静默 OOM; 下次跑会在预算区提前降级).
+                        # v14.215: free=0 多为 torch caching allocator 的 cached 池未释放
+                        # (驻留 17.5GB + cached 4.5GB 后驱动 free≈0), 先主动 empty_cache
+                        # 回收, 重查仍不足才提示——避免 Sol-Attn kernel workspace 分配
+                        # 失败导致每步 1401s 的全量换页风暴.
                         try:
                             import torch as _torch65
                             _f65, _t65 = _torch65.cuda.mem_get_info()
                             _free65 = _f65 / 1024 ** 3
                             _ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)
                             if _free65 < _ws65 + 2.0:
-                                print(f"[H3 Extender] Refine 警告: 二采 workspace 空间不足 "
-                                      f"(free={_free65:.1f}GB < ws {_ws65:.1f}GB+2GB), "
-                                      f"采样将靠 lowvram 换页兜底, 建议下次降低 refine_upscale_factor")
+                                _fixed65 = False
+                                try:
+                                    import gc as _gc65b
+                                    _gc65b.collect()
+                                    _torch65.cuda.synchronize()
+                                    _torch65.cuda.empty_cache()
+                                    _f65b, _ = _torch65.cuda.mem_get_info()
+                                    _free65 = _f65b / 1024 ** 3
+                                    _fixed65 = _free65 >= _ws65 + 2.0
+                                except Exception:
+                                    pass
+                                if _fixed65:
+                                    print(f"[H3 Extender] v14.215 workspace 修复: "
+                                          f"empty_cache 回收 cached 池后 free={_free65:.1f}GB "
+                                          f">= ws {_ws65:.1f}GB+2GB, Sol-Attn workspace 可分配")
+                                else:
+                                    print(f"[H3 Extender] Refine 警告: 二采 workspace 空间不足 "
+                                          f"(free={_free65:.1f}GB < ws {_ws65:.1f}GB+2GB), "
+                                          f"采样将靠 lowvram 换页兜底, 建议下次降低 refine_upscale_factor")
                         except Exception:
                             pass
             except Exception as _lg2:
@@ -4106,7 +4126,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] v14.153 global 包装失败, 回退 spatial 分块保底: {_eg15}")
                     refine_mem_mode = "spatial"
                     _r_global_fallback_tiles = True
-            if _r_global_fallback_tiles and _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None:
+            # v14.215: global 回退后无条件补分块——原条件还要求 _r_tok_gate > 350K,
+            # 但回退已证明"全序列路径在此机不可用"(Sol-Attn override + 24GB), 无论
+            # token 多少都该切 spatial 分块: 218K 整段虽在 Sol-Attn 健康区, 但全帧
+            # workspace 1.5GB 在驻留 17.5GB + reserve 3.9GB 后 free≈0 无法分配
+            # (实测 1401s/it 换页风暴). 分块后每块 ~54K tokens 更快, workspace 需求
+            # 随 tile 数线性下降(x1.0: 1.5GB -> 0.8GB/块), Sol-Attn 稀疏照常生效.
+            if _r_global_fallback_tiles and _r_restore_tiles is None:
                 try:
                     import os as _os_t4, importlib.util as _ilu_t4
                     _tiles_path4 = _os_t4.path.join(_os_t4.path.dirname(_os_t4.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -4130,6 +4156,47 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         pass
                 except Exception as _te_t4:
                     print(f"[H3 Extender] v14.153 回退补分块失败(仅 v14.148 dense 门兜底): {_te_t4}")
+            # v14.215: global 回退 -> spatial 分块后, 重新平衡显存给 workspace 让位.
+            # 背景: 回退路径的 reserve 在 v14.208 之前已按"非分块"定好(用户场景 3.9GB),
+            # 此时模型驻留 17.5GB + reserve 3.9GB 已把 24GB 吃满, 分块 forward 的
+            # Sol-Attn workspace 仍无空间 -> 每步 1401s 换页风暴. 分块场景按 v1.88
+            # 实测把 reserve 下限提到 7.5GB(驻留 ~14.3GB + offload ~5.2GB +
+            # free ~7.2GB > 全幅 ws+2GB), ComfyUI 不再卸载驻留, Sol-Attn 每块
+            # workspace(0.8GB@x1.0)可分配. 摘除重载让加载器按新 reserve 平衡.
+            if _r_global_fallback_tiles and _r_restore_tiles is not None:
+                try:
+                    import torch as _t215, gc as _gc215
+                    import comfy.model_management as _mm215
+                    _gc215.collect()
+                    _t215.cuda.synchronize()
+                    _t215.cuda.empty_cache()
+                    _f215, _ = _t215.cuda.mem_get_info()
+                    _free215 = _f215 / 1024 ** 3
+                    _ws215 = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                    if _free215 < _ws215 + 2.0:
+                        # 分块场景: reserve 下限 7.5(v1.88 实测值, 防 ComfyUI 按全幅
+                        # 估算 ws 后卸载驻留); 非分块下限 6.0. 取当前与下限较大者.
+                        _resv215 = max(7.5, _r_reserve_gb) if tiled_refine else max(6.0, _r_reserve_gb)
+                        if _resv215 > _r_reserve_gb + 1e-6:
+                            try:
+                                _ff_unregister_model(model, label="二采-workspace-branch")
+                            except Exception:
+                                pass
+                            _mm215.EXTRA_RESERVED_VRAM = int(_resv215 * 1024 ** 3)
+                            _mm215.load_models_gpu([model])
+                            _t215.cuda.synchronize()
+                            _gc215.collect()
+                            _t215.cuda.empty_cache()
+                            _f215b, _ = _t215.cuda.mem_get_info()
+                            print(f"[H3 Extender] v14.215 workspace 让位: reserve "
+                                  f"{_r_reserve_gb:.1f}->{_resv215:.1f}GB, 重驻留后 "
+                                  f"free={_f215b/1024**3:.1f}GB (目标 ws {_ws215:.1f}GB+2GB), "
+                                  f"Sol-Attn 分块 workspace 已可分配")
+                        else:
+                            print(f"[H3 Extender] v14.215 分块回退后 free={_free215:.1f}GB "
+                                  f">= ws {_ws215:.1f}GB+2GB, 无需降驻留")
+                except Exception as _e215:
+                    print(f"[H3 Extender] v14.215 workspace 平衡失败(可忽略): {_e215}")
             _r_guider = _BasicGuider(_refine_model)
             _r_guider.set_conds(conditioning)
             # v1.64: 恢复 v1.59 驻留补丁(v1.61 改诊断时误删)——二采采样前
@@ -9160,6 +9227,52 @@ class BSAIH3FilmFactory:
                     int(audio_context_length),
                 )
                 _applied_ctx = True
+                # v14.219 (对齐 B 站教程 BV1fahB6XEKY《SelfLift双采_MotionContext
+                # 上下文参考无限循环_一镜到底1080P直出狂飙版》): 教程核心方法之一
+                # "给潜空间图像注入噪声"——原文: 通过给上文潜空间参考注入噪声,
+                # "可以很好的改善后面视频的画质, 避免严重劣化……因为噪声的加入
+                # 会引发采样的真实发生, 对画质进行修复"。
+                # 我们现状: overlap 延续区(采样起点)已加 10% 噪声(v14.178/188),
+                # 但 conditioning 的 minimax_keyframes(前文参考段)是干净复用上一段尾
+                # latent —— 无限长链多次复用时纯复用会累积过度平滑/劣化。
+                # 这里按教程精神给 keyframes 参考注入微噪(σ 比例自适应)。
+                # 环境变量 BSAI_H3_CTX_NOISE=0.05(默认), 设 0 关闭; 不加参数端口。
+                try:
+                    _ctx_noise = float(os.environ.get("BSAI_H3_CTX_NOISE", "0.05") or 0.0)
+                except (TypeError, ValueError):
+                    _ctx_noise = 0.05
+                if _ctx_noise > 0.0:
+                    try:
+                        # ComfyUI conditioning = list[[cond_dict, extra]]; 兼容两种槽位
+                        _row = positive[0] if isinstance(positive, list) and positive else None
+                        _pos_dict = None
+                        if isinstance(_row, (list, tuple)):
+                            for _cell in _row:
+                                if isinstance(_cell, dict) and "minimax_keyframes" in _cell:
+                                    _pos_dict = _cell
+                                    break
+                        elif isinstance(_row, dict) and "minimax_keyframes" in _row:
+                            _pos_dict = _row
+                        if _pos_dict is not None:
+                            _kfs = _pos_dict["minimax_keyframes"]
+                            _new_kfs, _noised = [], 0
+                            for _kf in _kfs:
+                                _kl = _kf.get("latent") if isinstance(_kf, dict) else None
+                                if _kl is None or not torch.is_tensor(_kl) or _kl.numel() == 0:
+                                    _new_kfs.append(_kf)
+                                    continue
+                                _sig = float(_ctx_noise) * float(_kl.std().item())
+                                _nkf = dict(_kf)
+                                _nkf["latent"] = _kl + torch.randn_like(_kl) * _sig
+                                _new_kfs.append(_nkf)
+                                _noised += 1
+                            if _noised:
+                                _pos_dict["minimax_keyframes"] = _new_kfs
+                                print(f"[H3 Extender] v14.219 上下文潜空间微噪(对齐 BV1fahB6XEKY): "
+                                      f"clip[{i}] {_noised} 个 keyframe 注入 {float(_ctx_noise):.2f}σ 噪声, "
+                                      f"防无限长链参考复用过度平滑/劣化; 设 BSAI_H3_CTX_NOISE=0 关闭")
+                    except Exception as _ctx_err:
+                        print(f"[H3 Extender] v14.219 keyframe 微噪失败(可忽略, 不影响渲染): {_ctx_err}")
                 # v14.178 一镜到底全球方案落地 P0-3: 重叠区噪声延续(HR Endless
                 # video_continuation=22 语义)。官方 AddGuide 是 conditioning 语义(采样
                 # 仍从空 latent 起), 接缝区模型仍会"重新想象"(诊断: 接缝 PSNR 仅 18.95dB)。
