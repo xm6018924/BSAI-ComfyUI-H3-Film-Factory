@@ -4140,8 +4140,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _tiles_mod4 = _ilu_t4.module_from_spec(_tiles_spec4)
                     _tiles_spec4.loader.exec_module(_tiles_mod4)
                     _r_restore_tiles = _tiles_mod4.wrap_sampler_spatial_tiles(
-                        _r_sampler, n_tiles=4, overlap_pixels=int(tile_overlap))
-                    print(f"[H3 Extender] v14.180 回退保底: 已补启用 spatial 分块 n_tiles=4 overlap={tile_overlap}px")
+                        _r_sampler, n_tiles=8, overlap_pixels=int(tile_overlap))
+                    print(f"[H3 Extender] v14.180 回退保底: 已补启用 spatial 分块 n_tiles=8 overlap={tile_overlap}px (v1.95: 4->8 降 tile activation)")
                     # v14.208: 与 v14.173 同逻辑——spatial fallback 装好后,
                     # 若 transformer_options 里有之前注入的 sol_max_tokens (来自 v14.148),
                     # 必须清掉, 否则每个 tile (~262k tokens) 被强制 dense attention,
