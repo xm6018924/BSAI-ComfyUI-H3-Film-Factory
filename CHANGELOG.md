@@ -16,6 +16,16 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 
 ---
 
+### v14.229 (2026-10-27) — 渲染管道新增第18档「4K重生成 OpenH3Regenerate2K (768P草稿直出2560)」/ render_pipeline tier 18: OpenH3Regenerate2K 4K regeneration (Bilibili BV13uxT66EWq)
+
+**对照《MinimaxH3 进入4K分辨率开源时代 768P草稿直接升2560 比官方还高清》(AI绘画KK, BV13uxT66EWq)：NVLabs Sana 仓库 OpenH3Regenerate2K 开放模型 = 闭源 H3Regenerate2K 的首个可复现开放替代——768P 草稿(1344x768, 121帧) -> 三步精修重生成 -> 2560x1440 2K。**
+**/ Against the guide (AI绘画KK, BV13uxT66EWq): NVLabs OpenH3Regenerate2K open model = first reproducible open replacement of closed H3Regenerate2K; regenerates a 768P draft (1344x768) to 2560x1440 in 3 refine steps.**
+
+- **本次改动（3 项）：** ① `extender.py` render_pipeline 新增第18档（optional 最末尾追加，不挤占任何既有 widget index）：一采 4 步 768P 草稿搭骨架 + 二采 3 步重生成（denoise 1.0，官方 sigmas [0.909375, 0.857143, 0.666667, 0]，CFG=1.0 需在采样器节点设置）+ latent x1.9 放大（1344->2560，官方 3D 卷积上采样器可挂 refine_upscaler_model）+ shift 12/3 + euler；打印提示确认 Loader 挂合并 LoRA（OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0，FP32 三适配器沿 rank 拼接误差 2.2e-8）；② `web/extender.js` H3LegacyCompat OPTIONS 白名单同步追加（前后端严格同步纪律）；③ CHANGELOG 登记。** / Changes: backend tier 18 (4-step draft + 3-step regenerate + latent x1.9) + front-end OPTIONS whitelist sync + docs.**
+- **许可提示：** 模型许可证地域限制排除欧盟/英国/韩国/美国，中国地区可用。** / License note: region-restricted (excludes EU/UK/KR/US); CN region OK.**
+
+---
+
 ### v14.226 (2026-10-27) — HyperVAE 2x 解码 OOM 根治：回退走官方时间+空间分块（decode_tiled_3d）/ HyperVAE 2x decode OOM fix: fall back to official temporal+spatial tiling (decode_tiled_3d)
 
 **根因（v14.225 实测后确认）：** v14.225 让 DiT 让位后（popped=1, free=8.42GB），VAE 体系（HyperVAE 2x + H3 Video/AudioVAE 全量加载）仍占 13.31GB；HyperVAE 2x 解码输出 12 通道 packed 张量 ~8.45GB，ComfyUI 常规解码 OOM 后自动回退到 `handles_tiling=True` 的 `_decode_tiled_owned`（**纯空间分块**，完整输出仍在 GPU 累积）→ 峰值 21GB+ 依然 OOM（实测 clip0/clip1 均 OOM，0 clip ready）。

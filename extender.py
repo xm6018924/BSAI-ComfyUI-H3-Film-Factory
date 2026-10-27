@@ -4113,7 +4113,18 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 包装失败时打印警告并回退 spatial 行为(此时 v14.149 自动分块已因
             # refine_mem_mode 被跳过, 需补一次分块包装保底)。
             _r_global_fallback_tiles = False
-            if refine_mem_mode == "global":
+            # v14.225: tokens 在 Sol-Attn 健康区(<=350k)时跳过 global 包装——
+            # global tiled_model 检测到 Sol-Attn override 会回退 dense full-sequence,
+            # 进而触发 v14.208 切 spatial 8 块(overlap 重复计算, 实测 171s/步)。
+            # 但 218k 稀疏 Sol-Attn 全帧直接跑只需 0.97s/步(基准), 根本不需要
+            # global 包装压激活。global 只在 tokens 超健康区(>350k)时才需要。
+            _skip_global_healthy = bool(refine_mem_mode == "global"
+                                        and _r_tok_gate <= _REFINE_MAX_SOL_TOKENS)
+            if _skip_global_healthy:
+                print(f"[H3 Extender] v14.225 二采 tokens={_r_tok_gate:,} 在 Sol-Attn 健康区, "
+                      f"跳过 global 包装(避免 attention override 回退 dense + 切 8 块), "
+                      f"稀疏 Sol-Attn 直接跑全帧(基准 0.97s/步, 不分块无 overlap 重复)")
+            if refine_mem_mode == "global" and not _skip_global_healthy:
                 try:
                     import os as _os_g, importlib as _ilg
                     import sys as _sys_g
@@ -6674,10 +6685,10 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货·01 纯文本配音（三口不接）", "直播带货·02 ref_audio音色参考配音（只接参考）", "直播带货·03 lip_voice对口型（只接现成主播音频）", "直播带货（全自动）", "FastH3 Omni × SelfLift 超分", "H25 Hybrid 8步 多参考单采"],
+            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货·01 纯文本配音（三口不接）", "直播带货·02 ref_audio音色参考配音（只接参考）", "直播带货·03 lip_voice对口型（只接现成主播音频）", "直播带货（全自动）", "FastH3 Omni × SelfLift 超分", "H25 Hybrid 8步 多参考单采", "4K重生成 OpenH3Regenerate2K (768P草稿直出2560)", "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
-                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift dual-pass (default, HD refine); (2) Live Dub HD = v14.179 dedicated live-commerce ref_audio dubbing: 12 first-pass steps (the usable lower bound for official audio) + 4 refine steps + audio redraw 0.7 (refines Mandarin vocals and eliminates garbled/mumbled dubbing at 6~8 steps; requires a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3-4step VSA = 4-step distillation + VSA LoRA, 4+2 dual-pass; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 dual-pass (shift 12/3); (6) DMAD-4step = DMAD 4-step distillation LoRA, 4+2 dual-pass (forced lcm, shift 12/2); (7) Action Combo = 8+4 dual-pass (euler; action/DMAD LoRAs are injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res first pass + boost x2 / 3-step detail second pass + DLSS5 4K pixel upscale, based on Bilibili BV18Vnb6UEPv); (9) FastH3 Omni 8-step single-pass = skip the refine pass and go straight from an 8-step distilled first pass (guidance 1.0 + shift 12/3; the Loader must switch to fasth3_omniref_8step_pruned_int8_convrot with BlockSparseAttention VSA keep_percent=10); (10) Dual-pass 2K = v14.184 T8 idea (BV1aiaL61Eyu): 8-step first pass (FastH3 distillation contract) + 4-step second pass (denoise 0.45) + no latent upscale (factor=1.0, about 4x faster refine) + HyperVAE 2x decoded pixels 2x (encoder 16x unchanged, decoder 32x, decode happens once with no extra sampling VRAM; weights are auto-detected from models/vae as hyper*2x*.safetensors) + audio redraw inherits w33 (0.7) — a live-commerce dubbing variant that outputs 2K directly without tiling seams. Note: v14.183 tried 10 steps + audio 0.9 and broke chained-segment audio (VAD returned 0 segments) with quality regression, so it was rolled back. (11) QAD-v2-8step = FastH3-QAD-v2 released 2026-10-20 by Hailuo AI Lab (a full quantization-aware distillation NVFP4 set, 118GB -> 30GB, with quality improving rather than dropping): 8-step distilled single pass (video shift 10 / audio shift 3, the official V2 NVFP4 schedule; note the Omni tier is 12/3 while this tier's 10/3 is QAD-v2 specific), refine pass skipped (single-pass seamless); the Loader must switch to the full QAD-v2 NVFP4 set (transformer + 50-layer text encoder qwen3vl_32b_minimax_h3_nvfp4_awq + new NVFP4 VAE decoder with 36/8 layers) with BlockSparseAttention VSA keep_percent=10; measured on RTX 5090, a 5s 480P clip takes only 12.6~14.8s (8-layer decoder). (12) Live Commerce (fully automatic) = v14.202 one-stop live-commerce ref_audio recipe: once selected, every parameter is taken over by this tier except width/height (resolution stays as the workflow defines it to prevent first-pass pixel blowup), and manual settings are ignored — 12 first-pass steps + 4 refine steps (denoise 0.55) + 3D latent upscaler x2.0 + audio redraw 0.7 (at 4 steps v14.196 automatically locks the 12-step first-pass audio) + shift 12/3 + TST tau 0.2 + tiled 4x128 refine + audio_context_length=0 (no previous-segment speech injection) + motion context disabled from clip2 on (prevents ghosting on the first frame of hard cuts). Pair with minimax_h3_ref2va_int8_convrot + 4-step LoRA. (13) FastH3 Omni x SelfLift = Bilibili BV1rtnQ6qErJ recipe: FastH3 Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE total); prefer sol-attn over VSA (brighter/clearer frame, same speed); Loader must use fasth3_omniref_8step_pruned_int8_convrot. ⑬FastH3 Omni × SelfLift 超分 = B站《FastH3 Omni 全流程教学》(BV1rtnQ6qErJ) 配方: Omni 8步蒸馏 + SelfLift 渐进式超分(一采 4 步 ≈0.4x 搭骨架 -> 3D latent 放大 -> 二采 4 步精修, 总 8 NFE); 建议注意力 sol-attn 替代 VSA(画面清亮通透, 速度不变); Loader 需换 fasth3_omniref_8step_pruned_int8_convrot. ⑭v14.220 直播带货配音模式 01/02/03 一键切换（讲话类直播带货专用，lip_audio 仅用于对口型MV不接）: 01 纯文本配音=三口(ref_audio/lip_audio/lip_voice)全不接，模型读分镜台词用默认音色生成人声; 02 ref_audio音色参考配音=只接ref_audio，模型读台词生成人声但声线跟随ref_audio; 03 lip_voice对口型=只接lip_voice现成主播音频，模型不生成音频、声音完全由lip_voice驱动@图1对口型。三档共用12+4采样配方并自动忽略误接的其它音频口。⑮H25 Hybrid 8步 多参考单采 = B站《MiniMax H3 多参考终于测出最优解，H25 Hybrid 混合架构胜出》(BV1dygg6EE6W, AI-KSK) 配方: H25 Hybrid 混合架构(Base=FL2VA 底模 + Overlay=Ref2VA 底模, Block Range Additive 模式, 区间 25-49 社区共识非 50/50 —— 保留 FL2VA 清晰/细节/运动流畅, 引入 Ref2VA 参考控制) + LightX2V 8 步 FL2V 加速 LoRA, 一采 8 步单采直出(euler+simple, shift 12/3, denoise 1.0, 跳过二采); 视频实测 8 步=正式生产档, 20 步仅作质量基准, 4 步 Ref2V 加速 LoRA 弃用(音频劣化+动态被约束); Loader 需换 minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors, 加速 LoRA 槽挂 minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors(强度 1.0)。",
+                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift dual-pass (default, HD refine); (2) Live Dub HD = v14.179 dedicated live-commerce ref_audio dubbing: 12 first-pass steps (the usable lower bound for official audio) + 4 refine steps + audio redraw 0.7 (refines Mandarin vocals and eliminates garbled/mumbled dubbing at 6~8 steps; requires a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3-4step VSA = 4-step distillation + VSA LoRA, 4+2 dual-pass; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 dual-pass (shift 12/3); (6) DMAD-4step = DMAD 4-step distillation LoRA, 4+2 dual-pass (forced lcm, shift 12/2); (7) Action Combo = 8+4 dual-pass (euler; action/DMAD LoRAs are injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res first pass + boost x2 / 3-step detail second pass + DLSS5 4K pixel upscale, based on Bilibili BV18Vnb6UEPv); (9) FastH3 Omni 8-step single-pass = skip the refine pass and go straight from an 8-step distilled first pass (guidance 1.0 + shift 12/3; the Loader must switch to fasth3_omniref_8step_pruned_int8_convrot with BlockSparseAttention VSA keep_percent=10); (10) Dual-pass 2K = v14.184 T8 idea (BV1aiaL61Eyu): 8-step first pass (FastH3 distillation contract) + 4-step second pass (denoise 0.45) + no latent upscale (factor=1.0, about 4x faster refine) + HyperVAE 2x decoded pixels 2x (encoder 16x unchanged, decoder 32x, decode happens once with no extra sampling VRAM; weights are auto-detected from models/vae as hyper*2x*.safetensors) + audio redraw inherits w33 (0.7) — a live-commerce dubbing variant that outputs 2K directly without tiling seams. Note: v14.183 tried 10 steps + audio 0.9 and broke chained-segment audio (VAD returned 0 segments) with quality regression, so it was rolled back. (11) QAD-v2-8step = FastH3-QAD-v2 released 2026-10-20 by Hailuo AI Lab (a full quantization-aware distillation NVFP4 set, 118GB -> 30GB, with quality improving rather than dropping): 8-step distilled single pass (video shift 10 / audio shift 3, the official V2 NVFP4 schedule; note the Omni tier is 12/3 while this tier's 10/3 is QAD-v2 specific), refine pass skipped (single-pass seamless); the Loader must switch to the full QAD-v2 NVFP4 set (transformer + 50-layer text encoder qwen3vl_32b_minimax_h3_nvfp4_awq + new NVFP4 VAE decoder with 36/8 layers) with BlockSparseAttention VSA keep_percent=10; measured on RTX 5090, a 5s 480P clip takes only 12.6~14.8s (8-layer decoder). (12) Live Commerce (fully automatic) = v14.202 one-stop live-commerce ref_audio recipe: once selected, every parameter is taken over by this tier except width/height (resolution stays as the workflow defines it to prevent first-pass pixel blowup), and manual settings are ignored — 12 first-pass steps + 4 refine steps (denoise 0.55) + 3D latent upscaler x2.0 + audio redraw 0.7 (at 4 steps v14.196 automatically locks the 12-step first-pass audio) + shift 12/3 + TST tau 0.2 + tiled 4x128 refine + audio_context_length=0 (no previous-segment speech injection) + motion context disabled from clip2 on (prevents ghosting on the first frame of hard cuts). Pair with minimax_h3_ref2va_int8_convrot + 4-step LoRA. (13) FastH3 Omni x SelfLift = Bilibili BV1rtnQ6qErJ recipe: FastH3 Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE total); prefer sol-attn over VSA (brighter/clearer frame, same speed); Loader must use fasth3_omniref_8step_pruned_int8_convrot. ⑬FastH3 Omni × SelfLift 超分 = B站《FastH3 Omni 全流程教学》(BV1rtnQ6qErJ) 配方: Omni 8步蒸馏 + SelfLift 渐进式超分(一采 4 步 ≈0.4x 搭骨架 -> 3D latent 放大 -> 二采 4 步精修, 总 8 NFE); 建议注意力 sol-attn 替代 VSA(画面清亮通透, 速度不变); Loader 需换 fasth3_omniref_8step_pruned_int8_convrot. ⑭v14.220 直播带货配音模式 01/02/03 一键切换（讲话类直播带货专用，lip_audio 仅用于对口型MV不接）: 01 纯文本配音=三口(ref_audio/lip_audio/lip_voice)全不接，模型读分镜台词用默认音色生成人声; 02 ref_audio音色参考配音=只接ref_audio，模型读台词生成人声但声线跟随ref_audio; 03 lip_voice对口型=只接lip_voice现成主播音频，模型不生成音频、声音完全由lip_voice驱动@图1对口型。三档共用12+4采样配方并自动忽略误接的其它音频口。⑮H25 Hybrid 8步 多参考单采 = B站《MiniMax H3 多参考终于测出最优解，H25 Hybrid 混合架构胜出》(BV1dygg6EE6W, AI-KSK) 配方: H25 Hybrid 混合架构(Base=FL2VA 底模 + Overlay=Ref2VA 底模, Block Range Additive 模式, 区间 25-49 社区共识非 50/50 —— 保留 FL2VA 清晰/细节/运动流畅, 引入 Ref2VA 参考控制) + LightX2V 8 步 FL2V 加速 LoRA, 一采 8 步单采直出(euler+simple, shift 12/3, denoise 1.0, 跳过二采); 视频实测 8 步=正式生产档, 20 步仅作质量基准, 4 步 Ref2V 加速 LoRA 弃用(音频劣化+动态被约束); Loader 需换 minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors, 加速 LoRA 槽挂 minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors(强度 1.0)。⑯4K重生成 OpenH3Regenerate2K = B站《MinimaxH3 进入4K分辨率开源时代 768P草稿直接升2560 比官方还高清》(BV13uxT66EWq, AI绘画KK) 配方: NVLabs Sana 仓库 OpenH3Regenerate2K 开放模型(闭源 H3Regenerate2K 的首个可复现开放替代) —— 768P 草稿(1344x768, 121帧) -> 三步精修重生成 -> 2560x1440 2K; 官方采样 3 步 sigmas [0.909375, 0.857143, 0.666667, 0], CFG=1.0, 初始态=(1-s0)*latent + s0*noise; 合并 LoRA(FP32, 三适配器沿 rank 轴拼接, 误差 2.2e-8): OpenH3 Refiner 5000步(强度0.7) + LTXRV fl2v turbo 1.2(强度1.0) + lms sharp rank64(强度1.0); 附赠 3D 卷积 latent 上采样器(BF16) 可挂 refine_upscaler_model; 许可证地域限制排除欧盟/英国/韩国/美国, 中国地区可用。⑰PRISM 10步 运动强化单采 = B站《Singularity v2 × 10Eros-Max 合并模型，提升运动效果》(BV1Vino6qE2F, plphy-up) 配方: PRISM = Ref2VA 系合并模型(HuggingFace OliviaRossi/Minimax-h3_Singularity-x-10Eros-Max_PRISM, int8 20.3GB), 官方 workflow 直接替换 ref2va 模板的 UNETLoader 模型, 提升运动流畅度与连贯性(动画战斗场景实测); 官方采样: euler + simple + 10 步 + denoise 1.0, BasicGuider 默认 CFG 1.0, 无 LoRA, 单采直出(不跑二采); 建议搭配 5 段式长提示词(subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music) 与参考图驱动(ref2va); 只改采样管道不碰模型图, Loader 需换 Minimax-h3_Singularity_x_10Eros-Max_PRISM_int8.safetensors。",
             },
         )
         # v14.185 (2026-10-24): 一镜到底采样档 —— 追加在 render_pipeline 之后（optional
@@ -7313,6 +7324,53 @@ class BSAIH3FilmFactory:
                 print("[H3 Extender] 🚀 H25 Hybrid 8步 多参考单采: 一采 8 步直出 (BV1dygg6EE6W 配方) — "
                       "确认 Loader=minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors, "
                       "加速LoRA槽=minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors(强度 1.0)")
+            elif _rp_mode == "4K重生成 OpenH3Regenerate2K (768P草稿直出2560)":
+                # v14.229 (2026-10-27): B站《MinimaxH3 进入4K分辨率开源时代 768P草稿
+                # 直接升2560 比官方还高清》(BV13uxT66EWq, AI绘画KK) 配方落地:
+                # NVLabs Sana 仓库 OpenH3Regenerate2K 开放模型 —— 768P 草稿
+                # (1344x768, 121帧) -> 三步精修重生成 -> 2560x1440 2K。
+                # 官方采样: 3 步 sigmas [0.909375, 0.857143, 0.666667, 0], CFG=1.0,
+                # 初始态 = (1-s0)*latent + s0*noise; 合并 LoRA(FP32, 三适配器沿
+                # rank 轴拼接, 误差 2.2e-8): OpenH3 Refiner 5000步(0.7) +
+                # LTXRV fl2v turbo 1.2(1.0) + lms sharp rank64(1.0)。
+                # 落地为双采: 一采 4 步 768P 草稿搭骨架 -> 二采 3 步重生成
+                # (denoise 1.0) + latent x1.9 放大(1344->2560) 精修出 2K。
+                steps, refine_steps, tile_count, refine_denoise = 4, 3, 4, 1.0
+                refine_enable = True
+                refine_upscale_factor = 1.9  # 1344 -> 2560 潜空间放大(官方 3D 卷积上采样器)
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                print("[H3 Extender] 🚀 4K重生成 OpenH3Regenerate2K: 768P草稿(1344x768) -> "
+                      "3步精修 -> 2560x1440 2K (BV13uxT66EWq 配方) — "
+                      "确认 Loader 挂合并LoRA(OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0), "
+                      "采样器 CFG 设为 1.0; 3D 卷积 latent 上采样器(BF16) 可挂 refine_upscaler_model; "
+                      "官方 3 步 sigmas [0.909375, 0.857143, 0.666667, 0]")
+            elif _rp_mode == "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)":
+                # v14.227 (2026-10-27): B站《Singularity v2 × 10Eros-Max 合并模型,
+                # 提升运动效果》(BV1Vino6qE2F, plphy-up) 配方落地。
+                # PRISM = Ref2VA 系合并模型(HuggingFace OliviaRossi/
+                # Minimax-h3_Singularity-x-10Eros-Max_PRISM, int8 20.3GB): 官方
+                # workflow 直接替换 ref2va 模板的 UNETLoader 模型, 提升运动
+                # 流畅度与连贯性(动画战斗场景实测)。官方采样 = euler + simple +
+                # 10 步 + denoise 1.0, BasicGuider 默认 CFG 1.0, 无 LoRA,
+                # 单采直出(不跑二采)。只改采样管道, 不碰模型图:
+                # Loader 需换 Minimax-h3_Singularity_x_10Eros-Max_PRISM_int8.safetensors;
+                # 建议 5 段式长提示词(subject_definitions / summary /
+                # retention_analysis / detailed_description / overall_soundscape /
+                # non_diegetic_music) 与参考图驱动(ref2va)。
+                steps, refine_steps, tile_count, refine_denoise = 10, 2, 4, 0.5
+                refine_enable = False
+                denoise = 1.0
+                shift_video, shift_audio = 12.0, 3.0
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print(f"[H3 Extender] v14.227 PRISM 10步(渲染管道): 采样器强制 euler + simple (PRISM 官方配方)")
+                scheduler = "simple"
+                print("[H3 Extender] 🚀 PRISM 10步 运动强化单采: 一采 10 步直出 (BV1Vino6qE2F 配方) — "
+                      "确认 Loader=Minimax-h3_Singularity_x_10Eros-Max_PRISM_int8.safetensors, "
+                      "euler+simple 10步 denoise 1.0 无 LoRA")
             else:
                 _rp_handled = False
             if _rp_handled:
@@ -7323,6 +7381,15 @@ class BSAIH3FilmFactory:
         # 03 声音完全由外部 lip_voice 提供 → 锁定（0.0）不重绘，避免外部原声被二次处理。
         if _ls_mode == "03":
             refine_audio_denoise = 0.0
+            # v14.225: lip_voice 外部音频已锁定(audio_denoise=0.0), 模型不生成音频,
+            # 12 步是给"模型自生成音频≥12步"保质量的下限; 8 步蒸馏模型用 8 步是
+            # 契约(v14.183 实测 10 步掉画质/标签变糊)。lip_voice 下省 4 步 x ~68s
+            # ≈ 4.5 分钟/clip。01/02 模型自生成音频仍保持 12 步不动。
+            if steps > 8:
+                print(f"[H3 Extender] v14.225 03 lip_voice对口型: 音频已锁定不生成, "
+                      f"一采 {steps}->8 步(8步蒸馏契约, 省 {steps-8} 步 x ~68s ≈ "
+                      f"{(steps-8)*68//60} 分钟/clip)")
+                steps = 8
             print(f"[H3 直播带货] 03 lip_voice对口型: 音频由外部 lip_voice 提供, 已锁 refine_audio_denoise=0.0（不重绘原声）")
         elif _ls_mode in ("01", "02"):
             refine_audio_denoise = 0.7
