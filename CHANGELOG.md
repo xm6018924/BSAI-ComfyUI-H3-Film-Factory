@@ -15,6 +15,10 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 ---
 
 
+### v14.237 (2026-10-28) — SegAttention 协同检测修正：KJNodes 真实注册名 `PathchSageAttentionKJ`（Sage 拼写带 h），旧检测名 `PatchSegAttentionKJ` 从未被任何插件注册 → 环境已装 sageattention 2.2.0+cu130 + KJNodes 节点也永远误报「未检测到 SegAttention」。现两名兼容（防 KJNodes 改名），命中任一即视为就绪；重启后日志显示 `✅ 已检测到 KJNodes PathchSageAttentionKJ`。**/ fix: SegAttention co-detection now matches KJNodes' real registration `PathchSageAttentionKJ` (the old misspelled name never matched -> false negative despite sageattention 2.2.0 installed); both names accepted.**
+
+---
+
 ### v14.236 (2026-10-28) — 修复 v14.232 时间分块解码导致的「~16 帧亮度闪烁 + banding 细横条纹」/ fix v14.232 tiled-decode flicker: per-16-frame brightness pulses + banding stripes
 
 **诊断（全片 347 帧实测）：** `_decode_single_clip_to_blob` 自 v14.232 起为防 HyperVAE 2x 解码 OOM，把 latent 沿 T 轴裸切 16 帧/块独立 `vae.decode()` 后 `torch.cat` 硬拼。H3 为视频 VAE，独立小块丢失块间时间上下文 → 每 ~16 视频帧出现亮度异常帧（脉冲尖峰 52/69/86/103/119/137/151/160/176/192/199/215/224/232/296，亮度 103.7–125.5 vs 谷底 74–79，单帧最大跳变 40.3/255）；异常帧平坦区亮度阶跃经 8bit yuv420p 编码呈 banding「细横条纹」（帧 69 banding=3 处、86=7 处，正常帧=0）。已排除：编码器引入（I 帧位置无关、脉冲帧为 P 帧且 pkt_size ~2x）、音频驱动（帧亮度↔音频 RMS 相关 ≈0，帧 240+ 静音仍闪）、内容切换（帧 65–100 NCC 0.88–0.97 而亮度跳 20–40）、行级隔行伪影（偶奇行亮度差 ≤0.31、无 2px FFT 峰）。

@@ -7452,14 +7452,20 @@ class BSAIH3FilmFactory:
             if _rp_handled:
                 print(f"[H3 Extender] v14.172 渲染管道: {_rp_mode} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (速度档不叠加)")
                 speed_preset = "custom"  # 防下方 speed_preset 分支再覆盖配方档参数
-        # v14.234: SegAttention 协同检测(对全部档位生效) —— KJNodes PatchSegAttentionKJ 外部节点。
+        # v14.237 (2026-10-28): SegAttention 协同检测修正 —— KJNodes 实际注册名是
+        # "PathchSageAttentionKJ"(Sage Attention, 拼写带 h, 见 KJNodes __init__.py NODE_CONFIG),
+        # 旧检测名 "PatchSegAttentionKJ" 从未被任何插件注册过 -> 环境已装 sageattention
+        # 2.2.0+cu130 + KJNodes PathchSageAttentionKJ 节点也永远误报"未检测到"。
+        # 现同时兼容两个名(防 KJNodes 改名), 命中任一即视为 SegAttention 就绪。
         try:
             _h3_seg_map = __import__("nodes").NODE_CLASS_MAPPINGS
-            _has_segattn = bool(_h3_seg_map and "PatchSegAttentionKJ" in _h3_seg_map)
+            _has_segattn = bool(_h3_seg_map and
+                                ("PathchSageAttentionKJ" in _h3_seg_map or
+                                 "PatchSegAttentionKJ" in _h3_seg_map))
         except Exception:
             _has_segattn = False
         if _has_segattn:
-            print("[H3 Extender] v14.234 ✅ 已检测到 KJNodes PatchSegAttentionKJ (SegAttention 2.2.0) — "
+            print("[H3 Extender] v14.234 ✅ 已检测到 KJNodes PathchSageAttentionKJ (SegAttention 2.2.0) — "
                   "插件注意力 override 让位协同, 稀疏注意力交 SegAttention 接管")
         else:
             print("[H3 Extender] v14.234 未检测到 SegAttention: 安装 KJNodes + SegAttention 2.2.0 环境包 "
