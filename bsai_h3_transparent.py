@@ -118,12 +118,12 @@ class BSAI_H3_TransparentKey:
             "required": {
                 "images": ("IMAGE", {"tooltip": "H3 生成的视频帧（电影工厂主节点 images 输出，B,H,W,3 float 0..1）"}),
                 "backdrop_color": (
-                    ["Green screen", "Blue screen", "Pure black", "Pure white"],
+                    ["Green screen", "Blue screen", "Pure black", "Pure white", "绿幕 Green", "蓝幕 Blue", "纯黑 Black", "纯白 White"],
                     {"default": "Green screen",
                      "tooltip": "Backdrop color used during generation: green/blue for characters/props; pure black for VFX fire/sparks/smoke (luma key); pure white for ink/silhouette/dark smoke (Dark-on-White)."},
                 ),
                 "matte_preset": (
-                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white"],
+                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white", "平衡（毛发/烟雾）Balanced", "硬边 Hard", "绿幕火焰 Fire", "白底暗景 Dark"],
                     {"default": "Balanced (hair/smoke)",
                      "tooltip": "One-click preset: Balanced=default tuning; Hard edges=tighten edges; Fire on green=green screen + stronger despill; Dark on white=white-screen dark-subject mode."},
                 ),
