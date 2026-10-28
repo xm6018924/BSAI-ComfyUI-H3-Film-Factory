@@ -164,6 +164,10 @@ class BSAI_H3_TransparentKey:
             },
             "optional": {
                 "mask": ("MASK", {"tooltip": "可选蒙版：keep_mask=True 时直接用该蒙版作为 Alpha（B,H,W 或 H,W float 0..1）。"}),
+                "preview_side": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64,
+                                        "tooltip": "棋盘格预览图短边上限（像素）。预览仅供检查，无需全分辨率；H3 全片 2K 视频（数百帧）时保持默认可大幅省内存。0=禁用预览降采样（不推荐）。"}),
+                "matte_side": ("INT", {"default": 512, "min": 0, "max": 2048, "step": 64,
+                                      "tooltip": "Matte 灰度图短边上限（像素）。0=全分辨率（需把 matte 当精确蒙版导出时使用，内存开销大）。默认降采样到 512，全分辨率 Alpha 仍由 images_rgba 的 A 通道提供，导出不受影响。"}),
             },
         }
 
@@ -239,56 +243,108 @@ class BSAI_H3_TransparentKey:
             rgb = torch.cat([rgb[:, 0:1], rgb[:, 1:2], _clamp01(b)], dim=1)
         return rgb
 
-    def _checkerboard(self, rgb, alpha, tile=8):
-        """把 RGBA 合成到棋盘格透明底上做预览。"""
+    def _checkerboard(self, rgb, alpha, tile=8, max_side=512):
+        """把 RGBA 合成到棋盘格透明底上做预览（按 max_side 降采样省内存）。"""
         b, c, h, w = rgb.shape
-        yy = torch.arange(h, device=rgb.device).view(-1, 1)
-        xx = torch.arange(w, device=rgb.device).view(1, -1)
+        if max_side and max_side > 0 and max(h, w) > max_side:
+            scale = max_side / float(max(h, w))
+            nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+            rgb_s = F.interpolate(rgb, size=(nh, nw), mode="bilinear", align_corners=False)
+            alpha_s = F.interpolate(alpha, size=(nh, nw), mode="bilinear", align_corners=False)
+        else:
+            rgb_s, alpha_s = rgb, alpha
+        bh, bw = rgb_s.shape[2], rgb_s.shape[3]
+        yy = torch.arange(bh, device=rgb_s.device).view(-1, 1)
+        xx = torch.arange(bw, device=rgb_s.device).view(1, -1)
         chk = ((yy // tile + xx // tile) % 2).float()  # (H,W)
-        bg = chk.view(1, 1, h, w).repeat(b, 1, 1, 1) * 0.45 + 0.10
-        comp = rgb * alpha + bg * (1.0 - alpha)
+        bg = chk.view(1, 1, bh, bw).repeat(b, 1, 1, 1) * 0.45 + 0.10
+        comp = rgb_s * alpha_s + bg * (1.0 - alpha_s)
         return _clamp01(comp)
+
+    @staticmethod
+    def _downsample_hw3(t_hwc, side):
+        """t_hwc: (B,H,W,3) -> 短边 <= side 的 (B,H',W',3)；side<=0 原样。"""
+        if not side or side <= 0:
+            return t_hwc
+        b, h, w, c = t_hwc.shape
+        if max(h, w) <= side:
+            return t_hwc
+        scale = side / float(max(h, w))
+        nh, nw = max(1, int(round(h * scale))), max(1, int(round(w * scale)))
+        t_chw = t_hwc.permute(0, 3, 1, 2)
+        t_s = F.interpolate(t_chw, size=(nh, nw), mode="bilinear", align_corners=False)
+        return t_s.permute(0, 2, 3, 1).contiguous()
 
     def key(self, images, backdrop_color, matte_preset, key_strength,
             clip_white, shadow_retention, fill_holes, edge_softness,
-            edge_choke, de_spill, keep_mask, mask=None):
-        rgb = _to_hw_batch(images).to(images.device)
-        b = rgb.shape[0]
+            edge_choke, de_spill, keep_mask, mask=None,
+            preview_side=512, matte_side=512):
+        rgb_full = _to_hw_batch(images).to(images.device)
+        b, c, h, w = rgb_full.shape
 
-        if keep_mask and mask is not None:
-            if mask.dim() == 2:
-                mask = mask.unsqueeze(0).unsqueeze(0)
-            elif mask.dim() == 3:
-                mask = mask.unsqueeze(1)
-            m = mask.float()
-            m = F.interpolate(m, size=(rgb.shape[2], rgb.shape[3]),
-                              mode="bilinear", align_corners=False)
-            alpha = _clamp01(m).repeat(b, 1, 1, 1)
-            spill = torch.zeros_like(rgb[:, 0:1])
-        else:
-            alpha, spill = self._key_alpha(
-                rgb, backdrop_color, float(key_strength),
-                float(clip_white), float(shadow_retention), matte_preset)
-            if "硬边" in matte_preset:
-                edge_softness = min(int(edge_softness), 1)
-                edge_choke = float(edge_choke) + 0.15
-            elif "火焰" in matte_preset:
-                de_spill = min(float(de_spill) + 0.25, 1.0)
-                edge_softness = int(edge_softness) + 1
+        # ---- 分块预算：控制峰值内存/显存 ----
+        # 每块帧数上限：目标每块中间张量峰值不超过 ~1.5GB。
+        # H,W 越大块越小；按输入所在设备分别给预算（CPU 保守 1GB，GPU 2GB）。
+        px = max(1, h * w)
+        is_cuda = rgb_full.device.type == "cuda"
+        block_budget = (2 if is_cuda else 1) * (1024 ** 3)
+        # 每帧主要副本：rgb(3ch)+alpha(1ch)+spill(1ch)+rgba(4ch)+matte(3ch)+preview(3ch) ≈ 15ch
+        frame_bytes = px * 15 * 4
+        chunk = max(1, min(b, block_budget // max(1, frame_bytes)))
+        if chunk < 1:
+            chunk = 1
 
-        alpha = self._apply_edges(alpha, int(fill_holes),
-                                  int(edge_softness), float(edge_choke))
-        rgb = self._de_spill_rgb(rgb, alpha, spill, float(de_spill),
-                                 backdrop_color)
+        rgba_parts, matte_parts, prev_parts = [], [], []
+        total_alpha_mean = 0.0
+        for s in range(0, b, chunk):
+            e = min(b, s + chunk)
+            rgb = rgb_full[s:e]
+            if keep_mask and mask is not None:
+                if mask.dim() == 2:
+                    m = mask.unsqueeze(0).unsqueeze(0).float()
+                elif mask.dim() == 3:
+                    m = mask.unsqueeze(1).float()
+                else:
+                    m = mask.float()
+                m = F.interpolate(m, size=(h, w), mode="bilinear", align_corners=False)
+                if m.shape[0] == 1 and (e - s) > 1:
+                    m = m.expand(e - s, -1, -1, -1)
+                alpha = _clamp01(m)
+                spill = torch.zeros_like(rgb[:, 0:1])
+            else:
+                alpha, spill = self._key_alpha(
+                    rgb, backdrop_color, float(key_strength),
+                    float(clip_white), float(shadow_retention), matte_preset)
+                if "硬边" in matte_preset:
+                    edge_softness = min(int(edge_softness), 1)
+                    edge_choke = float(edge_choke) + 0.15
+                elif "火焰" in matte_preset:
+                    de_spill = min(float(de_spill) + 0.25, 1.0)
+                    edge_softness = int(edge_softness) + 1
 
-        rgba = torch.cat([rgb, alpha], dim=1).permute(0, 2, 3, 1)
-        matte = alpha.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
-        preview = self._checkerboard(rgb, alpha).permute(0, 2, 3, 1)
+            alpha = self._apply_edges(alpha, int(fill_holes),
+                                      int(edge_softness), float(edge_choke))
+            rgb = self._de_spill_rgb(rgb, alpha, spill, float(de_spill),
+                                     backdrop_color)
+
+            rgba = torch.cat([rgb, alpha], dim=1).permute(0, 2, 3, 1)
+            matte = alpha.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
+            preview = self._checkerboard(rgb, alpha, max_side=int(preview_side)).permute(0, 2, 3, 1)
+            matte = self._downsample_hw3(matte, int(matte_side or 0))
+
+            rgba_parts.append(rgba)
+            matte_parts.append(matte)
+            prev_parts.append(preview)
+            total_alpha_mean += float(alpha.mean()) * (e - s)
+
+        rgba = torch.cat(rgba_parts, dim=0)
+        matte = torch.cat(matte_parts, dim=0)
+        preview = torch.cat(prev_parts, dim=0)
 
         frames = int(rgba.shape[0])
         print(f"[BSAI H3 TransparentKey] {backdrop_color} / {matte_preset}: "
-              f"{frames} 帧 -> RGBA+Matte+预览 (alpha 均值 "
-              f"{float(alpha.mean()) * 100:.1f}%)")
+              f"{frames} 帧 (chunk={chunk}) -> RGBA+Matte+预览 (alpha 均值 "
+              f"{total_alpha_mean / max(1, frames) * 100:.1f}%)")
         return (rgba, matte, preview)
 
     @classmethod
