@@ -9421,6 +9421,26 @@ class BSAIH3FilmFactory:
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
         _os_pass_notice_done = False  # v14.185: 一镜到底采样档提示每次执行只打印一次
+        # v14.241 (2026-10-28): 一镜到底 —— context 帧数下限自动提升到官方 22 帧。
+        # 根因: 用户实测 context=5 帧(仅覆盖 0.2s)时, 段头延续参考只有 5 帧,
+        # 段头锁 keep 区只有 2 latent 行(≈6.8帧), 之后 11.8s 模型完全自由发挥
+        # → 段内自切景别(实测: 全身侧姿硬切到近景半身)。官方 continuation 语义
+        # = 源尾部 22 帧(0.92s)续接, 上下文越长段头惯性越强, 模型越难在中途
+        # 重启镜头。一镜到底时 context_length < 22 自动提升到 22(渲染帧数/锁区/
+        # 音频重叠切分均按 context 动态计算, 自动联动, 净输出时长不变)。
+        # 逃生门: 显式设环境变量 BSAI_H3_OS_CTX=0 关闭自动提升(保留用户原值)。
+        if one_shot_enabled:
+            try:
+                _ctx_os_raw = str(context_length)
+                _ctx_os_val = int(_ctx_os_raw) if str(_ctx_os_raw).isdigit() else 0
+                _os_ctx_floor = "0" if os.environ.get("BSAI_H3_OS_CTX", "") == "0" else "22"
+                if _ctx_os_val > 0 and _ctx_os_val < int(_os_ctx_floor):
+                    print(f"[H3 Extender] v14.241 一镜到底: context_length={_ctx_os_val} 帧(仅 {_ctx_os_val/float(FPS):.2f}s)过短, "
+                          f"段头延续不足→段内自切; 已自动提升到官方 {_os_ctx_floor} 帧 "
+                          f"(渲染帧数/锁区/音频切分联动, 净输出时长不变; 设 BSAI_H3_OS_CTX=0 关闭)")
+                    context_length = _os_ctx_floor
+            except (TypeError, ValueError):
+                pass
         # v14.240 (2026-10-28): 一镜到底 —— 强制全链同 seed（摄像机轨迹连续）。
         # 根因: 默认 seed_mode=randomize 每段独立随机噪声场, 即使段头锁 keep +
         # keyframe 参考把画面锚住, 段内中段的噪声路径仍逐段重启 → 运镜轨迹
@@ -9735,6 +9755,36 @@ class BSAIH3FilmFactory:
                     "构图只允许随运镜连续渐变。"
                 )
                 print(f"[H3 Extender] v14.191 一镜到底 clip[{i}]: 已注入分拍反切镜指令(时间段=同一连续运镜的阶段)")
+            # v14.241 (fix): 一镜到底 —— 景别词汇反切强化。
+            # 实测根因(2026-10-28 用户截图): 提示词中出现"特写/近景/全景/推近/
+            # 拉远"等景别变化描述时, H3 蒙太奇先验会用硬切实现景别跳变(v14.191
+            # 的通用禁令约束力弱)。这里扫描本段提示词, 命中景别/推拉词即追加
+            # 更强的"景别恒定、推拉=连续运镜"指令, 并打印命中词供诊断。
+            if one_shot_enabled:
+                try:
+                    _os_shot_words = ["特写", "近景", "中景", "全景", "远景", "大特写",
+                                      "推近", "拉远", "推镜", "拉镜", "close-up", "close up",
+                                      "closeup", "zoom in", "zoom out", "wide shot",
+                                      "close shot", "full shot", "cut to", "cutaway"]
+                    _os_hit_words = [w for w in _os_shot_words if w in str(effective_prompt).lower()]
+                    if _os_hit_words:
+                        effective_prompt = str(effective_prompt) + (
+                            "\n[Shot-Size Hard Rule] The prompt may name shot sizes "
+                            "(close-up / medium / wide) or pushes — they describe the SAME "
+                            "continuous camera move, and the framing may ONLY evolve by a "
+                            "smooth push-in or pull-out over many frames. There must be "
+                            "exactly one shot from first frame to last: same camera height, "
+                            "same lens axis, same subject anchoring. A shot-size jump is "
+                            "forbidden even when the text names a different size."
+                            "\n[景别硬规则] 提示词中的景别词(特写/中景/全景等)与推拉词仅描述"
+                            "同一条连续运镜：构图只能通过缓慢推近/拉远逐帧渐变，全段从头到尾"
+                            "必须只有一个镜头——机位高度、镜头光轴、主体锚点全程不变。"
+                            "即使文本写到了不同景别，也禁止任何景别跳变。"
+                        )
+                        print(f"[H3 Extender] v14.241 一镜到底 clip[{i}]: 命中景别/推拉词 {_os_hit_words}, "
+                              f"已注入景别恒定硬规则(推拉=连续运镜, 禁止景别跳变)")
+                except Exception:
+                    pass
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
@@ -9978,6 +10028,14 @@ class BSAIH3FilmFactory:
                         _trim_n = int(trim_frames)
                         if _trim_n >= 5:
                             _n_head = max(1, ((_trim_n - 5) // 17) * 5 + 2)
+                            # v14.241 (fix): 锁区比 trim 区少 1 latent 行 —— 行粒度
+                            # (≈3.4帧/行)使 7 行(≈23.8帧) > 22帧 trim, 残留 1~2 帧
+                            # 锁区(双采档下为 2x->1x 缩小的 clip1 尾)成为输出首帧,
+                            # 实测 clip2 首帧 lap_var=34.0 vs clip1 尾 43.7(模糊, 用户
+                            # 反馈"clip2 首帧模糊成鬼样")。少锁 1 行后锁区(≈20.4帧)
+                            # < trim(22帧), 残留区由模型在 mask 边界按锁区锚点画面
+                            # 自然重绘(延续语义保留), 输出首帧锐利且画面连续。
+                            _n_head = max(1, _n_head - 1)
                         else:
                             _n_head = 1
                         _prev_samples = previous_proxy.get("samples") if isinstance(previous_proxy, dict) else previous_proxy
