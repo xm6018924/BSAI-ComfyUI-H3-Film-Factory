@@ -533,6 +533,12 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
             _mm.unload_all_models()
         except Exception:
             pass
+        # v1.96: 强制 GC 回收 delegate 量化权重(二采后 Python 引用残留导致 14.5GB 不释放)
+        import gc as _gc_v196
+        for _gc_round in range(3):
+            _gc_v196.collect()
+            _torch.cuda.empty_cache()
+            _torch.cuda.synchronize()
         # 3) 双重清缓存 + 同步
         _mm.soft_empty_cache(force=True)
         _torch.cuda.synchronize()
@@ -540,7 +546,11 @@ def _decode_clip_to_av(owner, clip_index, vae, audio_vae, fps):
         _torch.cuda.synchronize()
         _torch.cuda.empty_cache()
         _a = _torch.cuda.memory_allocated() / 1024 ** 3
-        print(f"[H3 Extender]   decode VRAM prepared (popped={_popped}): allocated={_a:.2f}GB")
+        print(f"[H3 Extender]   decode VRAM prepared (popped={_popped}, gc3x): allocated={_a:.2f}GB free={_torch.cuda.mem_get_info()[0]/1024**3:.2f}GB")
+        # v1.96: 如果清理后 allocated 仍 >8GB, 说明 delegate 权重泄漏, 打印警告
+        if _a > 8.0:
+            print(f"[H3 Extender]   ⚠️ decode VRAM: allocated={_a:.1f}GB 偏高(delegate 权重残留), "
+                  f"VAE decode 可能 OOM; 若崩溃需重启 ComfyUI")
     except Exception as _e:
         print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
 
@@ -4215,6 +4225,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _free215 = _f215 / 1024 ** 3
                     _ws215 = _ws_tbl.get(round(_r_factor, 1), 2.6)
                     if _free215 < _ws215 + 2.0:
+                        # v1.96: _r_reserve_gb 在 spatial fallback 路径可能未定义, 给默认值
+                        _r_reserve_gb = float(locals().get('_r_reserve_gb', 6.8))
                         # 分块场景: reserve 下限 7.5(v1.88 实测值, 防 ComfyUI 按全幅
                         # 估算 ws 后卸载驻留). 回退补分块(_r_restore_tiles 已装)与
                         # tiled_refine 分块同为分块采样, 统一用 7.5 下限. 非分块 6.0.
