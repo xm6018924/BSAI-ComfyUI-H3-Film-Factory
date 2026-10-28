@@ -4,6 +4,39 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.238 (2026-10-28) — 修复单采OM preview 模糊/马赛克/碎片化：小尺寸 VAE decode 改回整块，不再无脑 T 轴分块 / fix single-pass OM preview blockiness: small-decode goes whole-tensor instead of T-tiling
+
+**用户实测（`_clippv_250_0_f118ed85.mp4`）：preview 画面模糊、马赛克、碎片化。**
+**/ User reported preview mp4 (_clippv_250_0) looks blurry, blocky and fragmented.**
+
+- **根因：** v14.232 引入 T 轴 16 帧/块分块 decode 是为双采高分辨率路径（1088×1920，output buffer 8.45GB + DiT 残留 17.58GB = 26GB OOM）设计的。但单采OM一采低分辨率 latent 仅 68×120，VAE decode output 仅 ~8.5MB——根本不需要分块。代码却无条件 `if T > 16` 就分块，每块独立 decode 时 VAE 时间卷积在块边界（即使加了 ±8 帧上下文）产生微妙的颜色/亮度不一致，视觉即"每 ~16 帧马赛克一下 + 碎片化"。v14.236 的 ±8 帧上下文修了亮度闪烁，但没解决"不该分块却分块"的根本问题。
+**/ Root cause: v14.232's T-tiling was for dual-pass 1088×1920 (8.45GB output). Single-pass OM latent is only 68×120 (8.5MB output) — tiling is unnecessary but unconditional. Independent per-block decode causes VAE temporal-convolution boundary inconsistency → blocky/fragmented artifacts every ~16 frames. v14.236's ±8-frame context fixed flicker but not the over-tiling itself.**
+
+- **修复（motion_context_disk.py `_decode_single_clip_to_blob`）：** 分块前估算整块 decode output buffer（`T × H × W × 3 × 4B`）。**output < 3GB 时走整块 decode**（无块边界，画质最佳）；output ≥ 3GB 才走 v14.236 的 T 轴分块+±8帧上下文。单采OM 68×120（8.5MB）和 544×960（548MB）都走整块；1088×1920（2.2GB）也整块（v14.225 已摘 DiT，free~22GB 足够）；更高分辨率才分块。
+**/ Fix: estimate whole-decode output bytes before tiling. Under 3GB → whole-tensor decode (no block boundaries). Over 3GB → keep v14.236 T-tiling. Single-pass OM 68×120 (8.5MB) and 544×960 (548MB) now decode whole; 1088×1920 (2.2GB) also whole since DiT is offloaded by v14.225.**
+
+- **验证：** py_compile PASS。重启 8181 重跑单采OM，日志应出现 `v14.238: 整块 decode (est output=0.00GB <= 3GB, 无块边界)`，preview mp4 不再有每 ~16 帧的马赛克/碎片化。
+**/ Verified: py_compile PASS. Restart and rerun; look for the whole-decode log line; preview should be artifact-free.**
+
+---
+
+
+### v14.237 (2026-10-28) — 修复单采OM/双采 clip2+ 流式采样贴边 OOM（EXTRA_RESERVED_VRAM 动态降额）/ fix clip2+ streaming OOM on single-pass OM & dual-pass: dynamically lower EXTRA_RESERVED_VRAM when streaming
+
+**用户实测（单采OM oneshot 工作流 + 双采8+4 对照）：** clip=0 一采+refine+preview decode 全部成功（v14.236 分块 decode 生效），但 clip=1 一采第一个 forward 就 `CUDA error: out of memory`（int8_linear `torch.empty((m,n))` 失败），Peak allocated=17.6GB。
+**/ Field test: clip=0 (pass1+refine+preview decode) succeeds, but clip=1 fails on the very first forward — `CUDA OOM` in int8_linear torch.empty, peak allocated 17.6GB.**
+
+- **根因：** 24GB 卡上 int8 DiT 20.6GB，一采前 free=22.27GB − reserve 4.0GB = 可用 18.27GB，DiT 流式 peak ~17.6GB + output tensor ~0.7GB = 18.3GB > 18.27GB，贴边 OOM。clip=0 首次 CUDA context 干净能挤过（free=22.31），clip=1 经过 refine+decode 后 CUDA 碎片让 free 掉到 22.27，差 0.04GB 即崩。reserve=4.0GB 是 resident 模式（DiT 整块驻留 17.5GB）给 process_conds(causal_mask N×N)留的，流式模式（resident=0）DiT 权重不在 GPU，conds 空间更宽裕，reserve 不需要 4.0GB。
+**/ Root cause: 24GB card, int8 DiT 20.6GB. free=22.27GB − reserve 4.0 = 18.27GB usable; streaming peak 17.6GB + output 0.7 = 18.3GB > 18.27GB (0.03GB over). clip=0 survives on a clean CUDA context; clip=1 after refine+decode fragmentation tips it over. The 4.0GB reserve was sized for resident mode (DiT pinned 17.5GB) to protect process_conds causal_mask; in streaming mode (resident=0) the weights are not pinned, so conds have headroom and the reserve can drop.**
+
+- **修复（extender.py `_sample_h3` 一采驻留预算段）：** 两个流式回退分支（① `resident<4GB` 回退 DynamicVRAM 按需流式；② `free<18GB` 直接流式）里，把 `EXTRA_RESERVED_VRAM` 从 4.0GB 动态降到 **2.5GB** + `empty_cache`/`synchronize`，多 1.5GB 给 DiT 权重块逐层搬运。resident 模式（free≥18GB 且 resident≥4GB）不受影响，reserve 仍 4.0GB。单采OM（FastH3 Omni 8步单采 / 单采无缝 skip refine）与双采8+4 路径均走同一 `_sample_h3`，修复同时生效。
+**/ Fix: in both streaming fallback branches (resident<4GB / free<18GB), lower EXTRA_RESERVED_VRAM 4.0→2.5GB + empty_cache/sync, freeing 1.5GB for weight paging. Resident mode unchanged at 4.0GB. Applies to both single-pass OM (skip refine) and dual-pass 8+4 since both enter `_sample_h3`.**
+
+- **验证：** py_compile PASS。渲染验收需用户重跑单采OM工作流：日志应出现 `v14.237 流式 reserve 4.0->2.5GB, empty_cache 后 free=XX.XXGB`，clip=1+ 一采第一个 forward 不再 OOM。
+**/ Verified: py_compile PASS. Acceptance = rerun single-pass OM workflow; look for the v14.237 reserve-downgrade log and no OOM on clip2+.**
+
+---
+
 ## 🚨 铁律 / IRON RULE
 
 **未经用户验收合格,绝不动 git push(本地 commit 也先询问)。**

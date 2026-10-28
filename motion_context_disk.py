@@ -2963,7 +2963,17 @@ def _decode_single_clip_to_blob(
         _dec_t_block = 16
         _dec_ctx = 8
         _dec_t_total = int(v.shape[2])
-        if _dec_t_total > _dec_t_block:
+        # v14.238 (2026-10-28): 小尺寸整块 decode —— v14.232 的 T 轴分块是为
+        # 双采高分辨率(1088x1920, output 8.45GB + DiT 残留 17.58GB) OOM 设计的;
+        # 但单采OM一采低分辨率(68x120, output ~8.5MB)被无条件分块, 块边界处
+        # VAE 时间卷积上下文不足 → 每 ~16 帧出现马赛克/碎片化/亮度微跳。
+        # 整块 output < 3GB 时(DiT 已由 v14.225 摘出, free~22GB)直接整块 decode,
+        # 无块边界, 画质最佳; 高分辨率(>=3GB)仍走 v14.236 分块+上下文。
+        _dec_h = int(v.shape[-2])
+        _dec_w = int(v.shape[-1])
+        _est_out_gb = (_dec_t_total * _dec_h * _dec_w * 3 * 4) / 1024 ** 3
+        if _dec_t_total > _dec_t_block and _est_out_gb > 3.0:
+            print(f"[H3 Extender]   v14.238: T轴分块 decode (est output={_est_out_gb:.2f}GB > 3GB)")
             _dec_parts = []
             for _t0 in range(0, _dec_t_total, _dec_t_block):
                 _t1 = min(_t0 + _dec_t_block, _dec_t_total)
@@ -2984,6 +2994,7 @@ def _decode_single_clip_to_blob(
             video = torch.cat(_dec_parts, dim=0)
             del _dec_parts
         else:
+            print(f"[H3 Extender]   v14.238: 整块 decode (est output={_est_out_gb:.2f}GB <= 3GB, 无块边界)")
             video = vae.decode(v)
     finally:
         if _od_overridden:

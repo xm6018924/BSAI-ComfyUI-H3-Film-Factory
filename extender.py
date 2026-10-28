@@ -3303,9 +3303,32 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] v14.174 驻留无效(resident={_res:.1f}GB<4GB), "
                           f"回退 DynamicVRAM 按需流式 (total={_tot:.1f}GB > 可用{_free_os:.1f}GB-reserve)")
                     _h3_warn_stream_fallback(_tot, _free_os)
+                    # v14.237 (2026-10-28): 流式模式下动态降 reserve 4.0->2.5GB。
+                    # 根因(单采OM/双采 clip2+ 实测): resident=0 走 DynamicVRAM 逐层搬运时,
+                    # reserve=4.0GB 让 ComfyUI 认为可用 = free-4.0, DiT 20.6GB 流式 peak
+                    # ~17.6GB 卡在可用边缘(clip1 free=22.27 -> 可用18.27, peak 17.6+output
+                    # 0.7 = 18.3 超 0.03GB) -> 第一个 forward int8_linear torch.empty OOM。
+                    # resident 模式 reserve=4.0 是给 process_conds(causal_mask N×N)留的,
+                    # 流式模式权重不在 GPU, conds 空间更宽裕, reserve 可降到 2.5GB,
+                    # 多 1.5GB 给权重块搬运。clip0 首次 CUDA context 干净能挤过, clip1+ 碎片必崩。
+                    try:
+                        _mm1.EXTRA_RESERVED_VRAM = int(2.5 * 1024 ** 3)
+                        _t1.cuda.empty_cache()
+                        _t1.cuda.synchronize()
+                        _free_after = _t1.cuda.mem_get_info()[0] / 1024 ** 3
+                        print(f"[H3 Extender] v14.237 流式 reserve 4.0->2.5GB, "
+                              f"empty_cache 后 free={_free_after:.2f}GB (多 1.5GB 给权重搬运)")
+                    except Exception as _rsv_e:
+                        print(f"[H3 Extender] v14.237 reserve 调整失败(忽略): {_rsv_e}")
             except Exception: pass
         else:
             print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
+            # v14.237: 同上, free<18GB 流式分支也降 reserve。
+            try:
+                _mm1.EXTRA_RESERVED_VRAM = int(2.5 * 1024 ** 3)
+                _t1.cuda.empty_cache()
+                _t1.cuda.synchronize()
+            except Exception: pass
             try:
                 _h3_warn_stream_fallback(model.model_size() / 1024 ** 3, _free_os)
             except Exception:
