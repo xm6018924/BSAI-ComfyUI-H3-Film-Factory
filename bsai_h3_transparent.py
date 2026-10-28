@@ -118,14 +118,14 @@ class BSAI_H3_TransparentKey:
             "required": {
                 "images": ("IMAGE", {"tooltip": "H3 生成的视频帧（电影工厂主节点 images 输出，B,H,W,3 float 0..1）"}),
                 "backdrop_color": (
-                    ["绿幕 Green", "蓝幕 Blue", "纯黑 Pure Black", "纯白 Pure White"],
-                    {"default": "绿幕 Green",
-                     "tooltip": "生成时使用的背景色：绿幕/蓝幕用于角色/道具（绿幕可加 Fire on Green 预设）；纯黑用于火焰/火花/烟雾等 VFX（亮度抠像）；纯白用于墨水/剪影/深色烟雾（Dark-on-White）。"},
+                    ["Green screen", "Blue screen", "Pure black", "Pure white"],
+                    {"default": "Green screen",
+                     "tooltip": "Backdrop color used during generation: green/blue for characters/props; pure black for VFX fire/sparks/smoke (luma key); pure white for ink/silhouette/dark smoke (Dark-on-White)."},
                 ),
                 "matte_preset": (
-                    ["平衡（毛发/烟雾）Balanced", "硬边 Hard Edges", "火焰·绿幕 Fire on Green", "暗黑转白 Dark-on-White"],
-                    {"default": "平衡（毛发/烟雾）Balanced",
-                     "tooltip": "一键预设（叠加微调）：Balanced=默认微调；Hard Edges=收紧边缘（softness→0 + 轻微 choke）；Fire on Green=绿幕+更强去溢色与柔边（火焰绿边残留）；Dark-on-White=白幕暗主体模式参数（配合纯白背景）。"},
+                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white"],
+                    {"default": "Balanced (hair/smoke)",
+                     "tooltip": "One-click preset: Balanced=default tuning; Hard edges=tighten edges; Fire on green=green screen + stronger despill; Dark on white=white-screen dark-subject mode."},
                 ),
                 "key_strength": (
                     "FLOAT", {"default": 0.5, "min": 0.05, "max": 1.0, "step": 0.05,

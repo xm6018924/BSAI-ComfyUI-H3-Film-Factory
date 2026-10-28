@@ -2447,7 +2447,7 @@ except Exception:
 
 def _ff_get_upscaler_models():
     """获取可用的 3D latent upscaler 模型列表; 不可用时返回仅插值选项。"""
-    opts = ["(bilinear interpolation, no model)", "(bilinear插值, 无需模型)"]
+    opts = ["(bilinear interpolation, no model)"]
     if _FF_UPSCALER_MOD is not None:
         try:
             names = _FF_UPSCALER_MOD.scan_models()
