@@ -6553,7 +6553,7 @@ class BSAIH3FilmFactory:
                     "tooltip": "Manual resolution height, also used as Auto fallback when no internal image reference is loaded.",
                 },
             ),
-            "ref_image_size": (["match", "max", "half (4合1加速)"], {"default": "max"}),
+            "ref_image_size": (["match", "max", "half"], {"default": "max"}),
             "steps": ("INT", {"default": 8, "min": 1, "max": 10000, "step": 1}),
             "sampler_name": (sampler_names, {"default": default_sampler}),
             "scheduler": (scheduler_names, {"default": default_scheduler}),
@@ -6736,7 +6736,7 @@ class BSAIH3FilmFactory:
             "refine_lipsync_mode": (
                 # v2.120c: 兼容 a78fa62 之前保存的旧工作流中文标签（运行期 5429-5432 已双语映射；
                 # 仅合法值列表需同时接受中英文，避免旧工作流校验失败输出被忽略）。
-                ["Lock lip-sync (recommended)", "锁定保口型(推荐)", "Audio redraw 0.7", "音频参与重绘0.7", "Full audio redraw 1.0", "音频全重绘1.0"],
+                ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"],
                 {"default": "Lock lip-sync (recommended)", "tooltip": "Lip-sync × refine preset: Lock lip-sync = keep first-pass audio, no redraw (refine_audio_denoise=0); Audio redraw 0.7 = refine_audio_denoise=0.7; Full audio redraw 1.0 = refine_audio_denoise=1.0. Only effective when refine_enable is on."},
             ),
             # v14.83 像素超分旁支：per-clip 逐段超分 + final 全片超分（双开关，默认关）
@@ -6750,7 +6750,7 @@ class BSAIH3FilmFactory:
             ),
             "upscale_mode": (
                 # v2.120c: 兼容旧工作流中文标签（_ff_resolve_upscale_mode 2208-2216 已双语映射）。
-                ["Balanced (quality+speed)", "平衡(质量+速度)", "Quality first", "质量优先", "Speed first", "速度优先", "Custom", "自定义"],
+                ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"],
                 {"default": "Balanced (quality+speed)", "tooltip": "Upscale mode preset: Balanced = 2.0x auto (DLSS5 if available, else REALESR); Quality first = 3.0x REALESR; Speed first = 1.5x auto; Custom = explicit values from the widgets below."},
             ),
             "upscale_engine": (

@@ -118,14 +118,14 @@ class BSAI_H3_TransparentKey:
             "required": {
                 "images": ("IMAGE", {"tooltip": "H3 生成的视频帧（电影工厂主节点 images 输出，B,H,W,3 float 0..1）"}),
                 "backdrop_color": (
-                    ["Green screen", "Blue screen", "Pure black", "Pure white", "绿幕 Green", "蓝幕 Blue", "纯黑 Black", "纯白 White"],
+                    ["Green screen", "Blue screen", "Pure black", "Pure white"],
                     {"default": "Green screen",
-                     "tooltip": "Backdrop color used during generation: green/blue for characters/props; pure black for VFX fire/sparks/smoke (luma key); pure white for ink/silhouette/dark smoke (Dark-on-White)."},
+                     "tooltip": "Backdrop color used during generation: green/blue for characters/props; pure black for VFX fire/sparks/smoke (luma key); pure white for ink/silhouette/dark smoke (Dark-on-White). Legacy Chinese aliases (绿幕/蓝幕/纯黑/纯白) are accepted at runtime."},
                 ),
                 "matte_preset": (
-                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white", "平衡（毛发/烟雾）Balanced", "硬边 Hard", "绿幕火焰 Fire", "白底暗景 Dark"],
+                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white"],
                     {"default": "Balanced (hair/smoke)",
-                     "tooltip": "One-click preset: Balanced=default tuning; Hard edges=tighten edges; Fire on green=green screen + stronger despill; Dark on white=white-screen dark-subject mode."},
+                     "tooltip": "One-click preset: Balanced=default tuning; Hard edges=tighten edges; Fire on green=green screen + stronger despill; Dark on white=white-screen dark-subject mode. Legacy Chinese aliases accepted at runtime."},
                 ),
                 "key_strength": (
                     "FLOAT", {"default": 0.5, "min": 0.05, "max": 1.0, "step": 0.05,
@@ -320,10 +320,10 @@ class BSAI_H3_SaveTransparentVideo:
             "required": {
                 "images_rgba": ("IMAGE", {"tooltip": "RGBA 视频帧（BSAI_H3_TransparentKey 的 images_rgba 输出，B,H,W,4）"}),
                 "format": (
-                    ["ProRes 4444 (.mov, 真Alpha)", "WebM VP9 (.webm, Alpha)",
-                     "RGBA PNG 序列 (.png)"],
-                    {"default": "ProRes 4444 (.mov, 真Alpha)",
-                     "tooltip": "导出格式：ProRes 4444=12bit 真 Alpha 的 QuickTime（剪辑软件直接导入，首选）；WebM VP9=带 Alpha 的 WebM（网页/H5，依赖 FFmpeg 构建的 libvpx-vp9 支持，不支持时节点会明确报错）；RGBA PNG 序列=逐帧无损透明 PNG（合成首选）。"},
+                    ["ProRes 4444 (.mov)", "WebM VP9 (.webm)",
+                     "RGBA PNG Sequence (.png)"],
+                    {"default": "ProRes 4444 (.mov)",
+                     "tooltip": "Export format: ProRes 4444 = 12-bit true-alpha QuickTime (editing software imports directly, preferred); WebM VP9 = alpha-bearing WebM (web/H5, requires FFmpeg libvpx-vp9, node will error clearly if unavailable); RGBA PNG Sequence = lossless per-frame transparent PNG (compositing preferred)."},
                 ),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 60, "step": 1}),
                 "filename_prefix": ("STRING", {"default": "h3_transparent",
