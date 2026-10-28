@@ -118,12 +118,14 @@ class BSAI_H3_TransparentKey:
             "required": {
                 "images": ("IMAGE", {"tooltip": "H3 生成的视频帧（电影工厂主节点 images 输出，B,H,W,3 float 0..1）"}),
                 "backdrop_color": (
-                    ["Green screen", "Blue screen", "Pure black", "Pure white"],
+                    ["Green screen", "Blue screen", "Pure black", "Pure white",
+                     "绿幕 Green", "蓝幕 Blue", "纯黑 Pure Black", "纯白 Pure White"],
                     {"default": "Green screen",
                      "tooltip": "Backdrop color used during generation: green/blue for characters/props; pure black for VFX fire/sparks/smoke (luma key); pure white for ink/silhouette/dark smoke (Dark-on-White). Legacy Chinese aliases (绿幕/蓝幕/纯黑/纯白) are accepted at runtime."},
                 ),
                 "matte_preset": (
-                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white"],
+                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white",
+                     "平衡（毛发/烟雾）Balanced", "硬边 Hard edges", "火焰 Fire on green", "暗黑转白 Dark on white"],
                     {"default": "Balanced (hair/smoke)",
                      "tooltip": "One-click preset: Balanced=default tuning; Hard edges=tighten edges; Fire on green=green screen + stronger despill; Dark on white=white-screen dark-subject mode. Legacy Chinese aliases accepted at runtime."},
                 ),
@@ -321,9 +323,11 @@ class BSAI_H3_SaveTransparentVideo:
                 "images_rgba": ("IMAGE", {"tooltip": "RGBA 视频帧（BSAI_H3_TransparentKey 的 images_rgba 输出，B,H,W,4）"}),
                 "format": (
                     ["ProRes 4444 (.mov)", "WebM VP9 (.webm)",
-                     "RGBA PNG Sequence (.png)"],
+                     "RGBA PNG Sequence (.png)",
+                     "ProRes 4444 (.mov, 真Alpha)", "WebM VP9 (.webm, Alpha)",
+                     "RGBA PNG 序列 (.png)"],
                     {"default": "ProRes 4444 (.mov)",
-                     "tooltip": "Export format: ProRes 4444 = 12-bit true-alpha QuickTime (editing software imports directly, preferred); WebM VP9 = alpha-bearing WebM (web/H5, requires FFmpeg libvpx-vp9, node will error clearly if unavailable); RGBA PNG Sequence = lossless per-frame transparent PNG (compositing preferred)."},
+                     "tooltip": "Export format: ProRes 4444 = 12-bit true-alpha QuickTime (editing software imports directly, preferred); WebM VP9 = alpha-bearing WebM (web/H5, requires FFmpeg libvpx-vp9, node will error clearly if unavailable); RGBA PNG Sequence = lossless per-frame transparent PNG (compositing preferred). Legacy Chinese aliases (ProRes 4444 (.mov, 真Alpha) / RGBA PNG 序列 (.png)) accepted at runtime."},
                 ),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 60, "step": 1}),
                 "filename_prefix": ("STRING", {"default": "h3_transparent",
