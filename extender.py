@@ -2417,6 +2417,94 @@ def _sigmas(model, scheduler: str, steps: int, denoise: float):
 
 
 # ============================================================
+# v14.238: MiniMaxH3 Director「一采/二采极速渲染」全套移植辅助函数。
+# 参考插件例程 minimax_h3_director_二采_加速.json 的已验证契约:
+#   一采 8 步(res_multistep+simple, shift 12/3, guidance 1.0) @ 0.4MP 低清画布
+#     (864x480 @16:9) —— 低清草稿快定构图/形状/运动;
+#   二采 H3 latent 3D 放大到目标画布(默认 2MP = 1920x1088 @16:9)
+#     + SIGMAS 极轻精修(beta 调度 3 步 denoise 0.2, euler, 1 pass)。
+# 总 NFE = 8@0.4MP + 3@2MP —— 高分辨率只跑 3 步, 极速出 2K。
+# ============================================================
+def _ff_director_canvas(megapixels, ref_w, ref_h, snap=32):
+    """按百万像素 + 参考宽高比计算 32px 对齐画布(对齐参考插件 864x480/1920x1088 契约)。
+
+    参考宽高来自用户已解析的目标画布(保持其横竖构图), 参考值非法时回退 16:9。
+    """
+    try:
+        mp = float(megapixels)
+        rw = int(ref_w)
+        rh = int(ref_h)
+    except (TypeError, ValueError):
+        mp, rw, rh = 0.4, 16, 9
+    if mp <= 0 or rw <= 0 or rh <= 0:
+        mp, rw, rh = 0.4, 16, 9
+    snap = max(8, int(snap))
+    area = mp * 1e6
+    scale = math.sqrt(area / float(rw * rh))
+    w = max(snap, int(round(rw * scale / snap)) * snap)
+    h = max(snap, int(round(rh * scale / snap)) * snap)
+    # 收紧到面积上限内(与 Omni 一采钳制同源策略, 防对齐取整后越过目标 MP)
+    while w > snap and h > snap and w * h > area * 1.06:
+        if w > h:
+            w -= snap
+        else:
+            h -= snap
+    return int(w), int(h)
+
+
+def _ff_director_refine_factor(first_w, first_h, target_w, target_h, align_px):
+    """计算二采 latent 放大因子: 在 W/H 两个候选因子中选放大后面积与目标画布
+    误差更小的那个。因 32px 对齐取整(向下), 单一因子无法同时命中双轴,
+    此函数保证输出画布始终 ≈ 目标 MP 且构图不被拉变形。
+
+    返回 (面积误差, factor, 放大后 latent_w, 放大后 latent_h)。
+    """
+    try:
+        lm = max(1, int(align_px) // 16)
+        flw = max(1, int(first_w) // 16)
+        flh = max(1, int(first_h) // 16)
+        tlw = max(1, int(target_w) // 16)
+        tlh = max(1, int(target_h) // 16)
+        best = None
+        for f in (tlw / float(flw), tlh / float(flh)):
+            nw = _ff_snap_to_multiple(round(flw * f), lm)
+            nh = _ff_snap_to_multiple(round(flh * f), lm)
+            err = abs(nw * nh - tlw * tlh) / float(max(1, tlw * tlh))
+            if best is None or err < best[0]:
+                best = (err, f, nw, nh)
+        return best
+    except Exception:
+        return (9e9, float(target_w) / max(1, float(first_w)), 0, 0)
+
+
+def _ff_sigmas_override_tensor(sigmas_in):
+    """Director Refine 外接 SIGMAS 输入 -> CPU float32 单调递减 tensor(与内部
+    _sigmas() 返回同型)。支持 comfy.samplers.Sigmas 对象 / torch.Tensor /
+    可迭代数值列表; 非法输入(空/非单调/解析失败)返回 None, 调用方回退内部 beta 调度。"""
+    try:
+        import torch as _t
+        if sigmas_in is None:
+            return None
+        if isinstance(sigmas_in, _t.Tensor):
+            t = sigmas_in
+        elif hasattr(sigmas_in, "sigmas") and _t.is_tensor(getattr(sigmas_in, "sigmas", None)):
+            t = sigmas_in.sigmas
+        else:
+            try:
+                t = _t.tensor([float(v) for v in sigmas_in], dtype=_t.float32)
+            except Exception:
+                return None
+        t = t.detach().reshape(-1).cpu().float()
+        if t.numel() < 2:
+            return None
+        if not bool(_t.all(t[:-1] > t[1:])):
+            return None
+        return t
+    except Exception:
+        return None
+
+
+# ============================================================
 # v1.31: Sol-H3 Self-Lift 双采技术集成（一采 + 二采直出高清）
 # 移植自 BSAI-ComfyUI-Sol-H3 的 LatentUpscaleAlign 核心语义:
 #   latent 直接放大(不经过VAE) + 像素对齐(H3官方32px) + CONST 重加噪
@@ -3018,7 +3106,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                temporal_chunk_tokens=0, temporal_overlap_tokens=8,
                dual_track_shift=True, shift_video=12.0, shift_audio=3.0,
                tst_enable=True, tst_tau=0.2, omni_8step_mode=False,
-               honor_manual_steps=False):
+               honor_manual_steps=False,
+               # v14.238 MiniMaxH3 Director 极速双采移植:
+               #   refine_sampler: 二采采样器独立选择(参考插件一采 res_multistep、
+               #     二采 euler); None/"inherit (跟随一采)" 时跟随一采采样器。
+               #   refine_sigmas: 外接 SIGMAS 覆盖内部 beta 调度(Refine 节点
+               #     原版行为, 参考插件用 BasicScheduler/ManualSigmas 直连)。
+               refine_sampler=None, refine_sigmas=None):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -3320,6 +3414,32 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                               f"empty_cache 后 free={_free_after:.2f}GB (多 1.5GB 给权重搬运)")
                     except Exception as _rsv_e:
                         print(f"[H3 Extender] v14.237 reserve 调整失败(忽略): {_rsv_e}")
+                    # v14.238 (2026-10-28): 流式 vbar 驻留水位封顶。
+                    # 实测(v14.237 已生效仍 OOM): DynamicVRAM 的 vbar watermark 默认
+                    # = max_size(21GB), fault 调入的权重页"只进不出", 流式峰值爬到
+                    # ~18-20GB 后 int8_linear 的 torch.empty(m,n) 无空间可分配 ->
+                    # CUDA OOM (memory summary 里 torch reserved 仅 2GB 却 malloc
+                    # 失败, 正是 native vbar 占用了 torch 看不到的显存)。
+                    # 修复: 把 watermark 压到 free-4.0GB, 超过水位强制换出高位页,
+                    # 给 activation(qkv_proj out / process_conds) 留足余量。
+                    # 代价: 高位块反复 fault, 每步更慢; 但不再 OOM。
+                    # v14.239 (2026-10-28): Veda Sparse Attention predictor (275MB fp8) +
+                    # context帧 activation 额外吃 ~1GB, headroom 4.0->5.0GB。
+                    # clip0 干净 CUDA context 能挤过 4.0GB, clip1+ 带 Veda predictor
+                    # 驻留 torch 内存 + context 5帧 attention activation 顶爆。
+                    try:
+                        _vbar238 = None
+                        if hasattr(model, "_vbar_get"):
+                            _vbar238 = model._vbar_get(create=False)
+                        if _vbar238 is not None:
+                            _wm238 = int(max(2.0, _free_after - 5.0) * 1024 ** 3)
+                            _vbar238.set_watermark(_wm238)
+                            print(f"[H3 Extender] v14.239 流式 vbar watermark -> "
+                                  f"{_wm238/1024**3:.1f}GB (free {_free_after:.1f}GB − 5.0GB [Veda+ctx])")
+                        else:
+                            print(f"[H3 Extender] v14.238 未找到 vbar(非动态模型?), 跳过水位封顶")
+                    except Exception as _wm238e:
+                        print(f"[H3 Extender] v14.238 watermark 设置失败(忽略): {_wm238e}")
             except Exception: pass
         else:
             print(f"[H3 Extender] 一采前 free={_free_os:.1f}GB < 18GB, 走 ComfyUI 按需流式")
@@ -3329,6 +3449,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _t1.cuda.empty_cache()
                 _t1.cuda.synchronize()
             except Exception: pass
+            # v14.238: free<18GB 更紧, 同样给 vbar 水位封顶(free-3.5GB), 防止
+            # fault 调入爬满后 activation 无空间。
+            try:
+                _free_238 = _t1.cuda.mem_get_info()[0] / 1024 ** 3
+                _vbar238b = None
+                if hasattr(model, "_vbar_get"):
+                    _vbar238b = model._vbar_get(create=False)
+                if _vbar238b is not None:
+                    _wm238b = int(max(1.5, _free_238 - 4.5) * 1024 ** 3)
+                    _vbar238b.set_watermark(_wm238b)
+                    print(f"[H3 Extender] v14.239 流式(free<18GB) vbar watermark -> "
+                          f"{_wm238b/1024**3:.1f}GB (free {_free_238:.1f}GB − 4.5GB [Veda+ctx])")
+            except Exception as _wm238be:
+                print(f"[H3 Extender] v14.238 watermark 设置失败(忽略): {_wm238be}")
             try:
                 _h3_warn_stream_fallback(model.model_size() / 1024 ** 3, _free_os)
             except Exception:
@@ -3736,7 +3870,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
 
             # 2) CONST 重加噪（视频重噪到 sigma_start，音频锁定/重绘）
             # v1.33: 二采调度器对齐官方示例工作流（Sol-H3 双采极速版）——beta + denoise 0.55 保留底图细化
-            _r_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
+            # v14.238 Director 移植: 外接 refine_sigmas 端口(BasicScheduler/
+            # ManualSigmas 直连)优先, 二采完全按外部 sigma 曲线执行 —— 与参考
+            # 插件 Refine 节点原版行为一致; 未接时回退内部 beta 调度。
+            _r_sigmas_ext = _ff_sigmas_override_tensor(refine_sigmas)
+            if _r_sigmas_ext is not None:
+                _r_sigmas = _r_sigmas_ext
+                print(f"[H3 Extender] v14.238 Director极速二采: 使用外接 SIGMAS "
+                      f"({int(_r_sigmas_ext.shape[0])} 段), 覆盖内部 beta "
+                      f"{_r_steps}步/{_r_denoise:.2f} 调度")
+            else:
+                _r_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
             # v1.45 (2026-09-13 fix #5 画面糊成一片根因): CONST 加噪的噪声必须用真实随机噪声
             # (σ·ε+(1-σ)·x 混合), 但喂给 KSAMPLER.sample 的 noise 参数必须用空噪声!
             # 原因: CFGGuider.sample -> KSAMPLER.sample 内部会对 noise 再执行一次
@@ -4023,7 +4167,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             pass
             except Exception as _lg2:
                 print(f"[H3 Extender] Refine 主动加载模型失败, 走 DynamicVRAM 按需流式: {_lg2}")
-            _r_sampler = comfy.samplers.sampler_object(str(sampler_name))
+            # v14.238 Director 移植: 二采采样器独立选择(参考插件 Refine 节点
+            # 一采 res_multistep / 二采 euler 分离设计)。inherit 时跟随一采。
+            _r_sam_name = str(refine_sampler or sampler_name)
+            if _r_sam_name in ("inherit", "inherit (跟随一采)", "None", "none", ""):
+                _r_sam_name = str(sampler_name)
+            _r_sampler = comfy.samplers.sampler_object(_r_sam_name)
+            if _r_sam_name != str(sampler_name):
+                print(f"[H3 Extender] v14.238 Director极速二采: 二采采样器 "
+                      f"{_r_sam_name} (独立于 一采 {sampler_name})")
             # v1.48 分块二采(默认关): 长空间轴分块, 激活/attention workspace 随 tile_count
             # 线性下降. 算法移植自 MiniMaxH3 Director spatial_tiled_sampling.py (Apache-2.0).
             # 包装器对非 packed latent / 小尺寸自动回退全帧, 不破坏既有流程.
@@ -6725,7 +6877,7 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货·01 纯文本配音（三口不接）", "直播带货·02 ref_audio音色参考配音（只接参考）", "直播带货·03 lip_voice对口型（只接现成主播音频）", "直播带货（全自动）", "FastH3 Omni × SelfLift 超分", "H25 Hybrid 8步 多参考单采", "4K重生成 OpenH3Regenerate2K (768P草稿直出2560)", "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)", "透明视频 单采抠像 (H3 Transparent)", "4合1终极加速 (DMAD 8步 SelfLift 6+2 + 参考降分 + SegAttention)", "SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)"],
+            ["Sol-H3 Self-Lift 双采 (默认)", "直播配音高清（音频≥12步）", "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步", "武戏组合拳", "4K直出 秘制酱料", "FastH3 Omni 8步单采", "双采2K（HyperVAE 2x 解码）", "QAD-v2-8步", "直播带货·01 纯文本配音（三口不接）", "直播带货·02 ref_audio音色参考配音（只接参考）", "直播带货·03 lip_voice对口型（只接现成主播音频）", "直播带货（全自动）", "FastH3 Omni × SelfLift 超分", "H25 Hybrid 8步 多参考单采", "4K重生成 OpenH3Regenerate2K (768P草稿直出2560)", "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)", "透明视频 单采抠像 (H3 Transparent)", "4合1终极加速 (DMAD 8步 SelfLift 6+2 + 参考降分 + SegAttention)", "SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)", "Director 极速双采 (MiniMaxH3 Director 移植)"],
             {
                 "default": "Sol-H3 Self-Lift 双采 (默认)",
                 "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift dual-pass (default, HD refine); (2) Live Dub HD = v14.179 dedicated live-commerce ref_audio dubbing: 12 first-pass steps (the usable lower bound for official audio) + 4 refine steps + audio redraw 0.7 (refines Mandarin vocals and eliminates garbled/mumbled dubbing at 6~8 steps; requires a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3-4step VSA = 4-step distillation + VSA LoRA, 4+2 dual-pass; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 dual-pass (shift 12/3); (6) DMAD-4step = DMAD 4-step distillation LoRA, 4+2 dual-pass (forced lcm, shift 12/2); (7) Action Combo = 8+4 dual-pass (euler; action/DMAD LoRAs are injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res first pass + boost x2 / 3-step detail second pass + DLSS5 4K pixel upscale, based on Bilibili BV18Vnb6UEPv); (9) FastH3 Omni 8-step single-pass = skip the refine pass and go straight from an 8-step distilled first pass (guidance 1.0 + shift 12/3; the Loader must switch to fasth3_omniref_8step_pruned_int8_convrot with BlockSparseAttention VSA keep_percent=10); (10) Dual-pass 2K = v14.184 T8 idea (BV1aiaL61Eyu): 8-step first pass (FastH3 distillation contract) + 4-step second pass (denoise 0.45) + no latent upscale (factor=1.0, about 4x faster refine) + HyperVAE 2x decoded pixels 2x (encoder 16x unchanged, decoder 32x, decode happens once with no extra sampling VRAM; weights are auto-detected from models/vae as hyper*2x*.safetensors) + audio redraw inherits w33 (0.7) — a live-commerce dubbing variant that outputs 2K directly without tiling seams. Note: v14.183 tried 10 steps + audio 0.9 and broke chained-segment audio (VAD returned 0 segments) with quality regression, so it was rolled back. (11) QAD-v2-8step = FastH3-QAD-v2 released 2026-10-20 by Hailuo AI Lab (a full quantization-aware distillation NVFP4 set, 118GB -> 30GB, with quality improving rather than dropping): 8-step distilled single pass (video shift 10 / audio shift 3, the official V2 NVFP4 schedule; note the Omni tier is 12/3 while this tier's 10/3 is QAD-v2 specific), refine pass skipped (single-pass seamless); the Loader must switch to the full QAD-v2 NVFP4 set (transformer + 50-layer text encoder qwen3vl_32b_minimax_h3_nvfp4_awq + new NVFP4 VAE decoder with 36/8 layers) with BlockSparseAttention VSA keep_percent=10; measured on RTX 5090, a 5s 480P clip takes only 12.6~14.8s (8-layer decoder). (12) Live Commerce (fully automatic) = v14.202 one-stop live-commerce ref_audio recipe: once selected, every parameter is taken over by this tier except width/height (resolution stays as the workflow defines it to prevent first-pass pixel blowup), and manual settings are ignored — 12 first-pass steps + 4 refine steps (denoise 0.55) + 3D latent upscaler x2.0 + audio redraw 0.7 (at 4 steps v14.196 automatically locks the 12-step first-pass audio) + shift 12/3 + TST tau 0.2 + tiled 4x128 refine + audio_context_length=0 (no previous-segment speech injection) + motion context disabled from clip2 on (prevents ghosting on the first frame of hard cuts). Pair with minimax_h3_ref2va_int8_convrot + 4-step LoRA. (13) FastH3 Omni x SelfLift = Bilibili BV1rtnQ6qErJ recipe: FastH3 Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE total); prefer sol-attn over VSA (brighter/clearer frame, same speed); Loader must use fasth3_omniref_8step_pruned_int8_convrot. ⑬FastH3 Omni × SelfLift 超分 = B站《FastH3 Omni 全流程教学》(BV1rtnQ6qErJ) 配方: Omni 8步蒸馏 + SelfLift 渐进式超分(一采 4 步 ≈0.4x 搭骨架 -> 3D latent 放大 -> 二采 4 步精修, 总 8 NFE); 建议注意力 sol-attn 替代 VSA(画面清亮通透, 速度不变); Loader 需换 fasth3_omniref_8step_pruned_int8_convrot. ⑭v14.220 直播带货配音模式 01/02/03 一键切换（讲话类直播带货专用，lip_audio 仅用于对口型MV不接）: 01 纯文本配音=三口(ref_audio/lip_audio/lip_voice)全不接，模型读分镜台词用默认音色生成人声; 02 ref_audio音色参考配音=只接ref_audio，模型读台词生成人声但声线跟随ref_audio; 03 lip_voice对口型=只接lip_voice现成主播音频，模型不生成音频、声音完全由lip_voice驱动@图1对口型。三档共用12+4采样配方并自动忽略误接的其它音频口。⑮H25 Hybrid 8步 多参考单采 = B站《MiniMax H3 多参考终于测出最优解，H25 Hybrid 混合架构胜出》(BV1dygg6EE6W, AI-KSK) 配方: H25 Hybrid 混合架构(Base=FL2VA 底模 + Overlay=Ref2VA 底模, Block Range Additive 模式, 区间 25-49 社区共识非 50/50 —— 保留 FL2VA 清晰/细节/运动流畅, 引入 Ref2VA 参考控制) + LightX2V 8 步 FL2V 加速 LoRA, 一采 8 步单采直出(euler+simple, shift 12/3, denoise 1.0, 跳过二采); 视频实测 8 步=正式生产档, 20 步仅作质量基准, 4 步 Ref2V 加速 LoRA 弃用(音频劣化+动态被约束); Loader 需换 minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors, 加速 LoRA 槽挂 minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors(强度 1.0)。⑯4K重生成 OpenH3Regenerate2K = B站《MinimaxH3 进入4K分辨率开源时代 768P草稿直接升2560 比官方还高清》(BV13uxT66EWq, AI绘画KK) 配方: NVLabs Sana 仓库 OpenH3Regenerate2K 开放模型(闭源 H3Regenerate2K 的首个可复现开放替代) —— 768P 草稿(1344x768, 121帧) -> 三步精修重生成 -> 2560x1440 2K; 官方采样 3 步 sigmas [0.909375, 0.857143, 0.666667, 0], CFG=1.0, 初始态=(1-s0)*latent + s0*noise; 合并 LoRA(FP32, 三适配器沿 rank 轴拼接, 误差 2.2e-8): OpenH3 Refiner 5000步(强度0.7) + LTXRV fl2v turbo 1.2(强度1.0) + lms sharp rank64(强度1.0); 附赠 3D 卷积 latent 上采样器(BF16) 可挂 refine_upscaler_model; 许可证地域限制排除欧盟/英国/韩国/美国, 中国地区可用。⑰PRISM 10步 运动强化单采 = B站《Singularity v2 × 10Eros-Max 合并模型，提升运动效果》(BV1Vino6qE2F, plphy-up) 配方: PRISM = Ref2VA 系合并模型(HuggingFace OliviaRossi/Minimax-h3_Singularity-x-10Eros-Max_PRISM, int8 20.3GB), 官方 workflow 直接替换 ref2va 模板的 UNETLoader 模型, 提升运动流畅度与连贯性(动画战斗场景实测); 官方采样: euler + simple + 10 步 + denoise 1.0, BasicGuider 默认 CFG 1.0, 无 LoRA, 单采直出(不跑二采); 建议搭配 5 段式长提示词(subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music) 与参考图驱动(ref2va); 只改采样管道不碰模型图, Loader 需换 Minimax-h3_Singularity_x_10Eros-Max_PRISM_int8.safetensors。⑱透明视频 单采抠像 = B站《在 ComfyUI 中使用 MiniMax-H3 轻松制作透明视频》(BV1arJX69E7L, 治部少辅哈库 / SatoDive) 配方: H3 在纯色背景(绿幕/蓝幕/纯黑)上生成 -> 节点内自动抠像成真透明视频; 采样 = 一采 10 步单采直出(euler+simple, shift 12/3, denoise 1.0, 跳过二采 —— 二采重绘会破坏底色均匀导致抠像破洞), 建议 Loader 挂 4 步 turbo LoRA(minimax_h3_fl2v_turbo_4step_*.safetensors, 强度约 0.8, 无 LoRA 用 ~20 步); 只改采样管道, 后续接 BSAI_H3_TransparentKey 抠像(Matte 预设/边缘/去溢色) + BSAI_H3_SaveTransparentVideo 导出(ProRes 4444 真Alpha / WebM VP9 / RGBA PNG 序列); 提示词纪律: 明确写纯色背景(如'green screen background, flat solid green backdrop, no floor, no horizon')避免地板/地平线/道具被误抠进主体。⑲4合1终极加速 = B站《MiniMax H3终极加速！4合1的加速方法，速度直接起飞！》(BV1WWxT6cEdY, 小黄瓜) 配方: 4 大核心加速方案合体 —— ① DMAD MiniMax H3 4step LoRA(官方20步->8步, 实测 -57.5%) ② SegAttention 2.2.0(KJNodes PatchSegAttentionKJ 节点, 叠加 -81%) ③ 参考输入降分 half(叠加 -93.25%, 保留动作/轮廓) ④ SelfLift 二采(6步半分辨率草稿 + 2步全分辨率精修 = 8 NFE, latent upscale 放大); 落地: 一采 6 步 + 二采 2 步 + latent x2.0 + 参考 half + SegAttention 协同检测; Loader 建议挂 DMAD 4step LoRA + 8 步蒸馏基模; ⑳SolarRenderer 结构控制 = B站《全新 FastH3-Omni + Singularity V2 动画管线！SolarRenderer 逐帧控制，单卡直出〈刺客信条〉级电影短片！》(BV1Phxu6PE93) 配方: SolarRenderer 跑在 Minimax H3 上, 两个 LoRA —— ①控制LoRA 逐帧读取结构视频(3D灰盒/法线贴图/DW姿态骨架/OpenPose线框/深度图/边界框等 3D/ControlNet 风格输入 = 视频版ControlNet) ②4步LoRA 采样压到 4 步; 因果版可逐块实时生成(每块只读前 5 块结构+渲染结果, 不读未来帧); 基模 FastH3-Omni(加载运行更快) / Singularity V2(高动态动作更出色, INT8), 示例带注意力补丁(ComfyUI 内置 ComfyKition Attention 或 VSA); SelfLift 渐进采样器(低分辨率缩放 0.5 ~720P 草稿 -> 高分精修); 输出后处理 NVIDIA RTX VFX(RTX Video Frame Generation 24->48FPS + RTX Video Super Resolution 2K 放大, HDR 一般关); 首帧参考图(通义千问图像 2.1 生成/截取参考首帧) 驱动首帧画面; 提示词纪律: 必须详细描述(镜头切换/落地细节/环境层次等, 否则模型只输出参考里的 3D 方块); 落地: 一采 4 步(SelfLift 低分辨率草稿) + 二采 4 步(latent x2.0 全分辨率精修) = 8 NFE, ref_image_size 强制 max(结构细节不降分), Loader 建议挂 solarrenderer 控制LoRA + 4步LoRA(强度 ~0.8, 基模 FastH3-Omni/Singularity V2), 参考输入接结构视频抽帧序列(灰盒/法线/骨架/深度), 出片后可接 RTX Video Frame Generation 48FPS + Super Resolution 2K。",
@@ -6742,6 +6894,36 @@ class BSAIH3FilmFactory:
             {
                 "default": "单采无缝 (推荐)",
                 "tooltip": "One-shot sampling tier (only effective when one_shot_mode=on): Single-pass seamless = skip the refine pass, chained latents are never redrawn, seams have zero drift; recommended with the turbo 8-step LoRA + beta scheduler + 6-8 steps. Dual-pass HD = keep the refine upscale/refinement (can reach 2K), but the reference workflow shows dual-pass chaining introduces pixel drift at seams (blur/jitter between segments), so pick it only when you need HD upscaling. v14.215 adds 'Dual-pass seamless (8+4)': runs the refine pass (8 first-pass steps + 4 refine steps, denoise 0.45) AND repairs the inter-segment anchor so the join stays seamless - the head keep-lock used to die silently whenever the previous clip's tail was at the refined 2x resolution, which is exactly why dual-pass drifted. The 8+4 counts still come from the widget (speed_preset=custom); this tier never overrides them.",
+            },
+        )
+        # v14.238 MiniMaxH3 Director 极速双采移植参数 —— 追加在 optional 最末尾,
+        # 不挤占/不移位任何既有 widget index。
+        optional["refine_sampler"] = (
+            ["inherit (跟随一采)", "euler", "res_multistep", "dpmpp_2m", "lcm", "ddim"],
+            {
+                "default": "inherit (跟随一采)",
+                "tooltip": "v14.238 Director 移植: 二采采样器独立选择。参考插件 Refine 节点一采 res_multistep / 二采 euler 分离设计; inherit = 跟随一采采样器。Director 极速双采档默认 euler。",
+            },
+        )
+        optional["director_fast_first_mp"] = (
+            "FLOAT",
+            {
+                "default": 0.4, "min": 0.1, "max": 1.0, "step": 0.05,
+                "tooltip": "v14.238 Director 极速双采: 一采低清画布(百万像素)。默认 0.4 = 864x480(16:9), 对齐参考插件极速工作流契约; 仅「Director 极速双采」档生效。",
+            },
+        )
+        optional["director_fast_target_mp"] = (
+            "FLOAT",
+            {
+                "default": 2.0, "min": 0.5, "max": 4.0, "step": 0.1,
+                "tooltip": "v14.238 Director 极速双采: 二采后目标画布(百万像素)。默认 2.0 = 1920x1088(16:9); 仅「Director 极速双采」档生效。",
+            },
+        )
+        optional["refine_sigmas"] = (
+            "SIGMAS",
+            {
+                "forceInput": True,
+                "tooltip": "v14.238 Director 移植: 外接 SIGMAS 端口(参考插件 Refine 节点原版行为)。直连 BasicScheduler/ManualSigmas 时二采完全按外部 sigma 曲线执行; 未接时内部 beta 调度(refine_steps/refine_denoise)。",
             },
         )
         # v14.193: 视觉锚点改为全自动（自动记录 + 自动注入）—— 手动输入 widget
@@ -6950,6 +7132,20 @@ class BSAIH3FilmFactory:
         refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear interpolation, no model)")
         refine_align_to = int(kwargs.get("refine_align_to", 40))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
+        # v14.238 MiniMaxH3 Director 极速双采移植参数:
+        #   refine_sampler    —— 二采采样器独立选择(默认跟随一采; Director 配方 = euler)
+        #   refine_sigmas     —— 外接 SIGMAS 端口(未接时 None, 内部 beta 调度)
+        #   director_fast_*_mp —— 极速档一采低清画布/目标画布(百万像素)
+        refine_sampler = str(kwargs.get("refine_sampler", "inherit (跟随一采)") or "inherit (跟随一采)")
+        refine_sigmas = kwargs.get("refine_sigmas", None)
+        try:
+            _dff_first_mp = float(kwargs.get("director_fast_first_mp", 0.4) or 0.4)
+        except (TypeError, ValueError):
+            _dff_first_mp = 0.4
+        try:
+            _dff_target_mp = float(kwargs.get("director_fast_target_mp", 2.0) or 2.0)
+        except (TypeError, ValueError):
+            _dff_target_mp = 2.0
         # v14.83 对口型×二采组合预设（优先于 refine_audio_denoise 原始值）
         refine_lipsync_mode = str(kwargs.get("refine_lipsync_mode", "Lock lip-sync (recommended)"))
         if refine_lipsync_mode in ("Audio redraw 0.7", "音频参与重绘0.7"):
@@ -7128,6 +7324,9 @@ class BSAIH3FilmFactory:
         # v14.182: HyperVAE 2x 像素翻倍因子 —— 仅「双采2K」档在分支内置 2.0,
         # 其余档保持 1.0 (声明输出尺寸 = 实际解码像素, 不放大)。
         _hv2x_decl = 1.0
+        # v14.238 MiniMaxH3 Director 极速双采移植: 档位命中标志 —— 命中后
+        # 分辨率接管(一采低清画布)与 refine factor 换算在解析完分辨率后执行。
+        _director_fast_active = False
         # v14.210: 默认管道 "Sol-H3 Self-Lift 双采 (默认)" 名字里就是 "双采",
         # 理应自动 enable refine_enable——之前被行 6686 显式排除(作为"无管道"回退),
         # 导致用户选了默认管道但 UI toggle refine_enable=false 时二采被跳过。
@@ -7484,6 +7683,80 @@ class BSAIH3FilmFactory:
                       "Loader 建议挂 solarrenderer 控制LoRA + 4步LoRA(强度 ~0.8, 基模 FastH3-Omni/Singularity V2); "
                       "参考输入接结构视频抽帧序列(灰盒/法线贴图/骨架/深度图); 提示词务必详细描述镜头切换/落地细节; "
                       "出片后可接 NVIDIA RTX VFX(RTX Video Frame Generation 24->48FPS + Super Resolution 2K)")
+            elif _rp_mode == "Director 极速双采 (MiniMaxH3 Director 移植)":
+                # v14.238 (2026-10-28): MiniMaxH3 Director 插件「一采/二采极速渲染」
+                # 全套移植。参考插件例程 minimax_h3_director_二采_加速.json 的
+                # 已验证配方:
+                #   一采: 8 步(res_multistep+simple) + shift 12/3 + guidance 1.0
+                #         (BasicGuider 单前向) + 0.4MP 低清画布(864x480 @16:9)
+                #         —— 低清草稿快定构图/形状/大幅运动;
+                #   二采: H3 latent 3D 放大到目标画布(默认 2MP = 1920x1088 @16:9)
+                #         + SIGMAS 极轻精修: beta 调度 3 步 denoise 0.2 + euler
+                #         + 1 pass(参考插件 passes=1)。
+                # 总 NFE = 8@0.4MP + 3@2MP —— 高分辨率只跑 3 步, 极速出 2K。
+                # 电影工厂适配点:
+                #   ① 二采采样器独立选择(默认 euler, 参考插件一采 res_multistep
+                #      二采 euler 分离设计), 由新 widget refine_sampler 控制;
+                #   ② 音频锁定(3 步 0.2 denoise 重绘音频必毁人声/低频轰鸣,
+                #      遵循电影工厂 v14.195 音频质量原则; lip_voice 外部音频
+                #      更应锁定);
+                #   ③ 外接 SIGMAS: refine_sigmas 端口直连 BasicScheduler/
+                #      ManualSigmas 时, 二采完全按外部 sigma 曲线执行(参考
+                #      插件 Refine 节点原版行为), 未接时内部 beta 3步/0.2;
+                #   ④ 分辨率: 用户 width/height/megapixels 仍定义目标画布
+                #      (经 director_fast_target_mp 换算), 一采画布由
+                #      director_fast_first_mp 接管 —— 见下方分辨率 override。
+                steps, refine_steps, tile_count, refine_denoise = 8, 3, 4, 0.2
+                refine_enable = True
+                refine_audio_denoise = 0.0   # 极速二采锁定音频(低步数不重绘人声)
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                if str(sampler_name) != "res_multistep":
+                    sampler_name = "res_multistep"   # Director 一采采样器配方
+                    print(f"[H3 Extender] v14.238 Director极速双采(渲染管道): 一采采样器强制 res_multistep")
+                scheduler = "simple"
+                if refine_sampler in ("inherit", "inherit (跟随一采)", "None", "none", ""):
+                    refine_sampler = "euler"          # Director 二采采样器配方
+                # 音频契约: lip_audio/lip_voice 提供外部音频时一采 8 步(蒸馏契约,
+                # 省 4 步 x ~68s); 模型自生成音频时一采提 12 步满足官方音频可用
+                # 下限(参考插件 8 步在电影工厂实测会出恒定低频轰鸣/含混配音)。
+                if not kwargs.get("lip_audio") and not kwargs.get("lip_voice"):
+                    steps = 12
+                    print(f"[H3 Extender] v14.238 Director极速双采: 模型自生成音频 "
+                          f"(未接 lip_audio/lip_voice), 一采 8->12 步满足官方音频"
+                          f"下限; 接 lip_voice 外部音频可回到 8 步极速契约")
+                # 自动选用 3D latent upscaler(参考插件用
+                # minimax_h3_latent_upscaler_3d_bf16/fp32, 语义放大细节更丰富)
+                if _FF_UPSCALER_MOD is not None:
+                    try:
+                        _d_ups_opts = _ff_get_upscaler_models()
+                        _d_pick = None
+                        for _nm in _d_ups_opts:
+                            if "latent_upscaler_3d" in str(_nm).lower() or "upscaler_3d" in str(_nm).lower():
+                                _d_pick = _nm
+                                break
+                        if _d_pick is None and len(_d_ups_opts) > 2:
+                            _d_pick = _d_ups_opts[2]
+                        if _d_pick:
+                            refine_upscaler_model = _d_pick
+                            print(f"[H3 Extender] v14.238 Director极速双采: 自动选用 "
+                                  f"3D latent upscaler '{_d_pick}'")
+                    except Exception as _du_err:
+                        print(f"[H3 Extender] v14.238 Director极速双采: 3D upscaler "
+                              f"自动选择失败(走 bilinear): {_du_err}")
+                        refine_upscaler_model = "(bilinear interpolation, no model)"
+                else:
+                    refine_upscaler_model = "(bilinear interpolation, no model)"
+                    print(f"[H3 Extender] ⚠️ v14.238 Director极速双采: 未探测到 3D "
+                          f"latent upscaler 插件(Comfyui_Minimax_h3_latent_Upscaler), "
+                          f"二采放大走 bilinear 插值(画质略降)")
+                _director_fast_active = True
+                print(f"[H3 Extender] 🚀 v14.238 Director 极速双采(MiniMaxH3 Director "
+                      f"移植): 一采 {int(steps)} 步 {_dff_first_mp}MP 低清草稿 "
+                      f"-> H3 latent 3D 放大 -> 二采 {int(refine_steps)} 步 "
+                      f"(denoise {float(refine_denoise):.2f}, {refine_sampler}) 到 "
+                      f"{_dff_target_mp}MP 目标画布; 音频锁定不重绘; "
+                      f"总 NFE={int(steps)}@低清+{int(refine_steps)}@高清")
             else:
                 _rp_handled = False
             if _rp_handled:
@@ -8098,6 +8371,41 @@ class BSAIH3FilmFactory:
             height,
             refs,
         )
+
+        # v14.238 MiniMaxH3 Director 极速双采移植 —— 分辨率接管。
+        # 参考插件语义: Director 节点画布 = 一采低清(864x480 @0.4MP), Refine
+        # 节点决定最终画布(1920x1088 @2MP), 两者互相独立。这里把用户目标画布
+        # (width/height/megapixels 解析结果)仅用作构图参考: 一采画布由
+        # director_fast_first_mp 接管(低清草稿), 二采 latent 放大因子按
+        # director_fast_target_mp 自动换算(像素比 + 32px 对齐, 选面积误差
+        # 最小的轴向因子), 最终输出 ≈ 目标 MP 且保持用户横竖构图。
+        if _director_fast_active:
+            try:
+                _df_ref_w = int(requested_resolution.get("width") or 0)
+                _df_ref_h = int(requested_resolution.get("height") or 0)
+            except (TypeError, ValueError):
+                _df_ref_w, _df_ref_h = 0, 0
+            _df_fw, _df_fh = _ff_director_canvas(_dff_first_mp, _df_ref_w, _df_ref_h)
+            _df_tw, _df_th = _ff_director_canvas(_dff_target_mp, _df_ref_w, _df_ref_h)
+            _df_best = _ff_director_refine_factor(_df_fw, _df_fh, _df_tw, _df_th, int(refine_align_to))
+            _df_factor = float(_df_best[1])
+            requested_resolution = {
+                "width": _df_fw,
+                "height": _df_fh,
+                "mode": "director_fast_lowres",
+                "guide_ref": None,
+                "guide_src_width": 0,
+                "guide_src_height": 0,
+                "fallback": False,
+                "megapixels": float(_dff_first_mp),
+            }
+            refine_upscale_factor = _df_factor
+            print(f"[H3 Extender] v14.238 Director极速双采分辨率: 用户目标画布 "
+                  f"{_df_ref_w}x{_df_ref_h} -> 一采低清 {_df_fw}x{_df_fh} "
+                  f"({_dff_first_mp}MP) + 二采 latent x{_df_factor:.3f} -> 目标 "
+                  f"{_df_tw}x{_df_th} ({_dff_target_mp}MP, 对齐后实际 "
+                  f"~{int(_df_best[2]) * 16}x{int(_df_best[3]) * 16}); "
+                  f"外接 refine_sigmas 可覆盖 beta 3步/0.2 调度")
 
         cache_resolution = _resolution_from_manifest(manifest)
         cache_has_segments = bool(segments) and cache_resolution is not None
@@ -9709,6 +10017,9 @@ class BSAIH3FilmFactory:
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
                     omni_8step_mode=omni_8step_mode,
                     honor_manual_steps=(str(speed_preset) == "custom"),
+                    # v14.238 MiniMaxH3 Director 极速双采移植参数
+                    refine_sampler=refine_sampler,
+                    refine_sigmas=refine_sigmas,
                 )
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
