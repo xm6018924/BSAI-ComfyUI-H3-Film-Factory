@@ -2914,8 +2914,29 @@ def _decode_single_clip_to_blob(
                     except Exception:
                         pass
                 else:
-                    _mm.current_loaded_models.remove(_entry)
-                    _popped += 1
+                    # v14.244 (2026-10-28): disable-dynamic-vram 模式下原 DiT 是
+                    # base patcher(非 dynamic), partially_unload 走 comfy_patched_weights
+                    # 模块级卸载 —— 一采 offload 2.2GB(驻留17.3/总19.5)走的就是该路径,
+                    # 实机安全。此前一律只摘注册导致二采驻留 18.4GB 无法回收 -> decode
+                    # 无空间必然 OOM(v14.242 8+4/4+2ctx 分块都救不了, allocated 顶满
+                    # 23.82GB 连 56MB 都失败)。round1/3 崩溃链仅指 dynamic 模式下
+                    # 创建的 non-dynamic delegate 克隆(独立权重实例)与
+                    # unload_all_models(detach->self.model.to(cpu)) 路径, 与本路径不同。
+                    # 卸载后摘注册 + GC/empty_cache 统一回收。
+                    try:
+                        if getattr(_m, "model", None) is not None:
+                            _m.partially_unload(_m.offload_device, 1e32)
+                            _torch.cuda.synchronize()
+                            _freed244 = _torch.cuda.memory_allocated() / 1024 ** 3
+                            print(f"[H3 Extender] v14.244 非dynamic DiT partially_unload 真卸载: "
+                                  f"allocated={_freed244:.2f}GB")
+                    except Exception as _ue244:
+                        print(f"[H3 Extender] v14.244 partially_unload 异常(仅摘注册): {_ue244}")
+                    try:
+                        _mm.current_loaded_models.remove(_entry)
+                        _popped += 1
+                    except Exception:
+                        pass
             except Exception:
                 pass
         # v14.238: GC 3 轮回收 DynamicVRAM delegate/eject 残留(远端 v1.96 同款思路,
