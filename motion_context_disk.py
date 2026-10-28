@@ -2971,19 +2971,16 @@ def _decode_single_clip_to_blob(
 
     v = _load_segment_video(data_path, curr)
     print(f"[H3 Extender]   step 2: vae.decode (shape={tuple(v.shape)})...")
-    # v1.82b: 覆盖 VAE output_device 到 GPU —— lowvram/dynamic 模式下 ComfyUI
-    # intermediate_device() 会把整段 1920x1088 float32 视频直接输出到 CPU
-    # (8.5GB/段), 渲染进程内存压力下 alloc_cpu OOM. 强制 GPU 输出, 配合下方
-    # 分批 uint8 转换, 彻底消除 CPU 侧大分配. decode 为单线程调用, try/finally
-    # 立即恢复原值, 不影响后续路径.
+    # v14.247 (2026-10-28): 撤销 v1.82b 的 output_device=GPU 强制 override —— 实测根因链:
+    # v1.82b 把 out 钉在 GPU -> comfy decode_tiled_3d 的 12 通道 packed out (8.45GB) 全堆 GPU,
+    # pixel_shuffle_h3_images 的 contiguous 再要 8.45GB -> OOM(实机 traceback bsai_h3_hypervae_2x.py:78)。
+    # v14.232/v14.242/v14.246 的外层 T 轴分块是绕这个 OOM 的 workaround, 但外层硬切(无 overlap
+    # blend)+ comfy 内层 tile_t=4 overlap=1 -> 双重接缝 -> 实机重影/鬼影(用户 23:56 截图)。
+    # v14.244 DiT 真卸载后 free=22.26GB, CPU 内存充裕, 恢复 comfy 默认 output_device(intermediate_device):
+    # packed out 在 CPU 累积(GPU 峰值=VAE 5GB+单 tile 激活~9.3GB=14.3GB <22.26 ✓), comfy 自带
+    # tile_t 自适应 + overlap=(1,overlap,overlap) 加权 blend, 无外层接缝 -> 消除重影。
     _od_prev = getattr(vae, "output_device", None)
-    _od_overridden = bool(
-        _od_prev is not None
-        and getattr(getattr(vae, "device", None), "type", None) == "cuda"
-        and getattr(_od_prev, "type", None) != "cuda"
-    )
-    if _od_overridden:
-        vae.output_device = vae.device
+    _od_overridden = False  # v14.247: 不再 override, 走 comfy 默认
     try:
         # v14.232: 时间维分块 decode —— 整段 107 帧 decode_tiled_3d 预分配
         # 8.45GB output buffer, DiT 残留 17.58GB + 8.45GB 超 24GB OOM。
@@ -3007,116 +3004,17 @@ def _decode_single_clip_to_blob(
         _dec_h = int(v.shape[-2])
         _dec_w = int(v.shape[-1])
         _est_out_gb = (_dec_t_total * _dec_h * _dec_w * 3 * 4) / 1024 ** 3
-        # v14.239 (2026-10-28): allocated 偏高时强制分块 —— v14.238 只看 est output
-        # <= 3GB 就整块 decode, 但 DiT eject 不彻底时 allocated=13.7GB 残留,
-        # VAE decode 内部中间激活不可控, 即使 output 仅 0.01GB 也 OOM
-        # (前端报 "Allocation on device 0 would exceed allowed memory")。
-        # 条件: output > 3GB OR allocated > 8GB(eject 残留警告线) -> 分块。
-        _force_chunk = (_a if '_a' in dir() else 0.0) > 8.0
-        _dec_done = False
-        if _dec_t_total > _dec_t_block and (_est_out_gb > 3.0 or _force_chunk or _dec_t_total >= 16):
-            # v14.246 (2026-10-28): v14.242 的 8+4ctx 实测第一块即 OOM —— 12 帧
-            # latent 输入的 HyperVAE2x 解码激活 ~18.6GB + VAE 5GB ≈ 23.6GB 顶满;
-            # 4+2ctx(6帧输入 ~9.3GB)第一块可跑, 但块间只有 gc.collect 不释放 CUDA
-            # 缓存(第一块激活残留在 caching allocator), 第二块 OOM。修复:
-            # ① 降级顺序改 (4,2), 首选 4+4ctx(8帧输入 ~12.4GB, ctx=4 保留块间
-            #    时间上下文, v14.236 防"每~16帧闪一下"的接缝闪烁); ② 块间
-            #    gc.collect + torch.cuda.empty_cache + synchronize 真清缓存;
-            # ③ 2+2ctx 兜底(4帧输入 ~6GB, 仅剩这条路时用)。
-            for _dec_blk_try in (4, 2):
-                _dec_ctx_try = 4 if _dec_blk_try >= 4 else 2
-                try:
-                    print(f"[H3 Extender]   v14.246: T轴分块 decode (block={_dec_blk_try}+{_dec_ctx_try}ctx, "
-                          f"est output={_est_out_gb:.2f}GB, allocated={_a:.1f}GB, force_chunk={_force_chunk})")
-                    _dec_parts = []
-                    for _t0 in range(0, _dec_t_total, _dec_blk_try):
-                        _t1 = min(_t0 + _dec_blk_try, _dec_t_total)
-                        _s0 = max(0, _t0 - _dec_ctx_try)
-                        _s1 = min(_dec_t_total, _t1 + _dec_ctx_try)
-                        _vk = v[:, :, _s0:_s1].contiguous()
-                        _dec_k = vae.decode(_vk)
-                        if _dec_k.ndim == 5:
-                            _dec_k = _dec_k.reshape(-1, _dec_k.shape[-3], _dec_k.shape[-2], _dec_k.shape[-1])
-                        # 只保留本块对应帧(裁掉上下文扩展段), 块间输出严格不重叠
-                        _lo = _t0 - _s0
-                        _hi = _t1 - _s0
-                        _dec_k = _dec_k[_lo:_hi]
-                        _dec_parts.append(_dec_k.detach().cpu())
-                        print(f"[H3 Extender]   decode block [{_t0}:{_t1}/{_dec_t_total}] "
-                              f"(ctx=[{_s0}:{_s1}]) done")
-                        import gc as _gc_dec; _gc_dec.collect()
-                        # v14.246: 真清 CUDA 缓存, 否则第一块激活残留导致第二块 OOM
-                        _torch.cuda.empty_cache()
-                        _torch.cuda.synchronize()
-                    video = torch.cat(_dec_parts, dim=0)
-                    del _dec_parts
-                    _dec_done = True
-                    break
-                except torch.cuda.OutOfMemoryError as _dec_oom:
-                    print(f"[H3 Extender]   v14.246 decode OOM at block={_dec_blk_try}: {_dec_oom}")
-                    try:
-                        del _dec_parts
-                    except Exception:
-                        pass
-                    import gc as _gc_retry
-                    _gc_retry.collect()
-                    _torch.cuda.empty_cache()
-                    _torch.cuda.synchronize()
-                    if _dec_blk_try == 2:
-                        # 最小块仍 OOM: 抛出让上层 fallback 处理
-                        raise
-            if not _dec_done:
-                raise RuntimeError("[H3 Extender] decode 分块全部失败")
-        else:
-            try:
-                print(f"[H3 Extender]   v14.242: 整块 decode (est output={_est_out_gb:.2f}GB, "
-                      f"allocated={_a:.1f}GB, 无块边界)")
-                video = vae.decode(v)
-            except torch.cuda.OutOfMemoryError:
-                # v14.246: 整块 OOM -> 降级走 4+4ctx 分块(v14.242 的 8+4ctx 实测
-                # 第一块即 OOM: 12帧输入激活 ~18.6GB+VAE 5GB ≈ 23.6GB 顶满), 块内
-                # OOM 再自动降 2+2ctx, 块间 empty_cache 真清缓存。
-                print(f"[H3 Extender]   v14.246: 整块 decode OOM, 降级 T轴分块 (4+4ctx)")
-                _dec_done = False
-                for _dec_blk_try in (4, 2):
-                    _dec_ctx_try = 4 if _dec_blk_try >= 4 else 2
-                    try:
-                        _dec_parts = []
-                        for _t0 in range(0, _dec_t_total, _dec_blk_try):
-                            _t1 = min(_t0 + _dec_blk_try, _dec_t_total)
-                            _s0 = max(0, _t0 - _dec_ctx_try)
-                            _s1 = min(_dec_t_total, _t1 + _dec_ctx_try)
-                            _vk = v[:, :, _s0:_s1].contiguous()
-                            _dec_k = vae.decode(_vk)
-                            if _dec_k.ndim == 5:
-                                _dec_k = _dec_k.reshape(-1, _dec_k.shape[-3], _dec_k.shape[-2], _dec_k.shape[-1])
-                            _lo = _t0 - _s0
-                            _hi = _t1 - _s0
-                            _dec_k = _dec_k[_lo:_hi]
-                            _dec_parts.append(_dec_k.detach().cpu())
-                            print(f"[H3 Extender]   decode block [{_t0}:{_t1}/{_dec_t_total}] done")
-                            import gc as _gc_dec2; _gc_dec2.collect()
-                            # v14.246: 真清 CUDA 缓存, 否则块激活残留累积 OOM
-                            _torch.cuda.empty_cache()
-                            _torch.cuda.synchronize()
-                        video = torch.cat(_dec_parts, dim=0)
-                        del _dec_parts
-                        _dec_done = True
-                        break
-                    except torch.cuda.OutOfMemoryError as _dec_oom2:
-                        print(f"[H3 Extender]   v14.246 降级分块 OOM at block={_dec_blk_try}: {_dec_oom2}")
-                        try:
-                            del _dec_parts
-                        except Exception:
-                            pass
-                        import gc as _gc_retry2
-                        _gc_retry2.collect()
-                        _torch.cuda.empty_cache()
-                        _torch.cuda.synchronize()
-                        if _dec_blk_try == 2:
-                            raise
-                if not _dec_done:
-                    raise RuntimeError("[H3 Extender] decode 降级分块全部失败")
+        # v14.247 (2026-10-28): 撤销 v14.232/v14.236/v14.239/v14.242/v14.246 全部外层
+        # T 轴硬切分块 —— 这些都是为绕 v1.82b output_device=GPU 导致的 8.45GB packed out
+        # OOM 而加的 workaround, 但外层硬切(无 overlap blend) + comfy 内层 tile_t=4
+        # overlap=1 -> 双重接缝 -> 实机重影/鬼影(用户 23:56 截图)。v14.244 DiT 真卸载
+        # 后 free=22.26GB, v14.247 又撤了 output_device=GPU override(out 回 CPU),
+        # GPU 峰值 = VAE 5GB + comfy decode_tiled_3d 单 tile 激活 ~9.3GB = 14.3GB < 22.26
+        # 整块 decode 无 OOM 压力。comfy 自带 tile_t 自适应 + overlap=(1,overlap,overlap)
+        # 加权 blend, 无外层接缝 -> 消除重影/鬼影。
+        print(f"[H3 Extender]   v14.247: 整块 decode (est output={_est_out_gb:.2f}GB, "
+              f"allocated={_a:.1f}GB, out_device=comfy默认CPU, comfy自带tile_t+overlap blend)")
+        video = vae.decode(v)
     finally:
         if _od_overridden:
             vae.output_device = _od_prev
