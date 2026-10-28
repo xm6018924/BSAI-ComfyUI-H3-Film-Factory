@@ -2731,7 +2731,7 @@ def _rescale_segment_blob(owner_id, clip_index, target_w, target_h, fps, ffmpeg=
 
         curr["latent_end"] = latent_end
         curr["decoded_mp4_blob"] = render_spec
-        curr["decoded_mp4_version"] = 5  # v14.194: v5 = 含音频后处理(去低频轰鸣/底噪); v4 blob 不再复用
+        curr["decoded_mp4_version"] = 6  # v14.236: v6 = 时间分块解码加块间上下文(修复 ~16 帧亮度闪烁); v5 blob 不再复用
         curr["decoded_mp4_width"] = target_w
         curr["decoded_mp4_height"] = target_h
         segments[i] = curr
@@ -2814,7 +2814,9 @@ def _decode_single_clip_to_blob(
     # v14.141: decoded_mp4_version 升到 3 —— v2 blob 的编码 GOP=250(10.4s) 导致
     # 预览/成片尾部无 IDR 关键帧而雪花；升版后旧 blob 全部失效、按 GOP=48(2s)
     # 重新编码，预览/渐进全片/最终成片尾部均可独立解码。
-    if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 5:
+    # v14.236: decoded_mp4_version 升到 6 —— v5 blob 由 v14.232 裸 16 帧分块解码
+    # 生成, 块间无时间上下文, 每 ~16 帧亮度闪烁; 升版强制重解码以应用修复。
+    if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 6:
         _cur_w = int(curr.get("decoded_mp4_width", 0) or 0)
         _cur_h = int(curr.get("decoded_mp4_height", 0) or 0)
         if _tgt_w <= 0 or _tgt_h <= 0 or (_cur_w == _tgt_w and _cur_h == _tgt_h):
@@ -2848,35 +2850,60 @@ def _decode_single_clip_to_blob(
         import comfy.model_management as _mm
         import torch as _torch
         import gc as _gc_dv
+        # v14.235: 修复解码前 DiT 卸载失效(2026-10-28 实机日志佐证:
+        # popped=1 但 allocated=18.47GB free=0 -> clip 预览 VAE decode OOM,
+        # 整段+tiled 重试均 OOM, allocated 23.35GiB requested 932MiB)。
+        # 根因1: free_memory(for_dynamic=True) 对 DynamicVRAM 量化 DiT 直接跳过
+        #   (model_management.free_memory 里 is_dynamic and for_dynamic -> 不卸载);
+        # 根因2: 手动 .to('cpu') 对 DynamicVRAM staged 权重无效(量化权重在自定义
+        #   staged 容器, Module.to 不迁移) -> 权重纹丝不动。
+        # 修复: 复用 extender.py _mp_ck_offload_or_pop 同款已验证安全路径 ——
+        #   dynamic 量化模型(如 H3 量化 DiT)走标准 partially_unload(offload_device,
+        #   1e32) 块级卸载(实测安全: 'Unloaded partially: 14719.41 MB freed, 0.00 MB
+        #   remains loaded'), 卸载后仍有 GPU 驻留(loaded_size>1MB)则摘除注册;
+        #   非 dynamic 直接摘除注册由 GC/empty_cache 回收; 严禁走 detach/unpatch
+        #   /free_memory(不带 for_dynamic) 的 self.model.to(cpu) —— 对量化块触发
+        #   comfy_kitchen QuantizedTensor._handle_to 原生 access violation(round3
+        #   崩溃链, Python try/except 无法捕获, 直接杀进程)。
+        #   VAE/audioVAE 条目按真实模型身份保留; 下 clip 采样前驻留补丁自动重载 DiT。
+        _keep_entries = []
+        for _entry in list(_mm.current_loaded_models):
+            try:
+                _p = _entry.model  # weakref property 解引用 -> ModelPatcher
+                _real = getattr(_p, "model", None)
+            except Exception:
+                _real = None
+            if _real is vae or _real is getattr(vae, "model", None) \
+               or _real is audio_vae or _real is getattr(audio_vae, "model", None):
+                _keep_entries.append(_entry)
+        _keep_ids = {id(e) for e in _keep_entries}
         _popped = 0
-        _evict_targets = []
-        for _i in range(len(_mm.current_loaded_models) - 1, -1, -1):
+        for _entry in list(_mm.current_loaded_models):
+            if id(_entry) in _keep_ids:
+                continue
             try:
-                _lm = _mm.current_loaded_models[_i]
-                _lm_model = getattr(_lm, "model", None)
-                if _lm_model is None:
+                _m = _entry.model
+                if _m is None:
+                    _mm.current_loaded_models.remove(_entry)
+                    _popped += 1
                     continue
-                # 保留 VAE 本体(含内部 model), 其余全部摘除注册
-                if _lm_model is vae or _lm_model is getattr(vae, "model", None):
-                    continue
-                _evict_targets.append(_lm)
-                _mm.current_loaded_models.pop(_i)
-                _popped += 1
+                if _m.is_dynamic():
+                    try:
+                        _m.partially_unload(_m.offload_device, 1e32)
+                        _torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    try:
+                        if _m.loaded_size() > 1024 * 1024:
+                            _mm.current_loaded_models.remove(_entry)
+                            _popped += 1
+                    except Exception:
+                        pass
+                else:
+                    _mm.current_loaded_models.remove(_entry)
+                    _popped += 1
             except Exception:
                 pass
-        # v14.232: free_memory(for_dynamic=True) 跳过 dynamic 量化 DiT -> 权重仍驻留
-        # GPU(实测 allocated=17.58GB free=0) -> VAE decode OOM。强制把被摘除的
-        # DiT 模型权重移到 CPU RAM(decode 期间不用, 下 clip 采样前自动重载)。
-        for _lm in _evict_targets:
-            try:
-                _m = getattr(_lm, "model", _lm)
-                _m.to('cpu')
-            except Exception:
-                pass
-        try:
-            _mm.free_memory(1e30, _mm.get_torch_device(), for_dynamic=True)
-        except Exception:
-            pass
         _gc_dv.collect()
         _mm.soft_empty_cache(force=True)
         _torch.cuda.synchronize()
@@ -2907,18 +2934,31 @@ def _decode_single_clip_to_blob(
         # v14.232: 时间维分块 decode —— 整段 107 帧 decode_tiled_3d 预分配
         # 8.45GB output buffer, DiT 残留 17.58GB + 8.45GB 超 24GB OOM。
         # 切 16 latent 帧/块逐块 decode, 每块 output 仅 ~1.3GB, 峰值可控。
+        # v14.236 (fix): v14.232 裸切 16 帧/块截断了块间时间上下文 —— H3 为
+        # 视频 VAE, 独立小块丢失前后帧上下文, 块内出现亮度异常帧, 视觉即
+        # "每 ~16 帧闪一下" + 8bit 编码 banding 细横条纹。修复: 每块沿 T 向
+        # 两侧各扩展 _dec_ctx=8 帧上下文再 decode, 只取原块范围输出; 块间
+        # 输出帧仍严格不重叠, 峰值仅 ~2.6GB/块, 保持 24GB 卡不 OOM。
         _dec_t_block = 16
+        _dec_ctx = 8
         _dec_t_total = int(v.shape[2])
         if _dec_t_total > _dec_t_block:
             _dec_parts = []
             for _t0 in range(0, _dec_t_total, _dec_t_block):
                 _t1 = min(_t0 + _dec_t_block, _dec_t_total)
-                _vk = v[:, :, _t0:_t1].contiguous()
+                _s0 = max(0, _t0 - _dec_ctx)
+                _s1 = min(_dec_t_total, _t1 + _dec_ctx)
+                _vk = v[:, :, _s0:_s1].contiguous()
                 _dec_k = vae.decode(_vk)
                 if _dec_k.ndim == 5:
                     _dec_k = _dec_k.reshape(-1, _dec_k.shape[-3], _dec_k.shape[-2], _dec_k.shape[-1])
+                # 只保留本块对应帧(裁掉上下文扩展段), 块间输出严格不重叠
+                _lo = _t0 - _s0
+                _hi = _t1 - _s0
+                _dec_k = _dec_k[_lo:_hi]
                 _dec_parts.append(_dec_k.detach().cpu())
-                print(f"[H3 Extender]   decode block [{_t0}:{_t1}/{_dec_t_total}] done")
+                print(f"[H3 Extender]   decode block [{_t0}:{_t1}/{_dec_t_total}] "
+                      f"(ctx=[{_s0}:{_s1}]) done")
                 import gc as _gc_dec; _gc_dec.collect()
             video = torch.cat(_dec_parts, dim=0)
             del _dec_parts
@@ -3202,7 +3242,7 @@ def _decode_single_clip_to_blob(
         # Update manifest
         curr["latent_end"] = latent_end
         curr["decoded_mp4_blob"] = render_spec
-        curr["decoded_mp4_version"] = 5  # v14.194: v5 = 含音频后处理(去低频轰鸣/底噪)；v4 blob 不再复用，自动重编码
+        curr["decoded_mp4_version"] = 6  # v14.236: v6 = 时间分块解码加块间上下文(修复 ~16 帧亮度闪烁)；v5 blob 不再复用，自动重编码
         curr["decoded_mp4_width"] = int(video_u8.shape[2])
         curr["decoded_mp4_height"] = int(video_u8.shape[1])
         curr["decoded_mp4_has_audio"] = has_audio

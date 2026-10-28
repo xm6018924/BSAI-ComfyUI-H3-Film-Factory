@@ -15,6 +15,16 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 ---
 
 
+### v14.236 (2026-10-28) — 修复 v14.232 时间分块解码导致的「~16 帧亮度闪烁 + banding 细横条纹」/ fix v14.232 tiled-decode flicker: per-16-frame brightness pulses + banding stripes
+
+**诊断（全片 347 帧实测）：** `_decode_single_clip_to_blob` 自 v14.232 起为防 HyperVAE 2x 解码 OOM，把 latent 沿 T 轴裸切 16 帧/块独立 `vae.decode()` 后 `torch.cat` 硬拼。H3 为视频 VAE，独立小块丢失块间时间上下文 → 每 ~16 视频帧出现亮度异常帧（脉冲尖峰 52/69/86/103/119/137/151/160/176/192/199/215/224/232/296，亮度 103.7–125.5 vs 谷底 74–79，单帧最大跳变 40.3/255）；异常帧平坦区亮度阶跃经 8bit yuv420p 编码呈 banding「细横条纹」（帧 69 banding=3 处、86=7 处，正常帧=0）。已排除：编码器引入（I 帧位置无关、脉冲帧为 P 帧且 pkt_size ~2x）、音频驱动（帧亮度↔音频 RMS 相关 ≈0，帧 240+ 静音仍闪）、内容切换（帧 65–100 NCC 0.88–0.97 而亮度跳 20–40）、行级隔行伪影（偶奇行亮度差 ≤0.31、无 2px FFT 峰）。
+**/ Measured on all 347 frames: v14.232's manual 16-latent-frame decode blocks break inter-block temporal context for the video VAE -> brightness-pulse frames every ~16 frames (peaks 52/69/86/103/.../232, max single-frame jump 40.3); pulse frames' flat-region luma steps show up as 8bit banding stripes. Encoder/audio/content/interlace all ruled out.**
+
+- **修复（1 处逻辑 + 缓存升版）：** ① `motion_context_disk.py` `_decode_single_clip_to_blob` 分块段 —— 每块沿 T 向两侧各扩展 `_dec_ctx=8` 帧上下文再 decode，只取原块范围输出，块间输出帧严格不重叠（恢复视频 VAE 时间注意力上下文，峰值仅 ~2.6GB/块，保持 24GB 卡不 OOM）；② `decoded_mp4_version` 5→**6**（2 处写入 + 1 处判定），旧闪烁 blob 全部失效重解码，per-CLIP 预览 / 渐进全片 / 最终成片全链路生效。**/ Fix: per-block ±8-frame temporal context while keeping block outputs disjoint (~2.6GB/block, no OOM) + cache version bump 5→6 so flickering blobs re-decode across preview/progressive/final.**
+- **验证：** py_compile PASS。渲染验收需用户重跑同一工作流（判据：日志出现 `decode block [..] (ctx=[..]) done` 且成片无 ~16 帧亮度脉冲；自动重解码由 v6 缓存门保证）。**/ Verified: py_compile PASS; acceptance = rerun the same workflow, look for ctx-tagged decode blocks and no ~16-frame pulses.**
+
+---
+
 ### v14.235 (2026-10-27) — SolarRenderer 结构控制「逐帧驱动」第22档 / tier 22 "SolarRenderer Structure Control" (Bilibili BV1Phxu6PE93)
 
 **对照《全新 FastH3-Omni + Singularity V2 动画管线！SolarRenderer 逐帧控制，单卡直出〈刺客信条〉级电影短片！》(BV1Phxu6PE93) 配方落地：SolarRenderer 跑在 Minimax H3 上带两个 LoRA —— 控制 LoRA 逐帧读取结构视频（3D 灰盒/法线贴图/DW 姿态骨架/OpenPose 线框/深度图/边界框 = 视频版 ControlNet）+ 4 步 LoRA（采样压到 4 步）；因果版逐块实时生成（每块只读前 5 块结构+渲染结果）。**
