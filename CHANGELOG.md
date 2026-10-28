@@ -4,6 +4,17 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.239 (2026-10-26) — 档「FastH3 Omni × SelfLift 超分」倍率 2.5 → 2.0：修 24GB 卡上二采 Refine OOM / Cap the "FastH3 Omni × SelfLift" tier's refine factor at 2.0 to stop Refine OOM on 24GB cards
+
+**用户实测（v14.213 日志）：该档一采 4 步 544×960 正常（4分36秒），但二采 `x2.5` 把 latent 从 34×60 放大到 84×150 = 1,348,200 tokens，Sol-Attn 降级 dense 后 `Refine OOM`（allocated 22.75GiB / requested 4.60GiB / limit 23.86GiB），插件回退一采 latent，成片停在低分辨率。**
+**/ Measured: first pass fine, but refine x2.5 blew the latent to 1.35M tokens → dense attention → Refine OOM on a 24GB card, so the pass was rolled back.**
+
+- **根因：** 该档把倍率硬编码为 2.5（视频「0.4x 搭骨架」的原意），但插件里一采 = 工作流手动分辨率、二采 = 一采 × factor。竖版工作流手动 544×960 时，x2.5 的最终 latent 达 1.35M tokens，远超 24GB 的 dense 健康区（项目基准：873k 已很吃力）。
+- **修复：** `refine_upscale_factor` 2.5 → **2.0**，二采降到 ~864k tokens（≈ v14.164 实测跑通的 873k 量级）。需要更高最终分辨率时，把工作流的 width/height 按目标 0.4× 设小，而不是靠调大 factor。
+- **验证：** `extender.py` py_compile PASS。
+
+---
+
 ### v14.238 (2026-10-28) — 修复单采OM preview 模糊/马赛克/碎片化：小尺寸 VAE decode 改回整块，不再无脑 T 轴分块 / fix single-pass OM preview blockiness: small-decode goes whole-tensor instead of T-tiling
 
 **用户实测（`_clippv_250_0_f118ed85.mp4`）：preview 画面模糊、马赛克、碎片化。**
