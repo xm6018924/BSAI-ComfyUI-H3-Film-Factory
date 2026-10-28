@@ -15,6 +15,12 @@ This rule applies across all 刘百声 projects until explicitly revoked.
 ---
 
 
+### v14.238 (2026-10-28) — 修复 v14.235 解码前 DiT 卸载对 DynamicVRAM 无效（OOM 复现）：`partially_unload(offload_device)` 只处理 `comfy_patched_weights` 模块（model_patcher.py:1215），对 DynamicVRAM vbar/pin 权重（H3 量化 DiT 正是此型）卸载 0 字节 → 实机 `popped=1` 但 allocated 18.47GB 纹丝不动 → VAE decode 整段+tiled 均 OOM（requested 1.7GiB）。**/ fix v14.235: partially_unload is a no-op for DynamicVRAM weights (only handles comfy_patched_weights); DiT stayed resident at 18.47GB -> decode OOM reproduced.**
+- **修复：** 解码前清理段对 `is_dynamic()` 模型改走 **`unpatch_model(offload_device)`**（ModelPatcherDynamic 官方 override = `partially_unload(None,1e32)` + `partially_unload_ram` + `move_weight_functions`，ComfyUI 完整 eject 路径，动态量化模型安全）；卸载后一律摘除注册；追加 **GC 3 轮 + empty_cache**（回收 eject 后 delegate 引用残留，远端 v1.96 同款思路）+ `allocated>8GB` 警告。非 dynamic 量化块仍严禁 detach/unpatch（comfy_kitchen `_handle_to` 原生崩溃 round3 链）。**/ Fix: dynamic models now unload via ModelPatcherDynamic.unpatch_model (full eject path); +gc3x delegate cleanup; non-dynamic quantized blocks still must not detach/unpatch.**
+- **验证：** py_compile PASS。渲染验收需重启 ComfyUI 后重跑（判据：`decode VRAM prepared (popped≥1, gc3x): allocated≈0.x GB free≈22GB`，不再出现 OOM traceback，clip1 一采恢复 ~76s/步）。**/ Verified: py_compile PASS; acceptance = restart + rerun, look for allocated≈0.x GB in decode VRAM prepared.**
+
+---
+
 ### v14.237 (2026-10-28) — SegAttention 协同检测修正：KJNodes 真实注册名 `PathchSageAttentionKJ`（Sage 拼写带 h），旧检测名 `PatchSegAttentionKJ` 从未被任何插件注册 → 环境已装 sageattention 2.2.0+cu130 + KJNodes 节点也永远误报「未检测到 SegAttention」。现两名兼容（防 KJNodes 改名），命中任一即视为就绪；重启后日志显示 `✅ 已检测到 KJNodes PathchSageAttentionKJ`。**/ fix: SegAttention co-detection now matches KJNodes' real registration `PathchSageAttentionKJ` (the old misspelled name never matched -> false negative despite sageattention 2.2.0 installed); both names accepted.**
 
 ---

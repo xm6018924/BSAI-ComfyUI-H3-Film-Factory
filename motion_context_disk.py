@@ -2850,21 +2850,22 @@ def _decode_single_clip_to_blob(
         import comfy.model_management as _mm
         import torch as _torch
         import gc as _gc_dv
-        # v14.235: 修复解码前 DiT 卸载失效(2026-10-28 实机日志佐证:
+        # v14.235/238: 修复解码前 DiT 卸载失效(2026-10-28 实机日志佐证:
         # popped=1 但 allocated=18.47GB free=0 -> clip 预览 VAE decode OOM,
-        # 整段+tiled 重试均 OOM, allocated 23.35GiB requested 932MiB)。
+        # 整段+tiled 重试均 OOM, allocated 23.35GiB requested 932MiB/1.7GiB)。
         # 根因1: free_memory(for_dynamic=True) 对 DynamicVRAM 量化 DiT 直接跳过
         #   (model_management.free_memory 里 is_dynamic and for_dynamic -> 不卸载);
         # 根因2: 手动 .to('cpu') 对 DynamicVRAM staged 权重无效(量化权重在自定义
-        #   staged 容器, Module.to 不迁移) -> 权重纹丝不动。
-        # 修复: 复用 extender.py _mp_ck_offload_or_pop 同款已验证安全路径 ——
-        #   dynamic 量化模型(如 H3 量化 DiT)走标准 partially_unload(offload_device,
-        #   1e32) 块级卸载(实测安全: 'Unloaded partially: 14719.41 MB freed, 0.00 MB
-        #   remains loaded'), 卸载后仍有 GPU 驻留(loaded_size>1MB)则摘除注册;
-        #   非 dynamic 直接摘除注册由 GC/empty_cache 回收; 严禁走 detach/unpatch
-        #   /free_memory(不带 for_dynamic) 的 self.model.to(cpu) —— 对量化块触发
-        #   comfy_kitchen QuantizedTensor._handle_to 原生 access violation(round3
-        #   崩溃链, Python try/except 无法捕获, 直接杀进程)。
+        #   staged 容器, Module.to 不迁移) -> 权重纹丝不动;
+        # 根因3(v14.238 实测复盘): partially_unload(offload_device,1e32) 只处理
+        #   comfy_patched_weights 模块(comfy/model_patcher.py:1215), 对 DynamicVRAM
+        #   vbar/pin 权重(delegate)无效 —— 卸载 0 字节, 仅 remove 注册表。
+        # v14.238 修复: dynamic 量化模型走 ModelPatcherDynamic.unpatch_model 官方
+        #   eject 路径(内部 = partially_unload(None,1e32)+partially_unload_ram+
+        #   move_weight_functions); 卸载后一律摘除注册; 加 GC3 轮回收 delegate
+        #   残留 + allocated>8GB 警告。严禁对非 dynamic 量化块 detach/unpatch/
+        #   free_memory(不带 for_dynamic) 的 self.model.to(cpu) —— comfy_kitchen
+        #   QuantizedTensor._handle_to 原生 access violation(round3 崩溃链)。
         #   VAE/audioVAE 条目按真实模型身份保留; 下 clip 采样前驻留补丁自动重载 DiT。
         _keep_entries = []
         for _entry in list(_mm.current_loaded_models):
@@ -2888,15 +2889,28 @@ def _decode_single_clip_to_blob(
                     _popped += 1
                     continue
                 if _m.is_dynamic():
+                    # v14.238 (2026-10-28): DynamicVRAM 模型(如 H3 量化 DiT)走官方
+                    # eject 卸载 —— unpatch_model 的 ModelPatcherDynamic override 内部
+                    # = partially_unload(None,1e32) + partially_unload_ram + 
+                    # move_weight_functions, 是 ComfyUI 的完整卸载路径。此前用的
+                    # partially_unload(offload_device) 只处理 comfy_patched_weights
+                    # 模块, 对 DynamicVRAM vbar/pin 权重无效(实机日志: loaded_size
+                    # 18.4GB 纹丝不动, 仅 remove 注册 -> decode OOM 复现)。
+                    # 非 dynamic 量化块严禁 detach/unpatch(comfy_kitchen _handle_to
+                    # 原生崩溃, round3 链, try/except 捕不住)。
                     try:
-                        _m.partially_unload(_m.offload_device, 1e32)
+                        _m.unpatch_model(_m.offload_device, unpatch_weights=True)
                         _torch.cuda.synchronize()
-                    except Exception:
-                        pass
+                    except Exception as _ue:
+                        print(f"[H3 Extender] v14.238 dynamic unpatch_model 回退 partially_unload: {_ue}")
+                        try:
+                            _m.partially_unload(_m.offload_device, 1e32)
+                            _torch.cuda.synchronize()
+                        except Exception:
+                            pass
                     try:
-                        if _m.loaded_size() > 1024 * 1024:
-                            _mm.current_loaded_models.remove(_entry)
-                            _popped += 1
+                        _mm.current_loaded_models.remove(_entry)
+                        _popped += 1
                     except Exception:
                         pass
                 else:
@@ -2904,14 +2918,21 @@ def _decode_single_clip_to_blob(
                     _popped += 1
             except Exception:
                 pass
-        _gc_dv.collect()
+        # v14.238: GC 3 轮回收 DynamicVRAM delegate/eject 残留(远端 v1.96 同款思路,
+        # 实测 eject 后 delegate 权重 Python 引用残留可达 14.5GB 不释放), 再清缓存
+        # 腾满显存给 VAE 解码。
+        for _gc_round in range(3):
+            _gc_dv.collect()
+            _torch.cuda.empty_cache()
+            _torch.cuda.synchronize()
         _mm.soft_empty_cache(force=True)
-        _torch.cuda.synchronize()
-        _torch.cuda.empty_cache()
         _torch.cuda.synchronize()
         _a = _torch.cuda.memory_allocated() / 1024 ** 3
         _free = _torch.cuda.mem_get_info()[0] / 1024 ** 3
-        print(f"[H3 Extender]   decode VRAM prepared (popped={_popped}): allocated={_a:.2f}GB free={_free:.2f}GB")
+        print(f"[H3 Extender]   decode VRAM prepared (popped={_popped}, gc3x): allocated={_a:.2f}GB free={_free:.2f}GB")
+        if _a > 8.0:
+            print(f"[H3 Extender]   ⚠️ decode VRAM: allocated={_a:.1f}GB 偏高(dynamic 卸载残留), "
+                  f"VAE decode 可能 OOM; 若崩溃需重启 ComfyUI")
     except Exception as _e:
         print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
 
