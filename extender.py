@@ -4698,6 +4698,23 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             pass
                         _refine_model = model
                         _r_delegate_dyn = None
+                        # v14.243 (2026-10-28): 清除原 dynamic model 对 delegate 的
+                        # 缓存引用 —— get_non_dynamic_delegate() 会把 delegate 的
+                        # get_clone_model_override()(=delegate.model, 独立加载的
+                        # ~19.5GB 权重实例) 存入 self.non_dynamic_delegate_model 属性,
+                        # 原 model 全程存活导致 delegate 的 GPU 量化权重无法被 GC。
+                        # 实机佐证: 二采后摘注册+GC 后 allocated 仍 18.47GB, clip2
+                        # 一采全流式换页 195s/步(vs clip1 71s), v14.186 报 DiT
+                        # 19.5GB > 可用 0GB。清空后 delegate 强引用归零, GC 回收
+                        # 全部 GPU 权重; 下次二采 get_non_dynamic_delegate 重新创建,
+                        # 无副作用, 全程不触碰 .to(cpu)/unpatch。
+                        try:
+                            if hasattr(model, "non_dynamic_delegate_model"):
+                                model.non_dynamic_delegate_model = None
+                                print("[H3 Extender] v14.243 清除 delegate 缓存引用 "
+                                      "(non_dynamic_delegate_model), GPU 权重可回收")
+                        except Exception:
+                            pass
                         try:
                             import gc as _gc
                             _gc.collect()
@@ -9807,6 +9824,18 @@ class BSAIH3FilmFactory:
                             _lm.model.partially_unload(_lm.model.offload_device, 1e32)
                         except Exception:
                             pass
+                    # v14.243 兜底: 若二采完成处未走到 delegate 缓存引用清除
+                    # (异常/回退路径), 在下一 clip 一采前强制清除原 model 持有的
+                    # non_dynamic_delegate_model(=delegate.model 强引用), 使
+                    # delegate 的 GPU 量化权重可被 GC, 避免 clip2+ 一采全流式换页。
+                    try:
+                        for _lm243 in list(_mm.current_loaded_models):
+                            _m243 = getattr(_lm243, "model", None)
+                            if _m243 is not None and hasattr(_m243, "non_dynamic_delegate_model"):
+                                _m243.non_dynamic_delegate_model = None
+                                print("[H3 Extender] v14.243 兜底清除 delegate 缓存引用")
+                    except Exception:
+                        pass
                     _mm.soft_empty_cache(force=True)
                     _torch.cuda.synchronize()
                     _torch.cuda.empty_cache()
