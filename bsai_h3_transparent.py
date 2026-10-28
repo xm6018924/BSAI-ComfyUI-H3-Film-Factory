@@ -374,11 +374,12 @@ class BSAI_H3_SaveTransparentVideo:
     def _write_mov_prores(self, path, frames_u8, fps, audio):
         import av
         container = av.open(path, "w")
-        vstream = container.add_stream("prores", rate=fps)
-        try:
-            vstream.codec_context.profile = "4444"   # 12bit 真 Alpha
-        except Exception:
-            pass
+        # v14.240: profile 经 encoder options 显式传给 avcodec_open2。
+        # 旧写法 `vstream.codec_context.profile = "4444"` 对部分 PyAV/ffmpeg 组合
+        # 赋值不生效（被 try/except 静默吞），于是填默认 profile(hq) + pix_fmt
+        # yuva444p10le 的组合非法 -> avcodec_open2("prores", {}) 返回 22 (EINVAL)。
+        # options 里的 profile 与下面的 pix_fmt 构成合法组合 (4444 <-> yuva444p10le)。
+        vstream = container.add_stream("prores", rate=fps, options={"profile": "4444"})
         vstream.width = frames_u8.shape[2]
         vstream.height = frames_u8.shape[1]
         vstream.pix_fmt = "yuva444p10le"

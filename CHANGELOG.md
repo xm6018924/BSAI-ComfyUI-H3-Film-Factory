@@ -4,6 +4,17 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.240 (2026-10-26) — 修透明视频导出 prores 崩溃：profile 改经 encoder options 传递 / Fix prores export crash: pass the profile through encoder options
+
+**用户实测（节点 `BSAI_H3_SaveTransparentVideo`，1195 帧）：`av.error.ArgumentError: Invalid argument: 'avcodec_open2("prores", {})' returned 22`（`bsai_h3_transparent.py:397`）。**
+**/ Measured: prores export aborts with EINVAL from avcodec_open2.**
+
+- **根因：** 旧代码用 `vstream.codec_context.profile = "4444"` 设档位（外面套 `try/except` 吞异常），再设 `vstream.pix_fmt = "yuva444p10le"`。该 profile 赋值在部分 PyAV/ffmpeg 组合上**不生效**，于是编码器以默认 profile(hq) + `yuva444p10le` 打开 —— 组合非法 → `avcodec_open2` 返回 22。报错里 `{}` 是空 options，正是 profile 没经由 options 下发的证据。
+- **修复：** `add_stream("prores", rate=fps, options={"profile": "4444"})`，让 profile 随 encoder options 一路传到 `avcodec_open2`，与 `yuva444p10le` 构成合法组合（4444 ↔ yuva444p10le，12bit 真 Alpha）。
+- **验证：** `bsai_h3_transparent.py` py_compile PASS。
+
+---
+
 ### v14.239 (2026-10-26) — 档「FastH3 Omni × SelfLift 超分」倍率 2.5 → 2.0：修 24GB 卡上二采 Refine OOM / Cap the "FastH3 Omni × SelfLift" tier's refine factor at 2.0 to stop Refine OOM on 24GB cards
 
 **用户实测（v14.213 日志）：该档一采 4 步 544×960 正常（4分36秒），但二采 `x2.5` 把 latent 从 34×60 放大到 84×150 = 1,348,200 tokens，Sol-Attn 降级 dense 后 `Refine OOM`（allocated 22.75GiB / requested 4.60GiB / limit 23.86GiB），插件回退一采 latent，成片停在低分辨率。**
