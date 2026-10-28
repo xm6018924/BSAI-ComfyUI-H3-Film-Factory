@@ -2972,8 +2972,15 @@ def _decode_single_clip_to_blob(
         _dec_h = int(v.shape[-2])
         _dec_w = int(v.shape[-1])
         _est_out_gb = (_dec_t_total * _dec_h * _dec_w * 3 * 4) / 1024 ** 3
-        if _dec_t_total > _dec_t_block and _est_out_gb > 3.0:
-            print(f"[H3 Extender]   v14.238: T轴分块 decode (est output={_est_out_gb:.2f}GB > 3GB)")
+        # v14.239 (2026-10-28): allocated 偏高时强制分块 —— v14.238 只看 est output
+        # <= 3GB 就整块 decode, 但 DiT eject 不彻底时 allocated=13.7GB 残留,
+        # VAE decode 内部中间激活不可控, 即使 output 仅 0.01GB 也 OOM
+        # (前端报 "Allocation on device 0 would exceed allowed memory")。
+        # 条件: output > 3GB OR allocated > 8GB(eject 残留警告线) -> 分块。
+        _force_chunk = (_a if '_a' in dir() else 0.0) > 8.0
+        if _dec_t_total > _dec_t_block and (_est_out_gb > 3.0 or _force_chunk):
+            print(f"[H3 Extender]   v14.239: T轴分块 decode (est output={_est_out_gb:.2f}GB, "
+                  f"allocated={_a:.1f}GB, force_chunk={_force_chunk})")
             _dec_parts = []
             for _t0 in range(0, _dec_t_total, _dec_t_block):
                 _t1 = min(_t0 + _dec_t_block, _dec_t_total)
@@ -2994,7 +3001,8 @@ def _decode_single_clip_to_blob(
             video = torch.cat(_dec_parts, dim=0)
             del _dec_parts
         else:
-            print(f"[H3 Extender]   v14.238: 整块 decode (est output={_est_out_gb:.2f}GB <= 3GB, 无块边界)")
+            print(f"[H3 Extender]   v14.239: 整块 decode (est output={_est_out_gb:.2f}GB, "
+                  f"allocated={_a:.1f}GB, 无块边界)")
             video = vae.decode(v)
     finally:
         if _od_overridden:
