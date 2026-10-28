@@ -2927,6 +2927,18 @@ def _decode_single_clip_to_blob(
             _torch.cuda.synchronize()
         _mm.soft_empty_cache(force=True)
         _torch.cuda.synchronize()
+        # v14.242 (2026-10-28): 保险 —— 恢复 EXTRA_RESERVED_VRAM 到默认(600MB)。
+        # 二采 reserve 分支曾将其设为 3~8GB 并应在 4707 复原, 但若任何异常路径
+        # 跳过复原, free_memory 会误判可用显存为负, 影响 VAE 加载/解码前的调度。
+        # 仅在残留 >2GB 时复位, 不触碰正常默认值。
+        try:
+            _rv_now = getattr(_mm, "EXTRA_RESERVED_VRAM", None)
+            if _rv_now is not None and _rv_now > 2 * 1024 * 1024 * 1024:
+                _mm.EXTRA_RESERVED_VRAM = 600 * 1024 * 1024
+                print(f"[H3 Extender] v14.242 恢复 EXTRA_RESERVED_VRAM: "
+                      f"{_rv_now / 1024 ** 3:.1f}GB -> 600MB (解码前)")
+        except Exception:
+            pass
         _a = _torch.cuda.memory_allocated() / 1024 ** 3
         _free = _torch.cuda.mem_get_info()[0] / 1024 ** 3
         print(f"[H3 Extender]   decode VRAM prepared (popped={_popped}, gc3x): allocated={_a:.2f}GB free={_free:.2f}GB")
@@ -2960,15 +2972,17 @@ def _decode_single_clip_to_blob(
         # "每 ~16 帧闪一下" + 8bit 编码 banding 细横条纹。修复: 每块沿 T 向
         # 两侧各扩展 _dec_ctx=8 帧上下文再 decode, 只取原块范围输出; 块间
         # 输出帧仍严格不重叠, 峰值仅 ~2.6GB/块, 保持 24GB 卡不 OOM。
-        _dec_t_block = 16
-        _dec_ctx = 8
+        _dec_t_block = 8
+        _dec_ctx = 4
         _dec_t_total = int(v.shape[2])
-        # v14.238 (2026-10-28): 小尺寸整块 decode —— v14.232 的 T 轴分块是为
-        # 双采高分辨率(1088x1920, output 8.45GB + DiT 残留 17.58GB) OOM 设计的;
-        # 但单采OM一采低分辨率(68x120, output ~8.5MB)被无条件分块, 块边界处
-        # VAE 时间卷积上下文不足 → 每 ~16 帧出现马赛克/碎片化/亮度微跳。
-        # 整块 output < 3GB 时(DiT 已由 v14.225 摘出, free~22GB)直接整块 decode,
-        # 无块边界, 画质最佳; 高分辨率(>=3GB)仍走 v14.236 分块+上下文。
+        # v14.242 (2026-10-28): 直播带货对口型 preview decode OOM 根治补充。
+        # 实机日志: 解码前 allocated=18.47GB(free=0) —— 二采 non-dynamic delegate
+        # 与 DynamicVRAM 原 model 共享底层 Model 实例, 二采后清理仅摘注册无法回收
+        # GPU 量化权重(QuantizedTensor .to(cpu) 原生 access violation, 严禁触碰);
+        # HyperVAE2x 解码 v14.239 的 16+8ctx 帧块中间激活 ~4.85GB + output 1.7GB
+        # 叠加 18.5GB 残留 → allocated 23.35GiB + Requested 1.70GiB OOM。
+        # 修复: 默认分块降为 8+4ctx(中间激活 ~2.4GB, 18.5+2.4 < 23.86 有裕量),
+        # OOM 自动降级 4+2ctx 重试, 全程零 .to(cpu)/unpatch, 不动 delegate 驻留。
         _dec_h = int(v.shape[-2])
         _dec_w = int(v.shape[-1])
         _est_out_gb = (_dec_t_total * _dec_h * _dec_w * 3 * 4) / 1024 ** 3
@@ -2978,32 +2992,95 @@ def _decode_single_clip_to_blob(
         # (前端报 "Allocation on device 0 would exceed allowed memory")。
         # 条件: output > 3GB OR allocated > 8GB(eject 残留警告线) -> 分块。
         _force_chunk = (_a if '_a' in dir() else 0.0) > 8.0
+        _dec_done = False
         if _dec_t_total > _dec_t_block and (_est_out_gb > 3.0 or _force_chunk):
-            print(f"[H3 Extender]   v14.239: T轴分块 decode (est output={_est_out_gb:.2f}GB, "
-                  f"allocated={_a:.1f}GB, force_chunk={_force_chunk})")
-            _dec_parts = []
-            for _t0 in range(0, _dec_t_total, _dec_t_block):
-                _t1 = min(_t0 + _dec_t_block, _dec_t_total)
-                _s0 = max(0, _t0 - _dec_ctx)
-                _s1 = min(_dec_t_total, _t1 + _dec_ctx)
-                _vk = v[:, :, _s0:_s1].contiguous()
-                _dec_k = vae.decode(_vk)
-                if _dec_k.ndim == 5:
-                    _dec_k = _dec_k.reshape(-1, _dec_k.shape[-3], _dec_k.shape[-2], _dec_k.shape[-1])
-                # 只保留本块对应帧(裁掉上下文扩展段), 块间输出严格不重叠
-                _lo = _t0 - _s0
-                _hi = _t1 - _s0
-                _dec_k = _dec_k[_lo:_hi]
-                _dec_parts.append(_dec_k.detach().cpu())
-                print(f"[H3 Extender]   decode block [{_t0}:{_t1}/{_dec_t_total}] "
-                      f"(ctx=[{_s0}:{_s1}]) done")
-                import gc as _gc_dec; _gc_dec.collect()
-            video = torch.cat(_dec_parts, dim=0)
-            del _dec_parts
+            # v14.242: 分块解码 + OOM 自适应降级(8+4ctx -> 4+2ctx)
+            for _dec_blk_try in (8, 4):
+                _dec_ctx_try = 4 if _dec_blk_try >= 8 else 2
+                try:
+                    print(f"[H3 Extender]   v14.242: T轴分块 decode (block={_dec_blk_try}+{_dec_ctx_try}ctx, "
+                          f"est output={_est_out_gb:.2f}GB, allocated={_a:.1f}GB, force_chunk={_force_chunk})")
+                    _dec_parts = []
+                    for _t0 in range(0, _dec_t_total, _dec_blk_try):
+                        _t1 = min(_t0 + _dec_blk_try, _dec_t_total)
+                        _s0 = max(0, _t0 - _dec_ctx_try)
+                        _s1 = min(_dec_t_total, _t1 + _dec_ctx_try)
+                        _vk = v[:, :, _s0:_s1].contiguous()
+                        _dec_k = vae.decode(_vk)
+                        if _dec_k.ndim == 5:
+                            _dec_k = _dec_k.reshape(-1, _dec_k.shape[-3], _dec_k.shape[-2], _dec_k.shape[-1])
+                        # 只保留本块对应帧(裁掉上下文扩展段), 块间输出严格不重叠
+                        _lo = _t0 - _s0
+                        _hi = _t1 - _s0
+                        _dec_k = _dec_k[_lo:_hi]
+                        _dec_parts.append(_dec_k.detach().cpu())
+                        print(f"[H3 Extender]   decode block [{_t0}:{_t1}/{_dec_t_total}] "
+                              f"(ctx=[{_s0}:{_s1}]) done")
+                        import gc as _gc_dec; _gc_dec.collect()
+                    video = torch.cat(_dec_parts, dim=0)
+                    del _dec_parts
+                    _dec_done = True
+                    break
+                except torch.cuda.OutOfMemoryError as _dec_oom:
+                    print(f"[H3 Extender]   v14.242 decode OOM at block={_dec_blk_try}: {_dec_oom}")
+                    try:
+                        del _dec_parts
+                    except Exception:
+                        pass
+                    import gc as _gc_retry
+                    _gc_retry.collect()
+                    _torch.cuda.empty_cache()
+                    _torch.cuda.synchronize()
+                    if _dec_blk_try == 4:
+                        # 最小块仍 OOM: 抛出让上层 fallback 处理
+                        raise
+            if not _dec_done:
+                raise RuntimeError("[H3 Extender] decode 分块全部失败")
         else:
-            print(f"[H3 Extender]   v14.239: 整块 decode (est output={_est_out_gb:.2f}GB, "
-                  f"allocated={_a:.1f}GB, 无块边界)")
-            video = vae.decode(v)
+            try:
+                print(f"[H3 Extender]   v14.242: 整块 decode (est output={_est_out_gb:.2f}GB, "
+                      f"allocated={_a:.1f}GB, 无块边界)")
+                video = vae.decode(v)
+            except torch.cuda.OutOfMemoryError:
+                # v14.242: 整块 OOM -> 降级走 8+4ctx 分块, 块内 OOM 再自动降 4+2ctx
+                print(f"[H3 Extender]   v14.242: 整块 decode OOM, 降级 T轴分块 (8+4ctx)")
+                _dec_done = False
+                for _dec_blk_try in (8, 4):
+                    _dec_ctx_try = 4 if _dec_blk_try >= 8 else 2
+                    try:
+                        _dec_parts = []
+                        for _t0 in range(0, _dec_t_total, _dec_blk_try):
+                            _t1 = min(_t0 + _dec_blk_try, _dec_t_total)
+                            _s0 = max(0, _t0 - _dec_ctx_try)
+                            _s1 = min(_dec_t_total, _t1 + _dec_ctx_try)
+                            _vk = v[:, :, _s0:_s1].contiguous()
+                            _dec_k = vae.decode(_vk)
+                            if _dec_k.ndim == 5:
+                                _dec_k = _dec_k.reshape(-1, _dec_k.shape[-3], _dec_k.shape[-2], _dec_k.shape[-1])
+                            _lo = _t0 - _s0
+                            _hi = _t1 - _s0
+                            _dec_k = _dec_k[_lo:_hi]
+                            _dec_parts.append(_dec_k.detach().cpu())
+                            print(f"[H3 Extender]   decode block [{_t0}:{_t1}/{_dec_t_total}] done")
+                            import gc as _gc_dec2; _gc_dec2.collect()
+                        video = torch.cat(_dec_parts, dim=0)
+                        del _dec_parts
+                        _dec_done = True
+                        break
+                    except torch.cuda.OutOfMemoryError as _dec_oom2:
+                        print(f"[H3 Extender]   v14.242 降级分块 OOM at block={_dec_blk_try}: {_dec_oom2}")
+                        try:
+                            del _dec_parts
+                        except Exception:
+                            pass
+                        import gc as _gc_retry2
+                        _gc_retry2.collect()
+                        _torch.cuda.empty_cache()
+                        _torch.cuda.synchronize()
+                        if _dec_blk_try == 4:
+                            raise
+                if not _dec_done:
+                    raise RuntimeError("[H3 Extender] decode 降级分块全部失败")
     finally:
         if _od_overridden:
             vae.output_device = _od_prev
