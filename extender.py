@@ -3206,6 +3206,29 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     noise = comfy.sample.prepare_noise(latent_image, int(seed), batch_inds)
     noise_mask = latent_out.get("noise_mask", None)
 
+    # v14.240 (2026-10-28): 二采段头锁 keep —— 提取一采 noise_mask 的段头锁行数
+    # (video 成员头部连续 mask=0 的行 = motion context trim 区的 latent 行)。
+    # 一采已把段头锁成上一段尾延续画面; 二采若从加噪底重绘段头, 接缝被二次
+    # 重绘 → 段间跳帧/漂移(双采无缝档实测跳帧根因)。二采对同样行数锁 keep。
+    _os_head_rows = 0
+    try:
+        _nm_os = latent.get("noise_mask")
+        if _nm_os is not None:
+            _nmm_os, _ = _ff_extract_members(_nm_os)
+            _mvv_os = _nmm_os[0]
+            if _mvv_os is not None and _mvv_os.dim() in (4, 5):
+                _zr_os = 0
+                for _r_os in range(int(_mvv_os.shape[2])):
+                    if float(_mvv_os[:, :, _r_os].min()) <= 0.0:
+                        _zr_os += 1
+                    else:
+                        break
+                if _zr_os >= 1:
+                    _os_head_rows = _zr_os
+                    print(f"[H3 Extender] v14.240 二采段头锁: 检测到一采段头锁 {_os_head_rows} latent 行, 二采将保持该区(不二次重绘)")
+    except Exception:
+        _os_head_rows = 0
+
     x0_output = {}
     total_steps = sigmas.shape[0] - 1
 
@@ -3930,6 +3953,35 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             if not _use_temporal:
                 _r_noise = comfy.sample.prepare_noise(samples, int(seed) + 1, None)
                 _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
+                # v14.240 (fix): 非分块二采段头锁 keep —— 一采段头锁行数 >0 时,
+                # 把二采 latent 段头重置为一采输出(samples)的干净延续画面, 并设
+                # video mask=0 锁 keep, 杜绝二采从加噪底重画接缝 → 段间跳帧。
+                if _os_head_rows >= 1:
+                    try:
+                        _rlm_os, _rln_os = _ff_extract_members(_r_latent["samples"])
+                        _rv_os = _rlm_os[0]
+                        _hrows_os = min(_os_head_rows, int(_rv_os.shape[2]))
+                        if _hrows_os >= 1:
+                            _smem_os, _ = _ff_extract_members(samples)
+                            _s_v_os = _smem_os[0]
+                            if tuple(_s_v_os.shape[-2:]) == tuple(_rv_os.shape[-2:]):
+                                _rv_os = _rv_os.clone()
+                                _rv_os[:, :, :_hrows_os] = _s_v_os[:, :, :_hrows_os]
+                                _rlm_os[0] = _rv_os
+                                _r_latent["samples"] = _ff_wrap_members(_rlm_os, _rln_os)
+                                _vmask_os = torch.ones_like(_rv_os)
+                                _vmask_os[:, :, :_hrows_os] = 0.0
+                                _a_part_os = _rlm_os[1]
+                                if float(_r_audio) >= 0.5:
+                                    _amask_os = torch.ones((1, 1, 1, int(_a_part_os.shape[-1])),
+                                                           dtype=_rv_os.dtype, device=_rv_os.device)
+                                else:
+                                    _amask_os = torch.zeros((1, 1, 1, int(_a_part_os.shape[-1])),
+                                                           dtype=_rv_os.dtype, device=_rv_os.device)
+                                _r_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_vmask_os, _amask_os))
+                                print(f"[H3 Extender] v14.240 非分块二采段头锁 keep: 段头 {_hrows_os} 行锁定为一采延续画面(接缝零二次重绘)")
+                    except Exception as _rlock_err:
+                        print(f"[H3 Extender] v14.240 二采段头锁失败(可忽略): {_rlock_err}")
             else:
                 _r_noise = None
                 _r_latent = None
@@ -4557,6 +4609,35 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                 _amask = torch.zeros((1, 1, 1, int(_a_part.shape[-1])),
                                                     dtype=_mask_ki.dtype, device=_a_part.device)
                             _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_ki, _amask))
+                        # v14.240 (fix): 分块二采·首块段头锁 keep —— 首块无前块
+                        # 重叠(_ov_here=0), 原逻辑全重绘会把 clip 段头(一采已锁的
+                        # 延续区)二次重画 → 段间跳帧。这里把首块段头 _os_head_rows
+                        # 行锁为一采输出(samples)的干净延续画面, mask=0 不二次重绘。
+                        if _ki == 0 and _os_head_rows >= 1 and _lock_n == 0:
+                            try:
+                                _cl_m0, _cl_n0 = _ff_extract_members(_chunk_latent["samples"])
+                                _cv_os = _cl_m0[0]
+                                _hrows_os = min(_os_head_rows, int(_cv_os.shape[2]))
+                                if _hrows_os >= 1:
+                                    _s_v_os = _mem_full[0]
+                                    if _st == 0 and tuple(_s_v_os.shape[-2:]) == tuple(_cv_os.shape[-2:]):
+                                        _cv_os = _cv_os.clone()
+                                        _cv_os[:, :, :_hrows_os] = _s_v_os[:, :, :_hrows_os]
+                                        _cl_m0[0] = _cv_os
+                                        _chunk_latent["samples"] = _ff_wrap_members(_cl_m0, _cl_n0)
+                                        _mask_h0 = torch.ones_like(_cv_os)
+                                        _mask_h0[:, :, :_hrows_os] = 0.0
+                                        _a_h0 = _cl_m0[1]
+                                        if float(_r_audio) >= 0.5:
+                                            _amask_h0 = torch.ones((1, 1, 1, int(_a_h0.shape[-1])),
+                                                                   dtype=_cv_os.dtype, device=_cv_os.device)
+                                        else:
+                                            _amask_h0 = torch.zeros((1, 1, 1, int(_a_h0.shape[-1])),
+                                                                    dtype=_cv_os.dtype, device=_cv_os.device)
+                                        _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_h0, _amask_h0))
+                                        print(f"[H3 Extender] v14.240 分块首块段头锁 keep: {_hrows_os} 行锁定为一采延续画面(接缝零二次重绘)")
+                            except Exception as _h0_err:
+                                print(f"[H3 Extender] v14.240 分块首块段头锁失败(可忽略): {_h0_err}")
                         with _aimdo_disabled():
                             _chunk_out = _r_guider.sample(
                                 comfy.sample.prepare_empty_noise(_chunk_latent["samples"]),
@@ -9340,6 +9421,29 @@ class BSAIH3FilmFactory:
         # Walk the card list in order. Cached TRUE clips are metadata-only;
         # active clips sample and are written immediately to disk.
         _os_pass_notice_done = False  # v14.185: 一镜到底采样档提示每次执行只打印一次
+        # v14.240 (2026-10-28): 一镜到底 —— 强制全链同 seed（摄像机轨迹连续）。
+        # 根因: 默认 seed_mode=randomize 每段独立随机噪声场, 即使段头锁 keep +
+        # keyframe 参考把画面锚住, 段内中段的噪声路径仍逐段重启 → 运镜轨迹
+        # 每段重新随机, 观感=段间"切镜"。官方 continuation 语义(单次生成 +
+        # 22帧延续)天然同源; 链式方案必须同 seed 才能让噪声场跨段连续,
+        # 摄像机运动(推/拉/摇/移)沿同一条轨迹自然延伸。
+        if one_shot_enabled:
+            try:
+                _os_seed_fixed = None
+                for _osc in clips[:loop_end]:
+                    try:
+                        _s0 = max(0, min(DEFAULT_SEED_MAX, int(_osc.get("seed", 0) or 0)))
+                        if _os_seed_fixed is None:
+                            _os_seed_fixed = _s0
+                        _sm = str(_osc.get("seed_mode", "randomize"))
+                        if _osc.get("seed") != _os_seed_fixed or _sm != "fixed":
+                            _osc["seed"] = _os_seed_fixed
+                            _osc["seed_mode"] = "fixed"
+                            print(f"[H3 Extender] v14.240 一镜到底: clip seed 强制统一 = {_os_seed_fixed} (原 {_sm}), 噪声场跨段连续")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
         # v14.193: 视觉锚点自动记录 —— 渲染前按故事顺序预提取每个分镜的
         # 全部可见视觉元素状态（来源 = 分镜正文, 与渲染提示词同源: 外部 prompt
         # 覆盖优先）。覆盖角色形象/外观/服装/服饰/发型/鞋帽/场景/道具/布景等
@@ -9798,10 +9902,18 @@ class BSAIH3FilmFactory:
                 # latent —— 无限长链多次复用时纯复用会累积过度平滑/劣化。
                 # 这里按教程精神给 keyframes 参考注入微噪(σ 比例自适应)。
                 # 环境变量 BSAI_H3_CTX_NOISE=0.05(默认), 设 0 关闭; 不加参数端口。
+                # v14.240 (fix): 一镜到底默认关闭微噪 —— 该微噪给 keyframes 参考
+                # latent 注入 5%σ 随机扰动, 会让模型把段头参考"重新想象"成新画面,
+                # 抵消锁 keep + 尾帧引导的延续效果(用户实测段间跳帧)。仅当用户
+                # 显式设 BSAI_H3_CTX_NOISE 才启用; 分镜模式保持原默认 0.05。
                 try:
-                    _ctx_noise = float(os.environ.get("BSAI_H3_CTX_NOISE", "0.05") or 0.0)
+                    _ctx_noise_env = os.environ.get("BSAI_H3_CTX_NOISE", None)
+                    if _ctx_noise_env is None:
+                        _ctx_noise = 0.0 if one_shot_enabled else 0.05
+                    else:
+                        _ctx_noise = float(_ctx_noise_env or 0.0)
                 except (TypeError, ValueError):
-                    _ctx_noise = 0.05
+                    _ctx_noise = 0.0 if one_shot_enabled else 0.05
                 if _ctx_noise > 0.0:
                     try:
                         # ComfyUI conditioning = list[[cond_dict, extra]]; 兼容两种槽位
@@ -9855,7 +9967,19 @@ class BSAIH3FilmFactory:
                 # 锁 keep(v14.178 已验证无缝)。
                 try:
                     if trim_frames:
-                        _n_head = max(1, (int(trim_frames) + 16) // 17)  # 帧→latent步(stride≈17)
+                        # v14.240 (fix): 帧→latent 行精确换算(H3 网格: 每 17 帧
+                        # 5 行, 基底 5 帧/2 行)。旧公式 (trim+16)//17: trim=22 -> 2行
+                        # (≈6.8帧), trim=39 -> 3行(≈10帧) —— 锁 keep 区只覆盖段头
+                        # 1/3~1/4, 其余 trim 区模型"重新想象" → 段头画面不延续
+                        # 上一段尾 → 段间跳帧。精确公式 trim>=5 ->
+                        # ((trim-5)//17)*5+2: 22->7行(≈23帧), 39->12行(≈41帧),
+                        # 覆盖整个 motion context trim 区, 采样器在段头严格从
+                        # 上一段尾状态延续演化, 输出区起点自然衔接。
+                        _trim_n = int(trim_frames)
+                        if _trim_n >= 5:
+                            _n_head = max(1, ((_trim_n - 5) // 17) * 5 + 2)
+                        else:
+                            _n_head = 1
                         _prev_samples = previous_proxy.get("samples") if isinstance(previous_proxy, dict) else previous_proxy
                         _tail_v = None
                         if isinstance(_prev_samples, comfy.nested_tensor.NestedTensor):
@@ -9901,7 +10025,15 @@ class BSAIH3FilmFactory:
                                         except Exception as _rs_err:
                                             print(f"[H3 Extender] v14.215 接缝锚点重采样失败(可忽略): {_rs_err}")
                                             raise
-                                    _vv2[:, :, :_n_head] = _src * 0.9 + torch.randn_like(_src) * 0.1
+                                    if one_shot_enabled:
+                                        # v14.240 (fix): 一镜到底锁区用纯尾帧(零扰动)。
+                                        # 锁区按 H3 网格精确对齐 trim 区后, 行粒度
+                                        # (≈3.4帧/行)使锁区比 trim 区多 1~2 帧并残留
+                                        # 进输出区; 旧 10% 扰动会让残留帧带噪(跳帧感)。
+                                        # 纯尾帧 = 画面无缝延续上一段尾, 无噪点。
+                                        _vv2[:, :, :_n_head] = _src
+                                    else:
+                                        _vv2[:, :, :_n_head] = _src * 0.9 + torch.randn_like(_src) * 0.1
                                     latent["samples"] = comfy.nested_tensor.NestedTensor((_vv2, _aa))
                                     _m_old = latent.get("noise_mask")
                                     if isinstance(_m_old, comfy.nested_tensor.NestedTensor):
