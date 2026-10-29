@@ -118,7 +118,13 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.233-h3-transparent-keying"
+BUILD = "minimax-h3-extender-v14.240-refine-workspace-probe"
+
+# v14.240: 二采 workspace reserve 记忆。
+# 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
+# 直接把上次实测的 reserve 用上, 省掉一次"全卸 -> 重驻留"(24GB 卡上约
+# 30-60s 的纯开销)。键 = refine 倍率, 值 = reserve(GB)。
+_REFINE_WS_RESERVE_HINT = {}
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -4191,6 +4197,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             # free~7.2GB > ws6.5GB, ComfyUI 不再卸载, 分块forward正常换页。
                             if tiled_refine:
                                 _r_reserve_gb = max(_r_reserve_gb, 7.5)
+                            # v14.240: 用上次实测的 reserve(见本文件下方 workspace 探针)。
+                            # 链式渲染 clip>=2 直接命中, 省一次全卸重驻留。
+                            _hint240 = _REFINE_WS_RESERVE_HINT.get(round(_r_factor, 2))
+                            if _hint240:
+                                _r_reserve_gb = max(_r_reserve_gb, min(8.0, _hint240))
+                                print(f"[H3 Extender] v14.240 复用上次实测 reserve "
+                                      f"{_r_reserve_gb:.1f}GB (x{_r_factor}), 免重驻留")
                             _ff_unregister_model(model, label="二采-reserve-branch")
                             _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
                         except Exception:
@@ -4233,9 +4246,59 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                           f"empty_cache 回收 cached 池后 free={_free65:.1f}GB "
                                           f">= ws {_ws65:.1f}GB+2GB, Sol-Attn workspace 可分配")
                                 else:
-                                    print(f"[H3 Extender] Refine 警告: 二采 workspace 空间不足 "
-                                          f"(free={_free65:.1f}GB < ws {_ws65:.1f}GB+2GB), "
-                                          f"采样将靠 lowvram 换页兜底, 建议下次降低 refine_upscale_factor")
+                                    # v14.240 (2026-10-29): 把"只看 free 就报警"改成
+                                    # 「真实试分配探针 + 真缺才自适应让位」。
+                                    # 根因: --cuda-malloc(cudaMallocAsync) 下 mem_get_info()
+                                    # 会把分配器池内的空闲块计为"已占用", 实测驻留
+                                    # 18.4GB 后 free=0.0GB, 但整段采样并没有 OOM ——
+                                    # 旧逻辑据此打印"空间不足/建议降低 refine_upscale_factor",
+                                    # 属于误报; 更糟的是它只报警不处理, 若真缺 workspace,
+                                    # Sol-Attn kernel 会退化到 dense/换页路径, 每步暴涨.
+                                    # 新逻辑:
+                                    #   1) 直接申请 ws+0.5GB(连续大块, 顺带验证碎片);
+                                    #      成功 => workspace 确实可用, 保持满驻留(最快配置);
+                                    #   2) 失败 => 说明真缺, 抬高 reserve 重驻留让位,
+                                    #      绝不降 refine 倍率(成片像素不缩水).
+                                    _probe_ok240 = False
+                                    try:
+                                        _pb240 = int((_ws65 + 0.5) * 1024 ** 3)
+                                        _pt240 = _torch65.empty(_pb240 // 4, dtype=_torch65.float32,
+                                                                device="cuda")
+                                        del _pt240
+                                        _torch65.cuda.synchronize()
+                                        _torch65.cuda.empty_cache()
+                                        _probe_ok240 = True
+                                    except Exception as _pe240:
+                                        _probe_ok240 = False
+                                    if _probe_ok240:
+                                        print(f"[H3 Extender] v14.240 workspace 探针通过: "
+                                              f"free={_free65:.1f}GB 低于阈值 ws {_ws65:.1f}GB+2GB, "
+                                              f"但真实试分配 {_ws65 + 0.5:.1f}GB 成功(池内空闲块可复用), "
+                                              f"Sol-Attn workspace 可用 → 保持满驻留 x{_r_factor}(不降倍率)")
+                                    else:
+                                        _resv_old240 = float(locals().get('_r_reserve_gb', 5.5))
+                                        _deficit240 = (_ws65 + 2.0) - _free65
+                                        _resv240 = min(14.0, _resv_old240 + _deficit240 + 0.5)
+                                        try:
+                                            import gc as _gc240
+                                            _ff_unregister_model(model, label="二采-workspace-adaptive")
+                                            _mm3.EXTRA_RESERVED_VRAM = int(_resv240 * 1024 ** 3)
+                                            _mm3.load_models_gpu([model])
+                                            _torch65.cuda.synchronize()
+                                            _gc240.collect()
+                                            _torch65.cuda.empty_cache()
+                                            _f240b, _ = _torch65.cuda.mem_get_info()
+                                            _res240 = model.loaded_size() / 1024 ** 3
+                                            _r_reserve_gb = _resv240
+                                            _REFINE_WS_RESERVE_HINT[round(_r_factor, 2)] = _resv240
+                                            print(f"[H3 Extender] v14.240 workspace 自适应让位: "
+                                                  f"reserve {_resv_old240:.1f}->{_resv240:.1f}GB, "
+                                                  f"resident={_res240:.1f}GB, "
+                                                  f"free={_f240b / 1024 ** 3:.1f}GB "
+                                                  f"(目标 ws {_ws65:.1f}GB+2GB), 倍率保持 x{_r_factor}")
+                                        except Exception as _er240:
+                                            print(f"[H3 Extender] v14.240 workspace 让位失败, "
+                                                  f"走 lowvram 换页兜底(可忽略): {_er240}")
                         except Exception:
                             pass
             except Exception as _lg2:
