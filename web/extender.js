@@ -5727,6 +5727,21 @@ function buildUi(node) {
     hideNativeWidget(node, jsonWidget);
     hideNativeWidget(node, refsWidget);
 
+    // v14.253 (2026-10-29): 兜底强制隐藏 clips_json / refs_json 文本框。
+    // 背景：用户实测 H3 Film Factory 节点被两个巨型 JSON 文本框撑爆，
+    //       CLIP 卡片/全局提示词/底部按钮全部被挤到看不见。
+    //       hideNativeWidget 走前端 visibility API，但 ComfyUI 1.55+ 的
+    //       customtext widget 在某些版本里 hidden=true 不生效，仍然显示。
+    // 兜底方案：把 widget.type 从 "customtext" 改成 "hidden"（ComfyUI 官方
+    //       认可的隐藏类型，不渲染 DOM 行），并强制 computeSize 归零。
+    //       值仍然保留在 widgets_values 里，保存/加载工作流不受影响。
+    for (const _w of [jsonWidget, refsWidget]) {
+        if (!_w) continue;
+        try { _w.type = "hidden"; } catch (e) {}
+        try { _w.computeSize = () => [0, 0]; } catch (e) {}
+        try { _w.computedHeight = 0; } catch (e) {}
+    }
+
     const state = parseState(jsonWidget.value);
     const refsState = parseRefsState(refsWidget.value);
 
