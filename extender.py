@@ -755,11 +755,25 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
 
     sum_clip_dur = sum(clip_durations)
 
-    # If clip total > audio total, scale down proportionally
+    # If clip total > audio total, scale down proportionally.
+    # v14.248: clips duration 来自用户分镜 cfg["duration"], 但实际渲染帧数可能与
+    # 规划不符(例: clips[1].duration 规划 30s 但直播带货档实际只渲 15s)。当
+    # sum_clip_dur/total_duration > 1.3 (差异>30%) 时, 按错误比例 scale 会导致
+    # 每段注入 AV latent 的音频段比视频短, 尾部出现静音 gap(用户实测
+    # h3_motion_preview_7_0.mp4: 每段尾部 ~3s 完全静音)。改为等分音频总长到
+    # N 段, 保证每段音频段覆盖对应视频时长。
     if sum_clip_dur > total_duration + 0.01:
-        scale = total_duration / sum_clip_dur
-        clip_durations = [d * scale for d in clip_durations]
-        print(f"[H3 LipSync] CLIP总时长({sum_clip_dur:.1f}s) > 音频总时长({total_duration:.1f}s)，按比例缩放到 {scale:.3f}x")
+        _ratio = sum_clip_dur / total_duration
+        if _ratio > 1.3:
+            _per_seg = total_duration / len(clip_durations)
+            clip_durations = [_per_seg] * len(clip_durations)
+            print(f"[H3 LipSync] CLIP总时长({sum_clip_dur:.1f}s) > 音频总时长({total_duration:.1f}s)，"
+                  f"差异 {_ratio:.2f}x > 1.3x, clips duration 口径可能不准, "
+                  f"等分到 {len(clip_durations)} 段 (每段 {_per_seg:.2f}s)")
+        else:
+            scale = total_duration / sum_clip_dur
+            clip_durations = [d * scale for d in clip_durations]
+            print(f"[H3 LipSync] CLIP总时长({sum_clip_dur:.1f}s) > 音频总时长({total_duration:.1f}s)，按比例缩放到 {scale:.3f}x")
 
     # Split audio into segments
     # v2: For clips after the first, extend the segment backward by ~1s to cover
@@ -3937,7 +3951,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _t_cand226 = int(samples["samples"].tensors[0].shape[2])
                         except Exception:
                             pass
-                    if _t_cand226 is not None and _t_cand226 >= 50:
+                    # v14.248: 自动时间分块阈值 T>=50 -> T>=200。根因: T=107 (二采
+                    # tokens=218k 在 Sol-Attn 健康区 <=350k) 整帧采样只需 0.97s/步,
+                    # v14.225 已确认不需要 global 包装。但 v14.228 仍自动切成
+                    # chunk=21/overlap=8 -> 8 段独立 seed 采样, 段间接缝在 ~3s 处出现
+                    # 模糊/马赛克/明暗闪烁/粗横条纹(用户实测 h3_motion_preview_7_0.mp4)。
+                    # T>=200 (~500k+ tokens) 才真需要时间分块降 dense workspace;
+                    # T=107 走 Sol-Attn 稀疏全帧最稳。
+                    if _t_cand226 is not None and _t_cand226 >= 200:
                         temporal_chunk_tokens = max(20, int(round(_t_cand226 / 5)))
                         _use_temporal = True
                         print(f"[H3 Extender] v14.228 自动时间分块: T={_t_cand226} -> "
