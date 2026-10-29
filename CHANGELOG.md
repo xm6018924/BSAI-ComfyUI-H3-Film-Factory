@@ -4,6 +4,29 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.258 (2026-10-29) — 新增 PDMD/PTD 加速配方档 + 修 v14.257 前端白名单漏改 / Add PDMD/PTD recipe tiers + fix v14.257 frontend whitelist miss
+
+**新增 3 个渲染管道档（extender.py render_pipeline 枚举 + 配方分支 + web/extender.js QUICK_DEFS 三处同步）：**
+**/ Three new render-pipeline tiers added (extender.py enum + recipe branches + web/extender.js QUICK_DEFS, all three sync points updated):**
+
+- **PDMD 4步 SelfLift 双采 (4+2)：** PDMD（UCSD×字节，arXiv 2609.35768，2026-09-23/29 发布）4步蒸馏 LoRA —— 一采 4 步（论文 4 步契约，VideoGen-Eval 总分 83.17，超所有 4 步蒸馏基线）+ 二采 2 步全分辨率精修（latent x2.0）= 6 NFE；Loader 挂 Kijai 转换版 `minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors`（Kijai/MiniMax-H3-experimental，标准 H3 LoRA 路径加载），shift 12/3，学生模型面向 1344×768。
+**/ PDMD 4-Step SelfLift Dual-Pass (4+2): PDMD 4-step distillation LoRA (UCSD x ByteDance, arXiv 2609.35768, 2026-09-23/29) - 4-step first pass (paper contract, VideoGen-Eval 83.17, beating all 4-step baselines) + 2-step full-res refine (latent x2.0) = 6 NFE; Kijai-converted LoRA minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors, shift 12/3, targets 1344x768.**
+- **PDMD 2步 极速试稿 (单采)：** PDMD 2步蒸馏（Kijai 转换 `minimax_h3_pdmd_2step_lora_avg_rank_38_bf16.safetensors`）= 2 NFE 单采直出；定位快速试稿/筛镜头，不用于正片（低步数细节易崩，正片建议 ≥6 步或走双采）。
+**/ PDMD 2-Step Fast Draft (single-pass): 2 NFE direct output (Kijai-converted pdmd_2step LoRA); draft/shot-screening only, never final footage.**
+- **PTD 4步 Ref2VA 单采 (参考图加速)：** PTD 逐跳 Ref2VA 加速 LoRA（淘宝内容AI，2026-10-20/22 发布，ComfyUI-Wiki 2026-10-22 报道；HF `MiniMax-H3-Ref2VA-PTD-4Step` rank128 bf16 5.58GB，作者 H20 实测 1344×768/243帧/4 NFE 端到端）= 参考图→音视频 4 步单采；需 Ref2VA 底模（未剪枝 ~140GB 或社区 ComfyUI-PTD-Compact int8），无底模勿选；ref_image_size 不强制。
+**/ PTD 4-Step Ref2VA Single-Pass: per-hop Ref2VA acceleration LoRA (Taobao Content-AI, 2026-10-20/22; HF MiniMax-H3-Ref2VA-PTD-4Step, H20 measured 1344x768/243 frames/4 NFE end-to-end); requires a Ref2VA base model (~140GB unpruned or community int8 compact build); ref_image_size not forced.**
+
+- **v14.257 漏改 bug 修复：** web/extender.js `OPTIONS.render_pipeline` 白名单缺 `"双采2K（官方条件放大）"`（v14.257 只加了后端枚举，前端白名单漏改）——`norm()` 用该白名单校验，导致该档每次节点 apply 被静默重置回默认档。本次按"三处同步契约"（后端枚举 / QUICK_DEFS cycle+cycleLabels+tints+desc_en / OPTIONS 白名单）全量补齐。
+**/ v14.257 miss fixed: web/extender.js OPTIONS.render_pipeline whitelist was missing "双采2K（官方条件放大）" (v14.257 added the backend enum but forgot the frontend whitelist) - norm() validates against that whitelist, so the tier was silently reset to default on every node apply. This release completes the three-point sync contract (backend enum / QUICK_DEFS / OPTIONS whitelist).**
+
+- **外部稀疏注意力节点检测扩展：** SegAttention 协同检测从 PathchSageAttentionKJ/PatchSegAttentionKJ 扩展为大小写不敏感关键词扫描 NODE_CLASS_MAPPINGS（veda/spark/sageattn/segattn），汇总打印"已检测到外部稀疏注意力节点"，并追加警告：同时挂 Veda/Spark-H3 与插件 sol_attn（sol_max_tokens 门控）会互踢，请只保留一个。纯打印诊断，不改行为。
+**/ External sparse-attention detection extended: case-insensitive keyword scan of NODE_CLASS_MAPPINGS (veda/spark/sageattn/segattn) on top of the existing KJNodes names; prints detected external sparse nodes and warns that running Veda/Spark-H3 together with the plugin sol_attn gate causes mutual eviction - keep exactly one. Diagnostic print only, no behavior change.**
+
+- 验证：extender.py py_compile PASS；web/extender.js node --check PASS；新示例工作流 `BSAI_H3_Film_Factory电影工厂-PDMD4步SelfLift双采-v14.258.json` json.load PASS（95 nodes / 89 links，与基底一致）。
+**/ Verified: extender.py py_compile PASS; web/extender.js node --check PASS; new example workflow json.load PASS (95 nodes / 89 links, identical to the base).**
+
+---
+
 ### v14.252 (2026-10-29) — 修一镜到底 MV clip2+ 每段末尾音频静音 / Fix silent audio tail on clip2+ in one-shot MV mode
 
 **现象：** 一镜到底 MV（对口型）模式，clip1 结尾音频完整、可与 clip2 无缝衔接，但 clip2 之后每段末尾都被截掉一段纯静音（实测 clip2/3/4 尾部 0.185-0.187s 全零采样，clip1 为 0）。**根因：** `_split_lip_audio_by_clips` 把段头重叠算进了段长（段长 = 净时长 nominal，其中含 overlap），解码混音时又按 `overlap_samples` 从段头切掉 → 每段只剩 `nominal - overlap` 的原曲，尾部补零；推进量也是 `nominal - overlap`，歌曲每段比视频慢 overlap，20 段累积错位约 4s。**修复：** 段长改为 `nominal + overlap`（头部重叠之外再补满净时长）、推进改为 `nominal`；解码混音切掉段头后恰好剩 nominal，与视频净帧数等长，零补零、零累积漂移。已缓存的对口型 blob 加 `decoded_mp4_lip_tail_fix` 失效标记（仅 clip2+ 重混音，clip1 与非对口型链不受影响）。

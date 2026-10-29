@@ -7,5 +7,19 @@ cache/
 
 *.bak*
 
-# 运行时崩溃日志(第三方节点启动期 native crash 的 faulthandler 落盘)
+# 备份目录/文件（同步前快照，命名形态多样，统一排除）
+bak_*/
+bak*/
+*.bak_*
+*.bak-*
+*.bak
+
+# 同步快照目录（bak_sync_pre_* 等）
+*_sync_pre_*/
+*_pre_*_backup/
+
+# 本地调试产物
+debug_bg.png
+debug_height.png
 _crash_faulthandler.log
+*.log
