@@ -225,17 +225,30 @@ class BSAI_ContextualSeriesLoad:
 
     @staticmethod
     def _resolve_directory(directory):
-        if os.path.isabs(directory) and os.path.isdir(directory):
-            return directory
-        candidates = [
-            os.path.join(folder_paths.get_output_directory(), directory),
-            os.path.join(folder_paths.get_input_directory(), directory),
-            directory,
-        ]
+        """Resolve a frame directory, confined to ComfyUI's output/input roots.
+
+        Returns the realpath when it lives inside either root, otherwise None:
+        a directory string coming from a shared workflow must not be able to read
+        frames from anywhere else on disk.
+        """
+        directory = str(directory or "").strip()
+        if not directory:
+            return None
+        bases = [folder_paths.get_output_directory(), folder_paths.get_input_directory()]
+        candidates = [directory] if os.path.isabs(directory) else []
+        candidates.extend(os.path.join(b, directory) for b in bases)
         for c in candidates:
-            if os.path.isdir(c):
-                return c
-        return directory
+            if not os.path.isdir(c):
+                continue
+            real = os.path.realpath(c)
+            for b in bases:
+                base = os.path.realpath(b)
+                try:
+                    if os.path.commonpath([base, real]) == base:
+                        return real
+                except ValueError:
+                    continue
+        return None
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -296,8 +309,10 @@ class BSAI_ContextualSeriesLoad:
             raise ValueError("Directory path is required.")
 
         resolved = self._resolve_directory(directory)
-        if not os.path.isdir(resolved):
-            raise ValueError(f"Directory not found: {directory}")
+        if resolved is None:
+            raise ValueError(
+                f"Directory not found, or outside ComfyUI's input/output folders: {directory}"
+            )
 
         exts = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
         files = sorted(
@@ -337,7 +352,7 @@ class BSAI_ContextualSeriesLoad:
     @classmethod
     def IS_CHANGED(cls, directory, **kwargs):
         resolved = cls._resolve_directory(directory)
-        if not os.path.isdir(resolved):
+        if resolved is None:
             return ""
         return str(os.path.getmtime(resolved))
 
