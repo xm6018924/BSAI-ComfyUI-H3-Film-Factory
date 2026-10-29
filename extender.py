@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.251-lipauto-audio-driven-clips"
+BUILD = "minimax-h3-extender-v14.252-live-commerce-denoise-rollback"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -7934,16 +7934,16 @@ class BSAIH3FilmFactory:
                 #   + clip2 起关闭 motion context(硬切段不再做 2s 渐变 → 首帧无拖影)
                 # width/height 不锁: 分辨率决定一采像素, 锁死 1920 会让一采
                 # 直接涨到 1920x1088(耗时 4x), 与用户"15秒必须 1 小时内"冲突。
-                # v14.251 (2026-10-29) 画质调参(用户实测色块/残肢/残影/拖影):
-                #   ① refine_audio_denoise 0.7→0.3 —— 音频不重画, 只精修视频,
-                #      消除"音视频AV latent 不同步 → VAE decode 出彩色噪块"色块。
-                #   ② refine_upscale_factor 2.0→1.5 —— 二采 tokens 从 873k 降到
-                #      ~490k, 时间注意力负担减半, 残影/拖影大减。
-                #   ③ refine_denoise 0.55→0.45 —— 二采更保守, 保留一采细节,
-                #      残肢/手指更稳。
-                #   ④ refine_steps 4→6 —— 补偿 denoise 降低带来的精修不足。
-                # 总耗时预算基本不变(tokens 减半抵消步数增加)。
-                steps, refine_steps, tile_count, refine_denoise = 12, 6, 4, 0.45
+                # v14.252 (2026-10-29) refine_denoise 回滚 0.45→0.55:
+                # v14.251 把 denoise 降到 0.45 太保守, 一采 12 步本身低质量(480p/12 NFE),
+                # 二采 0.45 没去掉一采高频噪点, 用户实测脸/手/衣服全部麻点污染
+                # (头发高光区反而干净 —— 高频细节需要更高 denoise 才能"重画"干净)。
+                # 保留 v14.251 的有效改动:
+                #   ① audio_denoise=0.3 (色块已消)
+                #   ② upscale_factor=1.5 (残影/拖影已减)
+                #   ③ refine_steps=6 (更精细)
+                # 只回滚 denoise 一项。
+                steps, refine_steps, tile_count, refine_denoise = 12, 6, 4, 0.55
                 refine_enable = True
                 refine_audio_denoise = 0.3
                 refine_upscale_factor = 1.5
