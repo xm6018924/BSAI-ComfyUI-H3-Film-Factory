@@ -7679,7 +7679,12 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 是 dom widget(serialize:false, 但现役前端仍把它序列化为尾部空串)。
         // 现役 64 位: 0..61 = run_mode..face_lock_mode(62 个后端 widget),
         // 62 = refine_mem_mode, 63 = h3_extender_timeline(dom, applyToNode 跳过)。
-        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","one_shot_mode","one_shot_clip_duration","render_pipeline","one_shot_sampling","refine_sampler","director_fast_first_mp","director_fast_target_mp","h3_extender_timeline"];
+        // v14.254 (2026-10-29): 补加 refine_sigmas —— Python 端 v14.238 在 optional
+        // 末尾加了 refine_sigmas(SIGMAS, forceInput=True)，ComfyUI 前端把它也当
+        // widget 序列化进 widgets_values，导致数组长度从 71 变 72，后续所有 widget
+        // 映射错位，clips_json/refs_json 被挤到错误索引显示为巨大文本框。
+        // 修复：KEYS 数组补加 "refine_sigmas"(index 70)，h3_extender_timeline 顺延到 71。
+        const KEYS = ["run_mode","width","height","ref_image_size","steps","sampler_name","scheduler","denoise","context_length","audio_context_length","clips_json","resolution_mode","megapixels","refs_json","output_mode","filename_prefix","output_image_audio","block_cache","block_cache_threshold","block_cache_device","ref_cache","cache_dit","clip_select_enable","clip_select","pause_enable","pause_timeout","refine_enable","refine_denoise","refine_steps","refine_upscale_factor","refine_upscaler_model","refine_align_to","refine_audio_denoise","refine_lipsync_mode","upscale_per_clip","upscale_final","upscale_mode","upscale_engine","upscale_factor","upscale_model","upscale_tile","upscale_batch","upscale_fp16","upscale_face_restore","tiled_refine","tile_count","tile_overlap","speed_preset","dual_track_shift","shift_video","shift_audio","selflift_tst_enable","selflift_tst_tau","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_enable","semantic_bridge_adapter","semantic_bridge_alpha","semantic_bridge_magnitude_match","env_audio_enable","env_audio_gain","face_lock_mode","refine_mem_mode","one_shot_mode","one_shot_clip_duration","render_pipeline","one_shot_sampling","refine_sampler","director_fast_first_mp","director_fast_target_mp","refine_sigmas","h3_extender_timeline"];
         const DEFAULTS = ["clip_by_clip",1344,768,"max",8,"euler","simple",1.0,"39",0,"","auto_from_ref",0,"","none","H3_Extender",true,false,0.12,"cpu",true,false,false,"all",false,5.0,true,0.55,6,2.0,"(bilinear interpolation, no model)",40,0.0,"Lock lip-sync (recommended)",false,false,"Balanced (quality+speed)","auto",2.0,"realesr-general-x4v3.pth",0,4,true,false,false,4,128,"custom",true,12.0,3.0,true,0.2,0,"8",false,"(off: no weights)","0.15",true,"global_inherit",0.15,"off (关闭)","spatial (分块,兼容)","off (分镜模式)",12,"Sol-H3 Self-Lift 双采 (默认)","单采无缝 (推荐)","inherit (跟随一采)",0.4,2.0,""];
         const NUMERIC = new Set(["width","height","steps","audio_context_length","megapixels","block_cache_threshold","pause_timeout","refine_steps","refine_upscale_factor","refine_align_to","refine_audio_denoise","upscale_factor","upscale_tile","upscale_batch","tile_count","tile_overlap","temporal_chunk_tokens","temporal_overlap_tokens","semantic_bridge_alpha","env_audio_gain","one_shot_clip_duration","director_fast_first_mp","director_fast_target_mp"]);
         const BOOLS = new Set(["output_image_audio","block_cache","ref_cache","cache_dit","clip_select_enable","pause_enable","refine_enable","upscale_per_clip","upscale_final","upscale_fp16","upscale_face_restore","tiled_refine","semantic_bridge_enable","semantic_bridge_magnitude_match"]);
@@ -7720,8 +7725,9 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             // v14.192: 现役 68 键 = render_pipeline(65) + one_shot_sampling(66) + timeline(67)
             //          （visual_anchor_notes 手动输入已移除, 现役布局与旧 CUR68 相同,
             //          n===68 即 CUR68; n===69 仍为旧 CUR69 文件, 映射时丢弃 w[67]）。
-            // v14.238: 71 键 = 现役 + refine_sampler(67) + director_fast_first_mp(68)
-            //          + director_fast_target_mp(69) + timeline(70)。
+            // v14.254: 72 键 = 现役 + refine_sampler(67) + director_fast_first_mp(68)
+            //          + director_fast_target_mp(69) + refine_sigmas(70) + timeline(71)。
+            if (n === 72) return "CUR72";
             if (n === 71) return "CUR71";
             if (n === 69) return "CUR69";
             if (n === 68) return "CUR68";
@@ -7802,15 +7808,18 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             // 0..61 后端 widget, 62 = refine_mem_mode, 63 = one_shot_mode,
             // 64 = one_shot_clip_duration, 65 = render_pipeline, 66 = one_shot_sampling,
             // 67 = h3_extender_timeline(dom, applyToNode 跳过)。
-            // v14.238: 统一输出 71 位 —— 67 = refine_sampler, 68 = director_fast_first_mp,
-            // 69 = director_fast_target_mp, 70 = h3_extender_timeline(dom, 跳过)。
-            const out = new Array(71).fill(null);
-            if (L === "CUR71" || L === "CUR69" || L === "CUR68" || L === "CUR67" || L === "CUR66" || L === "CUR65" || L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
+            // v14.254: 统一输出 72 位 —— 67 = refine_sampler, 68 = director_fast_first_mp,
+            // 69 = director_fast_target_mp, 70 = refine_sigmas, 71 = h3_extender_timeline(dom, 跳过)。
+            const out = new Array(72).fill(null);
+            if (L === "CUR72" || L === "CUR71" || L === "CUR69" || L === "CUR68" || L === "CUR67" || L === "CUR66" || L === "CUR65" || L === "CUR64" || L === "N63" || L === "N62" || L === "CURRENT" || L === "L59G") {
                 // 新纪元(48..52 已有 P0/P2): 0..61 与 KEYS 完全同键, 直接照抄。
                 for (let i = 0; i < 62 && i < w.length; i++) out[i] = w[i];
-                // CUR71(现役 v14.238): w[62..69] 用户值保留(含 Director 极速三参数);
+                // CUR72(现役 v14.254): w[62..70] 用户值保留(含 Director 极速三参数 + refine_sigmas);
+                // timeline(71) 丢弃。
+                if (L === "CUR72" && w.length > 70) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; out[66] = w[66]; out[67] = w[67]; out[68] = w[68]; out[69] = w[69]; out[70] = w[70]; }
+                // CUR71(v14.238): w[62..69] 用户值保留(含 Director 极速三参数);
                 // timeline(70) 丢弃。
-                if (L === "CUR71" && w.length > 69) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; out[66] = w[66]; out[67] = w[67]; out[68] = w[68]; out[69] = w[69]; }
+                else if (L === "CUR71" && w.length > 69) { out[62] = w[62]; out[63] = w[63]; out[64] = w[64]; out[65] = w[65]; out[66] = w[66]; out[67] = w[67]; out[68] = w[68]; out[69] = w[69]; }
                 // CUR69(旧版含 visual_anchor_notes): w[62..66] 用户值保留;
                 // visual_anchor_notes(67)+timeline(68) 丢弃(锚点已自动记录, 旧手写值不再使用)。
                 // CUR68(现役, 与 v14.192 布局相同): w[62..66] 用户值; timeline(67) 丢弃。
