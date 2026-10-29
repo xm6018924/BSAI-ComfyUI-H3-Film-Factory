@@ -628,6 +628,89 @@ def _load_segment_video(data_path, desc):
     return video
 
 
+def _load_segment_video_native(data_path, desc):
+    """v14.250: 解码专用 latent(返回 (video, is_native))。
+
+    二采(refine) OOM 或塌陷时, 链上存的是「一采 latent 三线性放大」, 不是采样
+    出来的 latent。拿它按链几何直接 VAE 解码, 会得到周期 16px(=1 latent cell)的
+    马赛克玻璃条纹(2026-10-29 一镜到底 clip2 起实机复现)。这类段带
+    decode_native_hw: 这里先缩回一采几何, 由调用方把像素 bicubic 放大回链上尺寸
+    —— 画质等同单采(软但干净), 不再有马赛克。
+    """
+    video = _load_segment_video(data_path, desc)
+    native = desc.get("decode_native_hw")
+    if not native:
+        return video, False
+    try:
+        nh, nw = int(native[0]), int(native[1])
+    except Exception:
+        return video, False
+    ch, cw = int(video.shape[-2]), int(video.shape[-1])
+    if nh <= 0 or nw <= 0 or (nh == ch and nw == cw):
+        return video, False
+    print(
+        f"[H3 Disk Cache] clip {int(desc.get('index', 0)) + 1} 二采回退段: 按一采几何 "
+        f"{nw}x{nh} 解码 (链上 {cw}x{ch}), 规避插值 latent 直解码的马赛克条纹"
+    )
+    video = torch.nn.functional.interpolate(
+        video.to(torch.float32),
+        size=(int(video.shape[2]), nh, nw),
+        mode="trilinear",
+        align_corners=False,
+    ).to(video.dtype)
+    return video, True
+
+
+def _chain_pixel_hw(segments, geometry=None):
+    """链上解码像素尺寸 (h, w) = 非回退段的 latent 几何 × 16(VAE 空间倍率)。"""
+    for s in segments:
+        if s.get("decode_native_hw"):
+            continue
+        spec = s.get("video") or {}
+        shape = spec.get("shape") or []
+        if len(shape) != 5:
+            continue
+        return (int(shape[-2]) * 16, int(shape[-1]) * 16)
+    # 全链都是二采回退段时退回到 manifest 几何(链上几何本来就来自放大后的 latent)
+    try:
+        if geometry:
+            return (int(geometry["video_h"]) * 16, int(geometry["video_w"]) * 16)
+    except Exception:
+        pass
+    return None
+
+
+def _upscale_frames_to(frames, h, w):
+    """解码帧像素 bicubic 放大到 (h, w); 已是目标尺寸则原样返回。"""
+    if int(frames.shape[1]) == int(h) and int(frames.shape[2]) == int(w):
+        return frames
+    x = frames[..., :3].detach().float().clamp(0.0, 1.0).permute(0, 3, 1, 2)
+    try:
+        x = torch.nn.functional.interpolate(
+            x, size=(int(h), int(w)), mode="bicubic", align_corners=False)
+    except Exception:
+        x = torch.nn.functional.interpolate(
+            x, size=(int(h), int(w)), mode="bilinear", align_corners=False)
+    return x.permute(0, 2, 3, 1).clamp_(0.0, 1.0).to(frames.dtype)
+
+
+def _write_scaled_frames(proc, frames, target_hw, batch=16):
+    """按批把解码帧(必要时像素放大)写入 ffmpeg, 限制临时张量峰值。"""
+    n = int(frames.shape[0])
+    if target_hw is None or (
+        int(frames.shape[1]) == int(target_hw[0])
+        and int(frames.shape[2]) == int(target_hw[1])
+    ):
+        _write_image_frames(proc, frames)
+        return n
+    for s in range(0, n, int(batch)):
+        part = _upscale_frames_to(frames[s:s + int(batch)], int(target_hw[0]), int(target_hw[1]))
+        part = part.detach().float().mul(255.0).add_(0.5).to(torch.uint8).contiguous()
+        _write_image_frames(proc, part)
+        del part
+    return n
+
+
 def _load_segment_audio(data_path, desc):
     audio = _map_tensor(data_path, desc["audio"])
     if audio.ndim == 3:
@@ -637,7 +720,8 @@ def _load_segment_audio(data_path, desc):
     return audio
 
 
-def _append_segment(data_path, latent, index, trim_frames, validated, manifest):
+def _append_segment(data_path, latent, index, trim_frames, validated, manifest,
+                    decode_native_hw=None):
     video, audio = _streams_from_latent(latent, "samples")
     _validate_batch_one(video, audio)
     if manifest.get("geometry") is not None:
@@ -665,7 +749,7 @@ def _append_segment(data_path, latent, index, trim_frames, validated, manifest):
         f.flush()
         os.fsync(f.fileno())
 
-    return {
+    desc = {
         "index": int(index),
         "validated": bool(validated),
         "frames": int(frames),
@@ -673,7 +757,18 @@ def _append_segment(data_path, latent, index, trim_frames, validated, manifest):
         "video": video_spec,
         "audio": audio_spec,
         "segment_end": segment_end,
-    }, _geometry(video, audio)
+    }
+    # v14.250: 二采 OOM/塌陷回退段 —— 链上存的是「一采 latent 插值放大」, 不是采样
+    # 产物; 解码时必须先缩回一采几何, 否则链几何直解码 = 16px 周期马赛克玻璃条纹。
+    try:
+        if decode_native_hw:
+            _nh, _nw = int(decode_native_hw[0]), int(decode_native_hw[1])
+            if _nh > 0 and _nw > 0:
+                desc["decode_native_hw"] = [_nh, _nw]
+                print(f"[H3 Disk Cache] clip {index + 1} 记录一采解码几何 {_nw}x{_nh}")
+    except Exception:
+        pass
+    return desc, _geometry(video, audio)
 
 
 def _backup_chain_before_truncate(data_path, manifest_path, reason):
@@ -1217,6 +1312,7 @@ class MiniMaxH3MotionContextDiskJoin:
         fps=24.0,
         previous_cache=None,
         unique_id=None,
+        decode_native_hw=None,
     ):
         data_path, manifest_path, manifest, mode, stop, index = _effective_state(
             previous_cache, run_mode, fps, unique_id
@@ -1287,6 +1383,7 @@ class MiniMaxH3MotionContextDiskJoin:
                 trim_frames=trim,
                 validated=bool(validated),
                 manifest=manifest,
+                decode_native_hw=decode_native_hw,
             )
             segments = [dict(x) for x in manifest.get("segments", [])] + [desc]
             manifest = dict(manifest)
@@ -2816,7 +2913,23 @@ def _decode_single_clip_to_blob(
     # 重新编码，预览/渐进全片/最终成片尾部均可独立解码。
     # v14.236: decoded_mp4_version 升到 6 —— v5 blob 由 v14.232 裸 16 帧分块解码
     # 生成, 块间无时间上下文, 每 ~16 帧亮度闪烁; 升版强制重解码以应用修复。
-    if curr.get("decoded_mp4_blob") is not None and curr.get("decoded_mp4_version", 0) >= 6:
+    # v14.250: 二采回退段(带 decode_native_hw)必须按一采几何重解码, 旧 blob 是
+    # 由插值 latent 直解码得到的马赛克画面, 不能复用。
+    # v14.252: 对口型段的 blob 音频来自 lip_audio 歌曲片段, clip2+ 旧 blob 的段尾
+    # ~0.21s 是补零静音(_split_lip_audio_by_clips 少切了 overlap)。这里只对
+    # "lip 段且需要裁重叠"的段打一次失效标记, 让下一次渲染重混音; 非 lip 链与
+    # clip1 不受影响, 不必整体升 decoded_mp4_version。
+    _native_ok = bool(curr.get("decode_native_hw")) and not curr.get("decoded_mp4_native")
+    trim = int(curr.get("trim_frames", 0)) if i > 0 else 0
+    _lip_tail_ok = (
+        lip_audio_segment is not None
+        and trim > 0
+        and not curr.get("decoded_mp4_lip_tail_fix")
+    )
+    if (curr.get("decoded_mp4_blob") is not None
+            and curr.get("decoded_mp4_version", 0) >= 6
+            and not _native_ok
+            and not _lip_tail_ok):
         _cur_w = int(curr.get("decoded_mp4_width", 0) or 0)
         _cur_h = int(curr.get("decoded_mp4_height", 0) or 0)
         if _tgt_w <= 0 or _tgt_h <= 0 or (_cur_w == _tgt_w and _cur_h == _tgt_h):
@@ -2969,7 +3082,7 @@ def _decode_single_clip_to_blob(
     except Exception as _e:
         print(f"[H3 Extender]   decode VRAM cleanup skipped: {_e}")
 
-    v = _load_segment_video(data_path, curr)
+    v, _native_decode = _load_segment_video_native(data_path, curr)
     print(f"[H3 Extender]   step 2: vae.decode (shape={tuple(v.shape)})...")
     # v14.247 (2026-10-28): 撤销 v1.82b 的 output_device=GPU 强制 override —— 实测根因链:
     # v1.82b 把 out 钉在 GPU -> comfy decode_tiled_3d 的 12 通道 packed out (8.45GB) 全堆 GPU,
@@ -3306,6 +3419,8 @@ def _decode_single_clip_to_blob(
         curr["latent_end"] = latent_end
         curr["decoded_mp4_blob"] = render_spec
         curr["decoded_mp4_version"] = 6  # v14.236: v6 = 时间分块解码加块间上下文(修复 ~16 帧亮度闪烁)；v5 blob 不再复用，自动重编码
+        curr["decoded_mp4_native"] = bool(curr.get("decode_native_hw"))  # v14.250: 已按一采几何解码
+        curr["decoded_mp4_lip_tail_fix"] = bool(lip_audio_segment is not None and trim > 0)  # v14.252: 已按修好的 lip 切段重混音
         curr["decoded_mp4_width"] = int(video_u8.shape[2])
         curr["decoded_mp4_height"] = int(video_u8.shape[1])
         curr["decoded_mp4_has_audio"] = has_audio
@@ -3756,7 +3871,7 @@ def _render_one_final_segment(
     curr = segments[i]
 
     if i == 0:
-        v = _load_segment_video(data_path, curr)
+        v, native = _load_segment_video_native(data_path, curr)
         video = vae.decode(v)
         if progress is not None:
             progress.advance()
@@ -3770,12 +3885,72 @@ def _render_one_final_segment(
                 f"H3 progressive preview: clip 1 decoded {video.shape[0]}, "
                 f"expected {expected}."
             )
+        if native:
+            target = _chain_pixel_hw(segments)
+            if target is not None and int(video.shape[0]) > 0:
+                _n = int(video.shape[0])
+                _out = torch.empty(
+                    (_n, int(target[0]), int(target[1]), int(video.shape[-1])),
+                    dtype=video.dtype,
+                )
+                for _s in range(0, _n, 16):
+                    _out[_s:_s + 16] = _upscale_frames_to(
+                        video[_s:_s + 16], target[0], target[1]
+                    )
+                video = _out
         audio = _decode_single_audio(data_path, curr, audio_vae, fps)
         if progress is not None:
             progress.advance()
         return video, audio, 0
 
     prev = segments[i - 1]
+
+    # v14.250: 二采回退段(带 decode_native_hw)不能进 pair 解码 —— 链上存的是
+    # 「一采 latent 插值放大」, 按链几何直解码就是 16px 周期的马赛克玻璃条纹。
+    # 这里单独按一采几何解码, 丢掉重叠 trim 帧, 再把像素放大到链上尺寸。
+    if curr.get("decode_native_hw"):
+        v, native = _load_segment_video_native(data_path, curr)
+        video = vae.decode(v)
+        if progress is not None:
+            progress.advance()
+        if video.ndim == 5:
+            video = video.reshape(
+                -1, video.shape[-3], video.shape[-2], video.shape[-1]
+            )
+        expected = int(curr["frames"])
+        if int(video.shape[0]) != expected:
+            raise RuntimeError(
+                f"H3 progressive preview: clip {i + 1} decoded {video.shape[0]}, "
+                f"expected {expected}."
+            )
+        trim = int(curr.get("trim_frames", 0) or 0)
+        if trim > 0:
+            video = video[trim:]
+        if native:
+            target = _chain_pixel_hw(segments)
+            if target is not None and int(video.shape[0]) > 0:
+                _n = int(video.shape[0])
+                _out = torch.empty(
+                    (_n, int(target[0]), int(target[1]), int(video.shape[-1])),
+                    dtype=video.dtype,
+                )
+                for _s in range(0, _n, 16):
+                    _out[_s:_s + 16] = _upscale_frames_to(
+                        video[_s:_s + 16], target[0], target[1]
+                    )
+                video = _out
+        audio = _decode_single_audio(data_path, curr, audio_vae, fps)
+        if progress is not None:
+            progress.advance()
+        if trim > 0 and audio is not None and int(audio.get("sample_rate", 0) or 0) > 0:
+            sr = int(audio["sample_rate"])
+            drop = int(round(float(trim) / float(fps) * sr))
+            keep = int(round(float(video.shape[0]) / float(fps) * sr))
+            wave = audio["waveform"]
+            if int(wave.shape[-1]) > drop:
+                audio = dict(audio)
+                audio["waveform"] = wave[..., drop:drop + keep]
+        return video, audio, 0
 
     # trim=0 means the current clip is kept in full and directly follows the
     # previous one (no overlap to trim). Concatenating two H3 video latents
@@ -5034,7 +5209,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
             # VIDEO - strict constant-memory path: one clip for N=1, otherwise
             # exactly one adjacent pair per seam. Nothing accumulated in IMAGE.
             if len(segments) == 1:
-                v = _load_segment_video(data_path, segments[0])
+                v, _native0 = _load_segment_video_native(data_path, segments[0])
                 decoded = vae.decode(v)
                 progress.advance()
                 if decoded.ndim == 5:
@@ -5044,6 +5219,9 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                     raise RuntimeError(
                         f"Disk Final Decode: VAE returned {decoded.shape[0]}, expected {expected0}."
                     )
+                _tgt0 = _chain_pixel_hw(segments, manifest.get("geometry"))
+                if _native0 and _tgt0 is not None:
+                    decoded = _upscale_frames_to(decoded, _tgt0[0], _tgt0[1])
                 h, w = int(decoded.shape[1]), int(decoded.shape[2])
                 video_proc, video_log_f = _start_video_encoder(
                     ffmpeg, temp_video, w, h, fps, codec, crf, preset, video_log
@@ -5053,18 +5231,23 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                 last_frame = decoded[-1:].detach().cpu().clone()
                 del decoded, v
             else:
+                _chain_hw = _chain_pixel_hw(segments, manifest.get("geometry"))
                 for i in range(1, len(segments)):
                     prev_desc = segments[i - 1]
                     curr_desc = segments[i]
+                    # v14.250: 二采回退段的 latent 只是「一采 latent 插值放大」,
+                    # 按链几何直解码会得到 16px 周期的马赛克玻璃条纹。这类段改走
+                    # 逐段单独解码(先缩回一采几何), 再像素放大到链上尺寸。
+                    _curr_native = bool(curr_desc.get("decode_native_hw"))
 
-                    if int(curr_desc.get("trim_frames", 0)) == 0:
+                    if int(curr_desc.get("trim_frames", 0)) == 0 or _curr_native:
                         # trim=0: clip 首尾相接、无重叠裁剪。H3 video latent
                         # 直接拼接会破坏 2mod5 时间网格（合并 T 无法被 VAE
                         # 解码），因此逐段单独解码并顺序写入；进度计数与
                         # pair 路径一致（每个 seam 一次 advance）。
                         seam_shifts[i] = 0
                         if video_proc is None:
-                            pv = _load_segment_video(data_path, prev_desc)
+                            pv, _p_native = _load_segment_video_native(data_path, prev_desc)
                             dec_p = vae.decode(pv)
                             if dec_p.ndim == 5:
                                 dec_p = dec_p.reshape(-1, dec_p.shape[-3], dec_p.shape[-2], dec_p.shape[-1])
@@ -5073,16 +5256,16 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                                 raise RuntimeError(
                                     f"Disk Final Decode: VAE returned {dec_p.shape[0]}, expected {exp_p}."
                                 )
-                            h, w = int(dec_p.shape[1]), int(dec_p.shape[2])
+                            _tgt = _chain_hw or (int(dec_p.shape[1]), int(dec_p.shape[2]))
+                            h, w = int(_tgt[0]), int(_tgt[1])
                             video_proc, video_log_f = _start_video_encoder(
                                 ffmpeg, temp_video, w, h, fps, codec, crf, preset, video_log
                             )
-                            _write_image_frames(video_proc, dec_p)
-                            written_frames += int(dec_p.shape[0])
+                            written_frames += _write_scaled_frames(video_proc, dec_p, _tgt)
                             last_frame = dec_p[-1:].detach().cpu().clone()
                             del dec_p, pv
 
-                        cv = _load_segment_video(data_path, curr_desc)
+                        cv, _c_native = _load_segment_video_native(data_path, curr_desc)
                         dec_c = vae.decode(cv)
                         progress.advance()
                         if dec_c.ndim == 5:
@@ -5092,8 +5275,12 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                             raise RuntimeError(
                                 f"Disk Final Decode: VAE returned {dec_c.shape[0]}, expected {exp_c}."
                             )
-                        _write_image_frames(video_proc, dec_c)
-                        written_frames += int(dec_c.shape[0])
+                        if _curr_native:
+                            _trim_c = int(curr_desc.get("trim_frames", 0) or 0)
+                            if _trim_c > 0:
+                                dec_c = dec_c[_trim_c:]
+                        _tgt = _chain_hw or (int(dec_c.shape[1]), int(dec_c.shape[2]))
+                        written_frames += _write_scaled_frames(video_proc, dec_c, _tgt)
                         last_frame = dec_c[-1:].detach().cpu().clone()
                         del dec_c, cv
                         continue

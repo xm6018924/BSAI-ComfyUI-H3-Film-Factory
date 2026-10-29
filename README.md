@@ -284,6 +284,7 @@ Each CLIP card has per-card controls; left border color shows status. Card butto
 - **3D latent upscaler 可选**：`refine_upscaler_model` 支持 3D 神经网络语义放大（需 `Comfyui_Minimax_h3_latent_Upscaler` 插件），比 bilinear 保留更多高频细节。/ Optional neural 3D upscaler for the refine pass.
 - **音频锁定**：`refine_audio_denoise=0` 时二采不重绘音频（噪声置零 + noise_mask 锁定），保证语音/音效一致。/ Audio lock: no audio re-paint in pass 2 by default.
 - **旧工作流兼容**：`refine_denoise=0.55`（旧默认）在新引擎中等价于"保留 45% 底图的 CONST 部分重绘"，行为自然延续，无需改工作流。/ Backward compatible: old refine_denoise values map to partial CONST re-noise.
+- **二采 OOM 回退段的解码（保障项）**：显存不足导致二采(refine)失败、回退到一采 latent 时，链上保存的只是「一采 latent 插值放大」，并非采样产物——若按链几何直接 VAE 解码会出现周期 16px（=1 latent cell）的马赛克/玻璃条纹（一镜到底 MV 从第 2 段开始尤为明显）。此类段现在会记录一采几何，解码前先缩回一采再像素放大到链上尺寸：画质等同单采（soft but clean），不再出条纹。二采成功的高清段不受影响。/ When pass 2 OOMs and falls back to the pass-1 latent, the cached latent is only an *interpolated* upscale; decoding it at chain geometry produced a 16px-period mosaic/glass streak artifact (most visible from clip 2 in one-shot MV mode). Such segments now record their pass-1 geometry and are decoded at pass-1 resolution, then pixel-upscaled to the chain size — single-pass quality, no mosaic. Refined segments are unaffected.
 
 ### v1.27+ 升级功能 / v1.27+ features
 - **per-CLIP 外部提示词端口** `clip_prompt_1..12`：可拖线连接任意文本节点（Muye 反推/PrimitiveStringMultiline 等），支持 `@图N/@视频N/@音频N` 资产引用语法。/ External prompt ports per clip, connectable to any text node, with @asset notation.

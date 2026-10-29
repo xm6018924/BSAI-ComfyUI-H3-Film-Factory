@@ -871,8 +871,9 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
     # 音频也必须是上一段尾部对应的原曲), 模型净输出 = 标称 - context。零重叠
     # 时输入/输出都缺这 1.625s → 段间缺口 + 尾对齐后新帧音频整体前移(口型错位)。
     # 现按 context_frames/fps 精确切重叠:
-    #   段 = [current - overlap, current - overlap + N)  (N = 标称帧数)
-    #   推进 = N - overlap = 模型净输出 → 段间零缺口, 口型与音频严格同源。
+    #   段 = [current - overlap, current + N)  (N = 标称净时长)
+    #   推进 = N。解码混音时切掉段头 overlap → 输出恰好 N, 与视频净帧数等长,
+    #   段间零缺口、零补零静音, 口型与音频严格同源。
     _ctx_frames = 0
     try:
         _ctx_frames = max(0, int(context_frames))
@@ -887,20 +888,26 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
 
         _ctx_on = bool(clips[idx].get("context_enabled", True)) if idx < len(clips) else True
         _overlap = min(_ctx_ov_samples, max(0, nominal_samples - 1)) if (idx > 0 and _ctx_on) else 0
-        _content_samples = max(1, nominal_samples - _overlap)
+        # v14.252 (fix): 段长 = 净时长 nominal + 头部重叠 overlap, 推进 = nominal。
+        # 旧实现把 overlap 算进 nominal 内(段长 nominal 含重叠), 解码混音时又按
+        # overlap_samples 切掉段头 → 每段只剩 nominal-overlap 的原曲, 尾部补零 →
+        # clip2+ 每段末尾静音(用户实测 h3_clip_250_1/2 对比: 仅 clip1 结尾无缝);
+        # 且歌曲每段少推进 overlap, 20 段累积错位 ~4s。
+        _content_samples = max(1, nominal_samples)
+        _seg_samples = nominal_samples + _overlap
 
         seg_start = max(0, current_sample - _overlap)
         end_sample = min(current_sample + _content_samples, total_samples)
         actual_samples = end_sample - seg_start
 
         if actual_samples <= 0:
-            silent = torch.zeros(waveform.shape[0], waveform.shape[1], nominal_samples,
+            silent = torch.zeros(waveform.shape[0], waveform.shape[1], _seg_samples,
                                  dtype=waveform.dtype, device=waveform.device)
             segments.append({"waveform": silent, "sample_rate": sr, "overlap_samples": 0})
         else:
             seg_wave = waveform[..., seg_start:end_sample].clone()
-            if seg_wave.shape[-1] < nominal_samples:
-                pad_len = nominal_samples - seg_wave.shape[-1]
+            if seg_wave.shape[-1] < _seg_samples:
+                pad_len = _seg_samples - seg_wave.shape[-1]
                 pad = torch.zeros(waveform.shape[0], waveform.shape[1], pad_len,
                                   dtype=waveform.dtype, device=waveform.device)
                 seg_wave = torch.cat([seg_wave, pad], dim=-1)
@@ -2653,6 +2660,18 @@ def _ff_wrap_members(members, was_nested):
     return members[0]
 
 
+def _ff_video_hw(samples):
+    """取 latent 视频成员的 (h, w); 失败返回 None。"""
+    try:
+        members, _ = _ff_extract_members(samples)
+        v = members[0] if members else None
+        if v is not None and v.dim() == 5:
+            return (int(v.shape[-2]), int(v.shape[-1]))
+    except Exception:
+        pass
+    return None
+
+
 def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
     """v14.179 (2026-10-23): 二采分块粒度自适应 —— 不再盲目扩块到 Sol-Attn 健康区。
 
@@ -3207,6 +3226,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
+    # v14.250 (2026-10-29): 二采 OOM/塌陷回退标记。回退后的 latent 只是「一采
+    # latent 插值放大」, 不是采样产物 —— 在链几何上直接 VAE 解码会得到 16px 周期
+    # 的马赛克玻璃条纹(实机一镜到底 clip2+ 复现, 条纹周期 = latent cell)。记下
+    # 一采几何, 交给 Disk Cache 解码时先缩回一采再像素放大。
+    _refine_fallback_hw = None
+
     # v14.195: 音频渲染质量保护（渲染环节治本, 非渲染后处理）——
     # 诊断(h3_clip_250 样本 + 5 个历史渲染): 所有电影工厂渲染输出均带恒定
     # 低频轰鸣(100-200Hz 占全频 ~60%、全程无静音、200-400Hz 人声带被盖住),
@@ -3501,6 +3526,18 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             print("[H3 Extender] ⚠️ 建议: ①换剪枝/int8 小模型(如 fasth3_omniref_8step_pruned_int8_convrot, "
                   "配「FastH3 Omni 8步单采」档)让权重整块驻留; ②或换更大显存显卡; "
                   "③降低分辨率/上下文只能减 activation, 解决不了权重装不下")
+        # v14.250: 流式 vbar watermark 的 activation headroom 改为可配置。
+        # watermark = free − headroom, 决定有多少权重页能留在显存:
+        #   headroom 越小 -> 驻留越多 -> 每步换页越少(越快);
+        #   但 process_conds / Veda predictor / ctx 帧 activation 余量越小, 过小 OOM。
+        # 原硬编码 5.0GB(流式) / 4.5GB(free<18GB 分支), 这里统一默认 3.5GB。
+        # 24GB 卡装 20.6GB 权重时, 设 BSAI_H3_STREAM_HEADROOM_GB=2.0 可让几乎全部
+        # 权重驻留(换页最少->最快), 代价是 activation 余量仅 2GB(风险自担)。
+        try:
+            _h3_stream_headroom = float(os.environ.get("BSAI_H3_STREAM_HEADROOM_GB", "3.5"))
+        except Exception:
+            _h3_stream_headroom = 3.5
+        _h3_stream_headroom = max(1.0, min(8.0, _h3_stream_headroom))
         if _free_os >= 18.0:
             _mm1.load_models_gpu([model])   # reserve 4.0 预算: 驻留 ~17.5GB, 尾部 ~2GB offload
             _t1.cuda.synchronize()
@@ -3560,10 +3597,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         if hasattr(model, "_vbar_get"):
                             _vbar238 = model._vbar_get(create=False)
                         if _vbar238 is not None:
-                            _wm238 = int(max(2.0, _free_after - 5.0) * 1024 ** 3)
+                            _wm238 = int(max(2.0, _free_after - _h3_stream_headroom) * 1024 ** 3)
                             _vbar238.set_watermark(_wm238)
-                            print(f"[H3 Extender] v14.239 流式 vbar watermark -> "
-                                  f"{_wm238/1024**3:.1f}GB (free {_free_after:.1f}GB − 5.0GB [Veda+ctx])")
+                            print(f"[H3 Extender] v14.250 流式 vbar watermark -> "
+                                  f"{_wm238/1024**3:.1f}GB (free {_free_after:.1f}GB − "
+                                  f"{_h3_stream_headroom:.1f}GB headroom)")
                         else:
                             print(f"[H3 Extender] v14.238 未找到 vbar(非动态模型?), 跳过水位封顶")
                     except Exception as _wm238e:
@@ -3585,10 +3623,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if hasattr(model, "_vbar_get"):
                     _vbar238b = model._vbar_get(create=False)
                 if _vbar238b is not None:
-                    _wm238b = int(max(1.5, _free_238 - 4.5) * 1024 ** 3)
+                    _wm238b = int(max(1.5, _free_238 - _h3_stream_headroom) * 1024 ** 3)
                     _vbar238b.set_watermark(_wm238b)
-                    print(f"[H3 Extender] v14.239 流式(free<18GB) vbar watermark -> "
-                          f"{_wm238b/1024**3:.1f}GB (free {_free_238:.1f}GB − 4.5GB [Veda+ctx])")
+                    print(f"[H3 Extender] v14.250 流式(free<18GB) vbar watermark -> "
+                          f"{_wm238b/1024**3:.1f}GB (free {_free_238:.1f}GB − "
+                          f"{_h3_stream_headroom:.1f}GB headroom)")
             except Exception as _wm238be:
                 print(f"[H3 Extender] v14.238 watermark 设置失败(忽略): {_wm238be}")
             try:
@@ -5113,6 +5152,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # 实际交付的是放大后未去噪的 latent(灰片)。这里补上真正的赋值。
                 if _samples_pre_upscale is not None:
                     samples = _samples_pre_upscale
+                    _refine_fallback_hw = _ff_video_hw(samples)
                     print(f"[H3 Extender] 已回退到一采 latent; 建议手动把 "
                           f"refine_upscale_factor 改成 1.0 重新跑")
             except Exception as _fb_err:
@@ -5127,6 +5167,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _tb_fb.print_exc()
                 if _samples_pre_upscale is not None:
                     samples = _samples_pre_upscale
+                    _refine_fallback_hw = _ff_video_hw(samples)
                     print(f"[H3 Extender] 已回退到一采 latent (fallback 异常)")
             finally:
                 # v1.65: 恢复 prepare_sampling, 防污染后续采样(下一 clip / 其它工作流)
@@ -5222,6 +5263,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     if _pre_v:
                         _pre_hw = tuple(_pre_v[0].shape[-2:])
                         samples = _ff_wrap_members(list(_pre_v), _pre_nst)
+                        _refine_fallback_hw = (int(_pre_hw[0]), int(_pre_hw[1]))
                         print(f"[H3 Extender] ⚠ 二采 latent 塌陷(clip={clip_index} "
                               f"通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}), "
                               f"已自动回退一采 latent {_pre_hw[1]}x{_pre_hw[0]}")
@@ -5271,6 +5313,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     out.pop("downscale_ratio_spacial", None)
     out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
+    if _refine_fallback_hw:
+        _fbh, _fbw = int(_refine_fallback_hw[0]), int(_refine_fallback_hw[1])
+        if _fbh > 0 and _fbw > 0:
+            # 解码时先缩回一采几何再像素放大(见 motion_context_disk._load_segment_video_native)
+            out["decode_native_hw"] = [_fbh, _fbw]
+            print(f"[H3 Extender] v14.250 二采已回退: 本段标记一采解码几何 "
+                  f"{_fbw}x{_fbh} (避免插值 latent 直解码的马赛克条纹)")
     return out
 
 
@@ -10590,6 +10639,9 @@ class BSAIH3FilmFactory:
                 print("[H3 Extender] 用户终止渲染，停止后续 CLIP")
                 break
 
+            _decode_native_hw = None
+            if isinstance(sampled, dict):
+                _decode_native_hw = sampled.pop("decode_native_hw", None)
             result = disk_join.join(
                 samples=sampled,
                 trim_frames=trim_frames,
@@ -10598,6 +10650,7 @@ class BSAIH3FilmFactory:
                 fps=float(FPS),
                 previous_cache=previous_handle,
                 unique_id=f"extender_{owner}",
+                decode_native_hw=_decode_native_hw,
             )
             previous_handle = result[0]
             previous_proxy = result[1]

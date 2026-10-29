@@ -4,6 +4,13 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.252 (2026-10-29) — 修一镜到底 MV clip2+ 每段末尾音频静音 / Fix silent audio tail on clip2+ in one-shot MV mode
+
+**现象：** 一镜到底 MV（对口型）模式，clip1 结尾音频完整、可与 clip2 无缝衔接，但 clip2 之后每段末尾都被截掉一段纯静音（实测 clip2/3/4 尾部 0.185-0.187s 全零采样，clip1 为 0）。**根因：** `_split_lip_audio_by_clips` 把段头重叠算进了段长（段长 = 净时长 nominal，其中含 overlap），解码混音时又按 `overlap_samples` 从段头切掉 → 每段只剩 `nominal - overlap` 的原曲，尾部补零；推进量也是 `nominal - overlap`，歌曲每段比视频慢 overlap，20 段累积错位约 4s。**修复：** 段长改为 `nominal + overlap`（头部重叠之外再补满净时长）、推进改为 `nominal`；解码混音切掉段头后恰好剩 nominal，与视频净帧数等长，零补零、零累积漂移。已缓存的对口型 blob 加 `decoded_mp4_lip_tail_fix` 失效标记（仅 clip2+ 重混音，clip1 与非对口型链不受影响）。
+**/ Symptom & fix:** In one-shot lip-sync MV mode only clip1's tail audio is intact; every clip2+ ended with digital silence (measured 0.185-0.187s of exact zeros). Root cause: the per-clip song split counted the head overlap inside the segment length, while decoding removed that overlap — leaving `nominal - overlap` of song plus a zero pad, and advancing by `nominal - overlap` so the song drifted behind the video by ~4s over 20 clips. Segments now span `nominal + overlap` and advance by `nominal`, so after the overlap cut each clip is exactly `nominal` long (no pad, no drift). Cached lip blobs are invalidated once via `decoded_mp4_lip_tail_fix` (clip2+ only; clip1 and non-lip chains unaffected).
+
+- 验证：extender.py / motion_context_disk.py py_compile PASS；12 段合成歌曲切分自测（每段切头重叠后 = nominal、段间首尾连续、尾部零静音）PASS。**/ Verified:** py_compile PASS; 12-segment synthetic split test PASS (each segment exactly nominal after the head-overlap cut, contiguous boundaries, zero silent tail).
+
 ### v14.249 (2026-10-29) — 落地《H3 一镜到底全球调研报告》短期项 S1/S3/S5/S7（4 落地 + 5 项判定已覆盖不重复实施）/ Land the global research report's short-term items S1/S3/S5/S7 (4 landed; 5 items judged already covered)
 
 **调研报告对照 v14.240-248 逐项核对结论：S2 已被 v14.191+241+248 三重 prompt 指令覆盖；S4 的 start_percent/end_percent/sink_conditioning 本就是 BSAI-Sol-H3 工作流 widget（无需改代码）；S6 被 v14.240 全链同 seed + v14.248 渐变锁覆盖；S8 的 context 39 与 v14.241 官方 22 语义决策冲突、锥形注噪与锁 keep 路线冲突（v14.240 实测注噪破坏延续）；S9 已有像素级 4 帧三角溶解（v14.178）+ ffmpeg xfade。以下为真增量的 4 项：**
