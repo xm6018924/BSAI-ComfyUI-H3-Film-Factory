@@ -468,13 +468,18 @@ def _tiled_model_call(
             if len(pred_streams) > 1 and audio_acc is None:
                 audio_acc = pred_streams[1].float()
             del tile_x, pred, pred_streams, pred_video
-            if device.type == "cuda":
-                torch.cuda.empty_cache()
+            # v14.251 (2026-10-29): 提速 —— 移除块间 empty_cache。
+            # 4 块串行时每块结束都 empty_cache 会强制同步 GPU + 整池回收,
+            # 下一块 forward 重新 cudaMalloc + 冷池分配, 每块多付一次分配税。
+            # 串行块峰值不叠加(池=历史峰值=单块峰值), 保留缓存池无 OOM 风险,
+            # 改为整步(finally)后一次回收, 与采样器步间行为一致。
     finally:
         base.latent_shapes = saved_shapes
         model_k.latent_image = saved_latent_image
         model_k.noise = saved_noise
         model_k._tiled_active = _prev_tiled
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     merged = [video_acc / weights.clamp(min=1e-8)]
     if audio_acc is not None and len(streams) > 1:

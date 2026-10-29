@@ -4822,6 +4822,39 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] v1.91 fraction 已是 1.0, 无需解除")
             except Exception as _e91:
                 print(f"[H3 Extender] v1.91 fraction reset 失败: {_e91}")
+            # v14.251 (2026-10-29): 二采首步预热 —— 第 1 大步的"初始化税"
+            # (Sol-Attn workspace 首次分配 4.5GB、KJNodes head 分组首触发、
+            # tiled proxy 首次调度、keyframes/PackedLayout 首次构建) 全部移到
+            # 真实进度条(0/4)之前: 用 1/8 空间小块 + 独立 seed 空跑最后一段
+            # sigma 一步, 不污染真实采样状态, 失败则静默跳过。
+            try:
+                import comfy.utils as _cu_w, comfy.sample as _cs_w, comfy.nested_tensor as _cnt_w
+                _wmem_w, _wnested_w = _ff_extract_members(_r_latent["samples"])
+                _wv_w = _wmem_w[0]
+                _wh_w = max(4, int(_wv_w.shape[-2]) // 8)
+                _ww_w = max(4, int(_wv_w.shape[-1]) // 8)
+                _wv_s = _wv_w[:, :, :, :_wh_w, :_ww_w].contiguous()
+                _wa_s = _wmem_w[1][..., :2048].contiguous() if len(_wmem_w) > 1 else None
+                _w_streams = [_wv_s] + ([_wa_s] if _wa_s is not None else [])
+                _wpack, _wshapes = _cu_w.pack_latents(_w_streams)
+                _wbase = _cnt_w.NestedTensor(tuple(_w_streams))
+                _w_guider_w = _BasicGuider(_refine_model)
+                _w_guider_w.set_conds(conditioning)
+                _w_noise_w = _cs_w.prepare_noise(_wbase, int(seed) + 999, None)
+                _w_sig_w = list(_r_sigmas)[-2:]
+                with _aimdo_disabled():
+                    _w_guider_w.sample(
+                        _w_noise_w, _wbase, _r_sampler, _w_sig_w,
+                        denoise_mask=None,
+                        callback=None,
+                        disable_pbar=True,
+                        seed=int(seed) + 999,
+                    )
+                torch.cuda.synchronize()
+                print(f"[H3 Extender] v14.251 二采首步预热完成 (dummy {_wh_w}x{_ww_w}, "
+                      f"首次初始化已移出第 1 大步)", flush=True)
+            except Exception as _we_w:
+                print(f"[H3 Extender] v14.251 二采首步预热跳过(可忽略): {_we_w}")
             try:
                 if _use_temporal:
                     # v2.02 时间分块二采: 沿 T 切段, 逐段走已有(空间分块)采样器,
