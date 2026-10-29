@@ -7842,9 +7842,13 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
                 // 0..47 照抄, 48..52 留空补 P0/P2 默认, 老 48..56 → 新 53..61,
                 // 62 = refine_mem_mode 默认。
                 const old = new Array(58).fill(null);
-                if (L === "L58O" || L === "L59" || L === "O63") {
-                    // 这三类 0..56 与老坐标系完全同键(真实工作流实测验证);
-                    // 57 及之后(restore_cache/timeline/污染垃圾)一律丢弃。
+                if (L === "L58O" || L === "L59" || L === "O63" || L === "CURRENT") {
+                    // v14.255 (2026-10-29): CURRENT(58 键)也走这个分支 —— 旧版 KEYS 0..57
+                    // 与新版 0..56 完全同键(仅 57 从 prompt_pack 变为 refine_mem_mode)。
+                    // 此前 CURRENT 走 else 分支只复制 0..32, 33..57 全部丢失 →
+                    // prompt_pack 默认值(复杂 JSON)被映射到新 71(h3_extender_timeline)
+                    // 显示为巨大文本框, 把节点撑爆。
+                    // 修复: CURRENT 复制 0..56, 57(prompt_pack)不映射(新版 62 由 DEFAULTS 补)。
                     for (let i = 0; i < 57 && i < w.length; i++) old[i] = w[i];
                 } else {
                     for (let i = 0; i < 33 && i < w.length; i++) old[i] = w[i];
