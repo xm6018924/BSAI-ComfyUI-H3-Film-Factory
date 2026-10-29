@@ -39,6 +39,38 @@ except Exception:  # 离线自检环境（enum probe）没有 ComfyUI 时兜底
 # 小工具 / shared helpers
 # ----------------------------------------------------------------------------
 
+# ----------------------------------------------------------------------------
+# 下拉值归一化 / dropdown normalisation
+# ----------------------------------------------------------------------------
+# 下拉列表只保留英文（见 INPUT_TYPES）。老工作流里存的旧中文标签在这里归一化，
+# 让它们继续可用，不必改动已保存的 JSON。
+_BACKDROP_ALIASES = {
+    "green screen": "green", "绿幕": "green", "绿幕 green": "green",
+    "blue screen": "blue", "蓝幕": "blue", "蓝幕 blue": "blue",
+    "pure black": "black", "纯黑": "black", "纯黑 pure black": "black",
+    "pure white": "white", "纯白": "white", "纯白 pure white": "white",
+}
+
+_MATTE_ALIASES = {
+    "balanced (hair/smoke)": "balanced",
+    "平衡（毛发/烟雾）balanced": "balanced", "平衡": "balanced",
+    "hard edges": "hard", "硬边 hard edges": "hard", "硬边": "hard",
+    "fire on green": "fire", "火焰 fire on green": "fire", "火焰": "fire",
+    "dark on white": "dark_white",
+    "暗黑转白 dark on white": "dark_white", "暗黑转白": "dark_white",
+}
+
+
+def _norm_backdrop(value):
+    """Backdrop dropdown value -> one of green / blue / black / white."""
+    return _BACKDROP_ALIASES.get(str(value or "").strip().lower(), "green")
+
+
+def _norm_preset(value):
+    """Matte-preset dropdown value -> one of balanced / hard / fire / dark_white."""
+    return _MATTE_ALIASES.get(str(value or "").strip().lower(), "balanced")
+
+
 def _clamp01(t):
     return torch.clamp(t, 0.0, 1.0)
 
@@ -108,66 +140,66 @@ class BSAI_H3_TransparentKey:
     RETURN_TYPES = ("IMAGE", "IMAGE", "IMAGE")
     RETURN_NAMES = ("images_rgba", "matte", "images_preview")
     FUNCTION = "key"
-    DESCRIPTION = ("H3 透明视频抠像台：绿幕/蓝幕/纯黑/纯白背景一键抠像 -> straight "
-                   "alpha RGBA + Matte + 棋盘格预览。Matte 预设 + 强度/白电平/阴影保留/"
-                   "补洞 + 边缘柔化/收缩/去溢色精修。输出可直接接透明视频导出节点。")
+    DESCRIPTION = ("H3 Transparent Keying Studio: one-click keying of green/blue screen "
+                   "or pure black/white backdrops -> straight-alpha RGBA + Matte + "
+                   "checkerboard preview. Matte presets plus strength / white-clip / "
+                   "shadow-retention / hole-fill and edge soften/choke/de-spill refinement. "
+                   "Outputs plug directly into the transparent-video export node.")
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE", {"tooltip": "H3 生成的视频帧（电影工厂主节点 images 输出，B,H,W,3 float 0..1）"}),
+                "images": ("IMAGE", {"tooltip": "H3-generated video frames (images output of the Film Factory main node; B,H,W,3 float 0..1)"}),
                 "backdrop_color": (
-                    ["Green screen", "Blue screen", "Pure black", "Pure white",
-                     "绿幕 Green", "蓝幕 Blue", "纯黑 Pure Black", "纯白 Pure White"],
+                    ["Green screen", "Blue screen", "Pure black", "Pure white"],
                     {"default": "Green screen",
-                     "tooltip": "Backdrop color used during generation: green/blue for characters/props; pure black for VFX fire/sparks/smoke (luma key); pure white for ink/silhouette/dark smoke (Dark-on-White). Legacy Chinese aliases (绿幕/蓝幕/纯黑/纯白) are accepted at runtime."},
+                     "tooltip": "Backdrop color used during generation: green/blue for characters/props; pure black for VFX fire/sparks/smoke (luma key); pure white for ink/silhouette/dark smoke (Dark-on-White). Legacy Chinese aliases saved in old workflows are accepted at runtime."},
                 ),
                 "matte_preset": (
-                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white",
-                     "平衡（毛发/烟雾）Balanced", "硬边 Hard edges", "火焰 Fire on green", "暗黑转白 Dark on white"],
+                    ["Balanced (hair/smoke)", "Hard edges", "Fire on green", "Dark on white"],
                     {"default": "Balanced (hair/smoke)",
                      "tooltip": "One-click preset: Balanced=default tuning; Hard edges=tighten edges; Fire on green=green screen + stronger despill; Dark on white=white-screen dark-subject mode. Legacy Chinese aliases accepted at runtime."},
                 ),
                 "key_strength": (
                     "FLOAT", {"default": 0.5, "min": 0.05, "max": 1.0, "step": 0.05,
-                              "tooltip": "抠像强度：越大保留主体越多（毛发/烟雾更完整），越小抠得越狠（背景更彻底透明）。"},
+                              "tooltip": "Keying strength: higher keeps more of the subject (fuller hair/smoke); lower keys harder (backdrop more fully transparent)."},
                 ),
                 "clip_white": (
                     "FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                              "tooltip": "白电平钳制：把接近不透明的高 alpha 拉满（去除残留灰雾/半透明罩），0=关闭。"},
+                              "tooltip": "White-clip: pushes near-opaque high alpha to fully opaque (removes residual haze/semi-transparent veil). 0=off."},
                 ),
                 "shadow_retention": (
                     "FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05,
-                              "tooltip": "阴影保留：把绿幕/蓝幕上的深色投影区域按比例拉回不透明（保留脚底阴影），0=关闭。"},
+                              "tooltip": "Shadow retention: pulls dark shadow areas on the green/blue screen back toward opaque by this ratio (keeps shadows under feet). 0=off."},
                 ),
                 "fill_holes": (
                     "INT", {"default": 2, "min": 0, "max": 12, "step": 1,
-                            "tooltip": "补洞半径（像素）：对主体内部被误抠的孔洞（如透出的背景色）做闭运算填充，0=关闭。"},
+                            "tooltip": "Hole-fill radius (px): closing fill for holes mistakenly keyed inside the subject (e.g. backdrop showing through). 0=off."},
                 ),
                 "edge_softness": (
                     "INT", {"default": 1, "min": 0, "max": 8, "step": 1,
-                            "tooltip": "边缘柔化半径（像素）：毛发/烟雾建议 1-3，硬边素材建议 0。"},
+                            "tooltip": "Edge softness radius (px): 1-3 recommended for hair/smoke; 0 for hard-edged material."},
                 ),
                 "edge_choke": (
                     "FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05,
-                              "tooltip": "边缘收缩（负值收紧去残留绿边）/扩张（正值保住细节），0=不变。"},
+                              "tooltip": "Edge choke: negative shrinks (removes leftover green fringe); positive expands (preserves detail). 0=unchanged."},
                 ),
                 "de_spill": (
                     "FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05,
-                              "tooltip": "去溢色强度：消除主体边缘残留的背景色光晕（绿边/蓝边），只作用于半透明边缘像素，不碰不透明主体。"},
+                              "tooltip": "De-spill strength: removes backdrop color halo on subject edges (green/blue fringe). Acts only on semi-transparent edge pixels, never on the opaque subject."},
                 ),
                 "keep_mask": (
                     "BOOLEAN", {"default": False,
-                                "tooltip": "启用后忽略背景抠像，直接使用下方 mask 输入作为 Alpha（适用于自带蒙版/透明底的参考素材）。"},
+                                "tooltip": "When enabled, skips backdrop keying and uses the mask input below as Alpha (for reference material that already ships a matte/transparent background)."},
                 ),
             },
             "optional": {
-                "mask": ("MASK", {"tooltip": "可选蒙版：keep_mask=True 时直接用该蒙版作为 Alpha（B,H,W 或 H,W float 0..1）。"}),
+                "mask": ("MASK", {"tooltip": "Optional mask: when keep_mask=True it is used directly as Alpha (B,H,W or H,W float 0..1)."}),
                 "preview_side": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64,
-                                        "tooltip": "棋盘格预览图短边上限（像素）。预览仅供检查，无需全分辨率；H3 全片 2K 视频（数百帧）时保持默认可大幅省内存。0=禁用预览降采样（不推荐）。"}),
+                                        "tooltip": "Checkerboard preview short-side cap (px). Preview is for inspection only and does not need full resolution; keep the default for full-length 2K H3 videos (hundreds of frames) to save a lot of memory. 0=disable preview downsampling (not recommended)."}),
                 "matte_side": ("INT", {"default": 512, "min": 0, "max": 2048, "step": 64,
-                                      "tooltip": "Matte 灰度图短边上限（像素）。0=全分辨率（需把 matte 当精确蒙版导出时使用，内存开销大）。默认降采样到 512，全分辨率 Alpha 仍由 images_rgba 的 A 通道提供，导出不受影响。"}),
+                                      "tooltip": "Matte grayscale short-side cap (px). 0=full resolution (only when exporting the matte as an exact mask; memory-heavy). Default downsamples to 512; the full-resolution alpha still comes from the A channel of images_rgba, so export is unaffected."}),
             },
         }
 
@@ -177,8 +209,8 @@ class BSAI_H3_TransparentKey:
         y, cb, cr = _rgb_to_ycbcr(rgb)
         b_ch = rgb.shape[1]
 
-        if backdrop_color.startswith("绿幕") or backdrop_color.startswith("蓝幕"):
-            if backdrop_color.startswith("绿幕"):
+        if backdrop_color in ("green", "blue"):
+            if backdrop_color == "green":
                 key = rgb[:, 1:2] - torch.maximum(rgb[:, 0:1], rgb[:, 2:3])
             else:
                 key = rgb[:, 2:3] - torch.maximum(rgb[:, 0:1], rgb[:, 1:2])
@@ -186,17 +218,17 @@ class BSAI_H3_TransparentKey:
             lo = 0.42 - 0.30 * strength
             hi = 0.42 + 0.28 * (1.0 - strength)
             alpha = 1.0 - _smoothstep(lo, hi, key)
-            spill_ch = 1 if backdrop_color.startswith("绿幕") else 2
+            spill_ch = 1 if backdrop_color == "green" else 2
             spill = torch.maximum(rgb[:, spill_ch:spill_ch + 1]
                                   - torch.maximum(rgb[:, 0:1], rgb[:, 2:3] if spill_ch == 1 else rgb[:, 1:2]),
                                   torch.zeros_like(key))
-        elif backdrop_color.startswith("纯黑"):
+        elif backdrop_color == "black":
             # 亮度抠像：亮部（火焰/火花/高亮烟雾）不透明，纯黑背景透明
             lo = 0.10 + 0.22 * (1.0 - strength)
             hi = 0.10 + 0.22 * (1.0 - strength) + 0.30
             alpha = _smoothstep(lo, hi, y)
             spill = torch.zeros_like(y)
-        else:  # 纯白
+        else:  # white
             # 亮度反抠：暗部（墨水/剪影/深色烟雾）不透明，纯白背景透明
             lo = 0.55 + 0.25 * (1.0 - strength)
             hi = lo + 0.30
@@ -211,9 +243,9 @@ class BSAI_H3_TransparentKey:
             shadow_floor = shadow_retention * (1.0 - y)
             alpha = torch.maximum(alpha, _clamp01(shadow_floor))
         # 预设微调
-        if "硬边" in preset:
+        if preset == "hard":
             pass  # 硬边由 edge 参数控制，这里不额外改 alpha
-        if "火焰" in preset:
+        if preset == "fire":
             alpha = torch.maximum(alpha, _clamp01(y))  # 火焰主体强化
         return _clamp01(alpha), _clamp01(spill)
 
@@ -235,10 +267,10 @@ class BSAI_H3_TransparentKey:
             return rgb
         # 只在半透明边缘生效：权重 = (1 - alpha)^1.2
         edge_w = torch.pow(_clamp01(1.0 - alpha), 1.2).detach()
-        if backdrop_color.startswith("绿幕"):
+        if backdrop_color == "green":
             g = rgb[:, 1:2] - de_spill * edge_w * spill
             rgb = torch.cat([rgb[:, 0:1], _clamp01(g), rgb[:, 2:3]], dim=1)
-        elif backdrop_color.startswith("蓝幕"):
+        elif backdrop_color == "blue":
             b = rgb[:, 2:3] - de_spill * edge_w * spill
             rgb = torch.cat([rgb[:, 0:1], rgb[:, 1:2], _clamp01(b)], dim=1)
         return rgb
@@ -279,6 +311,11 @@ class BSAI_H3_TransparentKey:
             clip_white, shadow_retention, fill_holes, edge_softness,
             edge_choke, de_spill, keep_mask, mask=None,
             preview_side=512, matte_side=512):
+        # Normalise dropdown values (incl. legacy Chinese labels from old
+        # workflow JSONs) to canonical keys: green/blue/black/white and
+        # balanced/hard/fire/dark_white.
+        backdrop_color = _norm_backdrop(backdrop_color)
+        matte_preset = _norm_preset(matte_preset)
         rgb_full = _to_hw_batch(images).to(images.device)
         b, c, h, w = rgb_full.shape
 
@@ -315,10 +352,10 @@ class BSAI_H3_TransparentKey:
                 alpha, spill = self._key_alpha(
                     rgb, backdrop_color, float(key_strength),
                     float(clip_white), float(shadow_retention), matte_preset)
-                if "硬边" in matte_preset:
+                if matte_preset == "hard":
                     edge_softness = min(int(edge_softness), 1)
                     edge_choke = float(edge_choke) + 0.15
-                elif "火焰" in matte_preset:
+                elif matte_preset == "fire":
                     de_spill = min(float(de_spill) + 0.25, 1.0)
                     edge_softness = int(edge_softness) + 1
 
@@ -343,9 +380,15 @@ class BSAI_H3_TransparentKey:
 
         frames = int(rgba.shape[0])
         print(f"[BSAI H3 TransparentKey] {backdrop_color} / {matte_preset}: "
-              f"{frames} 帧 (chunk={chunk}) -> RGBA+Matte+预览 (alpha 均值 "
+              f"{frames} frames (chunk={chunk}) -> RGBA+Matte+preview (alpha mean "
               f"{total_alpha_mean / max(1, frames) * 100:.1f}%)")
         return (rgba, matte, preview)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        # Let legacy Chinese dropdown labels saved by old workflow JSONs pass
+        # combo validation; key() normalises them via _norm_backdrop/_norm_preset.
+        return True
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
@@ -368,31 +411,35 @@ class BSAI_H3_SaveTransparentVideo:
     RETURN_NAMES = ("folder", "alpha_file", "preview_file", "preview_images")
     FUNCTION = "export"
     OUTPUT_NODE = True
-    DESCRIPTION = ("透明视频导出：ProRes 4444 (.mov 真 12bit Alpha，PR/AE/DaVinci/FCP "
-                   "直接识别 straight alpha) / WebM VP9 (.webm 带 Alpha) / RGBA PNG 序列；"
-                   "自动另存棋盘格预览 MP4。")
+    DESCRIPTION = ("Transparent video export: ProRes 4444 (.mov with true 12-bit alpha, "
+                   "recognised as straight alpha by PR/AE/DaVinci/FCP) / WebM VP9 (.webm "
+                   "with alpha) / RGBA PNG sequence; also saves a checkerboard preview MP4.")
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images_rgba": ("IMAGE", {"tooltip": "RGBA 视频帧（BSAI_H3_TransparentKey 的 images_rgba 输出，B,H,W,4）"}),
+                "images_rgba": ("IMAGE", {"tooltip": "RGBA video frames (images_rgba output of BSAI_H3_TransparentKey; B,H,W,4)"}),
                 "format": (
                     ["ProRes 4444 (.mov)", "WebM VP9 (.webm)",
-                     "RGBA PNG Sequence (.png)",
-                     "ProRes 4444 (.mov, 真Alpha)", "WebM VP9 (.webm, Alpha)",
-                     "RGBA PNG 序列 (.png)"],
+                     "RGBA PNG Sequence (.png)"],
                     {"default": "ProRes 4444 (.mov)",
-                     "tooltip": "Export format: ProRes 4444 = 12-bit true-alpha QuickTime (editing software imports directly, preferred); WebM VP9 = alpha-bearing WebM (web/H5, requires FFmpeg libvpx-vp9, node will error clearly if unavailable); RGBA PNG Sequence = lossless per-frame transparent PNG (compositing preferred). Legacy Chinese aliases (ProRes 4444 (.mov, 真Alpha) / RGBA PNG 序列 (.png)) accepted at runtime."},
+                     "tooltip": "Export format: ProRes 4444 = 12-bit true-alpha QuickTime (editing software imports directly, preferred); WebM VP9 = alpha-bearing WebM (web/H5, requires FFmpeg libvpx-vp9, node will error clearly if unavailable); RGBA PNG Sequence = lossless per-frame transparent PNG (compositing preferred). Legacy Chinese aliases saved in old workflows are accepted at runtime."},
                 ),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 60, "step": 1}),
                 "filename_prefix": ("STRING", {"default": "h3_transparent",
-                                               "tooltip": "输出文件名前缀（自动追加时间戳子文件夹，不覆盖旧产物）。"}),
+                                               "tooltip": "Output filename prefix (a timestamped subfolder is appended; older output is never overwritten)."}),
             },
             "optional": {
-                "audio": ("AUDIO", {"tooltip": "可选音频（电影工厂主节点 audios 输出），合入 MOV/WebM。"}),
+                "audio": ("AUDIO", {"tooltip": "Optional audio (audios output of the Film Factory main node), muxed into MOV/WebM."}),
             },
         }
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, **kwargs):
+        # Let legacy Chinese format labels saved by old workflow JSONs pass
+        # combo validation; export() matches them by prefix at runtime.
+        return True
 
     def _output_root(self):
         base = folder_paths.get_output_directory() if folder_paths is not None else os.path.join("output")
@@ -535,9 +582,10 @@ class BSAI_H3_SaveTransparentVideo:
             except Exception:
                 pass
             raise RuntimeError(
-                "BSAI_H3_SaveTransparentVideo: 当前 FFmpeg 构建的 VP9 编码器不支持 "
-                "Alpha 通道（libvpx-vp9 需 libvpx>=1.10，产出被静默降级为 yuv420p）。"
-                "请改用 'ProRes 4444 (.mov, 真Alpha)' 或 'RGBA PNG 序列 (.png)'。")
+                "BSAI_H3_SaveTransparentVideo: the VP9 encoder in this FFmpeg build does "
+                "not support an alpha channel (libvpx-vp9 needs libvpx>=1.10; output was "
+                "silently downgraded to yuv420p). Use 'ProRes 4444 (.mov)' or "
+                "'RGBA PNG Sequence (.png)' instead.")
 
     def _write_png_sequence(self, dir_path, images_rgba, prefix):
         """v14.248: 接收原始 torch tensor (B,H,W,4)，流式逐帧转 uint8 写 PNG。"""
@@ -579,10 +627,10 @@ class BSAI_H3_SaveTransparentVideo:
 
     def export(self, images_rgba, format, fps, filename_prefix, audio=None):
         if images_rgba.shape[-1] < 4:
-            raise ValueError("BSAI_H3_SaveTransparentVideo: 输入不是 RGBA（通道数 < 4），"
-                             "请先接 BSAI_H3_TransparentKey 的 images_rgba 输出。")
+            raise ValueError("BSAI_H3_SaveTransparentVideo: input is not RGBA (channel count < 4); "
+                             "connect the images_rgba output of BSAI_H3_TransparentKey first.")
         if not self._av_available():
-            raise RuntimeError("PyAV(av) 不可用：请确认 ComfyUI 环境已安装 PyAV。")
+            raise RuntimeError("PyAV (av) is unavailable: make sure PyAV is installed in the ComfyUI environment.")
 
         root = self._output_root()
         sub, alpha_dir, prev_dir = self._new_subfolder(root, filename_prefix)
@@ -608,12 +656,12 @@ class BSAI_H3_SaveTransparentVideo:
             self._write_preview_mp4(preview_path, images_rgba, fps)
         except Exception as e:
             preview_path = ""
-            print(f"[BSAI H3 SaveTransparentVideo] 预览生成失败（不影响 alpha 产物）: {e}")
+            print(f"[BSAI H3 SaveTransparentVideo] preview generation failed (alpha output unaffected): {e}")
 
         dur = b / fps
-        print(f"[BSAI H3 SaveTransparentVideo] {format} 已导出: {fpath} "
-              f"({b} 帧, {dur:.1f}s @ {fps}fps, 音频={'合入' if audio is not None else '无'})")
-        print(f"[BSAI H3 SaveTransparentVideo] 目录: {sub} (alpha/ + preview/)")
+        print(f"[BSAI H3 SaveTransparentVideo] {format} exported: {fpath} "
+              f"({b} frames, {dur:.1f}s @ {fps}fps, audio={'muxed' if audio is not None else 'none'})")
+        print(f"[BSAI H3 SaveTransparentVideo] folder: {sub} (alpha/ + preview/)")
 
         # 预览图输出（棋盘格合成首帧->全帧）
         # v14.248: 同样从 tensor 逐帧取，避免 frames_u8 中间数组
@@ -638,6 +686,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "BSAI_H3_TransparentKey": "BSAI H3 透明视频抠像台 / Transparent Keying Studio",
-    "BSAI_H3_SaveTransparentVideo": "BSAI H3 透明视频导出 / Transparent Video Writer",
+    "BSAI_H3_TransparentKey": "BSAI H3 Transparent Keying Studio",
+    "BSAI_H3_SaveTransparentVideo": "BSAI H3 Transparent Video Writer",
 }
