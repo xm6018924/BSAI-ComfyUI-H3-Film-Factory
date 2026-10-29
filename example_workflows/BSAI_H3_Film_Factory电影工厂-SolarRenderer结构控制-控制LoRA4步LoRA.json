@@ -1,8 +1,8 @@
 {
   "id": "e8d1fada-1797-4e7d-8425-0e78468e7502",
   "revision": 0,
-  "last_node_id": 1443,
-  "last_link_id": 709,
+  "last_node_id": 1444,
+  "last_link_id": 711,
   "nodes": [
     {
       "id": 107,
@@ -5451,7 +5451,7 @@
         {
           "name": "model",
           "type": "MODEL",
-          "link": 701
+          "link": 711
         },
         {
           "name": "clip",
@@ -5779,7 +5779,7 @@
         "global (全上下文省显存)",
         "off (分镜模式)",
         0,
-        "H25 Hybrid 8步 多参考单采",
+        "SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)",
         "单采无缝 (推荐)",
         ""
       ],
@@ -9202,7 +9202,7 @@
           "name": "model",
           "type": "MODEL",
           "links": [
-            701
+            710
           ]
         }
       ],
@@ -9294,6 +9294,111 @@
         "value": "【画面硬约束·全片必须遵守】任何时刻画面上只有一支香薰蜡烛@图3；绝不出现第二支蜡烛、第二个蜡烛容器、小杯实物、镜像或人物叠影；主播@图1全片只有两条手臂（左侧一条、右侧一条），双手必须自然连接在肩膀与躯干上，绝不出现第三条手臂、悬浮手掌、半截手臂或脱离身体的白袖手套；桌面不得叠放或排列多支产品。\n[整体风格]：直播带货写实风格，暖黄柔光直播间氛围，产品展示质感清晰且充满紧迫抢购氛围。\n\n[角色档案]：\n主播@图1，亚洲女性，30岁左右，长发微卷自然垂落，妆容清透自然，穿着米白色针织开衫搭配简约内搭，佩戴细项链与简约耳饰，材质光线柔和，表情热情亲切。\n\n[道具档案]：\n香薰蜡烛@图3，圆柱形陶瓷容器，表面哑光质地，顶部为天然大豆蜡，中心为棉芯，侧面印有极简品牌标识，燃烧时产生稳定微弱火焰与细腻香气扩散。\n\n[场景档案]：\n直播场景@图2(室内/白天)，主光源为正面环形灯（色温4500K），台面为浅色木质展示台（反光柔和），背景为浅灰色墙面搭配暖色布艺装饰，右侧墙面干净留白、不摆放任何产品，左侧放置小型绿植与书籍作为点缀，中央为产品@图3专属展示位，纵深约2米，灯光均匀无硬阴影。\n\n[口播判定分布表]（30秒 · 2镜 × 15秒 · 每镜5拍段×3秒 · 台词由lip_voice音频承载，分镜不写台词）\n\n[分镜1]：直播场景@图2-开场卖点讲解（【口播中】·对口型0:00.0起）\n0-3秒：镜头中近景，主播@图1位于画面中央偏左，双手自然下垂，面带微笑直视镜头。背景@图2清晰可见，暖光打在主播@图1面部与肩部。主播@图1按照lip_voice的音频对口型开口直播说话，直视镜头、语速自然、表情热情，轻轻点头示意观众。音效：直播间环境白噪音，轻微风扇声。\n3-6秒：镜头缓慢推近至特写，主播@图1左手拿起香薰蜡烛@图3举到胸前，右手食指指向产品@图3顶部烛芯。主播@图1按照lip_voice的音频对口型开口直播说话，眼神跟随手指移动，语气强调“没有刺鼻味”。背景@图2虚化，突出产品@图3细节。音效：香薰蜡烛@图3轻碰桌面的细微摩擦声。\n6-9秒：镜头平移至右侧，香薰蜡烛@图3置于木质台面中央，镜头微仰角拍摄，捕捉火焰跳动与烟雾上升。主播@图1按照lip_voice的音频对口型开口直播说话，语气放缓，在画面左侧边缘露出半个侧脸，微笑注视产品@图3。光影聚焦于火焰暖光，反射在陶瓷@图3表面。音效：轻微木炭燃烧声，空气流动声。\n9-12秒：镜头切回中近景，主播@图1身体前倾，右手做出小幅比价手势、左手落在台面边缘，随后右手食指指向下方（暗示购物车）；手势幅度不超过肩宽。主播@图1按照lip_voice的音频对口型开口直播说话，眉毛上扬，语气急促但亲切。背景@图2中的其他香薰产品@图3排列整齐，增加促销感。音效：电子提示音“叮”表示新品上架。\n12-15秒：镜头拉远至全景，主播@图1站在完整展示区前，香薰蜡烛@图3放在正前方台面，两侧有绿植点缀。主播@图1按照lip_voice的音频对口型开口直播说话，右手在胸前做小幅邀请手势，最后右手食指收拢指向镜头；不得张开双臂。整个空间暖色调饱满，体现舒适居家感。音效：直播间背景音乐渐弱，环境音回归平静。\n\n[分镜2]：直播场景@图2-深化促单转化（【口播中】·对口型0:15.0起）\n0-3秒：镜头特写，香薰蜡烛@图3静置于深色绒布上，镜头绕产品@图3顺时针旋转15度，展示陶瓷罐侧面纹理与品牌logo。主播@图1按照lip_voice的音频对口型开口直播说话，在画面右下角入镜，手持打火机准备点火演示，表情亲切。光影从左上角45度照射，形成柔和阴影。音效：打火机咔哒声预备动作。\n3-6秒：镜头切回中近景，主播@图1手持打火机靠近香薰蜡烛@图3顶端，火苗接触棉芯瞬间点燃。主播@图1按照lip_voice的音频对口型开口直播说话，眼睛亮起来，用手势指示火焰高度，表情惊喜。火焰照亮主播@图1下半张脸，形成动态光影变化。背景@图2保持明亮稳定。音效：烛焰“呼”声，轻微气流声。\n6-9秒：镜头切为侧面中景，主播@图1右手轻扶产品@图3罐身微调角度、左手自然放在台面，确保火焰稳定；不得出现前景悬浮手部或第三只手。主播@图1按照lip_voice的音频对口型开口直播说话，语气放缓，描述香气扩散过程，手指轻轻划过空气模拟香气流动。产品@图3位于黄金分割点。音效：香薰香气想象性SFX（风铃清脆声）。\n9-12秒：镜头回到正面中景，主播@图1将香薰蜡烛@图3放回台面，右手抚平绒布边缘，整理产品位置。主播@图1按照lip_voice的音频对口型开口直播说话，挑眉强调“买两瓶更优惠”，仅口头强调，画面中不得出现小杯、第二个蜡烛容器或任何赠品实物；右手食指轻点两下。背景@图2保持整洁，不得叠放或排列产品。音效：布料滑动声，轻微敲击桌面声。\n12-15秒：镜头快速推进至大特写，香薰蜡烛@图3火焰摇曳，同时屏幕左下角浮现虚拟购物车图标动画（非实拍元素，后期添加）。主播@图1按照lip_voice的音频对口型开口直播说话，指向左下角，语气坚定，最后挥手告别式动作。整个画面色彩饱和度高，突出紧迫感。音效：购物车点击声“咔哒”，结尾轻响提示音。\n\n[对口型使用提示]：本分镜按对口型模式（lip_voice）设计——@图1 完全按照 lip_voice 的音频对口型开口直播说话，模型不生成声音，分镜不注入台词文本。工作流 lip_voice 端口接入完整口播音频即可。\n"
       },
       "bgcolor": "rgba(0,0,0,0)"
+    },
+    {
+      "id": 1442,
+      "type": "Note",
+      "pos": [
+        -3400.0,
+        120.0
+      ],
+      "size": [
+        980,
+        1180
+      ],
+      "flags": {},
+      "order": 900,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "🎬 SolarRenderer 结构控制档 · 详细使用说明",
+      "properties": {},
+      "widgets_values": [
+        "🎬 SolarRenderer 结构控制档 · 详细使用说明\nrender_pipeline = \"SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)\"\n\n【这个档位做什么】\n把\"结构视频\"渲染成成片：3D 灰盒 / 语义分割图 / DW 姿态骨架 / OpenPose 线框 / 深度图 /\nSMPL 人体网格 / 简笔画（训练里没见过的结构也能跟）。两个 LoRA 分工：控制 LoRA 把结构\n逐帧送进 H3 原生 reference 通路（≈视频版 ControlNet），4步 LoRA 把采样压到 4 步。\n配方出处：B站 BV1Phxu6PE93；官方 Enderfga/SolarRenderer（arXiv:2610.28630），成对使用。\n\n【硬性前提】\n1) 基座：FastH3-Omni 或 Singularity V2（INT8）。不要拿 8 步蒸馏专用权重当基座。\n2) LoRA：把这一对挂到 H3LoraStack —— 控制 LoRA + DMAD 4步 LoRA，强度都 0.8。\n   （v1.4 示例里已在\"文戏档 → FilmFactory\"之间串好一个专用 H3 LoRA Stack；\n   本示例的两个 H3LoraStack 槽位默认是 None，按上面填即可。）要关掉就把两个槽改回 None。\n3) Loader：在「BSAI Sol-H3 Loader (极速版)」里选上面的基座；sol_attn 建议开。\n\n【档位会自动接管的参数（不用手改）】\n· 采样：一采 4 步（低分辨率草稿）+ 二采 4 步（latent ×2.0 全分辨率精修）= 8 NFE\n· 采样器 / 调度器：强制 euler + simple\n· ref_image_size：强制 max（结构细节不做降采样）\n· shift：video 12 / audio 3\n\n【结构输入怎么给】\n① 结构视频放进 ComfyUI 输入目录 → LoadVideo 选中\n② 抽帧落盘（或直接把结构视频当视频资产用 @视频1 引用）\n③ 在「资产库 AssetLibrary」里把结构帧上传为图片资产（图1、图2…）\n④ 分镜提示词里用 @图N 指定结构参考帧\n注意帧对位：结构视频的帧号要跟目标片段对得上，首帧决定起始姿态。\n\n【提示词怎么写】\n· 必须写细：镜头怎么动、主体落点、材质光影、环境细节 —— 模型只从参考图取\"结构\"，\n  外观 / 风格全靠文字描述。\n· 结构类型用文字点明（例：\"3D 灰盒结构\" / \"深度图结构\"）。\n· @图N 引用规则、参考图纪律沿用本工作流既有约定（表内其它 Note 已说明）。\n\n【和其它模块怎么配合】\n· LoRA 栈顺序：武戏档 → 文戏档 → SolarRenderer → FilmFactory。\n  武戏 / 文戏档不用就清空，别和 4 步 LoRA 叠加，避免破坏蒸馏合约。\n· 音频 / 对口型：lip_voice / lip_audio 照常走；SolarRenderer 只接管画面结构，不动音频链路。\n· 透明视频：出片仍走 BSAI_H3_TransparentKey → SaveTransparentVideo（ProRes 4444 / WebM / PNG）。\n· 与 Sol-Attn / VSA：配方推荐 sol-attn；用 VSA 也行，但基座的蒸馏合约要匹配。\n\n【分辨率 / 时长 / 显存】\n· 官方出片 1344×768（或 768×1344）、24fps、158 帧；单卡约 3.5 min 采样（官方口径）。\n· 分辨率由「画幅比例 + 像素大小选择」给；竖版透明视频建议 1080×1920 以内起步。\n· 8 NFE 比 50 步基线快约 12.3×，但结构控制更吃参考图，一采别压太小（≈0.4~0.5MP 起）。\n\n【出片后处理（可选）】\nNVIDIA RTX VFX：RTX Video Frame Generation 24→48FPS + RTX Video Super Resolution → 2K。\n放在 FilmFactory 之后的像素域，别插在二采与 VAEDecode 之间。\n\n【常见问题排查】\n· 结构没对上 / 画面乱跑 → 检查 @图N 是否指到结构帧、帧号是否对位、提示词是否写清了镜头运动。\n· 画面糊 / 细节差 → 一采别低于 ~0.5MP；ref_image_size 必须 max；别叠加其它蒸馏 LoRA。\n· 出片太慢 → 二采 latent ×2.0 是主要开销；可把 refine_upscale_factor 降到 1.5，或缩短 clip。\n· 报\"LoRA 不匹配 / 0 个 key\" → 基座与 LoRA 主干（Ref2VA）不匹配，换 FastH3-Omni / Singularity V2。\n· 想快速 A/B → 把 SolarRenderer LoRA 栈两槽设为 None 即为对照组（结构控制关闭）。"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1443,
+      "type": "Note",
+      "pos": [
+        -2380.0,
+        120.0
+      ],
+      "size": [
+        980,
+        1180
+      ],
+      "flags": {},
+      "order": 901,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "🎬 SolarRenderer tier · Detailed Usage (EN)",
+      "properties": {},
+      "widgets_values": [
+        "SolarRenderer Tier - Detailed Usage (EN)\nrender_pipeline = \"SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)\"\n\n[What this tier does]\nRenders a structure video into finished footage: 3D grey box / semantic map / DW pose skeleton /\nOpenPose wireframe / depth / SMPL body mesh / even a sketch it never saw in training.\nTwo LoRAs split the job - the control LoRA feeds the structure into H3's native reference\npathway frame-aligned (a video-grade ControlNet), the 4-step LoRA compresses sampling to 4 steps.\nRecipe source: Bilibili BV1Phxu6PE93; upstream Enderfga/SolarRenderer (arXiv:2610.28630).\n\n[Prerequisites]\n1) Base: FastH3-Omni or Singularity V2 (INT8). Do NOT use an 8-step-distill-only weight as base.\n2) LoRA: put this pair into an H3LoraStack - control LoRA + DMAD 4-step LoRA, both at strength 0.8.\n   (The v1.4 example already splices a dedicated H3 LoRA Stack between the drama stack and the\n   FilmFactory; this example's two H3LoraStack slots default to None - fill them as above.)\n   Set both slots back to None to disable the tier.\n3) Loader: pick that base in \"BSAI Sol-H3 Loader\"; keep sol_attn on.\n\n[What the tier overrides automatically]\n- Sampling: 1st pass 4 steps (low-res draft) + 2nd pass 4 steps (latent x2.0 full-res refine) = 8 NFE\n- Sampler / scheduler forced to euler + simple\n- ref_image_size forced to max (structure detail is not downsampled)\n- shift: video 12 / audio 3\n\n[How to feed the structure]\n1) Put the structure video in ComfyUI's input dir and pick it in LoadVideo\n2) Dump the frames (or upload the structure video as a video asset and reference @视频1)\n3) Upload those frames into the Asset Library as image assets (图1, 图2 ...)\n4) Reference them with @图N in the per-clip prompt\nFrame alignment matters: the structure video's frames must line up with the target clip;\nthe first frame sets the starting pose.\n\n[Prompting]\n- Be specific: camera movement, subject landing point, material/lighting, environment.\n  The model takes only the STRUCTURE from the reference images - look and style come from text.\n- Name the structure type in words (e.g. \"3D grey-box structure\", \"depth-map structure\").\n- Keep the existing @图N reference discipline used elsewhere in this workflow.\n\n[Interactions]\n- LoRA chain order: action stack -> drama stack -> SolarRenderer stack -> FilmFactory.\n  Clear the action/drama stacks when unused; do NOT stack other distilled LoRAs on top.\n- Audio / lip-sync: the lip_voice / lip_audio chain is untouched; SolarRenderer only takes over\n  the picture structure.\n- Transparent video: still goes through BSAI_H3_TransparentKey -> SaveTransparentVideo\n  (ProRes 4444 / WebM / PNG).\n- Sol-Attn vs VSA: the recipe recommends sol-attn; VSA also works if the base contract matches.\n\n[Resolution / length / VRAM]\n- Official output 1344x768 (or 768x1344), 24fps, 158 frames; ~3.5 min sampling on one GPU.\n- Size comes from \"画幅比例 + 像素大小选择\"; for vertical transparent video start at <= 1080x1920.\n- 8 NFE is ~12.3x faster than a 50-step baseline, but structure control is reference-heavy -\n  keep the 1st pass at ~0.4-0.5MP or above.\n\n[Post (optional)]\nNVIDIA RTX VFX: RTX Video Frame Generation 24->48FPS + RTX Video Super Resolution to 2K.\nPlace it in the pixel domain AFTER the FilmFactory, never between the 2nd pass and VAEDecode.\n\n[Troubleshooting]\n- Structure not matching / picture wanders -> check @图N points at structure frames, check frame\n  alignment, and spell out the camera movement.\n- Blurry / low detail -> 1st pass below ~0.5MP; ref_image_size must be max; remove other distilled LoRAs.\n- Too slow -> the x2.0 latent refine dominates; lower refine_upscale_factor to 1.5 or shorten the clip.\n- \"LoRA mismatch / 0 keys\" -> base and LoRA trunk (Ref2VA) do not match; switch to\n  FastH3-Omni / Singularity V2.\n- Quick A/B -> set both SolarRenderer stack slots to None (structure control off)."
+      ],
+      "color": "#243",
+      "bgcolor": "#365"
+    },
+    {
+      "id": 1444,
+      "type": "H3LoraStack",
+      "pos": [
+        -1957.1275978748931,
+        -485.26164829130676
+      ],
+      "size": [
+        603.6245306326032,
+        226
+      ],
+      "flags": {},
+      "order": 902,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "link": 710
+        }
+      ],
+      "outputs": [
+        {
+          "name": "model",
+          "type": "MODEL",
+          "slot_index": 0,
+          "links": [
+            711
+          ]
+        }
+      ],
+      "title": "H3 LoRA Stack · SolarRenderer (控制 + DMAD4步 @0.8)",
+      "properties": {
+        "Node name for S&R": "H3LoraStack"
+      },
+      "widgets_values": [
+        "H3\\SOL\\Solarrenderer_control_lora.safetensors",
+        0.8,
+        "H3\\SOL\\Solarrenderer_DMAD_4step_lora.safetensors",
+        0.8,
+        "None",
+        1.0,
+        "None",
+        1.0
+      ],
+      "widgets_values_named": {
+        "lora_1": "H3\\SOL\\Solarrenderer_control_lora.safetensors",
+        "strength_1": 0.8,
+        "lora_2": "H3\\SOL\\Solarrenderer_DMAD_4step_lora.safetensors",
+        "strength_2": 0.8,
+        "lora_3": "None",
+        "strength_3": 1.0,
+        "lora_4": "None",
+        "strength_4": 1.0
+      },
+      "bgcolor": "#232"
     }
   ],
   "links": [
@@ -9890,14 +9995,6 @@
       "AUDIO"
     ],
     [
-      701,
-      1440,
-      0,
-      250,
-      0,
-      "MODEL"
-    ],
-    [
       491,
       226,
       0,
@@ -10008,6 +10105,22 @@
       139,
       2,
       "STRING"
+    ],
+    [
+      710,
+      1440,
+      0,
+      1444,
+      0,
+      "MODEL"
+    ],
+    [
+      711,
+      1444,
+      0,
+      250,
+      0,
+      "MODEL"
     ]
   ],
   "groups": [
@@ -10333,6 +10446,18 @@
         313.57006259197317
       ],
       "color": "#8A8",
+      "flags": {}
+    },
+    {
+      "id": 9001,
+      "title": "🎬 SolarRenderer LoRA（控制 + DMAD 4步 @0.8）",
+      "bounding": [
+        -1977.1275978748931,
+        -505.26164829130676,
+        643.6245306326032,
+        270.0
+      ],
+      "color": "#8A2BE2",
       "flags": {}
     }
   ],
