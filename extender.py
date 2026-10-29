@@ -4260,32 +4260,40 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                           f"empty_cache 回收 cached 池后 free={_free65:.1f}GB "
                                           f">= ws {_ws65:.1f}GB+2GB, Sol-Attn workspace 可分配")
                                 else:
-                                    # v14.240 (2026-10-29): 把"只看 free 就报警"改成
-                                    # 「真实试分配探针 + 真缺才自适应让位」。
-                                    # 根因: --cuda-malloc(cudaMallocAsync) 下 mem_get_info()
-                                    # 会把分配器池内的空闲块计为"已占用", 实测驻留
-                                    # 18.4GB 后 free=0.0GB, 但整段采样并没有 OOM ——
-                                    # 旧逻辑据此打印"空间不足/建议降低 refine_upscale_factor",
-                                    # 属于误报; 更糟的是它只报警不处理, 若真缺 workspace,
-                                    # Sol-Attn kernel 会退化到 dense/换页路径, 每步暴涨.
-                                    # 新逻辑:
-                                    #   1) 直接申请 ws+0.5GB(连续大块, 顺带验证碎片);
-                                    #      成功 => workspace 确实可用, 保持满驻留(最快配置);
-                                    #   2) 失败 => 说明真缺, 抬高 reserve 重驻留让位,
-                                    #      绝不降 refine 倍率(成片像素不缩水).
+                                    # v14.250 (2026-10-29): 探针改为「tokens > 130k 时
+                                    # 强制让位, 不试分配」。v14.240 的试分配探针在
+                                    # x1.0 218k 场景下"通过"了, 但实测 992~1339s/it —
+                                    # 因为探针的 2GB 是在采样开始前试分配, 采样起来
+                                    # latent/conds/VAE 中间缓冲挤占后, kernel 被迫走
+                                    # 慢速备用路径。218k > 130k 已触发自动分块, 故
+                                    # 探针直接判定为"不可信", 无条件走让位路径,
+                                    # 保持满驻留不降倍率, 分块后每块 ~55k 在健康区。
                                     _probe_ok240 = False
+                                    _r_tok_probe250 = 0
                                     try:
-                                        _pb240 = int((_ws65 + 0.5) * 1024 ** 3)
-                                        _pt240 = _torch65.empty(_pb240 // 4, dtype=_torch65.float32,
-                                                                device="cuda")
-                                        del _pt240
-                                        _torch65.cuda.synchronize()
-                                        _torch65.cuda.empty_cache()
-                                        _probe_ok240 = True
-                                    except Exception as _pe240:
-                                        _probe_ok240 = False
+                                        _r_m_gate250, _ = _ff_extract_members(samples)
+                                        if _r_m_gate250 is not None and getattr(_r_m_gate250[0], "ndim", 0) >= 4:
+                                            _r_tok_probe250 = int(_r_m_gate250[0].shape[2]) * int(_r_m_gate250[0].shape[-2]) * int(_r_m_gate250[0].shape[-1])
+                                    except Exception:
+                                        pass
+                                    if _r_tok_probe250 > 130000:
+                                        print(f"[H3 Extender] v14.250 workspace 探针: tokens={_r_tok_probe250:,} > 130k "
+                                              f"(已触发自动分块), 不试分配直接判定让位 — "
+                                              f"保持满驻留 x{_r_factor}(不降倍率), "
+                                              f"分块后每块 ~{_r_tok_probe250 // 4 // 1000}k 在健康区")
+                                    else:
+                                        try:
+                                            _pb240 = int((_ws65 + 0.5) * 1024 ** 3)
+                                            _pt240 = _torch65.empty(_pb240 // 4, dtype=_torch65.float32,
+                                                                    device="cuda")
+                                            del _pt240
+                                            _torch65.cuda.synchronize()
+                                            _torch65.cuda.empty_cache()
+                                            _probe_ok240 = True
+                                        except Exception as _pe240:
+                                            _probe_ok240 = False
                                     if _probe_ok240:
-                                        print(f"[H3 Extender] v14.240 workspace 探针通过: "
+                                        print(f"[H3 Extender] v14.250 workspace 探针通过: "
                                               f"free={_free65:.1f}GB 低于阈值 ws {_ws65:.1f}GB+2GB, "
                                               f"但真实试分配 {_ws65 + 0.5:.1f}GB 成功(池内空闲块可复用), "
                                               f"Sol-Attn workspace 可用 → 保持满驻留 x{_r_factor}(不降倍率)")
@@ -4305,13 +4313,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                             _res240 = model.loaded_size() / 1024 ** 3
                                             _r_reserve_gb = _resv240
                                             _REFINE_WS_RESERVE_HINT[round(_r_factor, 2)] = _resv240
-                                            print(f"[H3 Extender] v14.240 workspace 自适应让位: "
+                                            print(f"[H3 Extender] v14.250 workspace 自适应让位: "
                                                   f"reserve {_resv_old240:.1f}->{_resv240:.1f}GB, "
                                                   f"resident={_res240:.1f}GB, "
                                                   f"free={_f240b / 1024 ** 3:.1f}GB "
                                                   f"(目标 ws {_ws65:.1f}GB+2GB), 倍率保持 x{_r_factor}")
                                         except Exception as _er240:
-                                            print(f"[H3 Extender] v14.240 workspace 让位失败, "
+                                            print(f"[H3 Extender] v14.250 workspace 让位失败, "
                                                   f"走 lowvram 换页兜底(可忽略): {_er240}")
                         except Exception:
                             pass
@@ -4364,11 +4372,13 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             #   n=218,280 -> 0.97s / n=293,760 -> 0.70s (健康)
             #   n=440,640 -> >45s / n=873,120 topk -> >600s / n=873,120 dense -> >60s (病态)
             # 病态与 topk routing 无关, 是 kernel 在 n>=~440k 时超线性恶化.
-            # 二采整段 latent 120x68x107 = 873,120 tokens 必命中病态区 -> 第1步 75min 未完成.
-            # 门: 单段 latent token > 阈值时向 transformer_options 注入 sol_max_tokens,
-            # Sol-Attn make_override 读取后直接 dense 回退(KJNodes 分组+SageAttention,
-            # 对齐参考插件 v14.82 实测 240s/步 无雪花). 一采 218k 低于阈值不受影响.
-            _REFINE_MAX_SOL_TOKENS = 350000
+            # v14.250 (2026-10-29): 阈值 350k -> 130k 校准。
+            # 依据: 本机实测 n=218,280 未分块 + v14.240 探针误报 "保持满驻留" ->
+            # 二采 992~1339s/it(用户报告); n=440k+ 病态线参考值维持 440k。
+            # 130k 确保 x1.0 218k 自动分块(4 块 x ~55k/块, 每块稳在健康区
+            # ~76s/步一采基准, 二采 4 块 x overlap 后仍 < 240s/步目标),
+            # 同时 x2.0 873k 等更高倍率仍走原 dense 回退门。
+            _REFINE_MAX_SOL_TOKENS = 130000
             try:
                 _r_tok_gate = 0
                 _r_m_gate, _ = _ff_extract_members(samples)
