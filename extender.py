@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.240-refine-workspace-probe"
+BUILD = "minimax-h3-extender-v14.251-lipauto-audio-driven-clips"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -726,6 +726,77 @@ def _concat_clip_av(images_list, audios_list):
     else:
         audio = {"waveform": torch.zeros(1, 1, 1), "sample_rate": 32000}
     return images, audio
+
+
+def _ls_auto_clip_durations_by_audio(clips, lip_audio, fps=24.0):
+    """v14.251 (2026-10-29): 直播带货·03 lip_voice 档 —— 音频总时长驱动 clip 时长分配。
+
+    用户诉求: TTS 稿音频总时长决定 clip 切分, 不再人工预估每段时长。
+    例如 24s 音频 + 模板上限 15s → clip1=15s, clip2=9s (余下全给最后一段);
+    35s 音频 + 上限 15s → clip1=15s, clip2=15s, clip3=5s。
+    12s 音频 + 上限 15s → clip1=12s (不补零, 不触发 _ff_fit_audio_duration max_ratio)。
+
+    规则:
+      - 每段时长 ≤ clips[i].duration(模板/用户设定的上限)
+      - 剩余音频全给最后一段(若最后一段超出上限则截断到上限, 尾部音频丢弃)
+      - 音频总时长 ≤ 第一段上限 → 只有一段有效, 其余 clip 置 render_enabled=False
+      - 非 lip_voice 03 档 / lip_audio None → 原样返回, 不做任何修改
+
+    返回: (clips 新列表, 是否被修改)
+    """
+    if lip_audio is None or not clips:
+        return clips, False
+
+    try:
+        waveform = lip_audio["waveform"]
+        sr = int(lip_audio["sample_rate"])
+        total_samples = int(waveform.shape[-1])
+        audio_total_sec = float(total_samples) / float(sr)
+    except Exception:
+        return clips, False
+
+    if audio_total_sec <= 0:
+        return clips, False
+
+    remaining = audio_total_sec
+    modified = False
+    new_clips = []
+    for i, cfg in enumerate(clips):
+        cfg = dict(cfg)
+        try:
+            tpl_dur = float(cfg.get("duration", 15.0))
+        except Exception:
+            tpl_dur = 15.0
+        tpl_dur = max(0.25, min(150.0, tpl_dur))
+
+        if remaining <= 0:
+            # 音频已分完 → 本段不需要渲染
+            if cfg.get("render_enabled", True):
+                cfg["render_enabled"] = False
+                modified = True
+            new_clips.append(cfg)
+            continue
+
+        new_dur = min(tpl_dur, remaining)
+        if abs(new_dur - float(cfg.get("duration", tpl_dur))) > 0.01:
+            cfg["duration"] = new_dur
+            modified = True
+        # 尾段强制启用渲染(若有音频剩余)
+        if not cfg.get("render_enabled", True):
+            cfg["render_enabled"] = True
+            modified = True
+        new_clips.append(cfg)
+        remaining -= new_dur
+
+    if remaining > 0.05:
+        print(f"[H3 LipSync] v14.251 音频总时长 {audio_total_sec:.2f}s 超出全部 clip 上限总和, "
+              f"尾部 {remaining:.2f}s 音频将被丢弃 (可加大 clip 时长上限或增加 clip 数)")
+
+    if modified:
+        _durs = [f"{c['duration']:.2f}s" for c in new_clips if c.get('render_enabled', True)]
+        print(f"[H3 LipSync] v14.251 音频驱动 clip 时长: 音频总长={audio_total_sec:.2f}s, "
+              f"分配 → {'/'.join(_durs)}")
+    return new_clips, modified
 
 
 def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
@@ -7726,10 +7797,19 @@ class BSAIH3FilmFactory:
                 #   + clip2 起关闭 motion context(硬切段不再做 2s 渐变 → 首帧无拖影)
                 # width/height 不锁: 分辨率决定一采像素, 锁死 1920 会让一采
                 # 直接涨到 1920x1088(耗时 4x), 与用户"15秒必须 1 小时内"冲突。
-                steps, refine_steps, tile_count, refine_denoise = 12, 4, 4, 0.55
+                # v14.251 (2026-10-29) 画质调参(用户实测色块/残肢/残影/拖影):
+                #   ① refine_audio_denoise 0.7→0.3 —— 音频不重画, 只精修视频,
+                #      消除"音视频AV latent 不同步 → VAE decode 出彩色噪块"色块。
+                #   ② refine_upscale_factor 2.0→1.5 —— 二采 tokens 从 873k 降到
+                #      ~490k, 时间注意力负担减半, 残影/拖影大减。
+                #   ③ refine_denoise 0.55→0.45 —— 二采更保守, 保留一采细节,
+                #      残肢/手指更稳。
+                #   ④ refine_steps 4→6 —— 补偿 denoise 降低带来的精修不足。
+                # 总耗时预算基本不变(tokens 减半抵消步数增加)。
+                steps, refine_steps, tile_count, refine_denoise = 12, 6, 4, 0.45
                 refine_enable = True
-                refine_audio_denoise = 0.7
-                refine_upscale_factor = 2.0
+                refine_audio_denoise = 0.3
+                refine_upscale_factor = 1.5
                 refine_upscaler_model = "minimax_h3_latent_upscaler_3d_fp32.pth"
                 refine_align_to = 40
                 shift_video, shift_audio = 12.0, 3.0
@@ -8952,6 +9032,17 @@ class BSAIH3FilmFactory:
             lip_audio = _lip_voice
             print(f"[H3 LipSync] ✅ lip_voice 已连接 → 升级为对口型驱动音频"
                   f"(取消模型自生成音频, 外部音频驱动口型; lip_voice 优先于 lip_audio)")
+            # v14.251 (2026-10-29): 直播带货·03 lip_voice 档 —— 音频总时长驱动 clip 切分。
+            # TTS 稿多长就切多长, 不再靠用户人工预估 clip duration。
+            # 例: 24s 音频 + 上限 15s → clip1=15s, clip2=9s。
+            #     35s 音频 + 上限 15s → clip1=15s, clip2=15s, clip3=5s。
+            #     12s 音频 + 上限 15s → clip1=12s (不补零, 不触发 _ff_fit_audio_duration max_ratio)。
+            # 只动 clips 的 duration/render_enabled 字段, 下游所有逻辑(_split_lip_audio_by_clips /
+            # 帧数计算 / 渲染) 自动用新时长, 完全无需用户介入。
+            if _ls_mode == "03":
+                clips, _audio_driven = _ls_auto_clip_durations_by_audio(clips, lip_audio, fps=float(FPS))
+                if _audio_driven:
+                    print(f"[H3 直播带货] v14.251 03档 音频驱动 clip 切分已生效 (仅本档启用)")
         else:
             _lip_voice_dummy = None
         _tts_model = kwargs.get("tts_model_TTS模型")
