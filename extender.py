@@ -9169,17 +9169,16 @@ class BSAIH3FilmFactory:
             lip_audio = _lip_voice
             print(f"[H3 LipSync] ✅ lip_voice 已连接 → 升级为对口型驱动音频"
                   f"(取消模型自生成音频, 外部音频驱动口型; lip_voice 优先于 lip_audio)")
-            # v14.251 (2026-10-29): 直播带货·03 lip_voice 档 —— 音频总时长驱动 clip 切分。
-            # TTS 稿多长就切多长, 不再靠用户人工预估 clip duration。
-            # 例: 24s 音频 + 上限 15s → clip1=15s, clip2=9s。
-            #     35s 音频 + 上限 15s → clip1=15s, clip2=15s, clip3=5s。
-            #     12s 音频 + 上限 15s → clip1=12s (不补零, 不触发 _ff_fit_audio_duration max_ratio)。
-            # 只动 clips 的 duration/render_enabled 字段, 下游所有逻辑(_split_lip_audio_by_clips /
-            # 帧数计算 / 渲染) 自动用新时长, 完全无需用户介入。
-            if _ls_mode == "03":
+            # v14.252 (2026-10-29): 不分渲染管道/模式, 只要 lip_audio(lip_voice) 有
+            # 真正音频输入, 一律按音频实际时长切分 clip (不 atempo 拉长, 不缩短);
+            # lip_audio=None (纯连端口/前端音频节点被 Bypass) → 不触发, 回退模型生成音频。
+            # v14.251 原本限定 _ls_mode=="03", 用户在双采2K/其他管道连 lip_voice 时走不到,
+            # 仍被 v14.203 atempo 拉到模板 clips 总时长 (25.51s 被拉成 30.17s) + v14.175
+            # 追加延续 clip (2 clip 变 3 段)。现放宽为全管道通用。
+            if lip_audio is not None and clips:
                 clips, _audio_driven = _ls_auto_clip_durations_by_audio(clips, lip_audio, fps=float(FPS))
                 if _audio_driven:
-                    print(f"[H3 直播带货] v14.251 03档 音频驱动 clip 切分已生效 (仅本档启用)")
+                    print(f"[H3 LipSync] v14.252 音频驱动 clip 切分已生效 (全管道通用, 按音频实际时长切分, 不拉长不缩短)")
         else:
             _lip_voice_dummy = None
         _tts_model = kwargs.get("tts_model_TTS模型")
@@ -9218,22 +9217,10 @@ class BSAIH3FilmFactory:
                 _ctx_frames = int(str(context_length))
             except (TypeError, ValueError):
                 _ctx_frames = 0
-            # ── v14.203: lip_voice(TTS 口播稿) 时长自适应视频总长 ──
-            # 稿子时长由 TTS 引擎决定, 与分镜总长不等: 短了每段尾部留静音(口型
-            # 提前闭合), 长了台词被段边界截断/被迫追加延续 CLIP。先 atempo 变速
-            # 不变调拉到视频总长, 再进切分, 段边界始终落在整句之间。
-            if _lip_voice is not None and clips:
-                _vid_total_sec = 0.0
-                for _c in clips:
-                    _d = _c.get("duration", 5.0)
-                    try:
-                        _d = float(_d)
-                    except (TypeError, ValueError):
-                        _d = float(str(_d))
-                    _vid_total_sec += float(_duration_to_frames(_d)) / float(FPS)
-                _fit = _ff_fit_audio_duration(lip_audio, _vid_total_sec)
-                if _fit is not None:
-                    lip_audio = _fit
+            # v14.252 (2026-10-29): 删除 v14.203 atempo 时长自适应 —— 用户要求 lip_voice
+            # 音频不拉长不缩短, 按实际时长切分。v14.252 已在上方按音频实际时长重排 clips
+            # (clip 总时长 = 音频时长), 此处再 atempo 拉到 clips 总时长会双重变速
+            # (25.51s 被拉成 30.17s, 口型听感变慢), 彻底移除。
             # ── v14.175: 对口型驱动音频超长 → 自动追加延续分镜 CLIP ──
             # 外部音频总时长 > 分镜脚本 clips 总时长时(例: 音频35s / 脚本30s),
             # 自动追加一个延续上一个分镜画面的 CLIP 承载多余音频, 保证外部音频完整性,
