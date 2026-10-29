@@ -998,6 +998,22 @@ def _auto_early_seam_shift(decoded, previous_frames, warmup_frames, max_early=2)
 
     nominal_score, nominal_jump = results[0]
 
+    # v14.249 (S7): 接缝 jump ratio 上抛 —— 20 段长链首次获得段级接缝质量仪表。
+    # 旧实现只在决定早切时打 logging.info(通常不显示), nominal_jump<=1.35 静默
+    # 返回, 接缝统计永远到不了控制台。现无条件 print; >12 打熔断告警(报告实测
+    # jump ratio 6.9-16 区间, >12 即用户可见跳变), 建议对该段 replace_mode 重渲。
+    # 只告警不自动重渲: 避免 12h 长链中途自动重试打乱渲染计划。
+    if math.isfinite(nominal_jump):
+        print(
+            f"[H3 Disk Join] v14.249 接缝 jump ratio={nominal_jump:.2f}"
+            f" (nominal score={nominal_score:.5f})"
+        )
+        if nominal_jump > 12.0:
+            print(
+                f"[H3 Disk Join] ⚠️ v14.249 接缝 jump ratio {nominal_jump:.2f} > 12 熔断阈值:"
+                f" 该段接缝跳变明显, 建议对该段 replace_mode 换 seed 重渲"
+            )
+
     # No obvious forward jump: preserve the exact nominal 22-frame cut.
     if not math.isfinite(nominal_score) or nominal_jump <= 1.35:
         return 0

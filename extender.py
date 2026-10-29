@@ -69,7 +69,7 @@ except Exception as _bsai_e:  # 注册失败不得拖垮插件
     print(f"[BSAI SDK] BSAI-H3-Film-Factory 注册失败(忽略): {_bsai_e}")
 # ==== BSAI SDK 块结束 ====
 
-from .motion_context_ram import MiniMaxH3MotionContextRAM
+from .motion_context_ram import MiniMaxH3MotionContextRAM, MC_KEY
 from .prompt_bridge import PROMPT_PACK_TYPE, _prompt_pack_signature
 from .motion_context_disk import (
     CACHE_VERSION,
@@ -3181,6 +3181,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     # 在 guider 创建前对 model clone+patch: ModelSamplingAV 驱动采样器 sigma,
     # transformer_options 双 shift 让模型内部推导 audio schedule.
     if dual_track_shift:
+        # v14.249 (S3): shift A/B env 门 —— BSAI_H3_SHIFT_VIDEO / BSAI_H3_SHIFT_AUDIO
+        # 覆盖档位 shift 值, 供一镜到底漂移 A/B (官方: Balanced 漂移→shift 12;
+        # 各档当前已统一 12.0/3.0, A/B 6/10/12 无需改代码)。不设 env 行为不变。
+        try:
+            _sv_env = os.environ.get("BSAI_H3_SHIFT_VIDEO", None)
+            _sa_env = os.environ.get("BSAI_H3_SHIFT_AUDIO", None)
+            if _sv_env or _sa_env:
+                _sv_use = float(_sv_env) if _sv_env else float(shift_video)
+                _sa_use = float(_sa_env) if _sa_env else shift_audio
+                print(f"[H3 Extender] v14.249 shift env 覆盖: video {shift_video}->{_sv_use}, "
+                      f"audio {shift_audio}->{_sa_use}", flush=True)
+                shift_video, shift_audio = _sv_use, _sa_use
+        except (TypeError, ValueError):
+            pass
         # v14.152: shift_audio 可能已是 None（0.0 的映射），不再 float()
         model = _apply_h3_dual_track_shift(model, float(shift_video), shift_audio)
     # P2 (2026-10-17): SelfLift H3 TST 少步数画质补偿 (时间状态传输).
@@ -10123,6 +10137,47 @@ class BSAIH3FilmFactory:
                     int(audio_context_length),
                 )
                 _applied_ctx = True
+                # v14.249 (S1): 一镜到底段中锚帧 —— 官方 AddGuide 任意帧语义
+                # (ComfyUI PR #15439, FL2VA 官方模板即用 1.5s/3.0s/5.0s 多点钉帧)。
+                # 调研报告 P0-2: 12s 段 T=87-92 逼近 H3 训练时序窗口上限
+                # (124-362 帧), 中后段"长度外推退化"→ 模型重新构图自切。把上一段
+                # 尾锚块(=全段基准构图, 与 v14.248 文本层基准景别锚定同向)钉在
+                # 本段输出区中点(≈7s), 图像层强制模型中段经过基准构图, 直接对冲
+                # 中段漂移。默认关闭: 锚帧来源(上段尾 latent)未经渲染实测, 先
+                # A/B(设 BSAI_H3_MID_ANCHOR=1 启用), 中段仍自切时再调锚点位置。
+                try:
+                    if (one_shot_enabled
+                            and str(os.environ.get("BSAI_H3_MID_ANCHOR", "")).strip() == "1"):
+                        _row_a = positive[0] if isinstance(positive, list) and positive else None
+                        _dict_a = None
+                        if isinstance(_row_a, (list, tuple)):
+                            for _cell in _row_a:
+                                if isinstance(_cell, dict) and "minimax_keyframes" in _cell:
+                                    _dict_a = _cell
+                                    break
+                        elif isinstance(_row_a, dict) and "minimax_keyframes" in _row_a:
+                            _dict_a = _row_a
+                        if _dict_a is not None:
+                            _kfs_a = _dict_a["minimax_keyframes"]
+                            _src_kf = None
+                            for _kf in reversed(_kfs_a):
+                                if isinstance(_kf, dict) and _kf.get("latent") is not None:
+                                    _src_kf = _kf
+                                    break
+                            if _src_kf is not None:
+                                _out_frames = max(1, frame_count - int(trim_frames))
+                                _mid_pixel = int(trim_frames) + _out_frames // 2
+                                _mid_kf = dict(_src_kf)
+                                _mid_kf.pop("audio_latent", None)
+                                _mid_kf["resolved_frame_index"] = _mid_pixel
+                                if MC_KEY in _mid_kf:
+                                    _mid_kf[MC_KEY] = _mid_pixel
+                                _dict_a["minimax_keyframes"] = list(_kfs_a) + [_mid_kf]
+                                print(f"[H3 Extender] v14.249 一镜到底段中锚帧: clip[{i}] "
+                                      f"基准构图钉在像素帧 {_mid_pixel} "
+                                      f"(输出区中点, {frame_count - int(trim_frames)} 输出帧)")
+                except Exception as _mid_err:
+                    print(f"[H3 Extender] v14.249 段中锚帧失败(可忽略): {_mid_err}")
                 # v14.219 (对齐 B 站教程 BV1fahB6XEKY《SelfLift双采_MotionContext
                 # 上下文参考无限循环_一镜到底1080P直出狂飙版》): 教程核心方法之一
                 # "给潜空间图像注入噪声"——原文: 通过给上文潜空间参考注入噪声,
@@ -10277,7 +10332,22 @@ class BSAIH3FilmFactory:
                                         # 渐变让模型在段头平滑从上一段尾状态演化, 输出区
                                         # 首帧锐利且运动延续。纯尾帧零扰动已证明会产生
                                         # 跳帧感(v14.240 日志), 此处取值 0.92/0.08。
-                                        _vv2[:, :, :_n_head] = _src * 0.92 + torch.randn_like(_src) * 0.08
+                                        # v14.249 (S5 凸形渐变): 均匀 8% → 逐行凸形 2%→8%。
+                                        # Rolling Forcing/Anchor Forcing 语义: 行0 近硬锚
+                                        # (2%≈上段尾画面最清晰延续), 向后凸形增噪到行末 8%
+                                        # (贴近中间态)—— 与下方 mask 渐变同向, 段头首帧
+                                        # 更实、值域过渡更平缓。
+                                        _wv = torch.linspace(
+                                            0.0, 1.0, int(_n_head),
+                                            device=_src.device, dtype=_src.dtype,
+                                        ) ** 2
+                                        _nw = (0.02 + 0.06 * _wv).view(
+                                            1, 1, int(_n_head), 1, 1
+                                        )
+                                        _vv2[:, :, :_n_head] = (
+                                            _src * (1.0 - _nw)
+                                            + torch.randn_like(_src) * _nw
+                                        )
                                     else:
                                         _vv2[:, :, :_n_head] = _src * 0.9 + torch.randn_like(_src) * 0.1
                                     latent["samples"] = comfy.nested_tensor.NestedTensor((_vv2, _aa))
@@ -10291,15 +10361,18 @@ class BSAIH3FilmFactory:
                                         # v14.248: 一镜到底锁区缓坡渐变 —— 前 1/3 行完全锁
                                         # (接缝锚点, 解码后被裁), 后 2/3 行 0.1→1.0 缓坡放开,
                                         # 消除 mask 边界值域断裂造成的输出首帧模糊。
+                                        # v14.249 (S5): 渐变段线性 → 凸形(t²) —— 中前段
+                                        # 更锁(与扰动凸形同向), 靠末端才快速放开。
                                         _n_locked_os = max(1, _n_head // 3)
                                         for _k in range(_n_head):
                                             if _k < _n_locked_os:
                                                 _mv[:, :, _k] = 0.0
                                             else:
-                                                _mv[:, :, _k] = 0.1 + 0.9 * (_k - _n_locked_os) / max(
+                                                _t = (_k - _n_locked_os) / max(
                                                     1, _n_head - _n_locked_os - 1
                                                 )
-                                        _lock_desc = f"缓坡渐变锁keep(前{_n_locked_os}行全锁→0.1→1.0)"
+                                                _mv[:, :, _k] = 0.1 + 0.9 * (_t * _t)
+                                        _lock_desc = f"凸形渐变锁keep(前{_n_locked_os}行全锁→0.1→1.0·t²)"
                                     else:
                                         # 分镜模式(场景可跳变): 头部渐进锁 keep, 0.0→1.0
                                         # 线性渐降, 首步完全保持(无缝进入), 逐步放开重绘,

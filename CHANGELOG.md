@@ -4,6 +4,28 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.249 (2026-10-29) — 落地《H3 一镜到底全球调研报告》短期项 S1/S3/S5/S7（4 落地 + 5 项判定已覆盖不重复实施）/ Land the global research report's short-term items S1/S3/S5/S7 (4 landed; 5 items judged already covered)
+
+**调研报告对照 v14.240-248 逐项核对结论：S2 已被 v14.191+241+248 三重 prompt 指令覆盖；S4 的 start_percent/end_percent/sink_conditioning 本就是 BSAI-Sol-H3 工作流 widget（无需改代码）；S6 被 v14.240 全链同 seed + v14.248 渐变锁覆盖；S8 的 context 39 与 v14.241 官方 22 语义决策冲突、锥形注噪与锁 keep 路线冲突（v14.240 实测注噪破坏延续）；S9 已有像素级 4 帧三角溶解（v14.178）+ ffmpeg xfade。以下为真增量的 4 项：**
+**/ Per-item audit against v14.240-248: S2 covered by triple prompt rules (v14.191/241/248); S4 params already exposed as BSAI-Sol-H3 workflow widgets; S6 covered by v14.240 same-seed chain + v14.248 gradient lock; S8's ctx-39 conflicts with v14.241's official-22 decision and tapered noising conflicts with the lock-keep route; S9 already covered by pixel-level 4-frame dissolve (v14.178) + ffmpeg xfade. The 4 genuine increments below:**
+
+- **S5 段头锁凸形渐变（extender.py 噪声延续+noise_mask）：** v14.248 的均匀 8% 扰动 + 线性 0.1→1.0 渐变升级为 Rolling/Anchor Forcing 语义的凸形曲线 —— 扰动逐行 `2%→8%`（`0.02+0.06·t²`，行0≈近硬锚、上段尾画面最清晰延续），mask 渐变段同步凸形（`0.1+0.9·t²`，中前段更锁、靠末端快速放开）。与 v14.248 值域过渡方向一致，段头首帧更实。
+**/ S5: uniform 8% perturbation + linear mask ramp upgraded to convex curves (perturbation 2%→8% by t², mask 0.1→1.0 by t²) — first locked row is a near-hard anchor, smoothest value-range transition.**
+
+- **S7 接缝 jump ratio 上抛+熔断告警（motion_context_ram.py `_auto_early_seam_shift`）：** 旧实现算出 nominal_jump 后只用于早切决策，≤1.35 静默返回且日志走 logging.info（控制台不可见）——20 段长链从未有过段级接缝质量仪表。现在每次接缝评估无条件 `print` jump ratio；**>12 打熔断告警**（报告实测跳变区间 6.9-16），提示对该段 replace_mode 换 seed 重渲。只告警不自动重渲，避免 12h 链中途自动重试打乱计划。
+**/ S7: seam jump ratio now printed on every evaluation (was invisible logging.info, dropped when ≤1.35); >12 prints a circuit-breaker warning suggesting replace_mode re-render for that clip. Warning only — no auto-retry on 12h chains.**
+
+- **S3 shift A/B env 门（extender.py `_sample_h3`）：** 各档 shift 已统一 12.0/3.0（官方漂移对策值，逐档核对确认）。新增 `BSAI_H3_SHIFT_VIDEO` / `BSAI_H3_SHIFT_AUDIO` env 覆盖，A/B shift∈{6,10,12} 无需改代码。不设 env 行为不变。
+**/ S3: env overrides BSAI_H3_SHIFT_VIDEO / BSAI_H3_SHIFT_AUDIO for drift A/B (all tiers verified already at the official 12.0/3.0). No env → unchanged.**
+
+- **S1 一镜到底段中锚帧（extender.py motion.apply 后，env 门控默认关）：** 官方 AddGuide 任意帧语义（PR #15439，FL2VA 模板即 1.5s/3.0s/5.0s 多点钉帧）——把上一段尾锚块（=全段基准构图，与 v14.248 文本层基准景别锚定同向）钉在本段输出区中点（≈7s），图像层对冲 12s 段 T=87-92 逼近 H3 训练时序窗口（124-362 帧）的中后段外推退化/自切。**设 `BSAI_H3_MID_ANCHOR=1` 启用**；默认关因锚帧来源未经渲染实测，先单段 A/B 再定默认。
+**/ S1: one-shot mid-clip anchor frame via AddGuide arbitrary-frame semantics — pins the previous clip's tail anchor block (= whole-take baseline framing, same direction as v14.248's text-level anchor) at the midpoint of this clip's output region. Opt-in via BSAI_H3_MID_ANCHOR=1 (default off: untested anchor source, A/B on a single clip first).**
+
+- **验证：** extender.py / motion_context_ram.py / motion_context_disk.py py_compile PASS。渲染验收：① 一镜到底链跑 1-2 段，日志出现 `v14.249 接缝 jump ratio=xx`（每段接缝一次）与 `凸形渐变锁keep` 标记；② jump ratio >12 时出现 ⚠️ 熔断告警行；③（可选）设 `BSAI_H3_MID_ANCHOR=1` 单段实测段中锚帧，观察输出区中点是否回到基准构图、无构图回跳副作用；④（可选）`BSAI_H3_SHIFT_VIDEO=10` 单段 A/B 漂移。
+**/ Verified: py_compile PASS on all three files. Acceptance: run 1-2 clips and check the new jump-ratio / convex-lock log lines; optional A/B for the mid anchor and shift envs.**
+
+---
+
 ### v14.240 (2026-10-26) — 修透明视频导出 prores 崩溃：profile 改经 encoder options 传递 / Fix prores export crash: pass the profile through encoder options
 
 **用户实测（节点 `BSAI_H3_SaveTransparentVideo`，1195 帧）：`av.error.ArgumentError: Invalid argument: 'avcodec_open2("prores", {})' returned 22`（`bsai_h3_transparent.py:397`）。**
