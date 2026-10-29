@@ -418,9 +418,35 @@ class BSAI_H3_SaveTransparentVideo:
             return False
 
     def _frames_to_uint8(self, images_rgba):
-        """(B,H,W,4) float -> numpy uint8 (B,H,W,4)。"""
-        im = images_rgba.detach().float().clamp(0.0, 1.0).cpu().numpy()
-        return (im * 255.0 + 0.5).astype(np.uint8)
+        """(B,H,W,4) float -> numpy uint8 (B,H,W,4)。
+
+        v14.248: 分批 + torch 操作避免 numpy 中间临时数组。
+        原实现: im(float32 22.4GiB) → im*255.0(临时 22.4GiB) → astype(5.6GiB) = 峰值 ~50GiB
+        现实现: 分批 32 帧用 torch 做原地运算，峰值 ≈ 22.4 + 1 + 5.6 = 29GiB
+        """
+        im = images_rgba.detach().float().clamp(0.0, 1.0)
+        if im.device.type != "cpu":
+            im = im.cpu()
+        B = im.shape[0]
+        # 预先分配输出缓冲区，避免 concatenate 再分配
+        out = np.empty((B, im.shape[1], im.shape[2], im.shape[3]), dtype=np.uint8)
+        chunk = max(1, min(B, 32))
+        for s in range(0, B, chunk):
+            e = min(s + chunk, B)
+            out[s:e] = (im[s:e] * 255.0 + 0.5).to(torch.uint8).numpy()
+        del im
+        return out
+
+    def _iter_frames_uint8(self, images_rgba):
+        """逐帧 yield uint8 numpy 数组，内存占用 ≈ 单帧（~8MB）。
+
+        供 write 方法内部流式使用，避免一次性持有全部 frames_u8 数组。
+        """
+        im = images_rgba.detach().float().clamp(0.0, 1.0)
+        if im.device.type != "cpu":
+            im = im.cpu()
+        for i in range(im.shape[0]):
+            yield (im[i] * 255.0 + 0.5).to(torch.uint8).numpy()
 
     def _audio_to_int16(self, audio):
         wf = audio["waveform"].float()          # (B, ch, samples)
@@ -431,13 +457,10 @@ class BSAI_H3_SaveTransparentVideo:
         mono = data[0].cpu().numpy()
         return (np.clip(mono, -1.0, 1.0) * 32767).astype(np.int16), sr
 
-    def _write_mov_prores(self, path, frames_u8, fps, audio):
+    def _write_mov_prores(self, path, images_rgba, fps, audio):
+        """v14.248: 接收原始 torch tensor (B,H,W,4)，流式逐帧转 uint8 写入。"""
         import av
         container = av.open(path, "w")
-        # v14.245 (2026-10-28): PyAV 实测 "prores"(legacy) 编码器不认 add_stream
-        # options 里的 profile -> avcodec_open2 返回 22 (EINVAL); "prores_ks"
-        # 编码器认 options={"profile": "4444"} 且支持 yuva444p10le, 实测可编码。
-        # 双保险: prores_ks 失败回退 prores + codec_context.profile 赋值。
         try:
             vstream = container.add_stream("prores_ks", rate=fps, options={"profile": "4444"})
         except Exception:
@@ -446,21 +469,20 @@ class BSAI_H3_SaveTransparentVideo:
                 vstream.codec_context.profile = "4444"
             except Exception:
                 pass
-        vstream.width = frames_u8.shape[2]
-        vstream.height = frames_u8.shape[1]
+        vstream.width = images_rgba.shape[2]
+        vstream.height = images_rgba.shape[1]
         vstream.pix_fmt = "yuva444p10le"
+        w, h = vstream.width, vstream.height
         if audio is not None:
             adata, sr = self._audio_to_int16(audio)
             astream = container.add_stream("pcm_s16le", rate=sr)
             astream.layout = "mono"
-        for i in range(frames_u8.shape[0]):
-            fr = av.VideoFrame.from_ndarray(frames_u8[i], format="rgba")
+        for frame_u8 in self._iter_frames_uint8(images_rgba):
+            fr = av.VideoFrame.from_ndarray(frame_u8, format="rgba")
             try:
-                fr = fr.reformat(width=frames_u8.shape[2], height=frames_u8.shape[1],
-                                 format="yuva444p10le")
+                fr = fr.reformat(width=w, height=h, format="yuva444p10le")
             except Exception:
-                fr = fr.reformat(width=frames_u8.shape[2], height=frames_u8.shape[1],
-                                 format="yuva444p")
+                fr = fr.reformat(width=w, height=h, format="yuva444p")
             for pkt in vstream.encode(fr):
                 container.mux(pkt)
         for pkt in vstream.encode():
@@ -474,21 +496,22 @@ class BSAI_H3_SaveTransparentVideo:
                 container.mux(pkt)
         container.close()
 
-    def _write_webm_vp9(self, path, frames_u8, fps, audio):
+    def _write_webm_vp9(self, path, images_rgba, fps, audio):
+        """v14.248: 接收原始 torch tensor (B,H,W,4)，流式逐帧转 uint8 写入。"""
         import av
         container = av.open(path, "w")
         vstream = container.add_stream("libvpx-vp9", rate=fps)
-        vstream.width = frames_u8.shape[2]
-        vstream.height = frames_u8.shape[1]
+        vstream.width = images_rgba.shape[2]
+        vstream.height = images_rgba.shape[1]
         vstream.pix_fmt = "yuva420p"     # WebM VP9 带 Alpha 的唯一格式
+        w, h = vstream.width, vstream.height
         if audio is not None:
             adata, sr = self._audio_to_int16(audio)
             astream = container.add_stream("libopus", rate=sr)
             astream.layout = "mono"
-        for i in range(frames_u8.shape[0]):
-            fr = av.VideoFrame.from_ndarray(frames_u8[i], format="rgba")
-            fr = fr.reformat(width=frames_u8.shape[2], height=frames_u8.shape[1],
-                             format="yuva420p")
+        for frame_u8 in self._iter_frames_uint8(images_rgba):
+            fr = av.VideoFrame.from_ndarray(frame_u8, format="rgba")
+            fr = fr.reformat(width=w, height=h, format="yuva420p")
             for pkt in vstream.encode(fr):
                 container.mux(pkt)
         for pkt in vstream.encode():
@@ -516,21 +539,22 @@ class BSAI_H3_SaveTransparentVideo:
                 "Alpha 通道（libvpx-vp9 需 libvpx>=1.10，产出被静默降级为 yuv420p）。"
                 "请改用 'ProRes 4444 (.mov, 真Alpha)' 或 'RGBA PNG 序列 (.png)'。")
 
-    def _write_png_sequence(self, dir_path, frames_u8, prefix):
+    def _write_png_sequence(self, dir_path, images_rgba, prefix):
+        """v14.248: 接收原始 torch tensor (B,H,W,4)，流式逐帧转 uint8 写 PNG。"""
         from PIL import Image
+        B = images_rgba.shape[0]
+        width = len(str(B))
         paths = []
-        n = frames_u8.shape[0]
-        width = len(str(n))
-        for i in range(n):
+        for i, frame_u8 in enumerate(self._iter_frames_uint8(images_rgba)):
             p = os.path.join(dir_path, f"{prefix}_{i:0{width}d}.png")
-            Image.fromarray(frames_u8[i], "RGBA").save(p)
+            Image.fromarray(frame_u8, "RGBA").save(p)
             paths.append(p)
         return paths
 
-    def _write_preview_mp4(self, path, frames_u8, fps):
-        """棋盘格合成预览（h264 无 Alpha，仅供快速检查）。"""
+    def _write_preview_mp4(self, path, images_rgba, fps):
+        """v14.248: 接收原始 torch tensor (B,H,W,4)，流式逐帧棋盘格合成预览。"""
         import av
-        b, h, w, _ = frames_u8.shape
+        b, h, w, _ = images_rgba.shape
         tile = 8
         yy = np.arange(h).reshape(-1, 1)
         xx = np.arange(w).reshape(1, -1)
@@ -541,9 +565,9 @@ class BSAI_H3_SaveTransparentVideo:
         vstream.height = h
         vstream.pix_fmt = "yuv420p"
         vstream.options = {"crf": "18", "preset": "medium"}
-        for i in range(b):
-            rgb = frames_u8[i][..., :3].astype(np.float32) / 255.0
-            a = frames_u8[i][..., 3:4].astype(np.float32) / 255.0
+        for frame_u8 in self._iter_frames_uint8(images_rgba):
+            rgb = frame_u8[..., :3].astype(np.float32) / 255.0
+            a = frame_u8[..., 3:4].astype(np.float32) / 255.0
             comp = np.clip(rgb * a + chk[..., None] * (1.0 - a), 0.0, 1.0)
             fr = av.VideoFrame.from_ndarray((comp * 255.0 + 0.5).astype(np.uint8), format="rgb24")
             fr = fr.reformat(width=w, height=h, format="yuv420p")
@@ -562,42 +586,45 @@ class BSAI_H3_SaveTransparentVideo:
 
         root = self._output_root()
         sub, alpha_dir, prev_dir = self._new_subfolder(root, filename_prefix)
-        frames_u8 = self._frames_to_uint8(images_rgba)
         fps = max(1, int(fps))
+        b = images_rgba.shape[0]
 
+        # v14.248: 不再一次性转换全部 frames_u8（峰值内存 ~50GiB），
+        # 改由各 write 方法内部通过 _iter_frames_uint8 流式逐帧处理。
         safe = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", str(filename_prefix)) or "h3_transparent"
         if format.startswith("ProRes"):
             fpath = os.path.join(alpha_dir, f"{safe}.mov")
-            self._write_mov_prores(fpath, frames_u8, fps, audio)
+            self._write_mov_prores(fpath, images_rgba, fps, audio)
         elif format.startswith("WebM"):
             fpath = os.path.join(alpha_dir, f"{safe}.webm")
-            self._write_webm_vp9(fpath, frames_u8, fps, audio)
+            self._write_webm_vp9(fpath, images_rgba, fps, audio)
         else:
             fpath = os.path.join(alpha_dir, f"{safe}_%04d.png")
-            paths = self._write_png_sequence(alpha_dir, frames_u8, safe)
+            paths = self._write_png_sequence(alpha_dir, images_rgba, safe)
             fpath = paths[0] if paths else fpath
 
         preview_path = os.path.join(prev_dir, f"{safe}_preview.mp4")
         try:
-            self._write_preview_mp4(preview_path, frames_u8, fps)
+            self._write_preview_mp4(preview_path, images_rgba, fps)
         except Exception as e:
             preview_path = ""
             print(f"[BSAI H3 SaveTransparentVideo] 预览生成失败（不影响 alpha 产物）: {e}")
 
-        b = frames_u8.shape[0]
         dur = b / fps
         print(f"[BSAI H3 SaveTransparentVideo] {format} 已导出: {fpath} "
               f"({b} 帧, {dur:.1f}s @ {fps}fps, 音频={'合入' if audio is not None else '无'})")
         print(f"[BSAI H3 SaveTransparentVideo] 目录: {sub} (alpha/ + preview/)")
 
         # 预览图输出（棋盘格合成首帧->全帧）
+        # v14.248: 同样从 tensor 逐帧取，避免 frames_u8 中间数组
         preview_imgs = []
-        for i in range(b):
-            rgb = frames_u8[i][..., :3].astype(np.float32) / 255.0
-            a = frames_u8[i][..., 3:4].astype(np.float32) / 255.0
-            yy = np.arange(frames_u8.shape[1]).reshape(-1, 1)
-            xx = np.arange(frames_u8.shape[2]).reshape(1, -1)
-            chk = ((yy // 8 + xx // 8) % 2).astype(np.float32) * 0.45 + 0.10
+        _, h, w, _ = images_rgba.shape
+        yy = np.arange(h).reshape(-1, 1)
+        xx = np.arange(w).reshape(1, -1)
+        chk = ((yy // 8 + xx // 8) % 2).astype(np.float32) * 0.45 + 0.10
+        for frame_u8 in self._iter_frames_uint8(images_rgba):
+            rgb = frame_u8[..., :3].astype(np.float32) / 255.0
+            a = frame_u8[..., 3:4].astype(np.float32) / 255.0
             comp = np.clip(rgb * a + chk[..., None] * (1.0 - a), 0.0, 1.0)
             preview_imgs.append(torch.from_numpy(comp).float())
         preview_out = torch.stack(preview_imgs, dim=0)
