@@ -4688,14 +4688,40 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # 的 LoadedModel, 释放本地引用 + GC, 让 GPU 量化权重真正回收, 不再触碰 .to()。
                 try:
                     if _refine_model is not model:
+                        # v14.248 (fix, 2026-10-29): 二采 delegate 真正卸载。
+                        # 旧卸载只摘注册+置 _refine_model=None, 但实测 decode 前
+                        # allocated 仍残留 14.47GB(每段都爆 VAE decode OOM)。根因:
+                        # ① _r_guider(BasicGuider 内部持有 model) 与 _r_sampler 仍
+                        #    强引用 delegate/tiled-wrapper, GC 无法回收 GPU 权重;
+                        # ② tiled/spatial wrapper 替换 _refine_model 后, 注册表
+                        #    匹配 `is _refine_model` 失败, delegate 的 LoadedModel
+                        #    条目未被摘除。修复: 卸载前先断开采样器/guider 引用,
+                        #    再摘除全部非 vae 且非原 dynamic model 的注册条目,
+                        #    最后 GC 3 轮 + 清缓存 + synchronize。
                         try:
                             from comfy.model_management import current_loaded_models as _r_clm
+                            # v14.248: 按 ModelPatcher 身份精确摘除 delegate/wrapper 条目,
+                            # 不误摘原 dynamic model(_rm_p is model 的条目保留, 交
+                            # DynamicVRAM 调度)。
+                            _r_target_ids = set()
+                            for _r_tgt in (_refine_model, _r_delegate_dyn):
+                                if _r_tgt is not None:
+                                    _r_target_ids.add(id(_r_tgt))
                             for _ri in range(len(_r_clm) - 1, -1, -1):
-                                if getattr(_r_clm[_ri], "model", None) is _refine_model:
+                                try:
+                                    _rm_p = _r_clm[_ri].model
+                                except Exception:
+                                    _rm_p = None
+                                if _rm_p is not None and id(_rm_p) in _r_target_ids:
                                     _r_clm.pop(_ri)
-                                    break
                         except Exception:
                             pass
+                        # v14.248: 断开采样器/guider/latent 对 delegate 的强引用
+                        _r_guider = None
+                        _r_sampler = None
+                        _r_latent = None
+                        _r_sigmas = None
+                        _r_step_cb = None
                         _refine_model = model
                         _r_delegate_dyn = None
                         # v14.243 (2026-10-28): 清除原 dynamic model 对 delegate 的
@@ -4717,8 +4743,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             pass
                         try:
                             import gc as _gc
-                            _gc.collect()
-                            _mm3.soft_empty_cache(force=True)
+                            for _g_round in range(3):
+                                _gc.collect()
+                                try:
+                                    _mm3.soft_empty_cache(force=True)
+                                except Exception:
+                                    pass
+                            _torch3.cuda.synchronize()
+                            _al_gb = _torch3.cuda.memory_allocated() / 1024 ** 3
+                            _fr_gb = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                            print(f"[H3 Extender] v14.248 delegate 已卸载: allocated={_al_gb:.2f}GB "
+                                  f"free={_fr_gb:.2f}GB (vs 卸载前 ~14.5GB, 为 VAE decode 腾显存)")
                         except Exception:
                             pass
                     if _ext_resv_orig is not None:
@@ -9785,6 +9820,38 @@ class BSAIH3FilmFactory:
                                       "close shot", "full shot", "cut to", "cutaway"]
                     _os_hit_words = [w for w in _os_shot_words if w in str(effective_prompt).lower()]
                     if _os_hit_words:
+                        # v14.248 (fix, 2026-10-29): 段内切镜强化 —— 实测 20 段成片
+                        # clip2+ 段内仍自动切镜(用户点名 00:14:21-22 / 00:18:18-19,
+                        # 之后各段一致)。v14.241 的负向禁令(禁止景别跳变)弱于模型正向
+                        # 蒙太奇先验; 这里正向锚定"本段第一个景别词 = 全段基准构图",
+                        # 后续所有景别词只能解释为同一条连续运镜相对基准的渐进推拉。
+                        _os_size_order = ["大特写", "特写", "近景", "中景", "全景", "远景"]
+                        _os_anchor = None
+                        _os_prompt_lower = str(effective_prompt).lower()
+                        for _w in _os_size_order:
+                            if _w in _os_prompt_lower:
+                                _os_anchor = _w
+                                break
+                        _os_anchor_en = {
+                            "大特写": "EXTREME CLOSE-UP",
+                            "特写": "CLOSE-UP",
+                            "近景": "CLOSE SHOT",
+                            "中景": "MEDIUM SHOT",
+                            "全景": "WIDE SHOT",
+                            "远景": "EXTREME WIDE SHOT",
+                        }.get(_os_anchor, "")
+                        _os_anchor_rule = ""
+                        if _os_anchor:
+                            _os_anchor_rule = (
+                                f"\n[Anchor Shot-Size] The FIRST shot size named in this prompt "
+                                f"is {_os_anchor_en}: it is the anchor framing of the WHOLE take. "
+                                f"Every later shot-size word describes how the same continuous move "
+                                f"gradually approaches or recedes from this anchor — never a cut "
+                                f"to a different size, never a restart of framing, never a new shot."
+                                f"\n[基准景别] 本段提示词出现的第一个景别词（{_os_anchor}）是全段基准构图。"
+                                f"之后出现的任何景别词都只能表示同一条连续运镜相对这个基准的"
+                                f"渐进靠近或拉远，禁止从基准景别跳变到任何其他景别、禁止重新取景。"
+                            )
                         effective_prompt = str(effective_prompt) + (
                             "\n[Shot-Size Hard Rule] The prompt may name shot sizes "
                             "(close-up / medium / wide) or pushes — they describe the SAME "
@@ -9797,9 +9864,10 @@ class BSAIH3FilmFactory:
                             "同一条连续运镜：构图只能通过缓慢推近/拉远逐帧渐变，全段从头到尾"
                             "必须只有一个镜头——机位高度、镜头光轴、主体锚点全程不变。"
                             "即使文本写到了不同景别，也禁止任何景别跳变。"
+                            + _os_anchor_rule
                         )
                         print(f"[H3 Extender] v14.241 一镜到底 clip[{i}]: 命中景别/推拉词 {_os_hit_words}, "
-                              f"已注入景别恒定硬规则(推拉=连续运镜, 禁止景别跳变)")
+                              f"基准景别={_os_anchor or '无'}, 已注入景别恒定+基准锚定硬规则(推拉=连续运镜, 禁止景别跳变)")
                 except Exception:
                     pass
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
@@ -10113,12 +10181,19 @@ class BSAIH3FilmFactory:
                                             print(f"[H3 Extender] v14.215 接缝锚点重采样失败(可忽略): {_rs_err}")
                                             raise
                                     if one_shot_enabled:
-                                        # v14.240 (fix): 一镜到底锁区用纯尾帧(零扰动)。
-                                        # 锁区按 H3 网格精确对齐 trim 区后, 行粒度
-                                        # (≈3.4帧/行)使锁区比 trim 区多 1~2 帧并残留
-                                        # 进输出区; 旧 10% 扰动会让残留帧带噪(跳帧感)。
-                                        # 纯尾帧 = 画面无缝延续上一段尾, 无噪点。
-                                        _vv2[:, :, :_n_head] = _src
+                                        # v14.248 (fix, 2026-10-29): 一镜到底段头锁区改
+                                        # "扰动+缓坡渐变"—— 实测 20 段成片每段间首几帧画面
+                                        # 模糊, 根因: v14.240 全锁+纯尾帧使锁区为"完成态
+                                        # latent"(上一段尾清晰画面), 而自由区是 8 步去噪的
+                                        # "中间态 latent", 两者值域在 mask 边界(行 _n_head)
+                                        # 断裂 → 输出区首帧(紧邻锁区)解码出伪影/模糊。
+                                        # 修复: ①锁区恢复适度扰动(8%, 值域贴近中间态, 消除
+                                        # 边界断裂); ②mask 改"前 1/3 行全锁 + 后 2/3 行缓坡
+                                        # 渐变(0.1→1.0)"—— 锁区全部落在 trim 区(解码被裁),
+                                        # 渐变让模型在段头平滑从上一段尾状态演化, 输出区
+                                        # 首帧锐利且运动延续。纯尾帧零扰动已证明会产生
+                                        # 跳帧感(v14.240 日志), 此处取值 0.92/0.08。
+                                        _vv2[:, :, :_n_head] = _src * 0.92 + torch.randn_like(_src) * 0.08
                                     else:
                                         _vv2[:, :, :_n_head] = _src * 0.9 + torch.randn_like(_src) * 0.1
                                     latent["samples"] = comfy.nested_tensor.NestedTensor((_vv2, _aa))
@@ -10129,9 +10204,18 @@ class BSAIH3FilmFactory:
                                         _mv, _ma = torch.ones_like(_vv2), torch.ones_like(_aa)
                                     _mv = _mv.clone()
                                     if one_shot_enabled:
-                                        # 一镜到底(连续镜头): 头部均匀锁 keep, 无缝延续
-                                        _mv[:, :, :_n_head] = 0.0
-                                        _lock_desc = "均匀锁keep"
+                                        # v14.248: 一镜到底锁区缓坡渐变 —— 前 1/3 行完全锁
+                                        # (接缝锚点, 解码后被裁), 后 2/3 行 0.1→1.0 缓坡放开,
+                                        # 消除 mask 边界值域断裂造成的输出首帧模糊。
+                                        _n_locked_os = max(1, _n_head // 3)
+                                        for _k in range(_n_head):
+                                            if _k < _n_locked_os:
+                                                _mv[:, :, _k] = 0.0
+                                            else:
+                                                _mv[:, :, _k] = 0.1 + 0.9 * (_k - _n_locked_os) / max(
+                                                    1, _n_head - _n_locked_os - 1
+                                                )
+                                        _lock_desc = f"缓坡渐变锁keep(前{_n_locked_os}行全锁→0.1→1.0)"
                                     else:
                                         # 分镜模式(场景可跳变): 头部渐进锁 keep, 0.0→1.0
                                         # 线性渐降, 首步完全保持(无缝进入), 逐步放开重绘,
@@ -10142,7 +10226,7 @@ class BSAIH3FilmFactory:
                                     latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mv, _ma))
                                     _mode_tag = "一镜到底" if one_shot_enabled else "分镜衔接"
                                     print(f"[H3 Extender] v14.188 {_mode_tag}: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
-                                          f"噪声从上一段尾latent延续(+10%扰动), noise_mask {_lock_desc}")
+                                          f"噪声从上一段尾latent延续(+{8 if one_shot_enabled else 10}%扰动), noise_mask {_lock_desc}")
                 except Exception as _seed_err:
                     print(f"[H3 Extender] v14.188 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
                 if lip_audio is not None:

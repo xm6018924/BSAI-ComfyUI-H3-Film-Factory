@@ -3102,7 +3102,18 @@ def _decode_single_clip_to_blob(
                 elif _model_wave.shape[1] == 1 and _lip_wave.shape[1] == 2:
                     _model_wave = _model_wave.repeat(1, 2, 1)
             # 长度对齐到模型音频长度(歌曲段可能略长/略短)
+            # v14.248 (fix, 2026-10-29): 段尾静音 —— 实测 20 段成片每段间音乐
+            # 停顿≥1s(用户点名 00:23:07-00:24:06 / 00:35:08-00:36:08, 之后所有
+            # clip 一致)。根因: 模型音频长度(~11.95s, 渲染 310 帧含 context 22)
+            # 比本段歌曲内容(11.04s = nominal - overlap 0.92s) 长 ~0.91s,
+            # 旧逻辑无条件 pad 到模型音频长度 → 每段尾部 0.91s 静音, 拼接后
+            # 段间停顿≈1s。修复: 对齐目标取 min(模型音频长度, 本段净视频帧数
+            # 对应样本) —— video 已在 lip_audio 末尾对齐时裁到净内容时长
+            # (段2+ ≈11.04s), 歌曲内容恰好等长, 不再 pad 静音。
             _target = int(_model_wave.shape[-1])
+            _video_target_samples = int(round(video.shape[0] / float(fps) * _model_sr))
+            if _video_target_samples > 0:
+                _target = min(_target, _video_target_samples)
             if int(_lip_wave.shape[-1]) >= _target:
                 _lip_aligned = _lip_wave[..., :_target]
             else:
@@ -3117,7 +3128,8 @@ def _decode_single_clip_to_blob(
             audio["waveform"] = _lip_aligned
             print(f"[H3 LipSync]   clip[{i}] 纯歌曲输出(模型音频已丢弃): "
                   f"{int(_lip_aligned.shape[-1])} samples @ {_model_sr}Hz, "
-                  f"跳过重叠 {_ov} samples")
+                  f"跳过重叠 {_ov} samples"
+                  + (f", 对齐净视频 {video.shape[0]}帧/{_video_target_samples}样本(无段尾静音)" if _ov > 0 else ""))
         except Exception as _mix_err:
             print(f"[H3 LipSync]   clip[{i}] 纯歌曲输出失败(回退模型原音): {_mix_err}")
 
