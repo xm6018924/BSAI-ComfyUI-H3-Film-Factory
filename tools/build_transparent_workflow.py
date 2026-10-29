@@ -201,12 +201,12 @@ MAIN = {
         True,             # 58
         "global_inherit", # 59
         0.15,             # 60
-        "off (关闭)",      # 61 面部锁定
-        "global (全上下文省显存)",  # 62
-        "off (分镜模式)",   # 63 单采模式
+        "off",            # 61 面部锁定
+        "global (full-context, low VRAM)",  # 62
+        "off (storyboard)",  # 63 单采模式
         0,                # 64
-        "透明视频 单采抠像 (H3 Transparent)",  # 65 render_pipeline (第20档)
-        "单采无缝 (推荐)",  # 66
+        "Transparent Video Single-Pass Keying (H3 Transparent)",  # 65 render_pipeline (第20档)
+        "Single-pass seamless (recommended)",  # 66
         "",               # 67
     ],
 }

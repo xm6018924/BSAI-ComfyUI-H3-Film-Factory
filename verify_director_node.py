@@ -90,7 +90,7 @@ if it:
               f"type={opt['refine_sigmas'][0]}")
     if "refine_sampler" in opt:
         rs_opts = opt["refine_sampler"][0]
-        check("refine_sampler 组合含 euler/inherit", "inherit (跟随一采)" in rs_opts and "euler" in rs_opts)
+        check("refine_sampler 组合含 euler/inherit", "inherit" in rs_opts and "euler" in rs_opts)
     # required 不变性抽查: 旧键仍在
     req = it.get("required", {})
     for k in ("run_mode", "width", "height", "steps", "sampler_name", "scheduler", "refine_enable"):
