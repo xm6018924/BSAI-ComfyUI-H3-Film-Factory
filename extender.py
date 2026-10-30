@@ -878,12 +878,30 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
     except Exception as _zg_e:
         print(f"[H3 LipSync] v14.253 全零断点剔除跳过(可忽略): {_zg_e}")
 
-    # Calculate per-clip durations aligned to H3 frame grid
+    # v14.254 (fix): 每段推进必须与渲染端(v14.177)的实际净帧数同口径。
+    # 渲染端: clip1 = _align_frame_count(round(dur*FPS))  → 12s 得 294 帧(12.25s);
+    #         clip2+ (ctx_on) = _align_frame_count(round(dur*FPS)+ctx) - ctx → 289 帧(12.04s)。
+    # 旧实现所有段都按 _duration_to_frames(dur)=294 推进, 于是 clip2+ 只播出
+    # 289 帧原曲、歌曲指针却前进 294 帧 → 每个 clip2+ 边界被跳过 5~6 帧(0.21~0.25s)。
+    # 用户实测: clip2 段尾原曲 00:24:06 → clip3 段头原曲从 00:24:12 起, 中间丢 6 帧;
+    # clip1(294 帧)与推进量一致, 所以恰好在 clip1→clip2 边界无缝。
+    _ctx_frames = 0
+    try:
+        _ctx_frames = max(0, int(context_frames))
+    except (TypeError, ValueError):
+        _ctx_frames = 0
+    _ctx_ov_samples = int(round(_ctx_frames / float(fps) * sr)) if _ctx_frames else 0
+
     clip_durations = []
-    for cfg in clips:
+    for idx, cfg in enumerate(clips):
         dur = float(cfg.get("duration", 5.0))
-        frames = _duration_to_frames(dur)
-        clip_durations.append(float(frames) / fps)
+        _raw = max(5, int(round(dur * float(fps))))
+        _ctx_on = bool(cfg.get("context_enabled", True)) if idx < len(clips) else True
+        if idx > 0 and _ctx_on and _ctx_frames > 0:
+            _frames = max(5, _align_frame_count(_raw + _ctx_frames) - _ctx_frames)
+        else:
+            _frames = _align_frame_count(_raw)
+        clip_durations.append(float(_frames) / float(fps))
 
     sum_clip_dur = sum(clip_durations)
 
@@ -939,13 +957,6 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
     #   段 = [current - overlap, current + N)  (N = 标称净时长)
     #   推进 = N。解码混音时切掉段头 overlap → 输出恰好 N, 与视频净帧数等长,
     #   段间零缺口、零补零静音, 口型与音频严格同源。
-    _ctx_frames = 0
-    try:
-        _ctx_frames = max(0, int(context_frames))
-    except (TypeError, ValueError):
-        _ctx_frames = 0
-    _ctx_ov_samples = int(round(_ctx_frames / float(fps) * sr)) if _ctx_frames else 0
-
     segments = []
     current_sample = 0
     for idx, dur in enumerate(clip_durations):

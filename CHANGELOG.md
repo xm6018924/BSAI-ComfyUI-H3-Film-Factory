@@ -4,6 +4,30 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.261 (2026-10-30) — clip2+ 段间原曲被吞 6 帧（clip3 段头从 24:12 而非 24:06 起）/ Fix the 6-frame song skip at every clip2+ boundary
+
+**实测（clip2/clip3 音轨对源曲《晚风》做归一化互相关，r≈0.99 且峰值唯一）：**
+
+| 位置 | 原曲时间 |
+|---|---|
+| clip2 段头 | 12.439s |
+| clip2 段尾 | 24.503s |
+| clip3 段头 | **24.689s** ← 比 clip2 段尾晚 0.186~0.25s（5~6 帧）|
+| 相邻段头间隔 | 恒为 **12.25s**（=294 帧）|
+
+而 clip1 成片 294 帧（12.25s）、clip2/clip3 成片只有 288~289 帧（12.00~12.04s）。
+
+**根因：切段端与渲染端帧数口径不一致。**
+- 渲染端 v14.177：clip1 = `_align_frame_count(288)` = **294 帧**；clip2+ = `_align_frame_count(288+22) - 22` = **289 帧**。
+- 切段端 `_split_lip_audio_by_clips`：所有段一律按 `_duration_to_frames(12)` = **294 帧**推进（=12.25s）。
+→ clip1 实际就是 294 帧，所以 clip1→clip2 恰好无缝；clip2+ 每段只播 289 帧原曲却把歌曲指针推进 294 帧，**每个 clip2+ 边界吞掉 5~6 帧（0.21~0.25s）**，累积即"音频断一截"。
+
+**修复：** 切段端改为与渲染端逐段同口径——clip2+（ctx_on）按 `_align_frame_count(raw + ctx) - ctx` = 289 帧，clip1 保持 294 帧。四段总长恢复为 294 + 289×3 = 1161 帧，与链缓存 manifest 的 `final_frame_count` 一致。
+
+**/ Fix:** the splitter now uses the renderer's per-clip net frame count (289 frames for context clips, 294 for the first clip) instead of a flat 294, so the song pointer advances exactly as far as the rendered picture.
+
+- 生效：重启 ComfyUI；已缓存的 clip2+ 必须重渲染（音频帧切割是采样前决定的，重解码不会改变）。
+
 ### v14.259 (2026-10-30) — 一镜到底：根治段内叠化切镜 / Kill in-clip dissolve cuts in one-shot mode
 
 **实测：** 用户 clip2 在 3.28s（正好第 3 秒分拍边界）出现一次叠化过渡切镜；逐帧差值分析 5.4 vs 中位数 2.8，切镜**已烘进生成片段本身**（一镜到底合并只做无缝拼接、不做转场），不是合成环节引入的。
