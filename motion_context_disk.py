@@ -2183,7 +2183,10 @@ def _fit_audio_segment_to_cumulative(wave, target_total, written_total):
 
 def _write_audio_raw(file_obj, wave):
     x = wave[0].detach().float().transpose(0, 1).cpu().contiguous()
-    file_obj.write(x.numpy().astype("float32", copy=False).tobytes(order="C"))
+    # v14.253 (fix): .astype(copy=False) 在 numpy array 本身 dtype 已是 float32
+    # 但 buffer 来自只读/非连续 tensor.view 时可能失败。直接 .tobytes() 即可，
+    # 它内部保证 C-order 且会处理连续化。
+    file_obj.write(x.numpy().tobytes(order="C"))
 
 
 def _mux_final(ffmpeg, temp_video, raw_audio, output_path, sr, channels, codec, audio_bitrate, log_path):

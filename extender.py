@@ -823,6 +823,61 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
     total_samples = int(waveform.shape[-1])
     total_duration = float(total_samples) / float(sr)
 
+    # v14.253 (fix): 剔除对口型源音频里的"数字全零断点"。
+    # TTS/拼接产物常在句间留下 0.1~0.2s 的精确全零(实测 26.264s TTS 在
+    # 14.049~14.247 有 0.199s 全零), 成片听感就是"人在说话突然断了 0.2s"。
+    # 自然换气的 RMS 在 0.001~0.005 量级, 不是全零, 所以只裁 |x|<=1e-4 的
+    # 连续 >=80ms 全零段: 人声连续, 正常停顿完全不受影响。
+    # 裁剪后按 6ms 交叉淡入淡出拼接, 避免硬切爆音。
+    try:
+        _wf = waveform
+        if _wf.dim() >= 2 and int(_wf.shape[-1]) > 1:
+            _mag = _wf.abs().amax(dim=tuple(range(_wf.dim() - 1)))
+            _zarr = (_mag <= 1e-4).detach().cpu().numpy()
+            _min_run = max(1, int(round(0.08 * sr)))
+            _n = int(_zarr.shape[-1])
+            _gaps, _pos = [], 0
+            while _pos < _n:
+                if bool(_zarr[_pos]):
+                    _end = _pos
+                    while _end < _n and bool(_zarr[_end]):
+                        _end += 1
+                    if (_end - _pos) >= _min_run:
+                        _gaps.append((_pos, _end))
+                    _pos = _end
+                else:
+                    _pos += 1
+            if _gaps:
+                _kept, _prev = [], 0
+                for _gs, _ge in _gaps:
+                    if _gs > _prev:
+                        _kept.append(_wf[..., _prev:_gs])
+                    _prev = _ge
+                if _prev < _n:
+                    _kept.append(_wf[..., _prev:])
+                if _kept:
+                    _fade = max(1, int(round(0.006 * sr)))
+                    _out = _kept[0]
+                    for _chunk in _kept[1:]:
+                        if (_fade > 0 and _out.shape[-1] >= _fade
+                                and _chunk.shape[-1] >= _fade):
+                            _ramp = torch.linspace(0.0, 1.0, _fade,
+                                                   device=_out.device, dtype=_out.dtype)
+                            _mix = (_out[..., -_fade:] * (1.0 - _ramp)
+                                    + _chunk[..., :_fade] * _ramp)
+                            _out = torch.cat((_out[..., :-_fade], _mix,
+                                              _chunk[..., _fade:]), dim=-1)
+                        else:
+                            _out = torch.cat((_out, _chunk), dim=-1)
+                    _removed = float(total_duration - float(_out.shape[-1]) / float(sr))
+                    waveform = _out
+                    total_samples = int(waveform.shape[-1])
+                    total_duration = float(total_samples) / float(sr)
+                    print(f"[H3 LipSync] v14.253 剔除源音频数字全零断点 "
+                          f"{len(_gaps)} 处, 共 {_removed:.2f}s (人声连续性修复)")
+    except Exception as _zg_e:
+        print(f"[H3 LipSync] v14.253 全零断点剔除跳过(可忽略): {_zg_e}")
+
     # Calculate per-clip durations aligned to H3 frame grid
     clip_durations = []
     for cfg in clips:
@@ -848,9 +903,19 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
                   f"差异 {_ratio:.2f}x > 1.3x, clips duration 口径可能不准, "
                   f"等分到 {len(clip_durations)} 段 (每段 {_per_seg:.2f}s)")
         else:
-            scale = total_duration / sum_clip_dur
-            clip_durations = [d * scale for d in clip_durations]
-            print(f"[H3 LipSync] CLIP总时长({sum_clip_dur:.1f}s) > 音频总时长({total_duration:.1f}s)，按比例缩放到 {scale:.3f}x")
+            # v14.253 (fix): 不再按比例缩放每一段。
+            # 旧实现按 total/sum 等比缩小所有段(实测 26.264s 音频 / 26.625s 视频
+            # -> x0.9865), 使每段音频都比自己的视频帧短(例 clip1 音频 14.879s
+            # 而视频 362 帧 = 15.083s)。解码混音时段尾被 torch.zeros 补零
+            # (motion_context_disk 的 _pad), 于是每个接缝都出现 ~0.2s 全零静音坑。
+            # 现只把缺口压到末段: 前面各段严格等于各自视频时长 -> 段间零补零;
+            # 缺口(本例 0.36s)落在片尾最后一段末尾, 片尾静音不可闻, 远好于段间断点。
+            _deficit = max(0.0, float(sum_clip_dur - total_duration))
+            if clip_durations and _deficit > 0:
+                _floor = 1.0 / float(fps)
+                clip_durations[-1] = max(_floor, float(clip_durations[-1]) - _deficit)
+            print(f"[H3 LipSync] CLIP总时长({sum_clip_dur:.2f}s) > 音频总时长({total_duration:.2f}s)，"
+                  f"缺口 {_deficit:.2f}s 全部由末段吸收(前面各段保持整帧, 段间零补零)")
 
     # Split audio into segments
     # v2: For clips after the first, extend the segment backward by ~1s to cover
@@ -3048,7 +3113,9 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
     per_frame = fw_in * fh_in * 3
     n_frames = max(1, nbytes // per_frame)
     bs = max(1, int(batch))
-    arr = np.frombuffer(open(raw, "rb").read(), dtype=np.uint8)
+    # v14.253 (fix): np.frombuffer 引用 bytes 不可变 buffer → torch.from_numpy
+    # 报 "The given NumPy array is not writable" warning。加 .copy() 拿到独立可写内存。
+    arr = np.frombuffer(open(raw, "rb").read(), dtype=np.uint8).copy()
     out_frames = []
     # tile_size: 新版 upscale 模型 forward 只接受 tile_size/tile_overlap,
     # 不接受 scale 走模型内部. scale 由模型本身决定.
@@ -4628,25 +4695,21 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                           f"(token_chunk=4096, 无空间分块)"
                           + (f", 上游回退: {_fb}(检测到自制注意力 override, 走全序列 attention+分块 MLP)" if _fb else ""))
                     if _fb:
-                        # v14.208: tiled_model 成功但被检测出 attention override,
-                        # 自动回退到 dense full-sequence attention——1.3M tokens 的
-                        # dense attention workspace 在 24GB 卡上 OOM.
-                        # 恢复原模型 + 切 spatial 分块 (tile 级 token 在 Sol-Attn 健康区).
-                        _refine_model = _r_original_refine_model
+                        # v14.253 (fix): 不再因 attention override 回退 spatial 分块。
+                        # 旧(v14.208): 看到 _selflift_global_fallback 就切 spatial 4~8 块
+                        # → 每块被独立重画成一整套构图 → 画面横带叠加(用户实测)。
+                        # 现: selflift_avatar.h3_global_tiling.tiled_model 内部已用
+                        # force_dense_on_unknown=True 处理了 attention override ——
+                        # 检测到 unknown override 时走 _native_attention_chunked_mlp
+                        # (完整 full-sequence attention + 仅 MLP 分块), 不切空间轴,
+                        # 画面完整。代价: 1.3M tokens dense attention 在 24GB 卡上
+                        # 可能吃满显存甚至 OOM, 但比"画面被切成 4 条横带"好得多。
+                        # 真 OOM 时用户改回 spatial 即可, 不必自动回退到坏画质路径。
+                        print(f"[H3 Extender] v14.253 global 保留 attention override({_fb}) "
+                              f"继续走 full-sequence dense attention + chunked MLP, "
+                              f"不切 spatial 分块(避免画面横带叠加); "
+                              f"若后续 OOM 请改回 spatial")
                         del _r_original_refine_model
-                        refine_mem_mode = "spatial"
-                        _r_global_fallback_tiles = True
-                        print(f"[H3 Extender] v14.208 global 回退 attention override({_fb}), "
-                              f"恢复原模型 + 切 spatial 分块以避免全序列 attention OOM")
-                        # tiled_model 内部 model.clone() 会创建权重副本 / cast buffer,
-                        # 显式 GC + empty_cache 回收 VRAM, 防止后续 spatial 分块 forward
-                        # 因碎片伪 OOM (allocated 低但 free=0).
-                        try:
-                            import gc as _gc208, torch as _t208
-                            _gc208.collect()
-                            _t208.cuda.empty_cache()
-                        except Exception:
-                            pass
                 except Exception as _eg15:
                     print(f"[H3 Extender] v14.153 global 包装失败, 回退 spatial 分块保底: {_eg15}")
                     refine_mem_mode = "spatial"
@@ -8039,11 +8102,16 @@ class BSAIH3FilmFactory:
                 shift_video, shift_audio = 12.0, 3.0
                 dual_track_shift = True
                 denoise = 1.0
-                context_length = "39"
-                audio_context_length = 0
+                # v14.253 (fix): 直播带货档硬编码对齐用户工作流 + 修复接缝/横带问题.
+                # context_length: 39 -> 22 (官方 AddGuide 22 帧尾部锚定, 过短锚不住, 过长占显存)
+                # audio_context_length: 0 -> 24 (跨 CLIP 音频上下文, 修复 clip1→clip2 接缝断音)
+                # refine_mem_mode: spatial -> global (避免 spatial 分块每块独立重画导致画面横带叠加;
+                # global 路径 v14.253 已修复 attention override 回退)
+                context_length = "22"
+                audio_context_length = 24
                 tiled_refine = False
                 tile_overlap = 128
-                refine_mem_mode = "spatial (分块,兼容)"
+                refine_mem_mode = "global (全上下文省显存)"
                 selflift_tst_enable = True
                 selflift_tst_tau = 0.2
                 upscale_per_clip = True
@@ -8062,8 +8130,9 @@ class BSAIH3FilmFactory:
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
                 scheduler = "simple"
-                print("[H3 Extender] 🛒 直播带货(全自动)档: 12+4 / denoise 0.55 / latent x2.0 / "
-                      "音频重绘 0.7 / shift 12-3 / TST 0.2 / 分块 4x128 / audio_context_length=0 / "
+                print("[H3 Extender] 🛒 直播带货(全自动)档 v14.253: 12+4 / denoise 0.55 / latent x2.0 / "
+                      "音频重绘 0.3 / shift 12-3 / TST 0.2 / global(不分块) / "
+                      "context_length=22 / audio_context_length=24(跨CLIP接缝) / "
                       "clip2+ 关闭上下文 —— 除分辨率外手动参数全部由本档接管")
             elif _rp_mode == "FastH3 Omni × SelfLift 超分":
                 # v14.211 (2026-10-26): B站《FastH3 Omni 全流程教学》(BV1rtnQ6qErJ) 配方落地。
