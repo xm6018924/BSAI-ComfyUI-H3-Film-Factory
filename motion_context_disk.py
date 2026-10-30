@@ -1635,8 +1635,8 @@ def _nvenc_available(ffmpeg, codec="h264"):
     _cache = getattr(_nvenc_available, "_cache", {})
     if key in _cache:
         return _cache[key]
-    # v2.118: 直接返回 True (RTX 5090 + imageio-ffmpeg v7.1 已确认支持 NVENC)
-    ok = True
+    # v14.260: RTX 5090 Laptop NVENC 渲染后编码崩溃(进程直接退出), 改 libx264 软编
+    ok = False
     _cache[key] = ok
     _nvenc_available._cache = _cache
     return ok
