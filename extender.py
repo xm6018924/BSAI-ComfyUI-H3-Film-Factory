@@ -8114,7 +8114,7 @@ class BSAIH3FilmFactory:
                 #   ② upscale_factor=1.5 (残影/拖影已减)
                 #   ③ refine_steps=6 (更精细)
                 # 只回滚 denoise 一项。
-                steps, refine_steps, tile_count, refine_denoise = 12, 6, 4, 0.55
+                steps, refine_steps, tile_count, refine_denoise = 12, 6, 4, 0.35
                 refine_enable = True
                 refine_audio_denoise = 0.3
                 refine_upscale_factor = 1.5
