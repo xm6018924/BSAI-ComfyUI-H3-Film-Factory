@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.258-pdmd-ptd-recipes"
+BUILD = "minimax-h3-extender-v14.262-upscale-stream-fix"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -3123,44 +3123,60 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
     fh_in = fh_in or 1
     per_frame = fw_in * fh_in * 3
     n_frames = max(1, nbytes // per_frame)
-    bs = max(1, int(batch))
-    # v14.253 (fix): np.frombuffer 引用 bytes 不可变 buffer → torch.from_numpy
-    # 报 "The given NumPy array is not writable" warning。加 .copy() 拿到独立可写内存。
-    arr = np.frombuffer(open(raw, "rb").read(), dtype=np.uint8).copy()
-    out_frames = []
+    bs = max(1, min(int(batch), 8))
+    # v14.262: memmap 替代 read+copy —— 旧版整段 raw 双份进内存 + 攒全部超分帧
+    # 再 torch.cat, 362 帧 2x 超分时单块 CPU 申请 36.3GB 直接 DefaultCPUAllocator OOM。
+    arr = np.memmap(raw, dtype=np.uint8, mode="r")
     # tile_size: 新版 upscale 模型 forward 只接受 tile_size/tile_overlap,
     # 不接受 scale 走模型内部. scale 由模型本身决定.
     _tile_size = int(tile) if int(tile) > 0 else 512
     _tile_overlap = 16
-    with torch.inference_mode():
-        for s in range(0, n_frames, bs):
-            chunk = arr[s * per_frame:(s + bs) * per_frame]
-            # N, H, W, 3 uint8 -> N, 3, H, W float32
-            t = torch.from_numpy(chunk).reshape(-1, fh_in, fw_in, 3).permute(0, 3, 1, 2).float().div_(255.0).to(dev)
-            if fp16 and dev.type == "cuda":
-                t = t.half()
-            # 模型原生 tile 式 forward. 若不支持 tile_size 参数, 回退全帧.
+    enc = None
+    try:
+        with torch.inference_mode():
+            for s in range(0, n_frames, bs):
+                # memmap 切片只读, np.array 复制本块拿到独立可写内存
+                chunk = np.array(arr[s * per_frame:(s + bs) * per_frame])
+                # N, H, W, 3 uint8 -> N, 3, H, W float32
+                t = torch.from_numpy(chunk).reshape(-1, fh_in, fw_in, 3).permute(0, 3, 1, 2).float().div_(255.0).to(dev)
+                if fp16 and dev.type == "cuda":
+                    t = t.half()
+                # 模型原生 tile 式 forward. 若不支持 tile_size 参数, 回退全帧.
+                try:
+                    up = model_mod(t, tile_size=_tile_size, tile_overlap=_tile_overlap)
+                except TypeError:
+                    up = model_mod(t)
+                if fp16 and dev.type == "cuda":
+                    up = up.float()
+                out = up.clamp_(0.0, 1.0).mul_(255.0).byte().permute(0, 2, 3, 1).cpu().numpy()
+                del t, up, chunk
+                if enc is None:
+                    # 逐块流式写 ffmpeg stdin; 输出尺寸以首块实际为准;
+                    # -map 1:a? -c:a copy 保留原音轨(旧版只编码视频流, 音轨丢失)
+                    oh, ow = int(out.shape[1]), int(out.shape[2])
+                    enc = subprocess.Popen(
+                        [ff, "-y",
+                         "-f", "rawvideo", "-pix_fmt", "rgb24",
+                         "-s", f"{ow}x{oh}", "-r", str(fps or 30.0), "-i", "pipe:0",
+                         "-i", str(path),
+                         "-map", "0:v:0", "-map", "1:a?",
+                         "-c:v", "libx264", "-crf", "18", "-preset", "slow",
+                         "-pix_fmt", "yuv420p", "-c:a", "copy",
+                         str(tmp)],
+                        stdin=subprocess.PIPE)
+                enc.stdin.write(out.tobytes())
+                del out
+    finally:
+        if enc is not None:
             try:
-                up = model_mod(t, tile_size=_tile_size, tile_overlap=_tile_overlap)
-            except TypeError:
-                up = model_mod(t)
-            if fp16 and dev.type == "cuda":
-                up = up.float()
-            out_frames.append(up.clamp_(0.0, 1.0).mul_(255.0).byte().cpu())
+                enc.stdin.close()
+            except Exception:
+                pass
     os.unlink(raw)
-    if not out_frames:
+    if enc is None:
         raise RuntimeError("realesr: 无输出帧")
-    cat = torch.cat(out_frames, dim=0).permute(0, 2, 3, 1).numpy()
-    tmpraw = str(tmp) + ".out.raw"
-    cat.tofile(tmpraw)
-    subprocess.run(
-        [ff, "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{fw}x{fh}",
-         "-r", str(fps or 30.0), "-i", tmpraw,
-         "-c:v", "libx264", "-crf", "18", "-preset", "slow", "-pix_fmt", "yuv420p",
-         str(tmp)],
-        check=True, capture_output=True, timeout=7200,
-    )
-    os.unlink(tmpraw)
+    if enc.wait() != 0:
+        raise RuntimeError("realesr: ffmpeg 重编码失败")
 
 
 def _ff_face_restore_file(path, ff):
@@ -4904,6 +4920,16 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             try:
                 import comfy.utils as _cu_w, comfy.sample as _cs_w, comfy.nested_tensor as _cnt_w
                 _wmem_w, _wnested_w = _ff_extract_members(_r_latent["samples"])
+                # v14.262: 分块二采下 samples 可能是 [video, audio] 的 list,
+                # _ff_extract_members 原样返回后 member 仍是 list → .shape 崩。
+                # 扁平化一层, 保证 _wmem_w[0]=视频 tensor, [1]=音频 tensor。
+                _flat_w = []
+                for _m in _wmem_w:
+                    if isinstance(_m, (list, tuple)):
+                        _flat_w.extend(_m)
+                    else:
+                        _flat_w.append(_m)
+                _wmem_w = _flat_w
                 _wv_w = _wmem_w[0]
                 _wh_w = max(4, int(_wv_w.shape[-2]) // 8)
                 _ww_w = max(4, int(_wv_w.shape[-1]) // 8)
