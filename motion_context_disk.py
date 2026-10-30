@@ -1759,20 +1759,19 @@ def _despeckle_frames(images, chroma_radius=13, chroma_knee=0.07, chroma_span=0.
     return _repair_bottom_edge_band(_out)
 
 
-def _repair_bottom_edge_band(images, band_frac=0.085, ramp_frac=0.032):
-    """v14.261: 修复 H3 解码/二采在画面最底边留下的"五彩色斑"。
+def _repair_bottom_edge_band(images, band_frac=0.032, ramp_frac=0.018):
+    """v14.263: 修复 H3 解码/二采在画面最底边留下的"五彩色斑"。
 
-    实测(1088x1920 直播带货成片): 画面最底 ~150px 是一条橙/青/紫/品红竖纹带,
-    每帧都有、位置固定。分离验证: 该带 **亮度(Y)结构正常**(去饱和后是合理的
-    木纹/地面), 只有 **色度(Cb/Cr)被污染** —— 是 latent 底边若干行解码出的
-    画外色度, 不是主体内容。
+    实测(1088x1920 直播带货成片): 橙/青/紫/品红竖纹只出现在 **最底部约 60px**,
+    更往上的"色度渐变"是场景本身的暗部色调, 不是污染。分离验证: 该带
+    亮度(Y)结构正常, 只有色度(Cb/Cr)被 latent 底边行污染。
 
-    因此不裁切(裁切会丢掉画面底部构图), 而是:
-      ① 保留 Y —— 结构/清晰度不变;
-      ② 色度替换为"色斑带上方最后一行干净像素"的色度(逐列复制), 所以
-         底部的真实色调(木纹棕/裙摆白)会自然延续下来;
-      ③ 带内对 Y 做纵向均值平滑 —— 去掉那条 8px(VAE 空间压缩)一格的横纹;
-      ④ 带的上边缘用余弦渐变过渡, 避免出现硬接缝。
+    因此只做一件事: 把最底部 band_frac 区域的 Cb/Cr 换成带上方干净行
+    的色度(逐列复制), 上边缘用余弦渐变过渡。**亮度一个像素都不动** ——
+    v14.261 曾对整个 163px 带做纵向均值平滑(半径 15), 把木纹/裙摆糊成
+    一片, 全片底部发糊, 该做法已废弃。
+
+    1920 高时: 全替换 61px + 渐变 35px = 最底 96px(5%), 之上完全原画。
 
     入参/返回: [T,H,W,C] float(0..1); uint8 输入按 uint8 返回。
     """
@@ -1787,48 +1786,37 @@ def _repair_bottom_edge_band(images, band_frac=0.085, ramp_frac=0.032):
     if _was_u8:
         _x = _x / 255.0
 
-    _band = int(round(_H * float(band_frac)))
-    _ramp = int(round(_H * float(ramp_frac)))
-    _smooth_r = max(3, int(round(_H * 0.008)) | 1)
-    _band = max(1, min(_band, _H // 3))
-    _ramp = max(1, min(_ramp, _H - _band - 1))
-
+    _band = max(1, min(int(round(_H * float(band_frac))), _H // 3))
+    _ramp = max(1, min(int(round(_H * float(ramp_frac))), _H - _band - 2))
     _top = _H - _band - _ramp
-    _s0 = max(0, _top - _smooth_r)          # 平滑需要带上方一点上下文
+    # 段首多带一行(即渐变区正上方的干净行), 作为参考色度源
+    _s0 = _top - 1
+
     _seg = _x[:, _s0:, :, :]
     _n = int(_seg.shape[1])
-    _i_top = _top - _s0                     # 渐变起点(段内索引)
-    _i_band = _i_top + _ramp                # 全替换起点
 
     _lw = _t.tensor([0.299, 0.587, 0.114], dtype=_seg.dtype, device=_seg.device)
     _y = (_seg * _lw).sum(dim=-1, keepdim=True)
     _cb = (_seg[..., 2:3] - _y) * 0.564
     _cr = (_seg[..., 0:1] - _y) * 0.713
 
-    # 参考色度 = 渐变起点上方最后一行(干净区)
-    _r0 = max(0, _i_top - 1)
-    _cb_ref = _cb[:, _r0:_r0 + 1]
-    _cr_ref = _cr[:, _r0:_r0 + 1]
+    # 参考色度 = 干净行逐列复制到下方
+    _cb_ref = _cb[:, 0:1]
+    _cr_ref = _cr[:, 0:1]
 
-    # 亮度纵向均值(只沿 H 轴)
-    _yp = _y.permute(0, 3, 1, 2)
-    _ys = _t.nn.functional.avg_pool2d(
-        _t.nn.functional.pad(_yp, (0, 0, _smooth_r, _smooth_r), mode="replicate"),
-        (_smooth_r * 2 + 1, 1), (1, 1)).permute(0, 2, 3, 1)
-
+    # idx0 = 干净行(权重0); idx1.._ramp = 渐变; 之后全替换
     _idx = _t.arange(_n, dtype=_seg.dtype, device=_seg.device)
-    _tgt = ((_idx - _i_top) / float(_ramp)).clamp_(0.0, 1.0)
+    _tgt = ((_idx - 1.0) / float(_ramp)).clamp_(0.0, 1.0)
     _w = (0.5 - 0.5 * _t.cos(_tgt * 3.1415926)).view(1, _n, 1, 1)
 
-    _y2 = _y + (_ys - _y) * _w
     _cb2 = _cb + (_cb_ref - _cb) * _w
     _cr2 = _cr + (_cr_ref - _cr) * _w
     _seg_out = _t.cat([
-        _y2 + 1.402 * _cr2,
-        _y2 - 0.344 * _cb2 - 0.714 * _cr2,
-        _y2 + 1.772 * _cb2,
+        _y + 1.402 * _cr2,
+        _y - 0.344 * _cb2 - 0.714 * _cr2,
+        _y + 1.772 * _cb2,
     ], dim=-1).clamp_(0.0, 1.0)
-    del _y, _cb, _cr, _yp, _ys, _cb_ref, _cr_ref, _y2, _cb2, _cr2, _w, _tgt, _idx
+    del _y, _cb, _cr, _cb_ref, _cr_ref, _cb2, _cr2, _w, _tgt, _idx
 
     _out = _t.cat([_x[:, :_s0], _seg_out], dim=1) if _s0 > 0 else _seg_out
     del _x, _seg, _seg_out
