@@ -5408,13 +5408,23 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     4, ceil_mode=True)
                 _clpdisp = float(
                     _clp.reshape(_clp.shape[0], _cc, -1).std(dim=2).median())
-                if _cdisp < 0.30 and _clpdisp < 0.15:
+                # v14.260 (2026-10-30): 补「灰底 + 规则网格」漏网判据。
+                # 分块二采(spatial 4 块)塌陷会产出均匀灰场 + 块状网格: 低频几乎全平
+                # (低通 std 极低), 但网格把整体 std 抬到 0.30 以上, 上面那条 AND 判据
+                # 因此漏网 → 灰片当"健康"直出。实测 clip[1]: 整体 0.472 / 低通 0.091;
+                # 而命中回退的 clip[0] 是 0.293 / 0.115(低通反而更高)。
+                # 独立触发: 低通极平 + 整体 std 低于注释记录的 0.68 健康下限 +
+                # 能量几乎全在高频(整体 > 1.8×低通)。真·平滑场景三者不会同时成立。
+                _grid_gray = (_clpdisp < 0.12 and _cdisp < 0.68
+                              and _cdisp > 1.8 * _clpdisp)
+                if (_cdisp < 0.30 and _clpdisp < 0.15) or _grid_gray:
                     _pre_v, _pre_nst = _ff_extract_members(_pre_up)
                     if _pre_v:
                         _pre_hw = tuple(_pre_v[0].shape[-2:])
                         samples = _ff_wrap_members(list(_pre_v), _pre_nst)
                         _refine_fallback_hw = (int(_pre_hw[0]), int(_pre_hw[1]))
-                        print(f"[H3 Extender] ⚠ 二采 latent 塌陷(clip={clip_index} "
+                        print(f"[H3 Extender] ⚠ 二采 latent 塌陷"
+                              f"({'网格灰场' if _grid_gray else '整体塌陷'}, clip={clip_index} "
                               f"通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}), "
                               f"已自动回退一采 latent {_pre_hw[1]}x{_pre_hw[0]}")
                         _send_extender_warning(
