@@ -3075,7 +3075,25 @@ def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_
             ]
             subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
         elif engine_eff == "realesr":
-            _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, batch)
+            # v14.265: 提交内存余量闸 —— 采样结束时 commit 基线常达 ~160GB/191GB,
+            # realesr 流(GPU 缓冲 + x264@4K 的 ~110MB malloc + 管道)是压垮它的最后
+            # 一根稻草(实测: x264 malloc 失败 -> 管道 EINVAL -> c10 空指针杀进程)。
+            # 余量不足时降级 bicubic: ffmpeg 单进程、内存可忽略, 保证出片不炸。
+            _cm_u265, _cm_t265 = _commit_gb()
+            if _cm_t265 > 0 and (_cm_t265 - _cm_u265) < 20.0:
+                print(f"[H3 Extender] 超分降级: 提交内存余量 {_cm_t265 - _cm_u265:.1f}GB "
+                      f"< 20GB, realesr->bicubic 保出片", flush=True)
+                cmd = [
+                    ff, "-y", "-i", str(path),
+                    "-vf", f"scale={fw}:{fh}:flags=bicubic",
+                    "-map", "0:v:0", "-map", "0:a?",
+                    "-c:v", "libx264", "-crf", "18", "-preset", "slow",
+                    "-pix_fmt", "yuv420p", "-c:a", "copy",
+                    str(tmp),
+                ]
+                subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
+            else:
+                _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, batch)
         else:
             # dlss5 预留：无 SDK 时回退 bicubic
             print(f"[H3 Extender] 超分引擎 {engine_eff} 暂不可用, 回退 bicubic")
@@ -3138,8 +3156,10 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
     """realesr 逐帧超分：ffmpeg 抽帧(rgb24) → torch → UpscaleModelLoader → 重编码。
     v14.211: 适配新版 ComfyUI —— comfy.ldm.modules.upscale 已不存在,
     UpscaleModelLoader 返回 spandrel ImageModelDescriptor, forward 直接调 descriptor.model."""
+    import gc as _gc265
     import numpy as np
     import torch
+    import torch.nn.functional as F
     import comfy.model_management as _mm211
     model_mod, _native_scale = _ff_load_upscale_model(model)
     dev = _mm211.get_torch_device()
@@ -3147,6 +3167,12 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
     # fp16 提速: upscale 模型大多是 conv, fp16 安全
     if fp16 and dev.type == "cuda":
         model_mod = model_mod.half()
+    # v14.265: 超分前释放采样期 CUDA 缓存 —— 采样结束时提交内存基线 ~160GB/191GB,
+    # 不释放的话 x264@高分辨率 的 ~110MB malloc 会失败(实测: ffmpeg 死亡 -> 管道
+    # EINVAL -> 超分失败, 随后 c10 分配空指针 0xc0000005 杀进程)。
+    _gc265.collect()
+    if dev.type == "cuda":
+        torch.cuda.empty_cache()
     raw = str(tmp) + ".raw"
     subprocess.run(
         [ff, "-y", "-i", str(path), "-f", "rawvideo", "-pix_fmt", "rgb24", raw],
@@ -3159,6 +3185,9 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
     per_frame = fw_in * fh_in * 3
     n_frames = max(1, nbytes // per_frame)
     bs = max(1, min(int(batch), 8))
+    # v14.265: 按请求输出尺寸收缩块 —— 单块输出 ≤ ~160MB, 防 8K 原生输出时
+    # 802MB/块的巨型管道写 (x264 慢档消费速度远低于产出, 管道长时间承压)。
+    bs = max(1, min(bs, int(160 * 1024 * 1024) // max(1, int(fw) * int(fh) * 3)))
     # v14.262: memmap 替代 read+copy —— 旧版整段 raw 双份进内存 + 攒全部超分帧
     # 再 torch.cat, 362 帧 2x 超分时单块 CPU 申请 36.3GB 直接 DefaultCPUAllocator OOM。
     arr = np.memmap(raw, dtype=np.uint8, mode="r")
@@ -3166,7 +3195,17 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
     # 不接受 scale 走模型内部. scale 由模型本身决定.
     _tile_size = int(tile) if int(tile) > 0 else 512
     _tile_overlap = 16
+    _need_resize = (int(fw_in) * _native_scale != float(fw)
+                    or int(fh_in) * _native_scale != float(fh))
+    if _need_resize:
+        # v14.265: 输出尺寸以用户请求的 (fw, fh) 为准 —— realesr-general-x4v3 原生 x4,
+        # v14.262 直接编码原生尺寸, 把 2x(2176x3840) 请求放大成 4x(4352x7680, 8K),
+        # 单帧 raw 25MB->100MB, x264 缓冲区翻 4 倍压垮提交内存。
+        print(f"[H3 Extender] 超分执行: 模型原生 x{_native_scale:g} "
+              f"({int(fw_in * _native_scale)}x{int(fh_in * _native_scale)}) "
+              f"-> 请求尺寸 {fw}x{fh}, area 缩放, 块={bs}", flush=True)
     enc = None
+    _pipe_err = None
     try:
         with torch.inference_mode():
             for s in range(0, n_frames, bs):
@@ -3183,23 +3222,31 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
                     up = model_mod(t)
                 if fp16 and dev.type == "cuda":
                     up = up.float()
+                if _need_resize and (int(up.shape[-1]) != int(fw) or int(up.shape[-2]) != int(fh)):
+                    up = F.interpolate(up, size=(int(fh), int(fw)), mode="area")
                 out = up.clamp_(0.0, 1.0).mul_(255.0).byte().permute(0, 2, 3, 1).cpu().numpy()
                 del t, up, chunk
                 if enc is None:
-                    # 逐块流式写 ffmpeg stdin; 输出尺寸以首块实际为准;
-                    # -map 1:a? -c:a copy 保留原音轨(旧版只编码视频流, 音轨丢失)
-                    oh, ow = int(out.shape[1]), int(out.shape[2])
+                    # 逐帧流式写 ffmpeg stdin; -map 1:a? -c:a copy 保留原音轨
+                    # (旧版只编码视频流, 音轨丢失)
                     enc = subprocess.Popen(
                         [ff, "-y",
                          "-f", "rawvideo", "-pix_fmt", "rgb24",
-                         "-s", f"{ow}x{oh}", "-r", str(fps or 30.0), "-i", "pipe:0",
+                         "-s", f"{int(fw)}x{int(fh)}", "-r", str(fps or 30.0), "-i", "pipe:0",
                          "-i", str(path),
                          "-map", "0:v:0", "-map", "1:a?",
                          "-c:v", "libx264", "-crf", "18", "-preset", "slow",
                          "-pix_fmt", "yuv420p", "-c:a", "copy",
                          str(tmp)],
                         stdin=subprocess.PIPE)
-                enc.stdin.write(out.tobytes())
+                try:
+                    for _fi in range(int(out.shape[0])):
+                        enc.stdin.write(out[_fi].tobytes())
+                except OSError as _we:
+                    # 编码端已死(多为提交内存不足 x264 malloc 失败), 立即停止写入
+                    _pipe_err = _we
+                    del out
+                    break
                 del out
     finally:
         if enc is not None:
@@ -3207,7 +3254,14 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
                 enc.stdin.close()
             except Exception:
                 pass
+            if _pipe_err is not None:
+                try:
+                    enc.kill()
+                except Exception:
+                    pass
     os.unlink(raw)
+    if _pipe_err is not None:
+        raise RuntimeError(f"realesr: 编码管道写入失败(ffmpeg 提前退出): {_pipe_err}")
     if enc is None:
         raise RuntimeError("realesr: 无输出帧")
     if enc.wait() != 0:
