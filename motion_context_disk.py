@@ -59,7 +59,7 @@ from .motion_context_ram import (
     _streams_from_latent,
 )
 
-BUILD = "motion-context-disk-v14.61-compact-prompt-bridge"
+BUILD = "motion-context-disk-v14.266-edge-pad-decode"
 PREVIEW_AUDIO_MODE = "pcm_single_aac_gain_chain_v3_entry_ramp"
 CACHE_VERSION = 12
 PREVIEW_ROTATION_SLOTS = 3
@@ -1481,7 +1481,7 @@ def _build_pair_video(data_path, prev_desc, curr_desc):
 
 
 def _decode_pair_video(vae, chain, meta):
-    decoded = vae.decode(chain)
+    decoded = _vae_decode_edge_pad(vae, chain)
     if decoded.ndim == 5:
         decoded = decoded.reshape(
             -1, decoded.shape[-3], decoded.shape[-2], decoded.shape[-1]
@@ -1756,75 +1756,32 @@ def _despeckle_frames(images, chroma_radius=13, chroma_knee=0.07, chroma_span=0.
     del _cbcr, _ref, _cb, _cr, _y, _yp, _m3, _m8, _dev, _mad3, _mad, _al, _aly
     if _was_u8:
         _out = _out.mul(255.0).add_(0.5).clamp_(0, 255).to(_t.uint8)
-    return _repair_bottom_edge_band(_out)
+    return _out
 
 
-def _repair_bottom_edge_band(images, band_frac=0.032, ramp_frac=0.018):
-    """v14.263: 修复 H3 解码/二采在画面最底边留下的"五彩色斑"。
+def _vae_decode_edge_pad(vae, v, pad_rows=8):
+    """v14.266: latent 底边镜像 pad 再解码, 裁掉 pad 区像素(输出尺寸不变)。
 
-    实测(1088x1920 直播带货成片): 橙/青/紫/品红竖纹只出现在 **最底部约 60px**,
-    更往上的"色度渐变"是场景本身的暗部色调, 不是污染。分离验证: 该带
-    亮度(Y)结构正常, 只有色度(Cb/Cr)被 latent 底边行污染。
-
-    因此只做一件事: 把最底部 band_frac 区域的 Cb/Cr 换成带上方干净行
-    的色度(逐列复制), 上边缘用余弦渐变过渡。**亮度一个像素都不动** ——
-    v14.261 曾对整个 163px 带做纵向均值平滑(半径 15), 把木纹/裙摆糊成
-    一片, 全片底部发糊, 该做法已废弃。
-
-    1920 高时: 全替换 61px + 渐变 35px = 最底 96px(5%), 之上完全原画。
-
-    入参/返回: [T,H,W,C] float(0..1); uint8 输入按 uint8 返回。
+    实测(1088x1920 直播带货成片): VAE/HyperVAE 解码器对最底 ~2 行 latent
+    上下文饥渴, 产出 平滑拖影 + 8px 周期色度污染(彩虹斑), 逐帧如此。
+    后处理涂抹(v14.261 亮度平滑 / v14.263 色度覆盖)都会糊画面, 已废弃。
+    改为: 底边镜像 pad 给底边行真实上下文, 解码后裁掉 pad 对应像素,
+    污染随 pad 区一起丢弃。采样几何/链缓存/输出分辨率全部不动。
     """
-    import torch as _t
-    if images is None or int(images.numel()) == 0 or int(images.shape[-1]) < 3:
-        return images
-    _H = int(images.shape[1])
-    if _H < 320:
-        return images
-    _was_u8 = images.dtype == _t.uint8
-    _x = images[..., :3].to(_t.float32)
-    if _was_u8:
-        _x = _x / 255.0
-
-    _band = max(1, min(int(round(_H * float(band_frac))), _H // 3))
-    _ramp = max(1, min(int(round(_H * float(ramp_frac))), _H - _band - 2))
-    _top = _H - _band - _ramp
-    # 段首多带一行(即渐变区正上方的干净行), 作为参考色度源
-    _s0 = _top - 1
-
-    _seg = _x[:, _s0:, :, :]
-    _n = int(_seg.shape[1])
-
-    _lw = _t.tensor([0.299, 0.587, 0.114], dtype=_seg.dtype, device=_seg.device)
-    _y = (_seg * _lw).sum(dim=-1, keepdim=True)
-    _cb = (_seg[..., 2:3] - _y) * 0.564
-    _cr = (_seg[..., 0:1] - _y) * 0.713
-
-    # 参考色度 = 干净行逐列复制到下方
-    _cb_ref = _cb[:, 0:1]
-    _cr_ref = _cr[:, 0:1]
-
-    # idx0 = 干净行(权重0); idx1.._ramp = 渐变; 之后全替换
-    _idx = _t.arange(_n, dtype=_seg.dtype, device=_seg.device)
-    _tgt = ((_idx - 1.0) / float(_ramp)).clamp_(0.0, 1.0)
-    _w = (0.5 - 0.5 * _t.cos(_tgt * 3.1415926)).view(1, _n, 1, 1)
-
-    _cb2 = _cb + (_cb_ref - _cb) * _w
-    _cr2 = _cr + (_cr_ref - _cr) * _w
-    _seg_out = _t.cat([
-        _y + 1.402 * _cr2,
-        _y - 0.344 * _cb2 - 0.714 * _cr2,
-        _y + 1.772 * _cb2,
-    ], dim=-1).clamp_(0.0, 1.0)
-    del _y, _cb, _cr, _cb_ref, _cr_ref, _cb2, _cr2, _w, _tgt, _idx
-
-    _out = _t.cat([_x[:, :_s0], _seg_out], dim=1) if _s0 > 0 else _seg_out
-    del _x, _seg, _seg_out
-    if int(_out.shape[-1]) != int(images.shape[-1]):
-        _alpha = images[..., 3:]
-        _out = _t.cat([_out, _alpha.to(_out.dtype)], dim=-1)
-    if _was_u8:
-        return _out.mul(255.0).add_(0.5).clamp_(0, 255).to(_t.uint8)
+    if not torch.is_tensor(v) or v.dim() != 5 or int(v.shape[-2]) < 16:
+        return vae.decode(v)
+    _H0 = int(v.shape[-2])
+    _p = max(1, min(int(pad_rows), _H0 // 4))
+    _vp = torch.cat([v, v[:, :, :, -_p:, :].flip(dims=[3])], dim=3)
+    _out = vae.decode(_vp)
+    del _vp
+    # 输出 (1,T,H,W,C) 或 (T,H,W,C): H 轴恒为倒数第 3 维
+    _h_dec = int(_out.shape[-3])
+    _h_keep = int(round(_h_dec * (_H0 / float(_H0 + _p))))
+    if 0 < _h_keep < _h_dec:
+        _out = _out[..., :_h_keep, :, :]
+        print(f"[H3 Extender] v14.266 底边修复: latent H {_H0}->{_H0 + _p} 镜像pad, "
+              f"解码 {_h_dec}px -> 裁回 {_h_keep}px (丢弃底边污染区)")
     return _out
 
 
@@ -3199,7 +3156,7 @@ def _decode_single_clip_to_blob(
         # 加权 blend, 无外层接缝 -> 消除重影/鬼影。
         print(f"[H3 Extender]   v14.247: 整块 decode (est output={_est_out_gb:.2f}GB, "
               f"allocated={_a:.1f}GB, out_device=comfy默认CPU, comfy自带tile_t+overlap blend)")
-        video = vae.decode(v)
+        video = _vae_decode_edge_pad(vae, v)
     finally:
         if _od_overridden:
             vae.output_device = _od_prev
@@ -3944,7 +3901,7 @@ def _render_one_final_segment(
 
     if i == 0:
         v, native = _load_segment_video_native(data_path, curr)
-        video = vae.decode(v)
+        video = _vae_decode_edge_pad(vae, v)
         if progress is not None:
             progress.advance()
         if video.ndim == 5:
@@ -3982,7 +3939,7 @@ def _render_one_final_segment(
     # 这里单独按一采几何解码, 丢掉重叠 trim 帧, 再把像素放大到链上尺寸。
     if curr.get("decode_native_hw"):
         v, native = _load_segment_video_native(data_path, curr)
-        video = vae.decode(v)
+        video = _vae_decode_edge_pad(vae, v)
         if progress is not None:
             progress.advance()
         if video.ndim == 5:
@@ -4031,7 +3988,7 @@ def _render_one_final_segment(
     # as the first clip. Audio has no 2-mod-5 constraint and stays exact.
     if int(curr.get("trim_frames", 0)) == 0:
         v = _load_segment_video(data_path, curr)
-        video = vae.decode(v)
+        video = _vae_decode_edge_pad(vae, v)
         if progress is not None:
             progress.advance()
         if video.ndim == 5:
@@ -5282,7 +5239,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
             # exactly one adjacent pair per seam. Nothing accumulated in IMAGE.
             if len(segments) == 1:
                 v, _native0 = _load_segment_video_native(data_path, segments[0])
-                decoded = vae.decode(v)
+                decoded = _vae_decode_edge_pad(vae, v)
                 progress.advance()
                 if decoded.ndim == 5:
                     decoded = decoded.reshape(-1, decoded.shape[-3], decoded.shape[-2], decoded.shape[-1])
@@ -5320,7 +5277,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                         seam_shifts[i] = 0
                         if video_proc is None:
                             pv, _p_native = _load_segment_video_native(data_path, prev_desc)
-                            dec_p = vae.decode(pv)
+                            dec_p = _vae_decode_edge_pad(vae, pv)
                             if dec_p.ndim == 5:
                                 dec_p = dec_p.reshape(-1, dec_p.shape[-3], dec_p.shape[-2], dec_p.shape[-1])
                             exp_p = int(prev_desc["frames"])
@@ -5338,7 +5295,7 @@ class MiniMaxH3MotionContextDiskFinalDecode:
                             del dec_p, pv
 
                         cv, _c_native = _load_segment_video_native(data_path, curr_desc)
-                        dec_c = vae.decode(cv)
+                        dec_c = _vae_decode_edge_pad(vae, cv)
                         progress.advance()
                         if dec_c.ndim == 5:
                             dec_c = dec_c.reshape(-1, dec_c.shape[-3], dec_c.shape[-2], dec_c.shape[-1])
