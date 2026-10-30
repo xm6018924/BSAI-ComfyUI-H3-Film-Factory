@@ -227,6 +227,41 @@ def _aimdo_disabled():
                 pass
 
 
+def _commit_gb():
+    """v14.264: 系统提交内存(commit = 页文件已用量)统计, 返回 (已用GB, 上限GB)。
+
+    v14.264 崩溃溯源: 事件日志 Resource-Exhaustion-Detector(2004) 显示本进程
+    提交内存一度涨到 150GB, 触顶后 PyTorch 某次分配返回空指针, c10.dll 直接
+    解引用 -> 0xc0000005(0xc0000005@c10.dll+0x8b645, 三次崩溃偏移完全相同)。
+    Windows 上 CUDA 缓存分配器不会归还地址空间, 长链渲染会持续膨胀。把 commit
+    打进各重阶段日志, 才能定位是谁把它顶上去的。
+    """
+    try:
+        import ctypes
+
+        class _MS(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        _m = _MS()
+        _m.dwLength = ctypes.sizeof(_m)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(_m)):
+            return ((_m.ullTotalPageFile - _m.ullAvailPageFile) / 1024.0 ** 3,
+                    _m.ullTotalPageFile / 1024.0 ** 3)
+    except Exception:
+        pass
+    return 0.0, 0.0
+
+
 def _release_dynamic_vram(tag=""):
     """v1.81 (2026-09-15 fix #11): 4090 DynamicVRAM 二采前 staged 池残留致 CUDA abort。
 
@@ -3628,7 +3663,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         # 配合启动参数去掉 --async-offload 根治。
         try: _mm1.EXTRA_RESERVED_VRAM = int(4.0 * 1024 ** 3)
         except Exception: pass
-        print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB), reserve->4.0GB")
+        _cm_u, _cm_t = _commit_gb()
+        print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB), commit={_cm_u:.1f}/{_cm_t:.1f}GB, reserve->4.0GB")
         # v1.91: 一采前同样解除 16GB fraction 限制(与二采一致), 避免
         # staged 15.25GB + workspace 临界超限. 全链路可用物理 23.86GB.
         try:
@@ -4593,7 +4629,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     import time as _t56
                     _now56 = _t56.time()
                     if _r_cb_t0["t"] is not None:
-                        print(f"[H3 Extender] refine耗时诊断: step={step+1}/{total} 距上步 {_now56-_r_cb_t0['t']:.1f}s")
+                        _cm_u56, _cm_t56 = _commit_gb()
+                        print(f"[H3 Extender] refine耗时诊断: step={step+1}/{total} 距上步 {_now56-_r_cb_t0['t']:.1f}s "
+                              f"commit={_cm_u56:.1f}/{_cm_t56:.1f}GB "
+                              f"cuda_alloc={torch.cuda.memory_allocated()/1024**3:.2f}GB "
+                              f"cuda_reserved={torch.cuda.memory_reserved()/1024**3:.2f}GB")
                     _r_cb_t0["t"] = _now56
                 except Exception:
                     pass
