@@ -10335,15 +10335,21 @@ class BSAIH3FilmFactory:
             # 避免与用户自撰镜头指令冲突。
             if one_shot_enabled:
                 _os_lower = str(effective_prompt).lower()
-                _os_hit = ("一镜到底" in str(effective_prompt)
-                           or "one shot" in _os_lower
+                # v14.253 (fix): 只把"真正的不切镜指令"算命中。旧版把"一镜到底"本身
+                # 也当命中, 而这个词几乎必然出现在全局提示词/工作流标题里, 于是本模板
+                # 在实机上从未注入过 —— 用户 clip2 在 3.2s 出现叠化切镜即为此。
+                _os_hit = ("不切镜" in str(effective_prompt)
                            or "不切场" in str(effective_prompt)
-                           or "不转场" in str(effective_prompt))
+                           or "不转场" in str(effective_prompt)
+                           or "无转场" in str(effective_prompt)
+                           or "one continuous take" in _os_lower
+                           or "no cut" in _os_lower)
                 if not _os_hit:
                     # v14.178 一镜到底全球方案落地 P1-8: 旧版"绝不切场/不转场/镜头跟随"
                     # 纯口号替换为结构化衔接模板 —— 段头微动作承接 + 段尾预埋下一动作 +
-                    # 跨段语音连续声明 + 切口标记 <scenetrans>/<cutoff>, 避免模型把"不切场"
-                    # 理解成静态画面。中英文双语模板。
+                    # 跨段语音连续声明, 避免模型把"不切场"理解成静态画面。中英文双语模板。
+                    # v14.253: 删除模板里的字面切口标记 <scenetrans>/<cutoff> —— 它们是
+                    # 切镜词汇, 与"一次都不切"的目标自相矛盾, 实测会诱发段内叠化切镜。
                     effective_prompt = str(effective_prompt) + (
                         "\n[One-Shot Continuous Take] "
                         "This clip is a seamless continuation of the same unbroken long take: "
@@ -10353,15 +10359,13 @@ class BSAIH3FilmFactory:
                         "footsteps continue, gaze adjusts, posture settles into the ongoing action). "
                         "At the tail: the subject's pose pre-positions for the next beat of motion, "
                         "so the next clip picks up mid-gesture. "
-                        "Voice continues uninterrupted across this boundary — no pause, no breath reset. "
-                        "<scenetrans> voice continues uninterrupted <scenetrans> <cutoff>"
+                        "Voice continues uninterrupted across this boundary — no pause, no breath reset."
                         "\n[一镜到底] 本段为同一条不间断长镜头的延续：机位空间、光照方向与主体位置"
                         "从上一段尾部无缝带入，无任何切场或转场。段头：呼吸渐稳、微小动作自然承接"
                         "(脚步延续、视线微调、姿态汇入正在进行的动作)；段尾：姿态预先摆向下一动作，"
                         "使下一段可从动作中途接上。语音跨此边界连续不断——无停顿、无换气重置。"
-                        "<scenetrans> voice continues uninterrupted <scenetrans> <cutoff>"
                     )
-                    print(f"[H3 Extender] 一镜到底 clip[{i}]: 已注入结构化衔接模板(段头承接+段尾预埋+<scenetrans>/<cutoff>)")
+                    print(f"[H3 Extender] 一镜到底 clip[{i}]: 已注入结构化衔接模板(段头承接+段尾预埋, v14.253 已删除 <scenetrans>/<cutoff> 切口词)")
             # v14.191: 一镜到底 —— 分拍时间标记反切镜指令(始终追加, 单采/双采都生效)。
             # 实测根因(clip1 预览 287 帧): 12s 长段提示词按 "0-3秒/3-6秒/6-9秒/9-12秒"
             # 分拍描述运镜时, 模型把每个分拍当成独立镜头, 在拍点处自行硬切
@@ -10376,11 +10380,20 @@ class BSAIH3FilmFactory:
                     "are consecutive PHASES of ONE single unbroken camera move inside THIS clip — "
                     "they are NOT separate shots. At every phase boundary the camera must glide "
                     "continuously: no cut, no transition, no angle or shot-size jump, no time skip. "
-                    "Framing may only evolve smoothly and continuously from phase to phase."
+                    "Framing may only evolve smoothly and continuously from phase to phase. "
+                    "Every azimuth, angle or framing named in the prompt is only a waypoint "
+                    "along the SAME single camera trajectory — never a new camera position "
+                    "and never a new shot. "
+                    "NEVER use a cut, dissolve, cross-fade, fade-in/out, flash, double exposure, "
+                    "morph or wipe to reach a new framing or a new camera angle."
                     "\n[单镜头硬规则] 本段提示词中所有时间段描述(0-3秒/3-6秒/6-9秒/9-12秒等)"
                     "是同一个连续运镜的先后阶段，不是多个镜头。每个阶段边界镜头必须平滑连续滑过："
                     "禁止切镜、禁止转场、禁止机位角度或景别跳变、禁止时间跳跃，"
-                    "构图只允许随运镜连续渐变。"
+                    "构图只允许随运镜连续渐变。提示词里出现的任何方位、角度、景别都只是同一条"
+                    "摄影机轨迹上的途经点，不是新机位、更不是新镜头。若提示词要求机位方位改变"
+                    "（绕到侧后方/背面、横移到四十五度、环绕、旋转到某一角度），必须由摄影机"
+                    "连续环绕或横移可见地逐帧完成；严禁用叠化、淡入淡出、双曝光、闪白、"
+                    "遮挡转场或硬切瞬间完成方位变化。"
                 )
                 print(f"[H3 Extender] v14.191 一镜到底 clip[{i}]: 已注入分拍反切镜指令(时间段=同一连续运镜的阶段)")
             # v14.241 (fix): 一镜到底 —— 景别词汇反切强化。
@@ -10433,12 +10446,15 @@ class BSAIH3FilmFactory:
                             "(close-up / medium / wide) or pushes — they describe the SAME "
                             "continuous camera move, and the framing may ONLY evolve by a "
                             "smooth push-in or pull-out over many frames. There must be "
-                            "exactly one shot from first frame to last: same camera height, "
-                            "same lens axis, same subject anchoring. A shot-size jump is "
-                            "forbidden even when the text names a different size."
+                            "exactly one shot from first frame to last: the subject stays "
+                            "anchored in the same take, and camera height / lens axis may "
+                            "ONLY change by smooth continuous camera movement (crane, dolly, "
+                            "arc around the subject), never by a cut or transition. A "
+                            "shot-size jump is forbidden even when the text names a different size."
                             "\n[景别硬规则] 提示词中的景别词(特写/中景/全景等)与推拉词仅描述"
                             "同一条连续运镜：构图只能通过缓慢推近/拉远逐帧渐变，全段从头到尾"
-                            "必须只有一个镜头——机位高度、镜头光轴、主体锚点全程不变。"
+                            "必须只有一个镜头——主体锚点全程不变；机位高度与镜头光轴只允许由"
+                            "连续的摄影机运动(升降/推移/环绕主体)平滑改变，禁止切镜或转场。"
                             "即使文本写到了不同景别，也禁止任何景别跳变。"
                             + _os_anchor_rule
                         )

@@ -4,6 +4,21 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.259 (2026-10-30) — 一镜到底：根治段内叠化切镜 / Kill in-clip dissolve cuts in one-shot mode
+
+**实测：** 用户 clip2 在 3.28s（正好第 3 秒分拍边界）出现一次叠化过渡切镜；逐帧差值分析 5.4 vs 中位数 2.8，切镜**已烘进生成片段本身**（一镜到底合并只做无缝拼接、不做转场），不是合成环节引入的。
+**/ Measured:** clip2 shows a dissolve cut at 3.28s (exactly the 3s phase boundary); frame-diff 5.4 vs median 2.8 — the cut is baked into the generated clip (one-shot merge does seamless concat only, no transitions).
+
+**三条根因 / Three root causes:**
+1. `_os_hit` 把"一镜到底"本身当命中词，而该词几乎常驻全局提示词/标题 → v14.178 结构化衔接模板在实机上**从未注入过**。→ 命中判定改为只认真正的不切镜指令（不切镜/不切场/不转场/无转场/no cut/one continuous take）。
+2. v14.178 模板内嵌字面切口标记 `<scenetrans> voice continues uninterrupted <scenetrans> <cutoff>` —— 这是**切镜词汇**，与"全程一次都不切"自相矛盾，反而诱发段内叠化。→ 已整段删除。
+3. v14.241 硬规则写死 "same camera height, same lens axis / 机位高度、镜头光轴全程不变"，而分镜要求"绕行至侧后方约四十五度角" → 模型面对自相矛盾的约束，只能用切镜/叠化"跳到"新角度。→ 改为"机位高度与光轴只允许由连续升降/推移/环绕平滑改变"。
+
+**新增纪律 / New discipline:** v14.191 单镜头硬规则追加——提示词里的任何方位/角度/景别都只是**同一条摄影机轨迹上的途经点**(waypoint，不是新机位、不是新镜头)；方位变化必须连续环绕/横移逐帧完成；**严禁叠化、淡入淡出、双曝光、闪白、遮挡转场、硬切**。
+
+- 提示词级约束的固有限制：扩散模型无硬保证。分镜正文若写"横移至侧后方约四十五度角"这类**离散角度目标**，仍是切镜最强诱因；建议改写成"沿弧线连续环绕至侧后方"（去掉度数、强调连续）。/ Prompts remain the ultimate lever: discrete angle targets ("move to 45° behind") are the strongest cut trigger; phrase them as continuous arcs instead.
+- 生效：重启 ComfyUI + 重出 clip2（切镜在成片里，重解码不会改变，必须新采样）。
+
 ### v14.258 (2026-10-29) — 新增 PDMD/PTD 加速配方档 + 修 v14.257 前端白名单漏改 / Add PDMD/PTD recipe tiers + fix v14.257 frontend whitelist miss
 
 **新增 3 个渲染管道档（extender.py render_pipeline 枚举 + 配方分支 + web/extender.js QUICK_DEFS 三处同步）：**
