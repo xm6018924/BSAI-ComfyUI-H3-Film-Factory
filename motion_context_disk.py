@@ -59,9 +59,11 @@ from .motion_context_ram import (
     _streams_from_latent,
 )
 
-BUILD = "motion-context-disk-v14.61-compact-prompt-bridge"
+BUILD = "motion-context-disk-v14.62-edge-band-root-fix"
 PREVIEW_AUDIO_MODE = "pcm_single_aac_gain_chain_v3_entry_ramp"
-CACHE_VERSION = 12
+# v14.62: 13 = 采样 canvas 底部加高 4 行再裁尾(extender v14.267)。旧链缓存的 latent
+# 是 60 行旧生成路径产物, 底部含灰带且无法补出补区内容, 必须整体失效重渲一次。
+CACHE_VERSION = 13
 PREVIEW_ROTATION_SLOTS = 3
 
 
