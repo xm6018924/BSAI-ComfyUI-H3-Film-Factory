@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.267-edge-band-root-fix"
+BUILD = "minimax-h3-extender-v14.267-bottom-band-diag"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -2812,62 +2812,37 @@ def _ff_video_hw(samples):
     return None
 
 
-# v14.267 (2026-10-31): 底部灰带根治 —— 采样 canvas 底部加高再裁尾。
-# 对照实验(v14.266, 五组): 544x960 canvas 的 H3 输出通篇把最后 3 条 latent 行
-# (1920 画面 y>=1824) 合成为无结构平滑灰带, 与 HyperVAE / 原生 1x VAE 解码、
-# VAE 内部 tiling、解码边界上下文全部无关 —— 行替换实验(把底部 3 行 latent 换成
-# 上方 3 行后解码即恢复正常)证明这 3 行 latent 的值本身就是灰的。
-# 因此修在生成端: 采样时把视频成员底部补 _EDGE_PAD_ROWS 行, 让模型合成灰带的
-# 位置落在补区, 采样完成后裁掉, 交付/链几何（60 行）保持不变。
-_EDGE_PAD_ROWS = 4
+# v14.267 临时诊断: 把一采 / 二采的视频 latent 落盘, 用于定位底部灰带到底发生在
+# 哪一阶段(一采全幅 60 行 canvas 自身, 还是二采空间分块最后一块的边界)。
+# 开关 = ComfyUI 根目录存在空文件 _bsai_diag_bottom.on; 删除即关闭, 不影响正常渲染。
+_DIAG_BOTTOM_DONE = set()
 
 
-def _ff_pad_video_rows(samples, rows):
-    """AV 视频成员底部补 rows 行(音频成员不动), 返回同类型 latent。"""
-    members, nested = _ff_extract_members(samples)
-    video = members[0]
-    members[0] = torch.nn.functional.pad(video, (0, 0, 0, int(rows)))
-    return _ff_wrap_members(members, nested)
-
-
-def _ff_crop_video_rows(samples, rows):
-    """AV 视频成员底部裁掉 rows 行(音频成员不动), 返回同类型 latent。"""
-    members, nested = _ff_extract_members(samples)
-    video = members[0]
-    members[0] = video[:, :, :, : int(video.shape[-2]) - int(rows), :].contiguous()
-    return _ff_wrap_members(members, nested)
-
-
-def _ff_pad_keyframe_latents(conditioning, target_h):
-    """把 minimax_keyframes 的视频 latent 底部补到采样目标高度。
-
-    PackedLayout 按「目标空间网格」为每个 keyframe 预留 vt*frame_rows 行
-    (model.py: `n = vt * frame_rows`), 所以 keyframe latent 必须与目标同高。
-    采样 canvas 加高后(60->64 行), 上一段尾部 context 仍是 60 行, 不补齐
-    就会在 _embed_and_pack 里 shape mismatch。补区裁掉, 不影响交付。
-    """
-    cells = conditioning if isinstance(conditioning, list) else []
-    padded = 0
-    for cell in cells:
-        data = cell[0] if isinstance(cell, (list, tuple)) and cell else cell
-        if not isinstance(data, dict):
-            continue
-        for kf in (data.get("minimax_keyframes") or []):
-            latent = kf.get("latent")
-            if not isinstance(latent, torch.Tensor) or latent.ndim != 5:
-                continue
-            kf_h = int(latent.shape[-2])
-            if kf_h == int(target_h):
-                continue
-            if kf_h > int(target_h):
-                raise RuntimeError(
-                    "MiniMax H3 Extender: keyframe latent "
-                    f"{kf_h} rows exceeds sampled canvas {target_h} rows."
-                )
-            kf["latent"] = torch.nn.functional.pad(
-                latent, (0, 0, 0, int(target_h) - kf_h))
-            padded += 1
-    return padded
+def _diag_dump_bottom(tag, samples):
+    try:
+        if tag in _DIAG_BOTTOM_DONE:
+            return
+        root = Path(__file__).resolve().parents[2]
+        if not (root / "_bsai_diag_bottom.on").exists():
+            return
+        members, _ = _ff_extract_members(samples)
+        video = members[0].detach().float().cpu() if members else None
+        if video is None or video.ndim != 5:
+            return
+        out_dir = Path(__file__).resolve().parents[3] / "_diag_blur"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"dump_{tag}.pt"
+        torch.save({"video": video}, out_path)
+        _DIAG_BOTTOM_DONE.add(tag)
+        frame0 = video[0, :, 0]
+        per_row = frame0.reshape(frame0.shape[0], frame0.shape[1], -1).std(dim=(0, 2))
+        h = int(per_row.numel())
+        tail = ", ".join(f"{i}:{float(per_row[i]):.2f}" for i in range(max(0, h - 6), h))
+        head = ", ".join(f"{i}:{float(per_row[i]):.2f}" for i in range(0, min(6, h)))
+        print(f"[H3 Extender][DIAG] {tag} latent {tuple(video.shape)} -> {out_path}")
+        print(f"[H3 Extender][DIAG] {tag} 逐行 std 头部 {head} | 底部 {tail}")
+    except Exception as _diag_e:
+        print(f"[H3 Extender][DIAG] dump {tag} 失败(可忽略): {_diag_e}")
 
 
 def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
@@ -3615,37 +3590,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         latent.get("downscale_ratio_spacial", None),
         latent.get("downscale_ratio_temporal", None),
     )
-    # v14.267: 底部灰带根治 —— 只有"交付几何 = 采样几何"(不放大 latent 的一采/二采)
-    # 才加高, 这样裁尾后的行数与链几何合同完全一致(60 行), 二采/解码/缓存无需改。
-    _edge_pad_rows = 0
-    if not bool(refine_enable) or float(refine_upscale_factor) <= 1.0:
-        _has_upscaler_pad = (refine_upscaler_model
-                             and not str(refine_upscaler_model).startswith("(")
-                             and _FF_UPSCALER_MOD is not None)
-        if not _has_upscaler_pad:
-            _edge_pad_rows = _EDGE_PAD_ROWS
-    if _edge_pad_rows:
-        _pad_members, _ = _ff_extract_members(latent_image)
-        _pad_h_before = (int(_pad_members[0].shape[-2])
-                         if _pad_members[0].ndim == 5 else 0)
-        if _pad_h_before >= _edge_pad_rows * 2:
-            latent_image = _ff_pad_video_rows(latent_image, _edge_pad_rows)
-            # motion-context keyframe 必须与目标同高(PackedLayout 按目标网格预留行)
-            _n_kf_pad = _ff_pad_keyframe_latents(
-                conditioning, _pad_h_before + _edge_pad_rows)
-            print(f"[H3 Extender] v14.267 底部灰带根治: 采样 canvas 视频 {_pad_h_before} -> "
-                  f"{_pad_h_before + _edge_pad_rows} 行, 采样后裁尾 {_edge_pad_rows} 行 "
-                  f"(交付/链几何保持 {_pad_h_before} 行, 同步补齐 keyframe {_n_kf_pad} 块)")
-        else:
-            _edge_pad_rows = 0
     latent_out["samples"] = latent_image
 
     batch_inds = latent_out.get("batch_index", None)
     noise = comfy.sample.prepare_noise(latent_image, int(seed), batch_inds)
     noise_mask = latent_out.get("noise_mask", None)
-    if _edge_pad_rows and noise_mask is not None:
-        # 补区是新画的画面, mask 取 1(全去噪); 音频成员不动。
-        noise_mask = _ff_pad_video_rows(noise_mask, _edge_pad_rows)
 
     # v14.240 (2026-10-28): 二采段头锁 keep —— 提取一采 noise_mask 的段头锁行数
     # (video 成员头部连续 mask=0 的行 = motion context trim 区的 latent 行)。
@@ -4002,6 +3951,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             except Exception:
                 pass
     samples = samples.to(comfy.model_management.intermediate_device())
+    _diag_dump_bottom("first_pass", samples)
 
     # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
     # 技术流程（对齐 BSAI-ComfyUI-Sol-H3 LatentUpscaleAlign 极速版）：
@@ -5692,14 +5642,6 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         except Exception as _coll_err:
             print(f"[H3 Extender] 二采 latent 塌陷检测失败(可忽略): {_coll_err}")
 
-    # v14.267: 裁掉采样时加高的底部补区 —— 灰带落在这里, 裁完即恢复干净画面。
-    # 必须早于下面的链几何对齐, 让对齐看到的是交付几何(60 行)。
-    if _edge_pad_rows:
-        samples = _ff_crop_video_rows(samples, _edge_pad_rows)
-        _hw_now = _ff_video_hw(samples)
-        print(f"[H3 Extender] v14.267 底部灰带根治: 已裁掉底部 {_edge_pad_rows} 行补区, "
-              f"交付视频 latent {_hw_now[0] if _hw_now else 0} 行")
-
     # v1.74b (2026-09-15 fix #10): 链几何对齐 —— 若链上已有段且本次 latent 几何不同
     # (per-clip 降级被拦截后仍可能 OOM fallback 到一采尺寸 / 异常路径),
     # bilinear 放大到链上几何, 保证 Disk Join 不断链。
@@ -5730,6 +5672,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     out.pop("downscale_ratio_spacial", None)
     out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
+    _diag_dump_bottom("refined", samples)
     if _refine_fallback_hw:
         _fbh, _fbw = int(_refine_fallback_hw[0]), int(_refine_fallback_hw[1])
         if _fbh > 0 and _fbw > 0:
