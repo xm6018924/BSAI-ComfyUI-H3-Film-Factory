@@ -3259,7 +3259,22 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
                     enc.kill()
                 except Exception:
                     pass
-    os.unlink(raw)
+        # v14.267: memmap 必须显式关闭再删文件 —— Windows 上 np.memmap 持有文件
+        # 句柄, 未释放时 os.unlink 报 [WinError 32] 另一个程序正在使用此文件,
+        # 于是每次超分都"失败"并静默退回未超分原片(用户看到的就是超分不生效)。
+        try:
+            arr._mmap.close()
+        except Exception:
+            pass
+        try:
+            del arr
+        except Exception:
+            pass
+        _gc265.collect()
+        try:
+            os.unlink(raw)
+        except Exception:
+            pass
     if _pipe_err is not None:
         raise RuntimeError(f"realesr: 编码管道写入失败(ffmpeg 提前退出): {_pipe_err}")
     if enc is None:
