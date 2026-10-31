@@ -29,6 +29,9 @@ log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.spatial_tiles")
 VAE_SPATIAL = 16
 # Long-side pixel size at or below this skips tiling (same 16× latent grid as H3).
 MAX_PIXELS_NO_TILE = 384
+# H3 patchify 是 (1, 2, 2): latent 高宽必须是偶数, 否则 _pad_even_hw 会 replicate
+# 复制末行补成偶数。块高对齐到该网格, 分块裁剪就是原始 latent 的干净切片。
+PATCH_SPATIAL = 2
 
 
 def clamp_n_tiles(raw: Any) -> int:
@@ -298,8 +301,13 @@ def _plan_regions(video_shape, n_tiles: int, overlap_pixels: int):
         ax_end = min(ax_start + tile_size, axis_size)
         if idx == 0:
             ax_start = 0
+        elif ax_start % PATCH_SPATIAL:
+            # 起点前移 1 行(而非后移): 只多覆盖 1 行, 由重叠区吸收, 不会留缝。
+            ax_start -= ax_start % PATCH_SPATIAL
         if idx == len(starts) - 1:
             ax_end = axis_size
+        elif ax_end % PATCH_SPATIAL:
+            ax_end = min(axis_size, ax_end + PATCH_SPATIAL - ax_end % PATCH_SPATIAL)
         ranges.append((ax_start, ax_end))
     regions = []
     for idx, (ax_start, ax_end) in enumerate(ranges):

@@ -59,11 +59,12 @@ from .motion_context_ram import (
     _streams_from_latent,
 )
 
-BUILD = "motion-context-disk-v14.62-edge-band-root-fix"
+BUILD = "motion-context-disk-v14.63-tile-edge-patch-align"
 PREVIEW_AUDIO_MODE = "pcm_single_aac_gain_chain_v3_entry_ramp"
-# v14.62: 13 = 采样 canvas 底部加高 4 行再裁尾(extender v14.267)。旧链缓存的 latent
-# 是 60 行旧生成路径产物, 底部含灰带且无法补出补区内容, 必须整体失效重渲一次。
-CACHE_VERSION = 13
+# v14.63: 14 = 分块二采的块边界对齐 2×2 patch(bsai_h3_spatial_tiles v1.97)。
+# 旧链缓存(13)的底部两行 latent 出自 23 行奇数块 + replicate 复制行, 解码后是
+# 彩色竖条/斑点, 无法通过重采样修补, 必须整体失效重渲一次。
+CACHE_VERSION = 14
 PREVIEW_ROTATION_SLOTS = 3
 
 
