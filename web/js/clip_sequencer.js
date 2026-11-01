@@ -553,14 +553,14 @@ function addClipCard(node, cardsWrapper, clipData) {
     // Prompt
     var promptLbl = document.createElement("div");
     promptLbl.className = "bsai-clip-lbl";
-    promptLbl.innerHTML = 'Prompt <span class="bsai-clip-lbl-hint">【旁白】【对白】 + @图N</span>';
+    promptLbl.innerHTML = 'Prompt <span class="bsai-clip-lbl-hint">【旁白】/【对白】 · @img1 @vid1 @aud1</span>';
     rightPanel.appendChild(promptLbl);
 
     var promptInput = document.createElement("textarea");
     promptInput.className = "bsai-clip-prompt";
     promptInput.rows = 2;
     promptInput.value = data.prompt || "";
-    promptInput.placeholder = "Enter generation prompt...\nUse 【旁白】/【对白】 for subtitles\nUse @图1 @视频1 @音频1 to reference assets";
+    promptInput.placeholder = "Enter generation prompt...\nUse 【旁白】/【对白】 for narration and dialogue\nUse @img1 @vid1 @aud1 to reference assets";
     promptInput.addEventListener("input", function () { serializeClips(node, cardsWrapper); });
     rightPanel.appendChild(promptInput);
 
@@ -734,14 +734,18 @@ async function renderAssetList(container, refsStr, onRefsChange) {
     var selected = parseAssetRefs(refsStr);
 
     var allItems = [];
+    // The chips must show the same token that rebuildRefsStr() writes into
+    // asset_refs (@imgN / @vidN / @audN). extender.py accepts both these and
+    // the legacy Chinese forms via @(?:图|img)(\d+) etc., so old clips still
+    // resolve after the switch.
     assets.images.forEach(function (a) {
-        allItems.push({ type: "image", prefix: "图", index: a.index, name: a.name, thumbnail: a.thumbnail });
+        allItems.push({ type: "image", prefix: "img", index: a.index, name: a.name, thumbnail: a.thumbnail });
     });
     assets.videos.forEach(function (a) {
-        allItems.push({ type: "video", prefix: "视频", index: a.index, name: a.name, thumbnail: a.thumbnail });
+        allItems.push({ type: "video", prefix: "vid", index: a.index, name: a.name, thumbnail: a.thumbnail });
     });
     assets.audios.forEach(function (a) {
-        allItems.push({ type: "audio", prefix: "音频", index: a.index, name: a.name, thumbnail: a.thumbnail });
+        allItems.push({ type: "audio", prefix: "aud", index: a.index, name: a.name, thumbnail: a.thumbnail });
     });
 
     if (allItems.length === 0) {
