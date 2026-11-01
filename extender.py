@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.276-single-pass-refine"
+BUILD = "minimax-h3-extender-v14.277-upscale-tiled"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -3283,6 +3283,14 @@ def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_
             ]
             subprocess.run(cmd, check=True, capture_output=True, timeout=7200)
         elif engine_eff == "realesr":
+            # v14.277: 先释放采样期 CUDA 缓存再测提交内存 —— H3 采样结束后 CUDA
+            # 缓存常占 ~10GB+, 不释放就测余量会把它压到 20GB 阈值以下, 导致本可
+            # realesr 的出片被误降级 bicubic。realesr 函数内仍会再释放一次。
+            import gc as _gc_gate
+            import torch as _torch_gate
+            _gc_gate.collect()
+            if _torch_gate.cuda.is_available():
+                _torch_gate.cuda.empty_cache()
             # v14.265: 提交内存余量闸 —— 采样结束时 commit 基线常达 ~160GB/191GB,
             # realesr 流(GPU 缓冲 + x264@4K 的 ~110MB malloc + 管道)是压垮它的最后
             # 一根稻草(实测: x264 malloc 失败 -> 管道 EINVAL -> c10 空指针杀进程)。
@@ -3423,11 +3431,21 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
                 t = torch.from_numpy(chunk).reshape(-1, fh_in, fw_in, 3).permute(0, 3, 1, 2).float().div_(255.0).to(dev)
                 if fp16 and dev.type == "cuda":
                     t = t.half()
-                # 模型原生 tile 式 forward. 若不支持 tile_size 参数, 回退全帧.
-                try:
-                    up = model_mod(t, tile_size=_tile_size, tile_overlap=_tile_overlap)
-                except TypeError:
-                    up = model_mod(t)
+                # v14.277: 用 comfy.utils.tiled_scale 做真正的分块超分 —— 旧版
+                # model_mod(t, tile_size=...) 对 spandrel 裸 nn.Module 无效
+                # (SRVGGNetCompact 拒收 tile_size kwarg, 总是落到全帧 forward),
+                # 1312x736 入 x4 原生 = 5248x2944 全帧, H3 常驻时极易 OOM。
+                # tiled_scale 按 tile 切输入、逐块 forward、羽化拼接, 中间激活
+                # 只占单块, 大幅降低峰值显存。
+                import comfy.utils as _cu_us
+                up = _cu_us.tiled_scale(
+                    t,
+                    lambda a: model_mod(a),
+                    tile_x=_tile_size, tile_y=_tile_size,
+                    overlap=_tile_overlap,
+                    upscale_amount=_native_scale,
+                    output_device=dev,
+                )
                 if fp16 and dev.type == "cuda":
                     up = up.float()
                 if _need_resize and (int(up.shape[-1]) != int(fw) or int(up.shape[-2]) != int(fh)):
