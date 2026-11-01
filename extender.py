@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.274-bislerp-fallback"
+BUILD = "minimax-h3-extender-v14.275-global-no-spatial-tiles"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -4540,13 +4540,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         if _h_cand226 > 0 and _w_cand226 > 0:
                             _tok226 = int(_t_cand226) * _h_cand226 * _w_cand226
                         _spatial_n226 = 1
-                        try:
-                            _spatial_n226 = max(1, int(tile_count))
-                        except Exception:
-                            _spatial_n226 = 1
+                        _tile_infl226 = 1.55
+                        _is_global_mem226 = str(refine_mem_mode) == "global"
+                        if _is_global_mem226:
+                            # v14.275: global 全上下文路径不裁空间轴, 没有 tile 重叠
+                            # 膨胀, 按"单次调用 tokens"直接换算(见下方 240k 目标)。
+                            _tile_infl226 = 1.0
+                        else:
+                            try:
+                                _spatial_n226 = max(1, int(tile_count))
+                            except Exception:
+                                _spatial_n226 = 1
                         # 1.55x = overlap 128px 的 tile 膨胀系数, 与 v14.179 实测
                         # "每块 272,136 tokens" 吻合(709920/4*1.55≈275k)。
-                        _per_tile226 = (_tok226 / float(_spatial_n226)) * 1.55 if _tok226 > 0 else 0
+                        _per_tile226 = (_tok226 / float(_spatial_n226)) * _tile_infl226 if _tok226 > 0 else 0
                         # v14.270 回滚开关(不改文件即可退回旧行为, 需重启 ComfyUI 生效):
                         #   BSAI_H3_TEMPORAL_TRIGGER=tokens  默认, 新逻辑(按每块 tokens 触发)
                         #   BSAI_H3_TEMPORAL_TRIGGER=legacy 退回 v14.248 旧逻辑(仅 T>=200)
@@ -4558,6 +4565,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _tok_tgt270 = float(os.environ.get("BSAI_H3_TILE_TOKEN_TARGET", "130000"))
                         except Exception:
                             _tok_tgt270 = 130000.0
+                        if _is_global_mem226:
+                            # v14.275: global 全上下文没有 tile 重叠, 130k 会把 T=87
+                            # 切成 6 段(每段~15帧, 段间接缝过密)。Sol-Attn 稀疏在
+                            # 236k tokens 实测健康(0.7-1.0s/步), 抬到 240k 后
+                            # T=87/709,920 tokens 只切 3 段(chunk=29) -> 4 段。
+                            _tok_tgt270 = max(_tok_tgt270, 240000.0)
                         if _trig270 == "off":
                             _need_auto270 = False
                         elif _trig270 == "legacy":
@@ -4982,6 +4995,21 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _r_tok_gate = int(_r_m_gate[0].shape[2]) * int(_r_m_gate[0].shape[-2]) * int(_r_m_gate[0].shape[-1])
             except Exception:
                 _r_tok_gate = 0
+            # v14.275: 门控必须看「单次调用」的 tokens, 不是整段 tokens。
+            # 时间分块二采每次只喂 temporal_chunk_tokens 帧(实机 T=87/chunk=29
+            # → 29*68*120=236,640), 旧代码拿整段 709,920 去比 130k 阈值, 于是
+            # 每个健康的分块调用都被 sol_max_tokens 强制降级成 dense attention。
+            # 分块后的单段在 Sol-Attn 健康区(基准 218k=0.97s/步, 293k=0.70s/步),
+            # 用 350k 作为该路径的上限(v14.225 验证过的健康区上界)。
+            _r_call_tok = _r_tok_gate
+            if _use_temporal:
+                try:
+                    _r_m_call, _ = _ff_extract_members(samples)
+                    _r_call_tok = int(int(temporal_chunk_tokens)
+                                      * int(_r_m_call[0].shape[-2]) * int(_r_m_call[0].shape[-1]))
+                except Exception:
+                    _r_call_tok = _r_tok_gate
+            _r_gate_limit = 350000 if _use_temporal else _REFINE_MAX_SOL_TOKENS
             # v14.164 (2026-10-22 fix #v14.173): 方案A — 先分块再决定 dense 降级。
             # 旧顺序(v14.148 先注入 sol_max_tokens -> v14.164 后分块)导致分块成功后
             # dense 门仍留在 transformer_options 里, 每个 262k token 的 tile 强制
@@ -4991,7 +5019,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # dense 门. 分块成功时每块 ~262k tokens 已在 Sol-Attn 健康区, 不需要
             # dense 回退. 同时显式清理 transformer_options 里可能从上个 clip 残留
             # 的 sol_max_tokens.
-            if _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None and refine_mem_mode != "global":
+            if _r_call_tok > _r_gate_limit and _r_restore_tiles is None and refine_mem_mode != "global":
                 try:
                     import os as _os_t3, importlib.util as _ilu_t3
                     _tiles_path3 = _os_t3.path.join(_os_t3.path.dirname(_os_t3.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -5000,7 +5028,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _tiles_spec3.loader.exec_module(_tiles_mod3)
                     _r_restore_tiles = _tiles_mod3.wrap_sampler_spatial_tiles(
                         _r_sampler, n_tiles=_ff_auto_refine_tile_count(samples, 4, tile_overlap), overlap_pixels=int(tile_overlap))
-                    print(f"[H3 Extender] v14.181 方案A: latent tokens={_r_tok_gate:,} > 阈值, "
+                    print(f"[H3 Extender] v14.181 方案A: latent tokens={_r_call_tok:,} > {_r_gate_limit:,}, "
                           f"自动启用分块二采 overlap={tile_overlap}px, n_tiles 按请求值(不扩块) "
                           f"(v14.149 固定 4 块 ~334k/块灰色区 399s/步 -> v14.164 扩 8 块 545s/步 反而更慢 -> v14.179 回退 -> v14.181 恢复 128px 接缝))")
                     # v14.173: 分块成功 —— 显式清理 transformer_options 里的 sol_max_tokens.
@@ -5025,24 +5053,25 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # latent tokens 命中病态区, 才需要强制 dense 回退 (KJNodes 分组+
             # SageAttention). 分块成功时 tile 级 token 已在健康区, 稀疏 Sol-Attn
             # 直接跑通, 不注入 sol_max_tokens.
-            if _r_tok_gate > _REFINE_MAX_SOL_TOKENS and _r_restore_tiles is None:
+            if _r_call_tok > _r_gate_limit and _r_restore_tiles is None:
                 try:
                     _r_to_gate = _refine_model.model_options.get("transformer_options", {})
                     if isinstance(_r_to_gate, dict):
                         _r_to_gate["sol_max_tokens"] = _REFINE_MAX_SOL_TOKENS
-                        print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} > "
-                              f"{_REFINE_MAX_SOL_TOKENS:,} 且未启用分块, "
+                        print(f"[H3 Extender] v14.148 方案A: 二采单次调用 tokens={_r_call_tok:,} > "
+                              f"{_r_gate_limit:,} 且未启用分块, "
                               f"Sol-Attn 已降级 dense(KJNodes 分组+SageAttention), "
                               f"绕开病态 kernel(基准: 293k=0.7s 健康 / 440k>45s / 873k>600s)")
                 except Exception as _eg:
                     print(f"[H3 Extender] v14.148 方案A 注入 sol_max_tokens 失败(可忽略): {_eg}")
             elif _r_restore_tiles is not None:
-                print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} > "
-                      f"{_REFINE_MAX_SOL_TOKENS:,}, 分块二启用 — tile 级 token 在健康区, "
+                print(f"[H3 Extender] v14.148 方案A: 二采单次调用 tokens={_r_call_tok:,} > "
+                      f"{_r_gate_limit:,}, 分块二启用 — tile 级 token 在健康区, "
                       f"Sol-Attn 稀疏保留")
             else:
-                print(f"[H3 Extender] v14.148 方案A: 二采 latent tokens={_r_tok_gate:,} <= "
-                      f"{_REFINE_MAX_SOL_TOKENS:,}, Sol-Attn 稀疏保留(健康区)")
+                print(f"[H3 Extender] v14.148 方案A: 二采单次调用 tokens={_r_call_tok:,} <= "
+                      f"{_r_gate_limit:,}, Sol-Attn 稀疏保留(健康区)"
+                      f" (整段 {_r_tok_gate:,}, 时间分块 {int(temporal_chunk_tokens) if _use_temporal else 0} 帧/段)")
             # v14.153 (2026-10-20): 二采省显存模式 global —— 移植 selflift-Avatar
             # (commit 5b93b6c) global-context 路径, 暂存源码 vendor/selflift_avatar/。
             # 与 spatial(v14.149 4 块分块)互斥: global 跳过空间分块, 对二采模型加
@@ -5065,9 +5094,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 但 218k 稀疏 Sol-Attn 全帧直接跑只需 0.97s/步(基准), 根本不需要
             # global 包装压激活。global 只在 tokens 超健康区(>350k)时才需要。
             _skip_global_healthy = bool(refine_mem_mode == "global"
-                                        and _r_tok_gate <= _REFINE_MAX_SOL_TOKENS)
+                                        and _r_call_tok <= _r_gate_limit)
             if _skip_global_healthy:
-                print(f"[H3 Extender] v14.225 二采 tokens={_r_tok_gate:,} 在 Sol-Attn 健康区, "
+                print(f"[H3 Extender] v14.225 二采单次调用 tokens={_r_call_tok:,} 在 Sol-Attn 健康区, "
                       f"跳过 global 包装(避免 attention override 回退 dense + 切 8 块), "
                       f"稀疏 Sol-Attn 直接跑全帧(基准 0.97s/步, 不分块无 overlap 重复)")
             if refine_mem_mode == "global" and not _skip_global_healthy:
@@ -5110,7 +5139,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # workspace 1.5GB 在驻留 17.5GB + reserve 3.9GB 后 free≈0 无法分配
             # (实测 1401s/it 换页风暴). 分块后每块 ~54K tokens 更快, workspace 需求
             # 随 tile 数线性下降(x1.0: 1.5GB -> 0.8GB/块), Sol-Attn 稀疏照常生效.
-            if _r_global_fallback_tiles and _r_restore_tiles is None:
+            # v14.275: 时间分块已启用时不再补 spatial 分块保底 —— 每次调用只剩
+            # chunk 帧(~236k tokens, 在 Sol-Attn 健康区), 不存在"全序列路径不可用"
+            # 的问题; 硬补 8 块反而把画面切成 8 条独立重构图(重影/碎屑)。
+            if _r_global_fallback_tiles and _r_restore_tiles is None and not _use_temporal:
                 try:
                     import os as _os_t4, importlib.util as _ilu_t4
                     _tiles_path4 = _os_t4.path.join(_os_t4.path.dirname(_os_t4.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -9075,6 +9107,20 @@ class BSAIH3FilmFactory:
             shift_video, shift_audio = 12.0, 3.0
             refine_enable = True
             _hv2x_decl = 1.0
+            # v14.275 (fix): 二采强制 global 全上下文, 禁用空间分块。
+            # 本档 latent 已被 3D upscaler 放大到 709,920 tokens, 空间分块每块只有
+            # 46/120 的宽度, 却仍带整套 ref2va 角色参考(PackedLayout 里 refs/keyframes
+            # 一并裁到 tile 尺寸) → 模型在每块里独立重新构图: 实机 tile1(0~736px)凭空
+            # 画出放大版人脸, tile4(1312~1920px)画出第二个沈砚, cosine 融合后就是
+            # 半透明重影 + 满屏碎屑。global 包装不裁空间轴: 整帧一次前向, attention
+            # 全序列稀疏(Sol-Attn), 仅 MLP 按 4096 token 分块压激活 → 无接缝、无重构图。
+            # v14.253 的教训已写在直播带货档: 横带叠加正是 spatial 分块造成的。
+            tiled_refine = False
+            if not refine_mem_global:
+                refine_mem_global = True
+                refine_mem_mode = "global (全上下文省显存)"
+                print("[H3 Extender] v14.275 一镜到底·2K双采: 二采强制 global 全上下文"
+                      "(禁用 spatial 空间分块 —— 每块独立重构图会造成重影/碎屑)")
             if str(sampler_name) != "euler":
                 sampler_name = "euler"
             print("[H3 Extender] 🎥 v14.272 一镜到底·2K双采: 一采 8 步(蒸馏契约) + 二采 4 步"
