@@ -66,7 +66,10 @@ PREVIEW_AUDIO_MODE = "pcm_single_aac_gain_chain_v3_entry_ramp"
 # 彩色竖条/斑点, 无法通过重采样修补, 必须整体失效重渲一次。
 # v14.64: 15 = 参考图裁单人立绘(_single_subject_ref_crop) + 分镜里"不开口/嘴唇闭合"
 # 指令删除。两者都改变送进 DiT 的输入, 旧的 14 链缓存必须整体失效。
-CACHE_VERSION = 15
+# v14.276: 16 = 一镜到底·2K双采改单次采样(v14.276), 二采几何从 x2.0(1920x1088)
+# 变成 token 预算内的 x1.39(1312x736)。旧 15 链缓存的空间几何与之不符, 续渲会
+# 直接报 "latent geometry changed" 断链, 必须整体失效重渲一次。
+CACHE_VERSION = 16
 PREVIEW_ROTATION_SLOTS = 3
 
 
