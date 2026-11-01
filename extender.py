@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.277-upscale-tiled"
+BUILD = "minimax-h3-extender-v14.278-refine-native"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -5060,10 +5060,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                       * int(_r_m_call[0].shape[-2]) * int(_r_m_call[0].shape[-1]))
                 except Exception:
                     _r_call_tok = _r_tok_gate
-            # v14.276: 单次采样档的 tokens 已由倍率预算压到 <=350,000(健康区上界),
-            # 门限按 350k 判 —— 仍用 130k 会把它误判成病态规模, 强制降级 dense
+            # v14.278: 单次采样档的 tokens 已由倍率预算压到 <=180,000(与一采同规模),
+            # 门限按 180k 判 —— 仍用 130k 会把它误判成病态规模, 强制降级 dense
             # 并套 global 包装(全序列 dense attention, 每步上百秒)。
-            _r_gate_limit = 350000 if (_use_temporal or refine_single_pass) else _REFINE_MAX_SOL_TOKENS
+            _r_gate_limit = 180000 if (_use_temporal or refine_single_pass) else _REFINE_MAX_SOL_TOKENS
             # v14.164 (2026-10-22 fix #v14.173): 方案A — 先分块再决定 dense 降级。
             # 旧顺序(v14.148 先注入 sol_max_tokens -> v14.164 后分块)导致分块成功后
             # dense 门仍留在 transformer_options 里, 每个 262k token 的 tile 强制
@@ -9873,7 +9873,11 @@ class BSAIH3FilmFactory:
         _os2k_decl_px = None
         if one_shot_dual_2k:
             try:
-                _os2k_budget = 350000
+                # v14.278: 350k 预算把二采推到 1312x736 / 328,164 tokens(健康上限 130k 的
+                # 2.5 倍)。实机出片: 满屏细织纹网格、亮白晕斑、细节被抹平, 且单角色被
+                # 复制成两个人 —— 都是采样规模外推的典型症状。分辨率改由像素域超分
+                # (realesr, 见 upscale_final)承担, 二采回到一采同规模(960x544/177k)。
+                _os2k_budget = 180000
                 _os2k_t = 0
                 for _c2k in clips or []:
                     try:
