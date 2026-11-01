@@ -59,12 +59,14 @@ from .motion_context_ram import (
     _streams_from_latent,
 )
 
-BUILD = "motion-context-disk-v14.63-tile-edge-patch-align"
+BUILD = "motion-context-disk-v14.64-single-subject-ref"
 PREVIEW_AUDIO_MODE = "pcm_single_aac_gain_chain_v3_entry_ramp"
 # v14.63: 14 = 分块二采的块边界对齐 2×2 patch(bsai_h3_spatial_tiles v1.97)。
 # 旧链缓存(13)的底部两行 latent 出自 23 行奇数块 + replicate 复制行, 解码后是
 # 彩色竖条/斑点, 无法通过重采样修补, 必须整体失效重渲一次。
-CACHE_VERSION = 14
+# v14.64: 15 = 参考图裁单人立绘(_single_subject_ref_crop) + 分镜里"不开口/嘴唇闭合"
+# 指令删除。两者都改变送进 DiT 的输入, 旧的 14 链缓存必须整体失效。
+CACHE_VERSION = 15
 PREVIEW_ROTATION_SLOTS = 3
 
 

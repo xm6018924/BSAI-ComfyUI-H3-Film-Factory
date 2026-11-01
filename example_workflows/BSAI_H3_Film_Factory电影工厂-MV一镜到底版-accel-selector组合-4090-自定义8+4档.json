@@ -1,4 +1,4 @@
-{
+﻿{
   "id": "3a88cfeb-48b4-403e-8f44-d36095dc90ec",
   "revision": 0,
   "last_node_id": 2008,
@@ -3100,7 +3100,7 @@
         }
       },
       "widgets_values": [
-        "BSAI NInfer HTTP (本地反推 @127.0.0.1:808x)",
+        "BSAI NInfer HTTP (local reverse @127.0.0.1:808x)",
         "Qwen3.8-VL",
         "Qwen3.8-27B-NVFP4-MTP-MEDIUM.gguf",
         "Qwen3.8-27B-CRACK-f16_mmproj.gguf",
@@ -3112,7 +3112,7 @@
         "(Auto — first model found)"
       ],
       "widgets_values_named": {
-        "backend": "BSAI NInfer HTTP (本地反推 @127.0.0.1:808x)",
+        "backend": "BSAI NInfer HTTP (local reverse @127.0.0.1:808x)",
         "model_family": "Qwen3.8-VL",
         "model_file": "Qwen3.8-27B-NVFP4-MTP-MEDIUM.gguf",
         "mmproj": "Qwen3.8-27B-CRACK-f16_mmproj.gguf",

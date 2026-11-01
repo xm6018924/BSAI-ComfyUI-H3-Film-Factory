@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.268-tile-edge-patch-align"
+BUILD = "minimax-h3-extender-v14.271-one-shot-single-take"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -154,7 +154,7 @@ AUDIO_LATENT_FPS = 40
 _REF_SHEET_RULE = (
     "【参考图纪律】<Picture N> 常为同一角色的多角度/多视图设定拼版：只采信其中一位角色的"
     "外形、发型与服装，全片同一角色只出现一次、只保留两条手臂；参考图中的其他视角、"
-    "其他身体、半截肢体与局部特写仅供外形参考，绝不复制进画面。\n"
+    "其他身体、半截肢体与局部细节仅供外形参考，不复制进画面。\n"
 )
 
 # v14.221 服装锁定纪律：H3 文本指令优先于参考图，分镜正文一旦出现与参考图相悖的
@@ -429,7 +429,7 @@ def _decode_single_clip_preview(owner, clip_index, vae, audio_vae, fps, ffmpeg=N
     """Decode a single cached clip to MP4 and store as blob for frontend preview.
     v1.70: async_encode=True 时 encode 段在后台线程执行, 返回
     {"async": True, "done_event": threading.Event}.
-    lip_audio_segment: 对口型模式下该 CLIP 对应的歌曲片段，会与模型环境音混音。"""
+    lip_audio_segment: 对口型模式下该 CLIP 对应的歌曲片段，纯歌曲输出(模型音频丢弃)。"""
     return _decode_single_clip_to_blob(
         owner_id=owner,
         clip_index=clip_index,
@@ -1634,8 +1634,10 @@ def _normalize_ref_descriptors(refs):
 #   02 ref_audio 音色参考配音（只接参考）—— ref_audio 提供音色/风格参考，
 #      模型读分镜台词生成人声但声线跟随 ref_audio；lip_audio/lip_voice 忽略。
 #   03 lip_voice 对口型（只接现成主播音频）—— 模型不生成音频，声音完全由
-#      lip_voice 提供并驱动 @图1 对口型；ref_audio/lip_audio 忽略。
+#      lip_voice 提供并驱动 @图1 对口型；ref_audio 忽略。
 # lip_audio 仅用于对口型 MV（歌曲），直播带货/讲话类一律不接。
+# v14.270 例外（最高优先级）：无论哪个档/哪条渲染管道，只要 lip_audio 端口
+# 接入有效音源，立即凌驾 01/02/03 接线强制，自动屏蔽 ref_audio/lip_voice。
 # 返回模式键 "01"/"02"/"03"；非直播带货档返回 None。旧「直播带货（全自动）」
 # 档等价于 02，历史工作流不受影响。
 _LIVESTREAM_VOICE_PIPELINES = {
@@ -1900,6 +1902,113 @@ def _load_reference_tensor(ref):
     return torch.from_numpy(np.ascontiguousarray(array)).unsqueeze(0)
 
 
+def _single_subject_ref_crop(img):
+    """v14.269: 把"多视图角色设定拼版"裁成单人立绘，从参考源头断掉第二个可复制的人形。
+
+    实测 clip2 首帧并列两个一模一样的主播: @图1 是 5 视图设定板(左 1 张胸像 + 4 张
+    全身立绘), 分镜正文写"身后陈列第二瓶同款产品@图3镜像对称排列", Ref2VA 就把设定板
+    里现成的第二具立绘当成"第二个人"贴进画面 —— 文字纪律压不住图像里的现成人形。
+
+    只在三个条件同时成立时才裁: 横幅(宽高比 ≥1.25)、浅色背景、≥3 条窄而立满高度的
+    前景条带且其中至少 3 条宽度相近。双人/多人实拍参考图、场景图、产品图都会原样返回。
+
+    裁给编码器的必须是"框内只有一个人的身体": 设定板若有明显更大的单人胸像(宽度 ≥ 同宽
+    立绘中位宽的 1.3 倍), 裁胸像; 否则裁最左那具立绘(设定板按正面/侧面/背面从左往右排)。
+    """
+    try:
+        if img is None or getattr(img, "ndim", 0) != 4:
+            return None
+        h, w = int(img.shape[1]), int(img.shape[2])
+        if w / float(max(1, h)) < 1.25:
+            return None
+        ys = max(1, h // 320)
+        xs = max(1, w // 480)
+        small = img[0, ::ys, ::xs, :].detach().float().cpu().numpy()
+        sh, sw = int(small.shape[0]), int(small.shape[1])
+        if sh < 32 or sw < 64:
+            return None
+        border = np.concatenate([small[0], small[-1], small[:, 0], small[:, -1]], axis=0)
+        bg = np.median(border, axis=0)
+        fg = np.abs(small - bg).max(axis=2) > 0.12
+        col = fg.mean(axis=0)
+        gap = max(1, int(round(sw * 0.02)))
+        bands = []
+        start = None
+        last_on = -1
+        for x in range(sw):
+            if col[x] > 0.22:
+                if start is None:
+                    start = x
+                last_on = x
+            elif start is not None and x - last_on > gap:
+                bands.append((start, last_on + 1))
+                start = None
+        if start is not None:
+            bands.append((start, last_on + 1))
+
+        ok = []
+        for x0, x1 in bands:
+            wf = (x1 - x0) / float(sw)
+            if wf < 0.05 or wf > 0.35:
+                continue
+            rows = np.where(fg[:, x0:x1].any(axis=1))[0]
+            if rows.size < 2:
+                continue
+            cov = (rows[-1] - rows[0] + 1) / float(sh)
+            if cov < 0.5:
+                continue
+            ok.append((x0, x1, float(cov), float(wf)))
+        if len(ok) < 3:
+            return None
+        # 至少 3 条同宽条带才确认是多视图设定拼版(双人/多人实拍参考图凑不出 3 条)
+        figs = [b for b in ok if sum(
+            1 for o in ok if max(o[3], b[3]) / min(o[3], b[3]) <= 1.8) >= 3]
+        if not figs:
+            return None
+        fig_w = sorted(b[3] for b in figs)
+        hero = max(ok, key=lambda b: b[3])
+        # v14.269 实测: 设定板左侧那张大胸像(宽 0.244)是立绘中位宽(0.121)的两倍,
+        # 且胸像的肩部白色与背景同色, 只有裁它才能保证裁切框里全是一个人的身体 ——
+        # 裁立绘会把胸像的白色肩袖带进画面角落, 那正是模型复制成第二个人/悬浮白袖的诱因。
+        # 仅当它确实是最左那条时才允许向左铺开(否则会把中间的立绘全卷进来)。
+        dominant = (hero[3] >= 1.3 * fig_w[len(fig_w) // 2]
+                    and hero[0] <= min(b[0] for b in ok))
+        best = hero if dominant else min(figs, key=lambda b: b[0])
+        x0, x1 = best[0], best[1]
+        rows = np.where(fg[:, x0:x1].any(axis=1))[0]
+        y0, y1 = int(rows[0]), int(rows[-1]) + 1
+        sx, sy = w / float(sw), h / float(sh)
+        # 外扩边距必须止于与相邻内容之间的空白: 边界吸附到最近的整列背景。
+        clean = np.abs(small - bg).max(axis=2).max(axis=0) < 0.5
+        mx = int(round((x1 - x0) * 0.12))
+        my = int(round((y1 - y0) * 0.05))
+        cl = max(0, x0 - mx)
+        nxt = [b[0] for b in bands if b[0] >= x1]
+        cap_r = min(nxt) if nxt else sw
+        if dominant:
+            # 主视角常被设定板自身裁掉左边(本例胸像紧贴画幅左缘), 向左吸附到 0 为止
+            while cl > 0 and not clean[cl]:
+                cl -= 1
+            cr = min(cap_r, x1 + mx)
+            while cr < cap_r and not clean[cr - 1]:
+                cr += 1
+        else:
+            while cl < x0 + (x1 - x0) // 4 and not clean[cl]:
+                cl += 1
+            cr = min(sw, x1 + mx)
+            while cr > x1 - (x1 - x0) // 4 and not clean[cr - 1]:
+                cr -= 1
+        cx0 = max(0, int(round(cl * sx)))
+        cx1 = min(w, int(round(cr * sx)))
+        cy0 = max(0, int(round((y0 - my) * sy)))
+        cy1 = min(h, int(round((y1 + my) * sy)))
+        if (cx1 - cx0) < 48 or (cy1 - cy0) < 96:
+            return None
+        return img[:, cy0:cy1, cx0:cx1, :], len(ok)
+    except Exception:
+        return None
+
+
 def _refs_from_project_payload(project_payload):
     extender = project_payload.get("extender", {}) if isinstance(project_payload, dict) else {}
     raw = extender.get("refs_json") if isinstance(extender, dict) else None
@@ -2076,6 +2185,12 @@ def _prepare_shared_refs(
     active_picture_slots = []
     for slot, ref in active:
         img = _load_reference_tensor(ref) if isinstance(ref, dict) else ref
+        # v14.269: 多视图设定拼版只保留主视角立绘(否则模型会把第二具立绘当第二个人)。
+        _crop = _single_subject_ref_crop(img)
+        if _crop is not None:
+            img, _n_views = _crop
+            print(f"[H3 Extender] v14.269 参考图 {slot} 是多视图设定拼版({_n_views} 具立绘) "
+                  f"-> 只取单人立绘 {int(img.shape[2])}x{int(img.shape[1])} 编码")
         h, w = int(img.shape[1]), int(img.shape[2])
         if ref_image_size == "match":
             scale = min(1.0, math.sqrt((int(width) * int(height)) / float(w * h)))
@@ -2156,7 +2271,9 @@ def _ref2va_cache_key(vae, width, height, ref_image_size, refs, cache_bias=""):
     # 导致1024短边修复完全不生效，clip[1] TE编码继续OOM。
     # v1.27: cache_bias 携带 @图N 资产图片路径签名——资产库更换后 key 变化，
     # 否则张量 refs 的 _refs_signature 恒定，ref2va 命中旧资产 VAE 编码。
-    raw = f"r2v|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}|b{cache_bias}".encode("utf-8")
+    # v14.269: "|s1" = 多视图设定拼版裁单人立绘(见 _single_subject_ref_crop)。
+    # 旧 key 的缓存是未裁剪的整张拼版, 必须失效, 否则裁图逻辑等于没生效。
+    raw = f"r2v|s1|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}|b{cache_bias}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:40]
 
 
@@ -2255,12 +2372,32 @@ _PICTURE_TAG_RE = re.compile(r"<Picture\s+(\d+)>", re.IGNORECASE)
 _ARCHIVE_SECTION_RE = re.compile(r"^\s*\[[^\[\]\n]*档案[^\[\]\n]*\]", re.MULTILINE)
 
 
+_MOUTH_CLOSED_RE = re.compile(r"(?:不开口|嘴唇闭合|双唇紧闭|闭嘴|不发声|闭口不言|口型不动)")
+
+
 def _strip_singing_talk_descriptions(text):
-    """lip_audio 模式: 不再删除唱歌/开口描述。
-    音频已注入 AV latent 并锁定, 模型需要知道角色要跟随音频动嘴。
-    此函数保留为空操作(兼容调用), 实际不删除任何描述。
+    """lip_audio 模式下音频锁死口型, 分镜正文里的"闭嘴"类指令必须删除。
+
+    v14.269: 实测 clip1 3-6s 分镜写的是"按照 lip_voice 对口型开口说话", 模型
+    却闭嘴静止; 同一段分镜其它拍段写着"主播@图1不开口，嘴唇闭合"。音频
+    (audio_denoise=0) 已经锁死口型, 任何"闭嘴/不开口"文字都是与 <Audio 1>
+    直接冲突的指令, 模型会在拍段边界上选择出错的一边。所以: 口型状态只能由
+    音频决定, 正文只保留画面描述, 不保留任何嘴部开合指令。
+
+    按分句删除整条含闭嘴指令的分句(而不是替换词), 避免留下"此，"这类残字。
     """
-    return text
+    if not text:
+        return ""
+    out = []
+    for seg in re.split(r"([，,；;。\n])", str(text)):
+        if _MOUTH_CLOSED_RE.search(seg):
+            continue
+        out.append(seg)
+    cleaned = "".join(out)
+    cleaned = re.sub(r"[，,；;]{2,}", "，", cleaned)
+    cleaned = re.sub(r"(?:。|；|;)\s*[，,]+\s*", r"。", cleaned)
+    cleaned = re.sub(r"[，,；;]\s*(?=[。\n])", "", cleaned)
+    return cleaned
 
 
 def _strip_archive_sections(text):
@@ -2810,39 +2947,6 @@ def _ff_video_hw(samples):
     except Exception:
         pass
     return None
-
-
-# v14.267 临时诊断: 把一采 / 二采的视频 latent 落盘, 用于定位底部灰带到底发生在
-# 哪一阶段(一采全幅 60 行 canvas 自身, 还是二采空间分块最后一块的边界)。
-# 开关 = ComfyUI 根目录存在空文件 _bsai_diag_bottom.on; 删除即关闭, 不影响正常渲染。
-_DIAG_BOTTOM_DONE = set()
-
-
-def _diag_dump_bottom(tag, samples):
-    try:
-        if tag in _DIAG_BOTTOM_DONE:
-            return
-        root = Path(__file__).resolve().parents[2]
-        if not (root / "_bsai_diag_bottom.on").exists():
-            return
-        members, _ = _ff_extract_members(samples)
-        video = members[0].detach().float().cpu() if members else None
-        if video is None or video.ndim != 5:
-            return
-        out_dir = Path(__file__).resolve().parents[3] / "_diag_blur"
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"dump_{tag}.pt"
-        torch.save({"video": video}, out_path)
-        _DIAG_BOTTOM_DONE.add(tag)
-        frame0 = video[0, :, 0]
-        per_row = frame0.reshape(frame0.shape[0], frame0.shape[1], -1).std(dim=(0, 2))
-        h = int(per_row.numel())
-        tail = ", ".join(f"{i}:{float(per_row[i]):.2f}" for i in range(max(0, h - 6), h))
-        head = ", ".join(f"{i}:{float(per_row[i]):.2f}" for i in range(0, min(6, h)))
-        print(f"[H3 Extender][DIAG] {tag} latent {tuple(video.shape)} -> {out_path}")
-        print(f"[H3 Extender][DIAG] {tag} 逐行 std 头部 {head} | 底部 {tail}")
-    except Exception as _diag_e:
-        print(f"[H3 Extender][DIAG] dump {tag} 失败(可忽略): {_diag_e}")
 
 
 def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
@@ -3951,7 +4055,6 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             except Exception:
                 pass
     samples = samples.to(comfy.model_management.intermediate_device())
-    _diag_dump_bottom("first_pass", samples)
 
     # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
     # 技术流程（对齐 BSAI-ComfyUI-Sol-H3 LatentUpscaleAlign 极速版）：
@@ -4335,12 +4438,18 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             if not _use_temporal:
                 try:
                     _t_cand226 = None
+                    _h_cand226 = 0
+                    _w_cand226 = 0
                     try:
                         _mem226, _ = _ff_extract_members(samples)
                         _t_cand226 = int(_mem226[0].shape[2])
+                        _h_cand226 = int(_mem226[0].shape[-2])
+                        _w_cand226 = int(_mem226[0].shape[-1])
                     except Exception:
                         try:
                             _t_cand226 = int(samples["samples"].tensors[0].shape[2])
+                            _h_cand226 = int(samples["samples"].tensors[0].shape[-2])
+                            _w_cand226 = int(samples["samples"].tensors[0].shape[-1])
                         except Exception:
                             pass
                     # v14.248: 自动时间分块阈值 T>=50 -> T>=200。根因: T=107 (二采
@@ -4350,12 +4459,60 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     # 模糊/马赛克/明暗闪烁/粗横条纹(用户实测 h3_motion_preview_7_0.mp4)。
                     # T>=200 (~500k+ tokens) 才真需要时间分块降 dense workspace;
                     # T=107 走 Sol-Attn 稀疏全帧最稳。
-                    if _t_cand226 is not None and _t_cand226 >= 200:
-                        temporal_chunk_tokens = max(20, int(round(_t_cand226 / 5)))
-                        _use_temporal = True
-                        print(f"[H3 Extender] v14.228 自动时间分块: T={_t_cand226} -> "
-                              f"chunk={temporal_chunk_tokens} ({max(1, int(round(_t_cand226 / int(temporal_chunk_tokens))))} 段), "
-                              f"与空间分块组合降每块 tokens", flush=True)
+                    #
+                    # v14.270 (2026-10-31 fix): 上面"拿 T 当阈值"是维度错误 —— 真正的
+                    # 压力是 tokens = T*H*W, 不是 T。实机反例: T=87 看着远小于 200,
+                    # 但 latent 已被 x2.0 放大到 120x68, tokens=87*120*68=709,920。
+                    # 于是时间分块不触发, 只剩空间单轴(_plan_regions 仅沿 H 切)4 块,
+                    # 每块仍吃满 87 帧 -> ~272k tokens/块(v14.179 实测)。后果链:
+                    #   Sol-Attn workspace 要 4.5GB, 而自适应让位后 free 仅 6.8GB
+                    #   且要留 2GB headroom -> 留给激活只剩 ~0.3GB, 同时仍有 3.9GB
+                    #   权重在 CPU 侧 -> 每步全量换页活锁。实机二采 0/4 卡死 20min+,
+                    #   GPU 99% util 但仅 82W / 55C = SM 空转等搬运, 不是在算。
+                    # 现改为以「空间分块后的每块 tokens」为准: 超过 v14.250 探针用
+                    # 的 130k 才启用时间分块, 并按超出倍数反推段数(不再固定 T/5)。
+                    # 倍率 _r_factor 全程不动 —— 宁可分块, 不降倍率(v14.157 原则)。
+                    if _t_cand226 is not None:
+                        _tok226 = 0
+                        if _h_cand226 > 0 and _w_cand226 > 0:
+                            _tok226 = int(_t_cand226) * _h_cand226 * _w_cand226
+                        _spatial_n226 = 1
+                        try:
+                            _spatial_n226 = max(1, int(tile_count))
+                        except Exception:
+                            _spatial_n226 = 1
+                        # 1.55x = overlap 128px 的 tile 膨胀系数, 与 v14.179 实测
+                        # "每块 272,136 tokens" 吻合(709920/4*1.55≈275k)。
+                        _per_tile226 = (_tok226 / float(_spatial_n226)) * 1.55 if _tok226 > 0 else 0
+                        # v14.270 回滚开关(不改文件即可退回旧行为, 需重启 ComfyUI 生效):
+                        #   BSAI_H3_TEMPORAL_TRIGGER=tokens  默认, 新逻辑(按每块 tokens 触发)
+                        #   BSAI_H3_TEMPORAL_TRIGGER=legacy 退回 v14.248 旧逻辑(仅 T>=200)
+                        #   BSAI_H3_TEMPORAL_TRIGGER=off    完全关闭自动时间分块
+                        #   BSAI_H3_TILE_TOKEN_TARGET=130000  每块 tokens 目标(仅 tokens 模式)
+                        _trig270 = str(os.environ.get("BSAI_H3_TEMPORAL_TRIGGER", "tokens")).strip().lower()
+                        _tok_tgt270 = 130000.0
+                        try:
+                            _tok_tgt270 = float(os.environ.get("BSAI_H3_TILE_TOKEN_TARGET", "130000"))
+                        except Exception:
+                            _tok_tgt270 = 130000.0
+                        if _trig270 == "off":
+                            _need_auto270 = False
+                        elif _trig270 == "legacy":
+                            _need_auto270 = (_t_cand226 >= 200)
+                        else:
+                            _need_auto270 = (_t_cand226 >= 200) or (_per_tile226 > _tok_tgt270)
+                        if _need_auto270:
+                            if _per_tile226 > 0:
+                                _seg_n226 = max(2, int(math.ceil(_per_tile226 / max(1.0, _tok_tgt270))))
+                                temporal_chunk_tokens = max(20, int(round(_t_cand226 / _seg_n226)))
+                            else:
+                                temporal_chunk_tokens = max(20, int(round(_t_cand226 / 5)))
+                            _use_temporal = True
+                            print(f"[H3 Extender] v14.270 自动时间分块(trigger={_trig270}, 目标每块<={int(_tok_tgt270):,}): "
+                                  f"T={_t_cand226} latent={_h_cand226}x{_w_cand226} "
+                                  f"tokens={_tok226:,} / 空间{_spatial_n226}块 -> 每块~{int(_per_tile226):,} "
+                                  f"切约 {max(1, int(round(_t_cand226 / max(1, int(temporal_chunk_tokens)))))} 段 "
+                                  f"(chunk={int(temporal_chunk_tokens)}), 倍率保持 x{_r_factor}", flush=True)
                 except Exception as _e226:
                     print(f"[H3 Extender] v14.228 自动时间分块失败(可忽略): {_e226}")
             # v14.200: 删除 v14.199 的"分块二采强制锁音频"。
@@ -5068,7 +5225,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # shape" 而整段预热被静默跳过。这里改成"深度优先展平 + 按维度挑成员",
                 # 并且每个阶段单独打标, 万一仍失败能直接看出是卡在哪一步。
                 _stage_w = "flatten"
-                _wflat_w, _wstack_w = [], list(_ff_extract_members(_r_latent["samples"])[0])
+                # v14.270 (2026-10-31 fix): 时间分块二采路径下 _r_latent 不会被创建
+                # (它只在 `if not _use_temporal` 分支里构造), 旧实现直接取
+                # _r_latent["samples"] 会 NameError -> 整段预热静默跳过 -> 第 1 大步
+                # 独自扛下全部初始化税, 加剧 0/4 假死。这里加 fallback 到 samples。
+                _w_lat_src = locals().get("_r_latent")
+                if not (isinstance(_w_lat_src, dict) and "samples" in _w_lat_src):
+                    _w_lat_src = {"samples": samples}
+                _wflat_w, _wstack_w = [], list(_ff_extract_members(_w_lat_src["samples"])[0])
                 while _wstack_w:
                     _mw = _wstack_w.pop(0)
                     if isinstance(_mw, torch.Tensor):
@@ -5081,7 +5245,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if _wv_w is None:
                     raise RuntimeError(
                         "samples 里没有 5 维视频成员: type=%s shapes=%s"
-                        % (type(_r_latent["samples"]).__name__,
+                        % (type(_w_lat_src.get("samples")).__name__,
                            [tuple(m.shape) for m in _wflat_w]))
                 _wa_w = next((m for m in _wflat_w
                               if m is not _wv_w and m.dim() >= 3), None)
@@ -5672,7 +5836,6 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     out.pop("downscale_ratio_spacial", None)
     out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
-    _diag_dump_bottom("refined", samples)
     if _refine_fallback_hw:
         _fbh, _fbw = int(_refine_fallback_hw[0]), int(_refine_fallback_hw[1])
         if _fbh > 0 and _fbw > 0:
@@ -5898,6 +6061,124 @@ def _build_visual_anchor_snapshot(states, clip_index, max_total=1000):
     except Exception as _va_err:
         print(f"[H3 Extender] v14.193 视觉锚点注入失败(本次跳过注入): {_va_err}")
         return None
+
+
+# ── v14.271 一镜到底: 分拍式剧本 → 单镜头连续散文 ─────────────────────────
+# H3 的时序先验: 提示词按 "0-3秒：/3-6秒：/6-9秒：" 分拍写运镜时, 模型把每个分拍
+# 当成一个独立镜头, 在拍点处自己硬切(实测 v004 clip2 第 78 帧 = 3.25s ≈ 3-6 秒拍点,
+# ffmpeg scene>0.12 检出的硬切)。一镜到底模式在编码前必须把分拍标签改写成先后
+# 连接词, 整段读成一气呵成的散文, 才能避开"拍点=镜头边界"的先验。
+#
+# 同时按社区 PROMPTING.md 的结论(CFG=1.0 无负向分支, 否定句会被当作画面内容渲染):
+# 这里只做正向改写 —— 把"镜头切换到"改成"镜头继续移向", 并抹掉用户自撰的
+# "不切镜/不转场"口号, 不注入任何 cut/dissolve/转场/叠化 词汇。
+_OS_SEG_TIME_RE = re.compile(
+    r"(?:【|\[|（|\()?\s*(?:第\s*)?\d{1,3}(?:\.\d+)?\s*(?:秒|s|S)?\s*"
+    r"(?:至|到|~|～|—|–|-)\s*\d{1,3}(?:\.\d+)?\s*(?:秒|s|S|seconds?|sec)\s*"
+    r"(?:】|\]|）|\))?(?:\s*[：:,，])?"
+)
+_OS_AT_TIME_RE = re.compile(r"(?:At|at)\s*\d{1,2}:\d{2}(?:[.,]\d{1,3})?\s*", re.IGNORECASE)
+_OS_ATTR_TAG_RE = re.compile(
+    r"(?:【|\[)\s*(?:镜头运动|运镜|景别(?:/构图)?|构图|光影(?:氛围)?|角色状态|道具交互|画面内容)\s*(?:】|\])"
+)
+_OS_SEG_CONNECTIVE = ("随后，", "接着，", "继而，", "然后，", "最后，")
+
+# 切镜词汇。一镜到底的提示词里只要出现(不论是否定句), 都会被 H3 当成画面内容。
+_OS_CUT_VOCAB = ("剪切", "切镜", "切场", "转场", "跳帧", "闪白", "画面切换", "切换机位",
+                 "叠化", "淡入", "淡出", "硬切")
+_OS_NEG_WORD_RE = re.compile(r"不|无|没有|禁止|绝不|严禁|不要|不得|避免")
+_OS_FRAG_RE = re.compile(r"[^，,；;。！？!?\n]*[，,；;。！？!?\n]?")
+
+
+def _strip_negated_cuts(text):
+    """v14.271: 逐分句删除"否定词 + 切镜词汇"的指令。
+
+    H3 在 CFG=1.0 下没有负向分支, "画面中不出现任何剪切点、转场、跳帧、闪白"
+    这类否定句会被当成画面内容渲染(社区 PROMPTING.md 结论), 实测反而诱发段内
+    切镜。一镜到底模式下这些分句一律不进入条件文本。
+    """
+    _out = []
+    for _ln in str(text or "").splitlines():
+        _keep = []
+        for _f in _OS_FRAG_RE.findall(_ln):
+            _core = _f.strip(" \t，,；;。！？!?\n")
+            if _core and _OS_NEG_WORD_RE.search(_core):
+                if any(_w in _core for _w in _OS_CUT_VOCAB):
+                    continue
+            _keep.append(_f)
+        _out.append("".join(_keep).rstrip())
+    return "\n".join(_out).strip()
+
+# 景别词表 + 英文映射。顺序只用于构造, 选取时按字面首次出现位置(见下)。
+_OS_SIZE_WORDS = (
+    ("大特写", "EXTREME CLOSE-UP"),
+    ("特写", "CLOSE-UP"),
+    ("中近景", "MEDIUM CLOSE SHOT"),
+    ("近景", "CLOSE SHOT"),
+    ("中全景", "MEDIUM WIDE SHOT"),
+    ("中景", "MEDIUM SHOT"),
+    ("全景", "WIDE SHOT"),
+    ("远景", "EXTREME WIDE SHOT"),
+)
+
+
+def _one_shot_flatten_prompt(text):
+    """v14.271: 一镜到底模式下把分拍式提示词改写为单镜头连续散文。
+
+    - 时间区间标签(0-3秒 / [0-3s] / At 00:03.000 / [Shot N]) → 先后连接词或直接删除
+    - 属性方括号([镜头运动]/[景别/构图]/...) → 删除, 让各拍从句连成一段
+    - 切镜动词(镜头切换至 / the camera cuts to) → 连续运镜动词
+    - 用户自撰的"不切镜/不切场/不转场/无转场"口号 → 删除(否定句会被渲染)
+
+    无任何可改写内容时原样返回。
+    """
+    s = str(text or "")
+    if not s.strip():
+        return s
+    s = _OS_AT_TIME_RE.sub("", s)
+    s = _OS_ATTR_TAG_RE.sub("", s)
+    s = _strip_negated_cuts(s)
+    for _w in ("不切镜", "不切场", "不转场", "无转场", "禁止切镜", "禁止转场"):
+        s = s.replace(_w, "")
+    s = (s.replace("镜头切换至", "镜头继续移向").replace("镜头切换到", "镜头继续移向")
+          .replace("切换至", "继续移向").replace("切换到", "继续移向")
+          .replace("硬切至", "连续移向").replace("硬切到", "连续移向"))
+    s = re.sub(r"the\s+camera\s+cuts?\s+to\s+", "the camera continues to ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bcut\s+to\s+", "move to ", s, flags=re.IGNORECASE)
+
+    _parts = []
+    _last = 0
+    _n = 0
+    for _m in _OS_SEG_TIME_RE.finditer(s):
+        _between = s[_last:_m.start()]
+        if "[分镜" in _between or "[Shot" in _between:
+            _n = 0  # 新分镜重新计数, 否则全局提示词从第二个分镜起全是"最后"
+        _parts.append(_between)
+        if _n:
+            _parts.append(_OS_SEG_CONNECTIVE[min(_n - 1, len(_OS_SEG_CONNECTIVE) - 1)])
+        _n += 1
+        _last = _m.end()
+    _parts.append(s[_last:])
+    s = re.sub(r"[ \t]{2,}", " ", "".join(_parts)).strip()
+    return s
+
+
+def _one_shot_first_size(text):
+    """v14.271: 返回提示词正文中最先出现的景别词 (词, 英文名); 无则 (None, "")。
+
+    按字面首次出现位置选取, 而不是按景别尺度排序 —— 尺度顺序会把参考图纪律或
+    全局提示词里的"特写"当成全段基准(v14.241 在实机上恒定输出"基准景别=特写")。
+    """
+    low = str(text or "").lower()
+    _best = (None, "")
+    _best_pos = None
+    for _w, _en in _OS_SIZE_WORDS:
+        _p = low.find(_w)
+        if _p < 0:
+            continue
+        if _best_pos is None or _p < _best_pos:
+            _best, _best_pos = (_w, _en), _p
+    return _best
 
 
 def _parse_clips_json(value: str):
@@ -7573,10 +7854,11 @@ class BSAIH3FilmFactory:
         optional = {
             "audio_vae": ("VAE", {"forceInput": True}),
             "ref_audio": ("AUDIO", {"forceInput": True, "tooltip": "Voice reference audio. When connected, it tells the H3 model that the character's voice/timbre/music style should follow this reference. Can be connected together with lip_audio — lip_audio drives the lip-sync while ref_audio provides the timbre reference."}),
-            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "Single song source: the complete song/dialogue audio. Once connected: (1) the lip-sync of every CLIP and @imgN character is driven entirely by the matching segment of this song; (2) the ref_audio port and @audN are ignored automatically; (3) all model-generated audio is discarded; (4) the output sound is exactly this song. It is auto-sliced per CLIP duration and the final output matches the video length."}),
+            "lip_audio": ("AUDIO", {"forceInput": True, "tooltip": "Single song source: the complete song/dialogue audio — TOP PRIORITY audio port. Once connected: (1) the lip-sync of every CLIP and @imgN character is driven entirely by the matching segment of this song; (2) the ref_audio and lip_voice ports and @audN are all ignored automatically, no matter whether they are connected; (3) all model-generated audio is discarded; (4) the output sound is exactly this song. It is auto-sliced per CLIP duration and the final output matches the video length."}),
             # v14.101: 回退 18:35(v14.84) — lip_voice 位置与 v2.7.json 一致（lip_audio 之后）
-            # v14.174: lip_voice 升级为对口型驱动音频（同 lip_audio 语义且优先）。
-            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "Lip-sync drive audio (v14.174+): the complete dialogue audio. Once connected, it behaves exactly like lip_audio — (1) drives lip-sync of every CLIP; (2) all model-generated audio is discarded; (3) output sound is exactly this audio, auto-sliced per CLIP; (4) takes priority over lip_audio. Typical use: connect BSAI IndexTTS-2.5 synthesis output here to drive lip-sync with TTS voice lines."}),
+            # v14.174: lip_voice 升级为对口型驱动音频（同 lip_audio 语义）。
+            # v14.270: 优先级反转 — lip_audio 最高，lip_voice 仅在 lip_audio 未接时生效。
+            "lip_voice": ("AUDIO", {"forceInput": True, "tooltip": "Lip-sync drive audio (v14.174+): the complete dialogue audio. Once connected, it behaves exactly like lip_audio — (1) drives lip-sync of every CLIP; (2) all model-generated audio is discarded; (3) output sound is exactly this audio, auto-sliced per CLIP; (4) applies only when lip_audio is NOT connected — lip_audio always takes top priority (v14.270+). Typical use: connect BSAI IndexTTS-2.5 synthesis output here to drive lip-sync with TTS voice lines."}),
             "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Unified external prompt source. Auto-split at first [ShotN] marker: text before → global prompt, text from [ShotN] onwards → storyboard segments (auto-create N CLIPs with prompts and durations)."}),
             "prompt_pack": (
                 PROMPT_PACK_TYPE,
@@ -8705,7 +8987,7 @@ class BSAIH3FilmFactory:
                       f"一采 {steps}->8 步(8步蒸馏契约, 省 {steps-8} 步 x ~68s ≈ "
                       f"{(steps-8)*68//60} 分钟/clip)")
                 steps = 8
-            print(f"[H3 直播带货] 03 lip_voice对口型: 音频由外部 lip_voice 提供, 已锁 refine_audio_denoise=0.0（不重绘原声）")
+            print(f"[H3 直播带货] 03 lip_voice对口型: 音频由外部音频(lip_voice/lip_audio)提供, 已锁 refine_audio_denoise=0.0（不重绘原声）")
         elif _ls_mode in ("01", "02"):
             refine_audio_denoise = 0.7
             print(f"[H3 直播带货] {_LIVESTREAM_VOICE_MODE_LABEL.get(_ls_mode, _ls_mode)}: 模型生成人声, 音频重绘 0.7 精修清晰度 + 一采12步达标")
@@ -9581,10 +9863,22 @@ class BSAIH3FilmFactory:
         # 实现: lip_voice 非 None 时重赋值 lip_audio → 下方切段/AV latent注入/
         # 提示词净化/音频锁定/输出混音替换全链路自动复用, 无需复制代码。
         _lip_voice = kwargs.get("lip_voice")
+        # v14.270: lip_audio 最高优先级（全渲染模型/全渲染管道通用，凌驾 01/02/03 档）。
+        # 一旦 lip_audio 端口接入有效音源 → 自动屏蔽 ref_audio/lip_voice，
+        # 不管这两个端口是否接入音源或处于连接状态，一律忽略。
+        if lip_audio is not None:
+            if ref_audio is not None or _lip_voice is not None:
+                print(f"[H3 LipSync] lip_audio 已连接(最高优先级) → 自动忽略 "
+                      f"{'ref_audio' if ref_audio is not None else ''}"
+                      f"{'/' if ref_audio is not None and _lip_voice is not None else ''}"
+                      f"{'lip_voice' if _lip_voice is not None else ''}, "
+                      f"声音与口型完全由 lip_audio 提供")
+            ref_audio = None
+            _lip_voice = None
         # v14.220 直播带货配音模式音频接线强制（01/02/03 一键切换）。
         # 讲话类直播带货只允许模式对应的音频口生效，其余一律忽略并告警，
         # 保证用户选错/多接也不会串音。lip_audio 仅用于对口型 MV，直播带货不接。
-        if _ls_mode:
+        elif _ls_mode:
             _ls_lbl = _LIVESTREAM_VOICE_MODE_LABEL.get(_ls_mode, _ls_mode)
             if _ls_mode == "01":
                 # 三口全不接：模型读分镜台词、用自身默认音色生成人声。
@@ -9619,9 +9913,10 @@ class BSAIH3FilmFactory:
                 else:
                     print(f"[H3 直播带货] {_ls_lbl}: lip_voice 对口型生效，模型不生成音频，完全由外部音频驱动 @图1 对口型")
         if _lip_voice is not None:
+            # 走到这里 lip_audio 必为 None（v14.270: lip_audio 最高优先级已在上方拦截）。
             lip_audio = _lip_voice
             print(f"[H3 LipSync] ✅ lip_voice 已连接 → 升级为对口型驱动音频"
-                  f"(取消模型自生成音频, 外部音频驱动口型; lip_voice 优先于 lip_audio)")
+                  f"(取消模型自生成音频, 外部音频驱动口型; 仅在 lip_audio 未接时生效)")
             # v14.252 (2026-10-29): 不分渲染管道/模式, 只要 lip_audio(lip_voice) 有
             # 真正音频输入, 一律按音频实际时长切分 clip (不 atempo 拉长, 不缩短);
             # lip_audio=None (纯连端口/前端音频节点被 Bypass) → 不触发, 回退模型生成音频。
@@ -10437,6 +10732,13 @@ class BSAIH3FilmFactory:
                 _refs_for_clip = _plan["refs"]
                 _clip_prompt_for_cond = _plan["clip_prompt"]
                 _gp_for_cond = _plan["global_prompt"]
+            # v14.271 一镜到底: 编码前把"0-3秒/3-6秒"分拍式剧本改写为单镜头连续散文。
+            # 分拍标签会被 H3 当成镜头切分点(实测 clip2 在 3.25s ≈ 3-6秒拍点硬切)。
+            if one_shot_enabled:
+                _os_flat = _one_shot_flatten_prompt(_clip_prompt_for_cond)
+                if _os_flat != _clip_prompt_for_cond:
+                    print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 提示词已单镜头化(分拍时间标签→连续运镜陈述)")
+                    _clip_prompt_for_cond = _os_flat
             # Determine ref_audio for this clip.
             # lip_audio 模式：lip_audio_segment 已注入 AV latent 锁定口型，
             # 不需要再作为 ref_block。全局 ref_audio（音色参考）保留为 ref_block。
@@ -10499,21 +10801,37 @@ class BSAIH3FilmFactory:
             # the render prompt only ever describes THIS CLIP's own content.
             effective_prompt = _clip_prompt_for_cond
             # v14.84 lip-audio: 只净化本段CLIP提示词(全局提示词不受影响),
-            # 抹掉唱歌/说话/开口描述, 口型完全由音频驱动。
+            # 抹掉"闭嘴/不开口"类与音频冲突的口型指令, 口型完全由音频驱动。
             if lip_audio_segments is not None:
                 _before = effective_prompt[:80]
                 effective_prompt = _strip_singing_talk_descriptions(effective_prompt)
                 if _before != effective_prompt[:80]:
-                    print(f"[H3 LipSync]   clip[{i+1}] 提示词净化(去唱歌/说话描述): '{_before}' -> '{effective_prompt[:80]}'")
+                    print(f"[H3 LipSync]   clip[{i+1}] 提示词净化(去闭嘴指令): '{_before}' -> '{effective_prompt[:80]}'")
             if _gp_for_cond:
                 gp = _strip_archive_sections(str(_gp_for_cond)).strip()
+                # v14.271 一镜到底: 全局提示词同样单镜头化。它会被前置到每一段,
+                # 里面若带"0-3秒"分拍标签或"不出现画面切换/绝不切换机位"这类
+                # 否定式切镜词, 会同时污染全部 clip(H3 会把否定句当画面渲染)。
+                if gp and one_shot_enabled:
+                    gp = _one_shot_flatten_prompt(gp)
                 if gp:
                     effective_prompt = gp + "\n" + effective_prompt
             # v14.193: 视觉锚点自动注入（参考 B站短剧导演台 V9 BV1m2HK6DEPX）。
             # 在 effective_prompt 组装早期注入状态快照（global prompt 之后、本段内容
             # 与 lip-audio/一镜到底指令之前），让"延续已建立状态"指令优先被模型读到。
             # 快照内容 = 本分镜前全部已自动记录的全部可见视觉元素状态（自旧到新, 有界）。
-            _va_snap = _build_visual_anchor_snapshot(_va_auto_states, i)
+            # v14.271 一镜到底: 跳过视觉锚点快照。快照会把**上一段正文**的机位、
+            # 景别、光照、时间(如 clip1 的"中全景仰视/橙粉残阳")原样搬到本段,
+            # 与本段"中景/暮色转蓝调夜景"直接冲突 —— H3 会把矛盾渲染成并集,
+            # 表现为段内某个时刻画面突然跳到上一段的空间与光线(实测 clip2 3.16s
+            # 仍是暖色残阳, 3.25s 才跳到蓝调夜景)。一镜到底的延续由 motion context
+            # keyframe(上一段尾 latent) 保证, 不再需要文本锚点, 且文本锚点有害。
+            _va_snap = None if one_shot_enabled else _build_visual_anchor_snapshot(_va_auto_states, i)
+            # v14.269: 视觉锚点来自前序分镜正文, 会把上段的"不开口，嘴唇闭合"原样
+            # 带进本段 —— 与 <Audio 1> 冲突。对口型模式下同样按分句删除,
+            # 口型只由音频决定。
+            if _va_snap and lip_audio_segments is not None:
+                _va_snap = _strip_singing_talk_descriptions(_va_snap) or None
             if _va_snap:
                 effective_prompt = str(effective_prompt) + _va_snap
                 print(f"[H3 Extender] v14.193 视觉锚点 clip[{i + 1}]: 已注入状态快照（自动记录·全部可见元素·延续约束）")
@@ -10522,146 +10840,50 @@ class BSAIH3FilmFactory:
             # 否则模型可能 lip-sync to nothing 或乱张嘴。
             if lip_audio_segments is not None:
                 _audio_tag = (
-                    "\n<Audio 1> 是本段中人物正在演唱的歌曲。"
-                    "人物的嘴唇、舌头和下颌必须跟随<Audio 1>的歌声自然开合，"
-                    "口型与歌词精确同步，演唱时面部表情随歌曲情绪起伏，"
-                    "身体随音乐节奏微微律动。人物正在对着麦克风深情演唱。"
+                    "\n<Audio 1> 是本段中主播正在说/唱的音频。"
+                    "主播的嘴唇、舌头和下颌必须跟随<Audio 1>的语速与音节自然开合，"
+                    "口型与音频精确同步，说话时面部表情随内容起伏。"
+                    "只要主播出现在画面内，嘴唇就必须持续跟随<Audio 1>开合，"
+                    "本段不存在闭嘴静止或只做表情不含口型的画面。"
                 )
                 if "<Audio 1>" not in effective_prompt:
                     effective_prompt = effective_prompt + _audio_tag
-            # v14.158: 一镜到底旁支模式 —— 提示词注入。
-            # 参考 B站《MinimaxH3 长视频一镜到底工作流》: 提示词写"不切场、
-            # 不转场、一镜到底、镜头始终跟随主体运动"。用户已写相关关键词则跳过,
-            # 避免与用户自撰镜头指令冲突。
+            # v14.271 一镜到底 —— 正向单镜头指令（合并旧 v14.158/v14.191/v14.241 模板）。
+            # 旧模板反复写 "no cut / 禁止切镜 / 禁止转场 / 禁止叠化 / no dissolve"。
+            # H3 在 CFG=1.0 下没有负向分支, 否定句会被当作画面内容渲染(社区
+            # PROMPTING.md 结论), 实测反而诱发段内切镜。这里只描述"摄影机如何连续
+            # 运动", 全文不含任何 cut/dissolve/转场/叠化/淡入淡出 词汇。
             if one_shot_enabled:
-                _os_lower = str(effective_prompt).lower()
-                # v14.253 (fix): 只把"真正的不切镜指令"算命中。旧版把"一镜到底"本身
-                # 也当命中, 而这个词几乎必然出现在全局提示词/工作流标题里, 于是本模板
-                # 在实机上从未注入过 —— 用户 clip2 在 3.2s 出现叠化切镜即为此。
-                _os_hit = ("不切镜" in str(effective_prompt)
-                           or "不切场" in str(effective_prompt)
-                           or "不转场" in str(effective_prompt)
-                           or "无转场" in str(effective_prompt)
-                           or "one continuous take" in _os_lower
-                           or "no cut" in _os_lower)
-                if not _os_hit:
-                    # v14.178 一镜到底全球方案落地 P1-8: 旧版"绝不切场/不转场/镜头跟随"
-                    # 纯口号替换为结构化衔接模板 —— 段头微动作承接 + 段尾预埋下一动作 +
-                    # 跨段语音连续声明, 避免模型把"不切场"理解成静态画面。中英文双语模板。
-                    # v14.253: 删除模板里的字面切口标记 <scenetrans>/<cutoff> —— 它们是
-                    # 切镜词汇, 与"一次都不切"的目标自相矛盾, 实测会诱发段内叠化切镜。
-                    effective_prompt = str(effective_prompt) + (
-                        "\n[One-Shot Continuous Take] "
-                        "This clip is a seamless continuation of the same unbroken long take: "
-                        "the camera space, lighting direction and subject position carry over "
-                        "from the previous clip's tail without any cut or transition. "
-                        "On entry: breath steadies, small motion resumes ("
-                        "footsteps continue, gaze adjusts, posture settles into the ongoing action). "
-                        "At the tail: the subject's pose pre-positions for the next beat of motion, "
-                        "so the next clip picks up mid-gesture. "
-                        "Voice continues uninterrupted across this boundary — no pause, no breath reset."
-                        "\n[一镜到底] 本段为同一条不间断长镜头的延续：机位空间、光照方向与主体位置"
-                        "从上一段尾部无缝带入，无任何切场或转场。段头：呼吸渐稳、微小动作自然承接"
-                        "(脚步延续、视线微调、姿态汇入正在进行的动作)；段尾：姿态预先摆向下一动作，"
-                        "使下一段可从动作中途接上。语音跨此边界连续不断——无停顿、无换气重置。"
-                    )
-                    print(f"[H3 Extender] 一镜到底 clip[{i}]: 已注入结构化衔接模板(段头承接+段尾预埋, v14.253 已删除 <scenetrans>/<cutoff> 切口词)")
-            # v14.191: 一镜到底 —— 分拍时间标记反切镜指令(始终追加, 单采/双采都生效)。
-            # 实测根因(clip1 预览 287 帧): 12s 长段提示词按 "0-3秒/3-6秒/6-9秒/9-12秒"
-            # 分拍描述运镜时, 模型把每个分拍当成独立镜头, 在拍点处自行硬切
-            # (实测切镜点 2.67s/6.46s ≈ 3s/6s 分拍边界, 场景检测 scene>0.18)。
-            # 既有链式机制(噪声延续+头部均匀锁 keep+衔接模板)只锚定段头 ~1s,
-            # 对段内中段无约束。此指令显式声明分拍=同一连续运镜的先后阶段,
-            # 压制模型在拍点的蒙太奇先验。
-            if one_shot_enabled:
-                effective_prompt = str(effective_prompt) + (
-                    "\n[Single Continuous Take — Hard Rule] "
-                    "All time-range descriptions in this prompt (0-3s / 3-6s / 6-9s / 9-12s etc.) "
-                    "are consecutive PHASES of ONE single unbroken camera move inside THIS clip — "
-                    "they are NOT separate shots. At every phase boundary the camera must glide "
-                    "continuously: no cut, no transition, no angle or shot-size jump, no time skip. "
-                    "Framing may only evolve smoothly and continuously from phase to phase. "
-                    "Every azimuth, angle or framing named in the prompt is only a waypoint "
-                    "along the SAME single camera trajectory — never a new camera position "
-                    "and never a new shot. "
-                    "NEVER use a cut, dissolve, cross-fade, fade-in/out, flash, double exposure, "
-                    "morph or wipe to reach a new framing or a new camera angle."
-                    "\n[单镜头硬规则] 本段提示词中所有时间段描述(0-3秒/3-6秒/6-9秒/9-12秒等)"
-                    "是同一个连续运镜的先后阶段，不是多个镜头。每个阶段边界镜头必须平滑连续滑过："
-                    "禁止切镜、禁止转场、禁止机位角度或景别跳变、禁止时间跳跃，"
-                    "构图只允许随运镜连续渐变。提示词里出现的任何方位、角度、景别都只是同一条"
-                    "摄影机轨迹上的途经点，不是新机位、更不是新镜头。若提示词要求机位方位改变"
-                    "（绕到侧后方/背面、横移到四十五度、环绕、旋转到某一角度），必须由摄影机"
-                    "连续环绕或横移可见地逐帧完成；严禁用叠化、淡入淡出、双曝光、闪白、"
-                    "遮挡转场或硬切瞬间完成方位变化。"
+                _os_shot_words = ["特写", "近景", "中景", "全景", "远景", "中全景", "中近景",
+                                  "推近", "拉远", "推镜", "拉镜", "close-up", "close up",
+                                  "closeup", "zoom in", "zoom out", "wide shot",
+                                  "close shot", "full shot"]
+                # 只扫本段正文(剥掉参考图纪律/服装锁定纪律), 否则模板词会污染基准景别
+                # 判定(v14.241 实机恒定输出"基准景别=特写", 与正文"中景"冲突)。
+                _os_body = (str(_clip_prompt_for_cond)
+                            .replace(_REF_SHEET_RULE, "")
+                            .replace(_OUTFIT_LOCK_RULE, ""))
+                _os_hit_words = [w for w in _os_shot_words if w in _os_body.lower()]
+                _os_anchor, _ = _one_shot_first_size(_os_body)
+                _os_rule = (
+                    "\n[One Continuous Take] 本段从头帧到尾帧只有一个镜头：摄影机沿一条"
+                    "连续轨迹运动，提示词中先后出现的时间与运镜描述都是这条轨迹上依次"
+                    "经过的阶段，画面随运镜逐帧连续变化，主体始终处在同一片连续空间里。"
+                    "机位高度与镜头光轴只通过连续的推移、升降与环绕平滑改变，速度连贯不变。"
+                    "提示词若要求绕到侧后方、横移到四十五度、环绕或旋转到某一角度，这些方位"
+                    "变化都由摄影机连续环绕或横移逐帧完成，镜头里能看见空间在逐渐转过去。"
+                    "段头呼吸渐稳、微小动作自然承接(脚步延续、视线微调、姿态汇入正在进行"
+                    "的动作)；段尾姿态预先摆向下一动作，使下一段从动作中途接上。"
                 )
-                print(f"[H3 Extender] v14.191 一镜到底 clip[{i}]: 已注入分拍反切镜指令(时间段=同一连续运镜的阶段)")
-            # v14.241 (fix): 一镜到底 —— 景别词汇反切强化。
-            # 实测根因(2026-10-28 用户截图): 提示词中出现"特写/近景/全景/推近/
-            # 拉远"等景别变化描述时, H3 蒙太奇先验会用硬切实现景别跳变(v14.191
-            # 的通用禁令约束力弱)。这里扫描本段提示词, 命中景别/推拉词即追加
-            # 更强的"景别恒定、推拉=连续运镜"指令, 并打印命中词供诊断。
-            if one_shot_enabled:
-                try:
-                    _os_shot_words = ["特写", "近景", "中景", "全景", "远景", "大特写",
-                                      "推近", "拉远", "推镜", "拉镜", "close-up", "close up",
-                                      "closeup", "zoom in", "zoom out", "wide shot",
-                                      "close shot", "full shot", "cut to", "cutaway"]
-                    _os_hit_words = [w for w in _os_shot_words if w in str(effective_prompt).lower()]
-                    if _os_hit_words:
-                        # v14.248 (fix, 2026-10-29): 段内切镜强化 —— 实测 20 段成片
-                        # clip2+ 段内仍自动切镜(用户点名 00:14:21-22 / 00:18:18-19,
-                        # 之后各段一致)。v14.241 的负向禁令(禁止景别跳变)弱于模型正向
-                        # 蒙太奇先验; 这里正向锚定"本段第一个景别词 = 全段基准构图",
-                        # 后续所有景别词只能解释为同一条连续运镜相对基准的渐进推拉。
-                        _os_size_order = ["大特写", "特写", "近景", "中景", "全景", "远景"]
-                        _os_anchor = None
-                        _os_prompt_lower = str(effective_prompt).lower()
-                        for _w in _os_size_order:
-                            if _w in _os_prompt_lower:
-                                _os_anchor = _w
-                                break
-                        _os_anchor_en = {
-                            "大特写": "EXTREME CLOSE-UP",
-                            "特写": "CLOSE-UP",
-                            "近景": "CLOSE SHOT",
-                            "中景": "MEDIUM SHOT",
-                            "全景": "WIDE SHOT",
-                            "远景": "EXTREME WIDE SHOT",
-                        }.get(_os_anchor, "")
-                        _os_anchor_rule = ""
-                        if _os_anchor:
-                            _os_anchor_rule = (
-                                f"\n[Anchor Shot-Size] The FIRST shot size named in this prompt "
-                                f"is {_os_anchor_en}: it is the anchor framing of the WHOLE take. "
-                                f"Every later shot-size word describes how the same continuous move "
-                                f"gradually approaches or recedes from this anchor — never a cut "
-                                f"to a different size, never a restart of framing, never a new shot."
-                                f"\n[基准景别] 本段提示词出现的第一个景别词（{_os_anchor}）是全段基准构图。"
-                                f"之后出现的任何景别词都只能表示同一条连续运镜相对这个基准的"
-                                f"渐进靠近或拉远，禁止从基准景别跳变到任何其他景别、禁止重新取景。"
-                            )
-                        effective_prompt = str(effective_prompt) + (
-                            "\n[Shot-Size Hard Rule] The prompt may name shot sizes "
-                            "(close-up / medium / wide) or pushes — they describe the SAME "
-                            "continuous camera move, and the framing may ONLY evolve by a "
-                            "smooth push-in or pull-out over many frames. There must be "
-                            "exactly one shot from first frame to last: the subject stays "
-                            "anchored in the same take, and camera height / lens axis may "
-                            "ONLY change by smooth continuous camera movement (crane, dolly, "
-                            "arc around the subject), never by a cut or transition. A "
-                            "shot-size jump is forbidden even when the text names a different size."
-                            "\n[景别硬规则] 提示词中的景别词(特写/中景/全景等)与推拉词仅描述"
-                            "同一条连续运镜：构图只能通过缓慢推近/拉远逐帧渐变，全段从头到尾"
-                            "必须只有一个镜头——主体锚点全程不变；机位高度与镜头光轴只允许由"
-                            "连续的摄影机运动(升降/推移/环绕主体)平滑改变，禁止切镜或转场。"
-                            "即使文本写到了不同景别，也禁止任何景别跳变。"
-                            + _os_anchor_rule
-                        )
-                        print(f"[H3 Extender] v14.241 一镜到底 clip[{i}]: 命中景别/推拉词 {_os_hit_words}, "
-                              f"基准景别={_os_anchor or '无'}, 已注入景别恒定+基准锚定硬规则(推拉=连续运镜, 禁止景别跳变)")
-                except Exception:
-                    pass
+                if _os_anchor:
+                    _os_rule += (
+                        f"\n[基准景别] 全段基准构图是{_os_anchor}：镜头从{_os_anchor}出发，"
+                        f"后续只通过同一条连续运镜缓慢推近或拉远，画面随推拉逐帧渐变，"
+                        f"主体在画面中的位置随运镜平滑移动。"
+                    )
+                effective_prompt = str(effective_prompt) + _os_rule
+                print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 命中景别/推拉词 "
+                      f"{_os_hit_words}, 基准景别={_os_anchor or '无'}, 已注入正向连续运镜指令")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
@@ -11791,10 +12013,9 @@ class BSAIH3FilmFactory:
 
         out_images_t, out_audios_t = _concat_clip_av(out_images, out_audios)
 
-        # ── Lip Sync 模式：最终音频 = lip_audio 主唱(满音量) + 模型环境音(压低垫底) ──
-        # 视频由各 CLIP 用对应歌曲片段驱动对口型生成。出片音轨以用户接入的原始歌曲为主
-        # (满音量)，模型采样时自生成的环境音/音效不丢弃，压低到 15% 音量垫在歌曲底下
-        # 作为 MV 辅助音。
+        # ── Lip Sync 模式：最终音频 = 纯 lip_audio 外部音源 ──
+        # v14.270: 模型自生成音频(环境音/呼吸/自生成音乐)完全丢弃, 不再以 15% 垫底;
+        # 模型音频仅在采样时作潜空间条件驱动口型, 不出现在最终输出中。
         if lip_audio is not None and lip_audio_segments is not None:
             try:
                 import torchaudio as _ta_final
@@ -11804,9 +12025,9 @@ class BSAIH3FilmFactory:
                 lip_wave = lip_audio["waveform"].float()
                 lip_sr = int(lip_audio["sample_rate"])
 
-                # 模型生成的拼接音频(out_audios_t)，作为垫底环境音
-                model_wave = out_audios_t["waveform"].float()
+                # 目标采样率/声道布局跟随模型音频输出格式
                 model_sr = int(out_audios_t["sample_rate"])
+                _out_ch = int(out_audios_t["waveform"].shape[-2]) if out_audios_t["waveform"].ndim >= 2 else 2
 
                 # 歌曲重采样到模型音频采样率
                 if lip_sr != model_sr:
@@ -11814,14 +12035,9 @@ class BSAIH3FilmFactory:
                 # 维度对齐 [B, C, L]
                 if lip_wave.ndim == 2:
                     lip_wave = lip_wave.unsqueeze(0)
-                if model_wave.ndim == 2:
-                    model_wave = model_wave.unsqueeze(0)
-                # 声道对齐
-                if lip_wave.shape[1] != model_wave.shape[1]:
-                    if lip_wave.shape[1] == 1 and model_wave.shape[1] == 2:
-                        lip_wave = lip_wave.repeat(1, 2, 1)
-                    elif model_wave.shape[1] == 1 and lip_wave.shape[1] == 2:
-                        model_wave = model_wave.repeat(1, 2, 1)
+                # 声道对齐(歌曲单声道 → 输出立体声)
+                if lip_wave.shape[1] == 1 and _out_ch == 2:
+                    lip_wave = lip_wave.repeat(1, 2, 1)
 
                 # 长度对齐到视频时长对应的模型采样数
                 target_samples = max(1, int(video_duration * model_sr))
@@ -11835,27 +12051,15 @@ class BSAIH3FilmFactory:
                         torch.zeros(lip_wave.shape[0], lip_wave.shape[1], _pad,
                                     dtype=lip_wave.dtype, device=lip_wave.device)
                     ], dim=-1)
-                # 模型环境音截/填到 target_samples
-                if int(model_wave.shape[-1]) >= target_samples:
-                    model_aligned = model_wave[..., :target_samples]
-                else:
-                    _pad = target_samples - int(model_wave.shape[-1])
-                    model_aligned = torch.cat([
-                        model_wave,
-                        torch.zeros(model_wave.shape[0], model_wave.shape[1], _pad,
-                                    dtype=model_wave.dtype, device=model_wave.device)
-                    ], dim=-1)
 
-                # 混音: 主唱满音量 + 模型环境音 x0.15
-                _FINAL_DUCK = 0.15
-                final_wave = lip_aligned + model_aligned * _FINAL_DUCK
+                # v14.270: 纯 lip_audio 输出 — 模型自生成音频完全丢弃
                 out_audios_t = {
-                    "waveform": final_wave.cpu().float().contiguous(),
+                    "waveform": lip_aligned.cpu().float().contiguous(),
                     "sample_rate": model_sr,
                 }
-                print(f"[H3 LipSync] ✅ 最终出片音频混音: 歌曲主唱满音量 + 模型环境音 x{_FINAL_DUCK} "
-                      f"= {int(final_wave.shape[-1])} samples @ {model_sr}Hz "
-                      f"({float(int(final_wave.shape[-1])) / model_sr:.2f}s)")
+                print(f"[H3 LipSync] ✅ 最终出片音频: 纯 lip_audio 外部音源(模型自生成音频已完全丢弃) "
+                      f"= {int(lip_aligned.shape[-1])} samples @ {model_sr}Hz "
+                      f"({float(int(lip_aligned.shape[-1])) / model_sr:.2f}s)")
             except Exception as _lip_err:
                 # 兜底：混音失败也要输出歌曲主体，不回退到纯模型音频。
                 print(f"[H3 LipSync] ⚠️ 最终混音失败({_lip_err})，直接输出原始 lip_audio 波形兜底")
