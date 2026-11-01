@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.271-one-shot-single-take"
+BUILD = "minimax-h3-extender-v14.272-one-shot-2k-dual"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -7490,6 +7490,7 @@ _ONE_SHOT_SAMPLING_EN2ZH = {
     "Single-pass seamless (recommended)": "单采无缝 (推荐)",
     "Dual-pass HD (seam risk)": "双采高清 (接缝风险)",
     "Dual-pass seamless (8+4)": "双采无缝 (8+4)",
+    "Dual-pass seamless 2K (8+4)": "双采无缝 2K (8+4)",
 }
 
 
@@ -7939,10 +7940,10 @@ class BSAIH3FilmFactory:
         # v14.215 (2026-10-26): 新增第三档「双采无缝 (8+4)」—— 一镜到底 + 二采
         # (1采8步 + 2采4步), 并修掉双采接缝漂移的根因(段头锁 keep 在双采分辨率下静默失效)。
         optional["one_shot_sampling"] = (
-            ["Single-pass seamless (recommended)", "Dual-pass HD (seam risk)", "Dual-pass seamless (8+4)"],
+            ["Single-pass seamless (recommended)", "Dual-pass HD (seam risk)", "Dual-pass seamless (8+4)", "Dual-pass seamless 2K (8+4)"],
             {
                 "default": "Single-pass seamless (recommended)",
-                "tooltip": "One-shot sampling tier (only effective when one_shot_mode=on): Single-pass seamless = skip the refine pass, chained latents are never redrawn, seams have zero drift; recommended with the turbo 8-step LoRA + beta scheduler + 6-8 steps. Dual-pass HD = keep the refine upscale/refinement (can reach 2K), but the reference workflow shows dual-pass chaining introduces pixel drift at seams (blur/jitter between segments), so pick it only when you need HD upscaling. v14.215 adds 'Dual-pass seamless (8+4)': runs the refine pass (8 first-pass steps + 4 refine steps, denoise 0.45) AND repairs the inter-segment anchor so the join stays seamless - the head keep-lock used to die silently whenever the previous clip's tail was at the refined 2x resolution, which is exactly why dual-pass drifted. The 8+4 counts still come from the widget (speed_preset=custom); this tier never overrides them.",
+                "tooltip": "One-shot sampling tier (only effective when one_shot_mode=on): Single-pass seamless = skip the refine pass, chained latents are never redrawn, seams have zero drift; recommended with the turbo 8-step LoRA + beta scheduler + 6-8 steps. Dual-pass HD = keep the refine upscale/refinement (can reach 2K), but the reference workflow shows dual-pass chaining introduces pixel drift at seams (blur/jitter between segments), so pick it only when you need HD upscaling. v14.215 adds 'Dual-pass seamless (8+4)': runs the refine pass (8 first-pass steps + 4 refine steps, denoise 0.45) AND repairs the inter-segment anchor so the join stays seamless - the head keep-lock used to die silently whenever the previous clip's tail was at the refined 2x resolution, which is exactly why dual-pass drifted. The 8+4 counts still come from the widget (speed_preset=custom); this tier never overrides them. v14.272 adds 'Dual-pass seamless 2K (8+4)': the same seamless dual-pass chain but as a self-contained 2K recipe - it forces 8 first-pass steps + 4 refine steps + denoise 0.45 + euler + shift 12/3, enables refine, and sets the refine scale so the output width lands on 2560 (2K) whatever the first-pass width is (1280 -> x2.00, 1920 -> x1.33, clamped to 1.0..2.0; a 3D latent upscaler model is used only at exactly x2.00, otherwise bilinear).",
             },
         )
         # v14.238 MiniMaxH3 Director 极速双采移植参数 —— 追加在 optional 最末尾,
@@ -8261,6 +8262,13 @@ class BSAIH3FilmFactory:
         # except 吞掉 → 噪声延续 + 段头锁 keep 全部失效 → 裁掉重叠区后接缝画面跳变。
         # one_shot_seamless_dual = 双采 + 接缝锚点修复(不跳过二采)
         one_shot_seamless_dual = one_shot_enabled and one_shot_sampling.startswith("双采无缝")
+        # v14.272 (2026-11-01): 第四档「双采无缝 2K (8+4)」—— 一镜到底 + 双采,
+        # 且是自带配方的 2K 档: 一采 8 步(蒸馏契约) + 二采 4 步(denoise 0.45),
+        # 二采 latent 放大倍数按一采宽度换算到"输出宽 2560(2K)"。与第三档的区别:
+        # 第三档沿用 widget 里的步数/倍数(用户 w4=12 步 + w29=2.0 → 一采 1920x1088
+        # 出来就是 3840x2176=4K), 本档才真正落到 2K。
+        one_shot_dual_2k = (one_shot_enabled and one_shot_sampling.startswith("双采无缝")
+                            and "2K" in one_shot_sampling)
         # v14.159: 一镜到底×歌曲自动分 CLIP 的每段目标时长(秒); 0=关闭自动分
         try:
             one_shot_clip_duration = int(kwargs.get("one_shot_clip_duration", 12) or 12)
@@ -8991,6 +8999,24 @@ class BSAIH3FilmFactory:
         elif _ls_mode in ("01", "02"):
             refine_audio_denoise = 0.7
             print(f"[H3 直播带货] {_LIVESTREAM_VOICE_MODE_LABEL.get(_ls_mode, _ls_mode)}: 模型生成人声, 音频重绘 0.7 精修清晰度 + 一采12步达标")
+        # v14.272 一镜到底·2K双采（1采8步 / 2采4步）—— 自带配方档。
+        # 一镜到底的第三档「双采无缝 (8+4)」不覆盖任何数值, 全靠 widget (用户
+        # 工作流是 12 步 + factor 2.0 → 一采 1920x1088 出来 3840x2176=4K)。
+        # 本档把配方钉死为 1采8步 / 2采4步 / denoise 0.45 / euler / shift 12-3,
+        # 并把二采倍数留给分辨率解析之后按"输出宽 2560(2K)"换算(见下方声明尺寸段),
+        # 这样 1280 一采 → x2.00 = 2560, 1920 一采 → x1.33 = 2560, 都是 2K。
+        # _hv2x_decl 保持 1.0: 本档走真实 latent 放大, 不依赖 HyperVAE 2x 解码
+        # (用户 VAE 是 minimax_h3_sol_vae, 挂 HyperVAE 声明会把 2K 变成假放大)。
+        if one_shot_dual_2k:
+            steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+            shift_video, shift_audio = 12.0, 3.0
+            refine_enable = True
+            _hv2x_decl = 1.0
+            if str(sampler_name) != "euler":
+                sampler_name = "euler"
+            print("[H3 Extender] 🎥 v14.272 一镜到底·2K双采: 一采 8 步(蒸馏契约) + 二采 4 步"
+                  " (denoise 0.45) + euler + shift 12/3；二采 latent 放大倍数按输出宽 2560(2K) 换算，"
+                  "接缝沿用 v14.215 双采锚点修复")
         # v14.221 (自动提速护栏): 检测到 HyperVAE 2x 权重可用且当前二采会因
         # latent x2.0 放大导致 24GB 换页超时(实测 834s/步)时, 自动把二采
         # 降级到"双采2K"提速路径: factor=1.0 + HyperVAE 2x 解码直出 2K,
@@ -9001,6 +9027,7 @@ class BSAIH3FilmFactory:
         _auto_hv2x = False
         try:
             if (os.environ.get("BSAI_H3_AUTO_HV2X", "1") != "0"
+                    and not one_shot_dual_2k
                     and bool(refine_enable)
                     and float(refine_upscale_factor or 1.0) > 1.0
                     and (_rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)")
@@ -9675,6 +9702,27 @@ class BSAIH3FilmFactory:
         # 显存预算降级"的段重采样回声明像素；旧实现只在本函数收尾前写这两个
         # 键，续跑/恢复出来的链常常拿不到，于是成片停在 1440x800 而不是
         # 声明的 1920x1088（人脸直接糊掉）。这里在渲染开始前就写一次。
+        # v14.272 一镜到底·2K双采: 二采 latent 放大倍数在这里按已解析的一采宽度
+        # 换算，让输出宽正好落到 2560(2K)。必须放在此处 —— 上面 9xxx 的渲染管道
+        # 分支跑在分辨率解析之前，拿不到 resolved_width。倍数夹在 [1.0, 2.0]:
+        # 一采 1280 → 2.00(正好 2K)、一采 1920 → 1.33(2560)、一采 ≥2560 → 1.0(只精修)。
+        if one_shot_dual_2k:
+            try:
+                _os2k_w = float(resolved_width or 0)
+                _os2k_f = (2560.0 / _os2k_w) if _os2k_w > 0 else 2.0
+                refine_upscale_factor = max(1.0, min(2.0, round(_os2k_f, 3)))
+                # 3D latent upscaler 只在原生 x2.0 倍率可用; 换算成 1.33 等非整数倍
+                # 时退回双线性, 避免上采样器把固定 2x 倍率硬套到 1.33 张力错配。
+                if abs(float(refine_upscale_factor) - 2.0) > 1e-3:
+                    if refine_upscaler_model and not str(refine_upscaler_model).startswith("("):
+                        refine_upscaler_model = "(bilinear interpolation, no model)"
+                print(f"[H3 Extender] v14.272 一镜到底·2K双采: 一采 {resolved_width}x{resolved_height} "
+                      f"-> 二采 latent x{float(refine_upscale_factor):.3f} = "
+                      f"{int(round(float(resolved_width) * float(refine_upscale_factor)))}"
+                      f"x{int(round(float(resolved_height) * float(refine_upscale_factor)))} (目标 2560 宽)")
+            except Exception as _os2k_err:
+                print(f"[H3 Extender] v14.272 一镜到底·2K双采: 倍数换算失败, 回退 x2.0 ({_os2k_err})")
+                refine_upscale_factor = 2.0
         try:
             _decl_out_f = max(1.0, float(refine_upscale_factor)) if bool(refine_enable) else 1.0
             # v14.182: 双采2K 档声明输出尺寸计入 HyperVAE 2x 像素翻倍 (latent
@@ -10626,6 +10674,17 @@ class BSAIH3FilmFactory:
                                   f"(参考标准: 6-8 步 + beta; 低动态内容可 6 步, 高动态 8 步)")
                         if _os_sched != "beta":
                             print(f"[H3 Extender] ℹ️ v14.185 一镜到底·单采: 当前调度器={_os_sched}, 参考工作流标准为 beta(仅提示, 不强制)")
+                    elif one_shot_dual_2k:
+                        # v14.272: 2K 档配方已钉死(8+4/denoise 0.45/euler/shift 12-3),
+                        # 这里只做校验与回报, 不改用户参数。
+                        if _os_steps != 8 or int(refine_steps) != 4:
+                            print(f"[H3 Extender] ⚠️ v14.272 一镜到底·2K双采: 当前一采 {_os_steps} 步 / 二采 {int(refine_steps)} 步, "
+                                  f"该档配方为 8+4 (脚本已按配方改写, 若日志仍如此请反馈)")
+                        print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采: 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
+                              f"(denoise {float(refine_denoise):.2f}), 二采倍数按输出宽 2560(2K) 换算, 接缝沿用 v14.215 双采锚点修复")
+                        if _os_sched != "beta":
+                            print(f"[H3 Extender] ℹ️ v14.272 一镜到底·2K双采: 当前调度器={_os_sched}, "
+                                  f"参考工作流标准为 beta(仅提示, 不强制)")
                     elif one_shot_seamless_dual:
                         # v14.215: 双采无缝档 = 蒸馏底模 8 步一采 + 4 步二采(不是老链的 >=20 步)
                         if _os_steps >= 20:
@@ -11338,6 +11397,14 @@ class BSAIH3FilmFactory:
                             print("[H3 Extender] 一镜到底·单采无缝：已跳过二采（refine），链式 latent 不重绘，"
                                   "接缝零漂移（对齐 Motion Context V2 单遍采样方案）；"
                                   "如需 2K/高清放大请改用「双采高清」档或分镜模式")
+                    elif one_shot_dual_2k:
+                        # v14.272: 2K 档二采照跑, 只是倍数按 2560 输出宽换算。
+                        if not _os_pass_notice_done:
+                            _os_pass_notice_done = True
+                            print("[H3 Extender] ✅ 一镜到底·2K双采：二采照跑"
+                                  f"(一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步, denoise {float(refine_denoise):.2f})，"
+                                  f"二采 latent 放大 x{float(refine_upscale_factor):.3f} 使输出宽 2560(2K)；"
+                                  "接缝沿用 v14.215 双采段头锚点修复")
                     elif one_shot_seamless_dual:
                         # v14.215: 双采无缝档 —— 二采照跑(1采8步+2采4步), 接缝靠
                         # v14.215 的锚点重采样修复(段头锁 keep 真正生效)。
