@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.272-one-shot-2k-dual"
+BUILD = "minimax-h3-extender-v14.274-bislerp-fallback"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -2913,11 +2913,59 @@ def _ff_get_upscaler_models():
     opts = ["(bilinear interpolation, no model)"]
     if _FF_UPSCALER_MOD is not None:
         try:
-            names = _FF_UPSCALER_MOD.scan_models()
+            # v14.273: 只列真正能加载的权重 —— models/latent_upscale_models/
+            # 同时放着 pure-3D 卷积、clean 因子化注意力、LTX-2.5 upsampler
+            # 三种互不兼容的架构, 选错会在 load_state_dict 里炸掉。
+            try:
+                names = _FF_UPSCALER_MOD.scan_models(supported_only=True)
+            except TypeError:
+                names = _FF_UPSCALER_MOD.scan_models()
             opts.extend(sorted(n for n in names if not n.startswith("(")))
         except Exception:
             pass
     return opts
+
+
+def _ff_resolve_upscaler_model(name):
+    """校验 3D upscaler 权重与加载器架构是否匹配, 不匹配时自动换成可用权重。
+
+    v14.273: 旧工作流里存的权重若不受加载器支持, 会在 load_state_dict 里
+    抛错, 被 except 吞掉后静默退化成 bilinear 插值 —— 画质明显变软却看不出
+    原因。这里提前发现, 自动纠正并把原因推到前端状态栏, 避免整条链白跑。
+    """
+    if not name or str(name).startswith("("):
+        return name, ""
+    if _FF_UPSCALER_MOD is None:
+        return name, ""
+    try:
+        _ok = bool(_FF_UPSCALER_MOD.is_supported_model(name))
+    except Exception:
+        return name, ""
+    if _ok:
+        return name, ""
+
+    _opts = [n for n in _ff_get_upscaler_models() if not str(n).startswith("(")]
+    _fallback = ""
+    for _pref in ("minimax_h3_latent_upscaler_3d", "latent_upscaler_3d", "upscaler_3d"):
+        for _n in _opts:
+            if _pref in str(_n).lower():
+                _fallback = _n
+                break
+        if _fallback:
+            break
+    if not _fallback and _opts:
+        _fallback = _opts[0]
+    if not _fallback:
+        return "(bilinear interpolation, no model)", (
+            f"3D upscaler 权重 '{name}' 与加载器架构不匹配, 且目录里没有可用权重, "
+            f"已退回 bilinear 插值")
+    try:
+        _desc = _FF_UPSCALER_MOD.describe_model(name)
+    except Exception:
+        _desc = "未知架构"
+    return _fallback, (
+        f"3D upscaler 权重 '{name}' 与加载器架构不匹配({_desc}), "
+        f"已自动改用 '{_fallback}'")
 
 
 def _ff_is_nested(samples):
@@ -3013,7 +3061,8 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
     再换算回 latent 尺寸, 避免官方节点不取整导致的分辨率偏移与边缘色条。
     音频 latent 保持不动(只放大视频成员)。
 
-    upscaler_model: 选中 3D latent upscaler 文件名时用神经网络语义放大, 否则 bilinear 插值。
+    upscaler_model: 选中 3D latent upscaler 文件名时用神经网络语义放大, 否则按 method 插值
+    (调用处传 bislerp: 保 token 范数的平滑方法, bilinear 会让二采在边缘发明碎屑)。
     """
     import comfy.utils
     if video.ndim < 4:
@@ -3051,7 +3100,7 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
                   f"model={upscaler_model}")
             return out
         except Exception as e:
-            print(f"[H3 Extender] Refine 3D upscaler 失败({e}), fallback bilinear")
+            print(f"[H3 Extender] Refine 3D upscaler 失败({e}), fallback {method}")
             # v14.157: 记录回退原因, 调用处会推送前端显式警告
             _FF_UPSCALER_FELL_BACK["hit"] = True
             _FF_UPSCALER_FELL_BACK["reason"] = str(e)[:180]
@@ -4317,14 +4366,28 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _old_hw = (tuple(_members[0].shape[-2:]) if _members else None)
                 _FF_UPSCALER_FELL_BACK["hit"] = False
                 _FF_UPSCALER_FELL_BACK["reason"] = ""
+                # v14.273: 权重与加载器架构不匹配时提前纠正, 不再让它静默退化成 bilinear
+                refine_upscaler_model, _up_note = _ff_resolve_upscaler_model(refine_upscaler_model)
+                if _up_note:
+                    print(f"[H3 Extender] v14.273 {_up_note}")
+                    _send_extender_warning(
+                        owner_id,
+                        _up_note,
+                        clip_index=clip_index,
+                    )
+                # v14.274: 插值回退用 bislerp 而不是 bilinear。latent token 是 24 维
+                # 向量, 分量插值会在内容边缘把相邻 token 方向抵消、范数塌缩; 这些
+                # "短 token" 严重 out-of-distribution, 二采会在此处凭空发明内容,
+                # 表现为沿边缘的碎屑/丝状物(实测满屏白色碎纸片)。bislerp 对方向做
+                # slerp、只插值模长, 是唯一保范数的平滑方法。
                 _up_video = _ff_upscale_video_latent(
-                    _members[0], _r_factor, _r_align, "bilinear", refine_upscaler_model)
-                # v14.157: 3D 语义放大失败不再静默 —— 会退化成 bilinear,
+                    _members[0], _r_factor, _r_align, "bislerp", refine_upscaler_model)
+                # v14.157: 3D 语义放大失败不再静默 —— 会退化成插值,
                 # 画质明显变软, 必须让用户在状态栏看到。
                 if _FF_UPSCALER_FELL_BACK["hit"]:
                     _send_extender_warning(
                         owner_id,
-                        f"3D 语义放大失败，已回退 bilinear 插值"
+                        f"3D 语义放大失败，已回退 bislerp 插值"
                         f"（{_FF_UPSCALER_FELL_BACK['reason']}）",
                         clip_index=clip_index,
                     )

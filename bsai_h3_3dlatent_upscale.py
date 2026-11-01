@@ -90,6 +90,7 @@ LATENTS_STD = [
 # 3D latent upscaler 模型加载（参考 LBH-123-AI / ComfyUI_Minimax_h3_latent_Upscaler）
 # ---------------------------------------------------------------------------
 _UPSCALER_CACHE = {}
+_UPSCALER_MODULE_CACHE = {}
 _UPSCALER_MODEL_DIR = "latent_upscale_models"
 
 
@@ -111,7 +112,24 @@ def _scan_upscale_models():
     for ext in ("*.safetensors", "*.pth"):
         files.extend(glob_models(d, ext))
     names = sorted(os.path.basename(f) for f in files)
+    # v1.1: 只列真正能加载的权重 —— models/latent_upscale_models/ 里混着
+    # pure-3D 卷积、clean 因子化注意力、LTX-2.5 upsampler 三种互不兼容的架构,
+    # 选错只会白等一次加载失败再退回插值。
+    names = _filter_supported_models(names, d)
     return names if names else ["(no model in latent_upscale_models)"]
+
+
+def _filter_supported_models(names, directory):
+    """剔除加载器不支持的权重 (架构不匹配)。失败时原样返回, 不影响节点可用性。"""
+    mod = _load_upscaler_module()
+    if mod is None:
+        return names
+    try:
+        return mod.scan_models(supported_only=True)
+    except TypeError:
+        return names
+    except Exception:
+        return names
 
 
 def glob_models(d, ext):
@@ -120,6 +138,19 @@ def glob_models(d, ext):
 
 
 def _load_upscaler_module():
+    """Load the LBH-123-AI 3D upscaler module by path (cached, graceful fallback).
+
+    v1.1: 之前每次调用都会重新 exec 一遍插件模块, 同一份权重会被重复实例化
+    (MODEL_CACHE 与显存都翻倍); 这里缓存模块实例, 只加载一次。
+    """
+    if "mod" in _UPSCALER_MODULE_CACHE:
+        return _UPSCALER_MODULE_CACHE["mod"]
+    mod = _load_upscaler_module_uncached()
+    _UPSCALER_MODULE_CACHE["mod"] = mod
+    return mod
+
+
+def _load_upscaler_module_uncached():
     """Load the LBH-123-AI 3D upscaler module by path (graceful fallback)."""
     try:
         import importlib.util as _ilu
