@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.275-global-no-spatial-tiles"
+BUILD = "minimax-h3-extender-v14.276-single-pass-refine"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -3054,6 +3054,28 @@ def _ff_snap_to_multiple(n, m):
     return max(m, (int(n) // m) * m)
 
 
+def _ff_refine_factor_for_budget(width, height, latent_t, budget, align_px=40):
+    """v14.276: 让二采单次调用 tokens <= budget 的最大 latent 放大倍率。
+
+    二采 tokens = T * H_lat * W_lat, 随倍率平方增长。超过预算时
+    只能靠时间分块把整段切成多段各自加噪采样, 段间必然出现接缝闪烁与碎花纹理
+    (实机 709,920 tokens 4 段采样满屏碎纹)。这里改为向下取倍率: 整段一次调用,
+    宁可比目标分辨率小一点, 也不再把画面切段。
+    """
+    h_lat = max(1, int(height) // 16)
+    w_lat = max(1, int(width) // 16)
+    step = max(1, int(align_px) // 16)
+    budget = max(1, int(budget))
+    best = 1.0
+    for _i in range(100, 201):
+        _f = _i / 100.0
+        _nh = _ff_snap_to_multiple(round(h_lat * _f), step)
+        _nw = _ff_snap_to_multiple(round(w_lat * _f), step)
+        if int(latent_t) * _nh * _nw <= budget:
+            best = _f
+    return best
+
+
 def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model=""):
     """v1.31: 视频 latent [B,C,T,H,W] 空间放大 + 像素对齐(不经过 VAE, 无编解码损失)。
 
@@ -3635,7 +3657,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                #     二采 euler); None/"inherit (跟随一采)" 时跟随一采采样器。
                #   refine_sigmas: 外接 SIGMAS 覆盖内部 beta 调度(Refine 节点
                #     原版行为, 参考插件用 BasicScheduler/ManualSigmas 直连)。
-               refine_sampler=None, refine_sigmas=None):
+               refine_sampler=None, refine_sigmas=None,
+               # v14.276: 一镜到底·2K双采的"干净优先"单次采样。倍率已按 token
+               # 预算压到 Sol-Attn 健康区, 整段一次调用即可; 时间分块(每段独立
+               # 加噪 + 独立 seed)会在接缝处闪烁、段内碎花, 该档一律禁用。
+               refine_single_pass=False):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -4244,7 +4270,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _ws_tbl = {1.0: 1.5, 1.5: 2.6, 2.0: 4.5}
                 _orig_f = float(_r_factor)
                 # 候选倍率从当前值开始逐级下降
-                _cands = [f for f in (2.0, 1.5, 1.0) if _orig_f >= f - 1e-6]
+                # v14.276: 单次采样档的倍率已按 token 预算取好(1.0~2.0 之间的小数),
+                # 阶梯里只认 1.5/1.0, 会被误判成"显存不足"→ 反而启用 spatial 分块
+                # 保住倍率(每块独立重构图 = 重影)。该档只按自身倍率判, 不分块。
+                _cands = ([_orig_f] if refine_single_pass
+                          else [f for f in (2.0, 1.5, 1.0) if _orig_f >= f - 1e-6])
                 if not _cands:
                     _cands = [max(1.0, _orig_f)]
                 # 需求估算:
@@ -4485,7 +4515,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             #   画面"糊成一片+像素化故障风". 官方 Sol-H3 DualSample 工作流二采正是用
             #   DisableNoise(Noise_EmptyNoise -> prepare_empty_noise 全零噪声) 走同一入口,
             #   此处完全对齐.
-            _use_temporal = bool(temporal_chunk_tokens) and int(temporal_chunk_tokens) > 0
+            _use_temporal = (bool(temporal_chunk_tokens) and int(temporal_chunk_tokens) > 0
+                             and not refine_single_pass)
             # v2.02b: chunk 过小(如当开关填 1)会切成大量单 token 段, 每段都要完整跑
             # 4 步空间分块采样, 总耗时爆炸(T=107 时 107 段≈100 分钟). 低于 16 一律按 16 执行.
             if _use_temporal and int(temporal_chunk_tokens) < 16:
@@ -4498,7 +4529,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 超 24GB 卡 -> 每块换页 ~87s -> 348s/步. 时间分块把每段降到 ~22 帧,
             # 与空间分块组合后每块 ~23K tokens, dense workspace ~2GB 可装, 总计算量
             # 守恒(tokens 均摊到段*块, 不膨胀), 预期 4 步总量 50-100s.
-            if not _use_temporal:
+            # v14.276: 单次采样档不做自动时间分块 —— 倍率已按 token 预算压到
+            # Sol-Attn 健康区, 整段一次调用最干净; 分块只会换来接缝闪烁与碎纹。
+            if not _use_temporal and not refine_single_pass:
                 try:
                     _t_cand226 = None
                     _h_cand226 = 0
@@ -5009,7 +5042,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                       * int(_r_m_call[0].shape[-2]) * int(_r_m_call[0].shape[-1]))
                 except Exception:
                     _r_call_tok = _r_tok_gate
-            _r_gate_limit = 350000 if _use_temporal else _REFINE_MAX_SOL_TOKENS
+            # v14.276: 单次采样档的 tokens 已由倍率预算压到 <=350,000(健康区上界),
+            # 门限按 350k 判 —— 仍用 130k 会把它误判成病态规模, 强制降级 dense
+            # 并套 global 包装(全序列 dense attention, 每步上百秒)。
+            _r_gate_limit = 350000 if (_use_temporal or refine_single_pass) else _REFINE_MAX_SOL_TOKENS
             # v14.164 (2026-10-22 fix #v14.173): 方案A — 先分块再决定 dense 降级。
             # 旧顺序(v14.148 先注入 sol_max_tokens -> v14.164 后分块)导致分块成功后
             # dense 门仍留在 transformer_options 里, 每个 262k token 的 tile 强制
@@ -8358,10 +8394,9 @@ class BSAIH3FilmFactory:
         # one_shot_seamless_dual = 双采 + 接缝锚点修复(不跳过二采)
         one_shot_seamless_dual = one_shot_enabled and one_shot_sampling.startswith("双采无缝")
         # v14.272 (2026-11-01): 第四档「双采无缝 2K (8+4)」—— 一镜到底 + 双采,
-        # 且是自带配方的 2K 档: 一采 8 步(蒸馏契约) + 二采 4 步(denoise 0.45),
-        # 二采 latent 放大倍数按一采宽度换算到"输出宽 2560(2K)"。与第三档的区别:
-        # 第三档沿用 widget 里的步数/倍数(用户 w4=12 步 + w29=2.0 → 一采 1920x1088
-        # 出来就是 3840x2176=4K), 本档才真正落到 2K。
+        # 且是自带配方的档: 一采 8 步(蒸馏契约) + 二采 4 步(denoise 0.45)。
+        # v14.276: 二采倍率改按「单次调用 token 预算 350k」向下取(960x544 → x1.39),
+        # 整段一次采样; 2K 在该卡上只能靠时间分块, 分块会闪烁+碎花, 已放弃。
         one_shot_dual_2k = (one_shot_enabled and one_shot_sampling.startswith("双采无缝")
                             and "2K" in one_shot_sampling)
         # v14.159: 一镜到底×歌曲自动分 CLIP 的每段目标时长(秒); 0=关闭自动分
@@ -9124,8 +9159,8 @@ class BSAIH3FilmFactory:
             if str(sampler_name) != "euler":
                 sampler_name = "euler"
             print("[H3 Extender] 🎥 v14.272 一镜到底·2K双采: 一采 8 步(蒸馏契约) + 二采 4 步"
-                  " (denoise 0.45) + euler + shift 12/3；二采 latent 放大倍数按输出宽 2560(2K) 换算，"
-                  "接缝沿用 v14.215 双采锚点修复")
+                  " (denoise 0.45) + euler + shift 12/3；二采倍率按单次采样 token 预算(<=350k)取,"
+                  " 整段一次采样不分块(v14.276 干净优先)")
         # v14.221 (自动提速护栏): 检测到 HyperVAE 2x 权重可用且当前二采会因
         # latent x2.0 放大导致 24GB 换页超时(实测 834s/步)时, 自动把二采
         # 降级到"双采2K"提速路径: factor=1.0 + HyperVAE 2x 解码直出 2K,
@@ -9811,27 +9846,41 @@ class BSAIH3FilmFactory:
         # 显存预算降级"的段重采样回声明像素；旧实现只在本函数收尾前写这两个
         # 键，续跑/恢复出来的链常常拿不到，于是成片停在 1440x800 而不是
         # 声明的 1920x1088（人脸直接糊掉）。这里在渲染开始前就写一次。
-        # v14.272 一镜到底·2K双采: 二采 latent 放大倍数在这里按已解析的一采宽度
-        # 换算，让输出宽正好落到 2560(2K)。必须放在此处 —— 上面 9xxx 的渲染管道
-        # 分支跑在分辨率解析之前，拿不到 resolved_width。倍数夹在 [1.0, 2.0]:
-        # 一采 1280 → 2.00(正好 2K)、一采 1920 → 1.33(2560)、一采 ≥2560 → 1.0(只精修)。
+        # v14.276 (干净优先): 2K 不再可行 —— 二采放大到 2560 宽时 tokens 到 709,920,
+        # Sol-Attn 稀疏在该规模病态, 单次调用装不进 24GB, 只能退化成时间分块(每段
+        # 独立加噪/独立 seed, 切点也不落在 5-token 帧组相位上), 实机就是全程闪烁 +
+        # 满屏碎花纹理。改为按「单次调用 token 预算」向下取倍率: 整段一次采样, 无
+        # 接缝、无分块噪声, 960x544 一采约 x1.39 -> latent 46x82 = 1312x736。
+        # 预算只与倍率平方相关(T·H_lat·W_lat), 这里按最长 clip 的 latent T 估算。
+        _os2k_decl_px = None
         if one_shot_dual_2k:
             try:
-                _os2k_w = float(resolved_width or 0)
-                _os2k_f = (2560.0 / _os2k_w) if _os2k_w > 0 else 2.0
-                refine_upscale_factor = max(1.0, min(2.0, round(_os2k_f, 3)))
-                # 3D latent upscaler 只在原生 x2.0 倍率可用; 换算成 1.33 等非整数倍
-                # 时退回双线性, 避免上采样器把固定 2x 倍率硬套到 1.33 张力错配。
-                if abs(float(refine_upscale_factor) - 2.0) > 1e-3:
-                    if refine_upscaler_model and not str(refine_upscaler_model).startswith("("):
-                        refine_upscaler_model = "(bilinear interpolation, no model)"
-                print(f"[H3 Extender] v14.272 一镜到底·2K双采: 一采 {resolved_width}x{resolved_height} "
-                      f"-> 二采 latent x{float(refine_upscale_factor):.3f} = "
-                      f"{int(round(float(resolved_width) * float(refine_upscale_factor)))}"
-                      f"x{int(round(float(resolved_height) * float(refine_upscale_factor)))} (目标 2560 宽)")
+                _os2k_budget = 350000
+                _os2k_t = 0
+                for _c2k in clips or []:
+                    try:
+                        _d2k = float(_c2k.get("duration", 5.0))
+                    except (TypeError, ValueError):
+                        _d2k = 5.0
+                    _os2k_t = max(_os2k_t, _video_latent_t(_duration_to_frames(_d2k)))
+                _os2k_t = max(1, _os2k_t)
+                refine_upscale_factor = _ff_refine_factor_for_budget(
+                    resolved_width, resolved_height, _os2k_t, _os2k_budget, refine_align_to)
+                _os2k_nh = _ff_snap_to_multiple(
+                    round(int(resolved_height) // 16 * float(refine_upscale_factor)),
+                    max(1, int(refine_align_to) // 16))
+                _os2k_nw = _ff_snap_to_multiple(
+                    round(int(resolved_width) // 16 * float(refine_upscale_factor)),
+                    max(1, int(refine_align_to) // 16))
+                print(f"[H3 Extender] v14.276 一镜到底·2K双采(干净优先): 一采 "
+                      f"{resolved_width}x{resolved_height} -> 二采 latent x{float(refine_upscale_factor):.2f} = "
+                      f"{_os2k_nw * 16}x{_os2k_nh * 16} "
+                      f"({_os2k_t}x{_os2k_nh}x{_os2k_nw}={_os2k_t * _os2k_nh * _os2k_nw:,} tokens <= 预算 "
+                      f"{_os2k_budget:,}), 整段一次采样(不分块, 无接缝/无碎纹)")
+                _os2k_decl_px = (int(_os2k_nw * 16), int(_os2k_nh * 16))
             except Exception as _os2k_err:
-                print(f"[H3 Extender] v14.272 一镜到底·2K双采: 倍数换算失败, 回退 x2.0 ({_os2k_err})")
-                refine_upscale_factor = 2.0
+                print(f"[H3 Extender] v14.276 一镜到底·2K双采: 倍率换算失败, 回退 x1.5 ({_os2k_err})")
+                refine_upscale_factor = 1.5
         try:
             _decl_out_f = max(1.0, float(refine_upscale_factor)) if bool(refine_enable) else 1.0
             # v14.182: 双采2K 档声明输出尺寸计入 HyperVAE 2x 像素翻倍 (latent
@@ -9842,6 +9891,10 @@ class BSAIH3FilmFactory:
             manifest["declared_refine_factor"] = float(_decl_out_f)
             manifest["output_width"] = int(round(float(resolved_width) * _decl_out_f))
             manifest["output_height"] = int(round(float(resolved_height) * _decl_out_f))
+            # v14.276: 单次采样档的声明像素取二采实际几何(按 align 取整后的 latent),
+            # 与倍率名义值差 1~2%, 直接用实际值避免成片再被重采样一次。
+            if _os2k_decl_px is not None:
+                manifest["output_width"], manifest["output_height"] = _os2k_decl_px
             _write_json_atomic(manifest_path, manifest)
             print(f"[H3 Extender] v14.157 声明输出尺寸: 一采 {resolved_width}x{resolved_height} "
                   f"× 二采 x{_decl_out_f:.1f} -> "
@@ -10790,7 +10843,8 @@ class BSAIH3FilmFactory:
                             print(f"[H3 Extender] ⚠️ v14.272 一镜到底·2K双采: 当前一采 {_os_steps} 步 / 二采 {int(refine_steps)} 步, "
                                   f"该档配方为 8+4 (脚本已按配方改写, 若日志仍如此请反馈)")
                         print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采: 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
-                              f"(denoise {float(refine_denoise):.2f}), 二采倍数按输出宽 2560(2K) 换算, 接缝沿用 v14.215 双采锚点修复")
+                              f"(denoise {float(refine_denoise):.2f}), 二采倍率按单次采样 token 预算(<=350k)取, "
+                              f"整段一次采样不分块(v14.276 干净优先)")
                         if _os_sched != "beta":
                             print(f"[H3 Extender] ℹ️ v14.272 一镜到底·2K双采: 当前调度器={_os_sched}, "
                                   f"参考工作流标准为 beta(仅提示, 不强制)")
@@ -11507,12 +11561,12 @@ class BSAIH3FilmFactory:
                                   "接缝零漂移（对齐 Motion Context V2 单遍采样方案）；"
                                   "如需 2K/高清放大请改用「双采高清」档或分镜模式")
                     elif one_shot_dual_2k:
-                        # v14.272: 2K 档二采照跑, 只是倍数按 2560 输出宽换算。
+                        # v14.276: 2K 档二采照跑, 倍数按单次采样 token 预算取。
                         if not _os_pass_notice_done:
                             _os_pass_notice_done = True
                             print("[H3 Extender] ✅ 一镜到底·2K双采：二采照跑"
                                   f"(一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步, denoise {float(refine_denoise):.2f})，"
-                                  f"二采 latent 放大 x{float(refine_upscale_factor):.3f} 使输出宽 2560(2K)；"
+                                  f"二采 latent 放大 x{float(refine_upscale_factor):.2f}(按 token 预算取, 整段一次采样)；"
                                   "接缝沿用 v14.215 双采段头锚点修复")
                     elif one_shot_seamless_dual:
                         # v14.215: 双采无缝档 —— 二采照跑(1采8步+2采4步), 接缝靠
@@ -11567,6 +11621,7 @@ class BSAIH3FilmFactory:
                     refine_mem_mode=("global" if refine_mem_global else "spatial"),
                     temporal_chunk_tokens=int(temporal_chunk_tokens),
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
+                    refine_single_pass=bool(one_shot_dual_2k),
                     omni_8step_mode=omni_8step_mode,
                     honor_manual_steps=(str(speed_preset) == "custom"),
                     # v14.238 MiniMaxH3 Director 极速双采移植参数
