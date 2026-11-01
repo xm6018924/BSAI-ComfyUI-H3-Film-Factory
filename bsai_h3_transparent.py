@@ -385,9 +385,16 @@ class BSAI_H3_TransparentKey:
         return (rgba, matte, preview)
 
     @classmethod
-    def VALIDATE_INPUTS(cls, **kwargs):
-        # Let legacy Chinese dropdown labels saved by old workflow JSONs pass
-        # combo validation; key() normalises them via _norm_backdrop/_norm_preset.
+    def VALIDATE_INPUTS(cls, backdrop_color=None, matte_preset=None):
+        # Naming only these two inputs keeps ComfyUI's built-in list check active
+        # for every other input of the node; a **kwargs signature would disable it
+        # node-wide. The alias tables already hold the current English labels plus
+        # every legacy Chinese label an old workflow can carry, so this accepts
+        # exactly what key() can normalise.
+        if backdrop_color is not None and str(backdrop_color).strip().lower() not in _BACKDROP_ALIASES:
+            return "Invalid backdrop_color: %r" % (backdrop_color,)
+        if matte_preset is not None and str(matte_preset).strip().lower() not in _MATTE_ALIASES:
+            return "Invalid matte_preset: %r" % (matte_preset,)
         return True
 
     @classmethod
@@ -436,9 +443,14 @@ class BSAI_H3_SaveTransparentVideo:
         }
 
     @classmethod
-    def VALIDATE_INPUTS(cls, **kwargs):
-        # Let legacy Chinese format labels saved by old workflow JSONs pass
-        # combo validation; export() matches them by prefix at runtime.
+    def VALIDATE_INPUTS(cls, format=None):
+        # export() dispatches on the value's prefix, so accept the three current
+        # labels plus the legacy Chinese ones ("RGBA PNG 序列 (.png)",
+        # "ProRes 4444 (.mov, 真Alpha)", ...) that older workflows still carry.
+        # Only this input is named, so every other input keeps the built-in check.
+        if format is not None and not str(format).startswith(
+                ("ProRes", "WebM", "RGBA", "PNG", "png")):
+            return "Invalid format: %r" % (format,)
         return True
 
     def _output_root(self):
