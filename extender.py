@@ -10591,7 +10591,7 @@ class BSAIH3FilmFactory:
             pass  # lip_voice 已接音频，不需要自动合成
         elif _tts_model is not None and lip_audio is None and _lip_voice is None:
             try:
-                # _speaker_audio_map 在资产库解析时已赋值（5元组返回值）
+                # _speaker_audio_map 在资产库解析时已赋值（6元组返回值）
                 _am = locals().get("_speaker_audio_map", {})
                 _auto_tts_triggered = self._try_auto_dialogue_tts(
                     clips=clips,
