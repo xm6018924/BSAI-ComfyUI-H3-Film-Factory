@@ -7,9 +7,9 @@
 
 ---
 
-| 📖 介绍 | 🧩 节点 | ⚙️ 参数 | 📝 更新说明 | 📦 安装 | 🎬 示例 |
-|---|---|---|---|---|---|
-| [插件介绍](#插件介绍--introduction) | [节点清单](#节点清单--node-list) | [主节点参数](#主节点参数--main-node-parameters) | **[👉 全部更新说明](./CHANGELOG.md)** | [安装](#安装--installation) | [工作流示例](#示例工作流--example-workflows) |
+| 📖 介绍 | 🧩 节点 | ⚙️ 参数 | 🎬 透明视频 | 📝 更新说明 | 📦 安装 | 🎬 示例 |
+|---|---|---|---|---|---|---|
+| [插件介绍](#插件介绍--introduction) | [节点清单](#节点清单--node-list) | [主节点参数](#主节点参数--main-node-parameters) | [透明视频管道](#透明视频渲染管道--transparent-video-pipeline-v14233) | **[👉 全部更新说明](./CHANGELOG.md)** | [安装](#安装--installation) | [工作流示例](#示例工作流--example-workflows) |
 
 
 
@@ -191,9 +191,102 @@
 ---
 
 
-| 📖 介绍 | 🧩 节点 | ⚙️ 参数 | 📝 更新说明 | 📦 安装 | 🎬 示例 |
-|---|---|---|---|---|---|
-| [插件介绍](#插件介绍--introduction) | [节点清单](#节点清单--node-list) | [主节点参数](#主节点参数--main-node-parameters) | **[👉 全部更新说明](./CHANGELOG.md)** | [安装](#安装--installation) | [工作流示例](#示例工作流--example-workflows) |
+| 📖 介绍 | 🧩 节点 | ⚙️ 参数 | 🎬 透明视频 | 📝 更新说明 | 📦 安装 | 🎬 示例 |
+|---|---|---|---|---|---|---|
+| [插件介绍](#插件介绍--introduction) | [节点清单](#节点清单--node-list) | [主节点参数](#主节点参数--main-node-parameters) | [透明视频管道](#透明视频渲染管道--transparent-video-pipeline-v14233) | **[👉 全部更新说明](./CHANGELOG.md)** | [安装](#安装--installation) | [工作流示例](#示例工作流--example-workflows) |
+
+---
+
+## 透明视频渲染管道 / Transparent Video Pipeline (v14.233+)
+
+### 这是什么 / What it is
+
+在**纯色背景**上生成 H3 视频，再把背景一键抠成 Alpha，输出**带真实透明通道**的成片——可直接拖进 PR / AE / DaVinci / Final Cut 叠加使用。整套实现参考 B站教程《在 ComfyUI 中使用 MiniMax-H3 轻松制作透明视频》（BV1arJX69E7L）。
+
+Generate H3 video on a **solid-colour backdrop**, key the backdrop out, and export a clip with a **real alpha channel** — drop it straight into Premiere / After Effects / DaVinci / Final Cut. Implementation follows the Bilibili tutorial “Transparent video with MiniMax-H3 in ComfyUI” (BV1arJX69E7L).
+
+### 两种用法 / Two ways to use it
+
+| 方式 / Option | 说明 / Description |
+|---|---|
+| **一键档位（推荐）** | 主节点 `render_pipeline` 选 **第 20 档 `Transparent Video Single-Pass Keying (H3 Transparent)` / 透明视频 单采抠像**：生成 → 抠像 → 带 Alpha 导出全自动完成。/ Pick the tier-20 pipeline in the main node: generation, keying and alpha export run automatically. |
+| **手动节点组合** | 主节点 `images` → `BSAI_H3_TransparentKey` → `BSAI_H3_SaveTransparentVideo`（可单独调参、单独重抠，不重新生成）。/ Wire main node `images` → keying studio → transparent writer to tune keying without re-generating. |
+
+### 管线流程 / Pipeline
+
+```
+提示词指定纯色背景（pure green screen background）
+        ↓
+主节点生成 H3 片段（绿幕 / 蓝幕 / 纯黑 / 纯白）
+        ↓
+BSAI_H3_TransparentKey   抠像：Matte 预设 + 边缘柔化/choke + 去溢色
+        ↓
+BSAI_H3_SaveTransparentVideo  导出：ProRes 4444 / WebM VP9 / RGBA PNG 序列
+```
+
+> 提示词里务必明确写出背景颜色（如 `pure green screen background, no shadow on background`）。背景越均匀、人物离背景越远，抠像越干净。/ Always state the backdrop explicitly in the prompt; the more even the backdrop and the farther the subject, the cleaner the key.
+
+### BSAI_H3_TransparentKey 参数 / Keying Studio Parameters
+
+| 参数 / Parameter | 中文说明 | English | 默认 / Default |
+|---|---|---|---|
+| `backdrop_color` | 生成时用的背景色 | Backdrop used at generation time | `Green screen` |
+| `matte_preset` | 一键 Matte 预设（平衡毛发 / 硬边 / 火焰 / 暗黑转白） | One-click matte preset | `Balanced (hair/smoke)` |
+| `key_strength` | 抠像强度，越大保留主体越多（背景越不容易抠净） | Higher keeps more subject | `0.5` |
+| `clip_white` | 白电平：把接近不透明的 alpha 推到 1.0，去掉残雾 | Push near-opaque alpha to 1.0 | `0.0` |
+| `shadow_retention` | 阴影保留：把背景上的暗部拉回不透明（保留脚下投影）| Keep shadows cast on the backdrop | `0.0` |
+| `fill_holes` | 填孔半径（闭运算），修补主体内部被误抠的洞 | Closing radius for holes inside the subject | `2` |
+| `edge_softness` | 边缘柔化半径，毛发/烟雾用 1-3，硬边素材用 0 | Edge blur radius | `1` |
+| `edge_choke` | 边缘收缩/扩张，负值收边（去残留绿边） | Negative shrinks, positive expands | `0.0` |
+| `de_spill` | 去溢色强度：去掉主体边缘的背景色溢光 | De-spill strength (backdrop halo) | `0.5` |
+| `keep_mask` | 打开后跳过抠像，直接用 `mask` 输入当 Alpha | Use the `mask` input as alpha instead of keying | `False` |
+| `preview_side` | 棋盘格预览短边像素上限（省显存） | Checkerboard preview short-side cap | `512` |
+| `matte_side` | Matte 灰度图短边像素上限，0 = 全分辨率 | Matte short-side cap, 0 = full res | `512` |
+| `aspect_ratio` | 目标画幅（Same as upstream = 沿用上游比例）| Target aspect ratio | `Same as upstream` |
+| `output_width` / `output_height` | 目标画布尺寸，0 = 跟随上游；等比缩放 + 居中透明补边（不拉伸）| Canvas size, 0 = follow upstream (proportional fit, transparent padding) | `0` / `0` |
+| `output_fps` | 目标帧率（H3 上游 24fps，改值会重采样帧数）| Target fps (resampling when ≠ 24) | `24` |
+
+输出 / Outputs: `images_rgba`（straight alpha RGBA）/ `matte`（灰度遮罩）/ `images_preview`（棋盘格预览，仅供观看）。
+
+### BSAI_H3_SaveTransparentVideo 参数 / Transparent Writer Parameters
+
+| 参数 / Parameter | 说明 / Description | 默认 / Default |
+|---|---|---|
+| `format` | `ProRes 4444 (.mov)` 12bit 真 Alpha，剪辑软件首选 ｜ `WebM VP9 (.webm)` 网页/H5，需 FFmpeg `libvpx-vp9` ｜ `RGBA PNG Sequence (.png)` 逐帧无损 PNG，合成/特效首选 | `ProRes 4444 (.mov)` |
+| `fps` | 输出帧率，需与 `output_fps` 一致 | `24` |
+| `filename_prefix` | 文件名前缀，实际输出会追加时间戳子目录，不覆盖旧文件 | `h3_transparent` |
+| `audio`（可选）| 主节点 `audios` 输出，混流进 MOV / WebM | — |
+
+### 输出目录 / Output Layout
+
+```
+output/H3_transparent_video/<时间戳>_h3_transparent/
+├── alpha/    h3_transparent.mov    ← 带 Alpha 的成片
+└── preview/  ...                   ← 棋盘格预览（便于快速检查抠像质量）
+```
+
+### 调参速查 / Tuning Cheat-sheet
+
+| 现象 / Symptom | 处理 / Fix |
+|---|---|
+| 主体边缘一圈绿色残留 | `de_spill` → `1.0`；`edge_choke` → `-0.10 ~ -0.20` |
+| 发丝 / 烟雾 / 纱被抠掉 | `key_strength` → `0.6~0.8`；`edge_softness` → `2~3` |
+| 手指、树枝等**细缝被糊成一片** | `fill_holes` → `0`（闭运算会粘连窄缝）；`edge_softness` → `0` |
+| 主体内部出现透明小洞 | `fill_holes` → `3~5` |
+| 背景仍有半透明残雾 | `clip_white` → `0.1~0.3` |
+| 纯黑 / 纯白背景（火焰、烟、墨迹）| `backdrop_color` 切 `Pure black` / `Pure white`，配合 `Fire on green` / `Dark on white` 预设 |
+| 快速挥手、甩头等帧糊成一团 | 这是**源片运动模糊**（生成阶段手指已经糊在一起），抠像无法还原；生成提示词加 `minimal motion blur / held still` 可减少 |
+
+### 格式选择 / Which Format
+
+- **ProRes 4444 (.mov)** — 12bit 真 Alpha，剪辑软件（PR/AE/DaVinci/FCP）直接导入，首选。/ First choice for editors.
+- **WebM VP9 (.webm)** — 带 Alpha 的网页视频，H5 叠播用；需 FFmpeg 编译 `libvpx-vp9`，缺失时节点会明确报错。/ For web playback.
+- **RGBA PNG Sequence (.png)** — 逐帧无损，合成/特效/去背景重做首选。/ Lossless per-frame for compositing.
+
+### 兼容性 / Compatibility
+
+- 输出为 **straight（非预乘）alpha**，导入合成软件请按 Straight/Unpremultiplied 处理。/ Output is **straight (unpremultiplied) alpha**.
+- 下拉里的英文项为当前值；旧工作流中保存的中文/双语标签会在运行时自动归一化，无需改 JSON。/ Legacy Chinese dropdown labels in old workflows are normalised at runtime.
 
 ---
 
