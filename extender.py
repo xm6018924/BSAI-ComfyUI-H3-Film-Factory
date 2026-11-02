@@ -8313,12 +8313,14 @@ class BSAIH3FilmFactory:
         Also loads referenced images as internal refs and audio as ref_audio path.
 
         Returns (clips_with_resolved_prompts, resolved_image_paths, resolved_audio_paths,
-                 clip_asset_paths, speaker_audio_map).
+                 clip_asset_paths, speaker_audio_map, picture_asset_map).
         speaker_audio_map: dict {图_index (int): audio_path (str)} — @图N → @音频N 声音参考绑定。
+        picture_asset_map: dict {<Picture N> ref_num (int): @图N tag_num (int)} —
+        prompt 里 @图N 已被替换成 <Picture N>，对话台词解析需要反查回资产索引（v14.281）。
         """
         if not asset_library:
             print("[H3 Extender] asset_library is empty or None, skipping @图N resolution")
-            return clips, [], [], [], {}
+            return clips, [], [], [], {}, {}
 
         # asset_library can be a dict with 'images'/'videos'/'audios' lists
         if isinstance(asset_library, dict):
@@ -8331,7 +8333,7 @@ class BSAIH3FilmFactory:
             audios = []
         else:
             print(f"[H3 Extender] asset_library is unexpected type: {type(asset_library)}")
-            return clips, [], [], [], {}
+            return clips, [], [], [], {}, {}
 
         print(f"[H3 Extender] asset_library received: {len(images)} images, {len(videos)} videos, {len(audios)} audios")
         for i, img in enumerate(images[:3]):
@@ -8345,6 +8347,8 @@ class BSAIH3FilmFactory:
         clip_asset_paths = [[] for _ in clips]
         # v14.280: @图N ↔ @音频N 声音参考绑定 {图index: audio_path}
         speaker_audio_map = {}
+        # v14.281: <Picture ref_num> → @图N tag_num 反查表（对话台词解析用）
+        picture_asset_map = {}
 
         def _find_asset_by_index(items, tag_num):
             """Find an asset by its 'index' field, falling back to positional."""
@@ -8384,6 +8388,7 @@ class BSAIH3FilmFactory:
                         speaker_audio_map[tag_num] = aud_path
                         print(f"[H3 Extender] 🎤 @图{tag_num} ↔ @音频{tag_num} voice ref bound: {aud_path[-60:]}")
                 ref_num = resolved_image_paths.index(img_path) + 1
+                picture_asset_map[ref_num] = tag_num
                 return f"<Picture {ref_num}>"
             prompt = re.sub(r'@(?:图|img)(\d+)', _replace_image_tag, prompt, flags=re.IGNORECASE)
 
@@ -8426,10 +8431,10 @@ class BSAIH3FilmFactory:
         if speaker_audio_map:
             print(f"[H3 Extender] 🎤 Speaker-audio bindings: {speaker_audio_map}")
 
-        return clips, resolved_image_paths, resolved_audio_paths, clip_asset_paths, speaker_audio_map
+        return clips, resolved_image_paths, resolved_audio_paths, clip_asset_paths, speaker_audio_map, picture_asset_map
 
     # ── v14.280: 自动多人对话声音克隆 ──────────────────────────────────────
-    def _try_auto_dialogue_tts(self, clips, tts_model, speaker_audio_map, asset_library):
+    def _try_auto_dialogue_tts(self, clips, tts_model, speaker_audio_map, asset_library, picture_asset_map=None):
         """从分镜脚本自动提取对话台词 → 调用 IndexTTS 多人对话合成 → 返回完整 AUDIO。
 
         触发条件（全部满足才执行）:
@@ -8464,18 +8469,24 @@ class BSAIH3FilmFactory:
             return None
 
         # 条件 3: 从 clips prompt 中提取对话台词
+        # 注意 clips 到这里时 @图N 已被 _resolve_asset_library_refs 替换成 <Picture N>，
+        # 因此除 @图N 外还必须识别 <Picture N>（v14.281）。
+        _pc_map = picture_asset_map or {}
         _DIALOGUE_LINE_RE = _re.compile(
             r"^\s*(?:"
-            r"[【\[]([^】\]]{1,20})[】\]]\s*[:：]?\s*"  # 【角色名】台词
-            r"|(\S{1,20})\s*[:：]\s+"                       # 角色名: 台词
-            r"|@\s*(?:图|音频|img|aud)\s*(\d+)\s*[:：]\s*"  # @图N: 台词
+            r"[【\[]([^】\]]{1,20})[】\]]\s*[:：]?\s*"            # 【角色名】台词
+            r"|(\S{1,20})\s*[:：]\s+"                            # 角色名: 台词
+            r"|@\s*(?:图|音频|img|aud)\s*(\d+)\s*[:：]\s*"        # @图N: 台词
+            r"|<Picture\s+(\d+)>\s*[:：]\s*"                      # <Picture N>: 台词
+            r"|<Audio\s+(\d+)>\s*[:：]\s*"                        # <Audio N>: 台词
             r")(.+?)\s*$"
         )
 
         dialogue_lines = []
         _non_dialogue_skip = {"镜头", "景别", "构图", "画面", "音效", "音乐",
                               "BGM", "bgm", "环境音", "描述", "运动", "转场",
-                              "时长", "秒", "灯光", "光影", "场景", "画面描述"}
+                              "时长", "秒", "灯光", "光影", "场景", "画面描述",
+                              "参考图纪律", "服装锁定纪律"}
         for _c in clips or []:
             prompt = _c.get("prompt", "") if isinstance(_c, dict) else str(_c)
             for _ln in prompt.splitlines():
@@ -8485,18 +8496,26 @@ class BSAIH3FilmFactory:
                 m = _DIALOGUE_LINE_RE.match(_ln)
                 if m:
                     if m.group(1):
-                        speaker, text = m.group(1), m.group(4)
+                        speaker, text = m.group(1), m.group(6)
                         if speaker in _non_dialogue_skip:
                             continue
                         dialogue_lines.append((speaker, text))
                     elif m.group(2):
-                        speaker, text = m.group(2), m.group(4)
+                        speaker, text = m.group(2), m.group(6)
                         if speaker in _non_dialogue_skip:
                             continue
                         dialogue_lines.append((speaker, text))
                     elif m.group(3):
                         asset_idx = int(m.group(3))
-                        text = m.group(4)
+                        text = m.group(6)
+                        dialogue_lines.append((f"asset_{asset_idx}", text))
+                    elif m.group(4):
+                        asset_idx = int(_pc_map.get(int(m.group(4)), int(m.group(4))))
+                        text = m.group(6)
+                        dialogue_lines.append((f"asset_{asset_idx}", text))
+                    else:
+                        asset_idx = int(m.group(5))
+                        text = m.group(6)
                         dialogue_lines.append((f"asset_{asset_idx}", text))
 
         if not dialogue_lines:
@@ -9780,7 +9799,7 @@ class BSAIH3FilmFactory:
         if global_prompt:
             print(f"[H3 Extender] global_prompt received (len={len(str(global_prompt))}): '{str(global_prompt)[:80]}'")
             gp_clip = {"prompt": str(global_prompt)}
-            resolved_all, resolved_img_paths, resolved_aud_paths, _all_asset_paths, _speaker_audio_map = self._resolve_asset_library_refs(
+            resolved_all, resolved_img_paths, resolved_aud_paths, _all_asset_paths, _speaker_audio_map, _picture_asset_map = self._resolve_asset_library_refs(
                 [gp_clip] + clips, asset_library
             )
             global_prompt = resolved_all[0]["prompt"]
@@ -9790,7 +9809,7 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] global_prompt after resolution: '{str(global_prompt)[:80]}'")
         else:
             print("[H3 Extender] no global_prompt connected")
-            clips, resolved_img_paths, resolved_aud_paths, clip_asset_paths, _speaker_audio_map = self._resolve_asset_library_refs(clips, asset_library)
+            clips, resolved_img_paths, resolved_aud_paths, clip_asset_paths, _speaker_audio_map, _picture_asset_map = self._resolve_asset_library_refs(clips, asset_library)
             global_asset_paths = []
         external_prompt_pack = _normalize_external_prompt_pack(prompt_pack)
         clips, active_prompt_pack_signature, prompt_pack_imported, _prompt_pack_count_changed = (
@@ -10579,9 +10598,34 @@ class BSAIH3FilmFactory:
                     tts_model=_tts_model,
                     speaker_audio_map=_am,
                     asset_library=asset_library,
+                    picture_asset_map=locals().get("_picture_asset_map", {}),
                 )
                 if _auto_tts_triggered is not None:
                     lip_audio = _auto_tts_triggered
+                    # v14.281: 自动合成音频同样按实际时长重排 clip（与 lip_voice 分支一致）。
+                    # 仅在音频总时长 ≤ 现有 clip 时长上限总和时重排（缩短 clip、关闭多余段）；
+                    # 音频超长时保持原 clips，交给下方 v14.175 追加延续 clip 承载余下音频，
+                    # 避免 _ls_auto_clip_durations_by_audio 截断尾部台词。
+                    if clips:
+                        try:
+                            _auto_audio_sec = float(int(lip_audio["waveform"].shape[-1])) / float(
+                                max(1, int(lip_audio["sample_rate"])))
+                            _auto_cap_sec = 0.0
+                            for _c in clips:
+                                try:
+                                    _auto_cap_sec += float(_c.get("duration", 5.0))
+                                except (TypeError, ValueError):
+                                    _auto_cap_sec += 5.0
+                            if _auto_audio_sec <= _auto_cap_sec + 0.01:
+                                clips, _auto_audio_driven = _ls_auto_clip_durations_by_audio(
+                                    clips, lip_audio, fps=float(FPS))
+                                if _auto_audio_driven:
+                                    print(f"[H3 AutoTTS] 音频驱动 clip 时长重分配已生效")
+                            else:
+                                print(f"[H3 AutoTTS] 音频 {_auto_audio_sec:.2f}s 超过 clip 上限总和 "
+                                      f"{_auto_cap_sec:.2f}s → 交由延续 clip 机制承载余下音频")
+                        except Exception as _e2:
+                            print(f"[H3 AutoTTS] clip 时长重分配跳过（非致命）：{_e2}")
                     print(f"[H3 AutoTTS] ✅ 多人对话自动合成完成 → 已升级为 lip_audio 驱动口型")
             except Exception as _e:
                 print(f"[H3 AutoTTS] 自动多人对话合成跳过（非致命）：{_e}")
