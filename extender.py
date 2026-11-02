@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.278-refine-native"
+BUILD = "minimax-h3-extender-v14.279-render-pipeline-authority"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -3076,6 +3076,32 @@ def _ff_refine_factor_for_budget(width, height, latent_t, budget, align_px=40):
     return best
 
 
+def _ff_declared_output_px(width, height, latent_factor, hv2x=1.0, align_px=40):
+    """v14.279: 由「一采像素 + 二采倍率」推导声明输出尺寸(与二采实际几何一致)。
+
+    旧写法 round(960 × 1.02)=979 / round(544 × 1.02)=555 都是奇数, libx264
+    yuv420p 直接拒绝 -> 每段 mp4 编码 BrokenPipe -> clip 预览/下载全空。
+    这里在 latent 空间推导: round(像素//16 × 倍率) -> 按 align/16 向下取整
+    回像素 -> HyperVAE 2x 再翻倍 -> 最后强制偶数。
+    960x544 × 1.02 -> latent 34x60(1.02 被取整吸收) -> 960x544, 与实际解码一致。
+    """
+    try:
+        w = max(1, int(width))
+        h = max(1, int(height))
+        f = max(1.0, float(latent_factor))
+        step = max(1, int(align_px) // 16)
+        nh = _ff_snap_to_multiple(round(int(h) // 16 * f), step)
+        nw = _ff_snap_to_multiple(round(int(w) // 16 * f), step)
+        x = max(1.0, float(hv2x))
+        ow = int(round(nw * 16 * x))
+        oh = int(round(nh * 16 * x))
+    except Exception:
+        ow, oh = int(width), int(height)
+    ow -= ow % 2
+    oh -= oh % 2
+    return max(2, ow), max(2, oh)
+
+
 def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model=""):
     """v1.31: 视频 latent [B,C,T,H,W] 空间放大 + 像素对齐(不经过 VAE, 无编解码损失)。
 
@@ -3132,6 +3158,97 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
     _method = "nearest-exact" if str(method) == "nearest" else str(method)
     out = comfy.utils.common_upscale(samples, new_w, new_h, _method, "disabled")
     return out.to(dtype=orig_dtype)
+
+
+# v14.279: 条件几何对齐统计(ref/kf/实际缩放块数), 由调用处打印后清零。
+_FF_COND_FIT_STATS = {"ref": 0, "kf": 0, "resized": 0}
+
+
+def _ff_fit_cond_geometry(conditioning, target_h, target_w, method="bilinear"):
+    """把 ref2va 的 minimax_refs / minimax_keyframes 视觉 latent 精确缩放到
+    二采 latent 的**实际空间几何**。
+
+    v14.250 直接按名义倍率 `_r_factor` 调官方 upscale_minimax_conditioning:
+    本次 latent 34x60 经 align=40px 取整后尺寸未变, cond 却被插值到
+    35x61(+patch pad 36x62)。PackedLayout 按 34x60 预留 9620 行, cond 实到
+    10292 行 -> comfy/ldm/minimax/model.py:576 广播崩溃, 每个 clip 二采全废。
+    改为「目标几何驱动」: 已与目标一致的块原样保留, 不一致的精确插值到
+    (target_h, target_w) 并同步 latent_h/w(及 latent_t), 行数与布局恒等。
+    """
+    if not conditioning:
+        return conditioning
+    th, tw = int(target_h), int(target_w)
+    if th <= 0 or tw <= 0:
+        return conditioning
+
+    def _fit(z):
+        if not isinstance(z, torch.Tensor) or z.ndim not in (4, 5):
+            return z
+        if tuple(z.shape[-2:]) == (th, tw):
+            return z
+        src_dtype = z.dtype
+        work = z.float()
+        try:
+            if z.ndim == 5:
+                work = torch.nn.functional.interpolate(
+                    work, size=(int(z.shape[2]), th, tw),
+                    mode="trilinear", align_corners=False)
+            else:
+                work = torch.nn.functional.interpolate(
+                    work, size=(th, tw), mode=str(method),
+                    align_corners=False)
+        except Exception:
+            work = torch.nn.functional.interpolate(
+                work,
+                size=(int(z.shape[2]), th, tw) if z.ndim == 5 else (th, tw),
+                mode="nearest")
+        _FF_COND_FIT_STATS["resized"] += 1
+        return work.to(dtype=src_dtype)
+
+    out = []
+    for entry in conditioning:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            out.append(entry)
+            continue
+        emb, meta = entry[0], entry[1]
+        if not isinstance(meta, dict):
+            out.append(entry)
+            continue
+        new_meta = dict(meta)
+        refs = meta.get("minimax_refs")
+        if isinstance(refs, list):
+            new_refs = []
+            for blk in refs:
+                if (not isinstance(blk, dict)
+                        or blk.get("kind") == "audio"
+                        or blk.get("latent") is None):
+                    new_refs.append(blk)
+                    continue
+                nb = dict(blk)
+                nb["latent"] = _fit(nb["latent"])
+                z = nb["latent"]
+                if isinstance(z, torch.Tensor):
+                    nb["latent_h"] = int(z.shape[-2])
+                    nb["latent_w"] = int(z.shape[-1])
+                    if "latent_t" in nb and z.ndim == 5:
+                        nb["latent_t"] = int(z.shape[2])
+                new_refs.append(nb)
+                _FF_COND_FIT_STATS["ref"] += 1
+            new_meta["minimax_refs"] = new_refs
+        kfs = meta.get("minimax_keyframes")
+        if isinstance(kfs, list):
+            new_kfs = []
+            for kf in kfs:
+                if not isinstance(kf, dict) or kf.get("latent") is None:
+                    new_kfs.append(kf)
+                    continue
+                nk = dict(kf)
+                nk["latent"] = _fit(nk["latent"])
+                new_kfs.append(nk)
+                _FF_COND_FIT_STATS["kf"] += 1
+            new_meta["minimax_keyframes"] = new_kfs
+        out.append([emb, new_meta])
+    return out
 
 
 # ── v14.83/84/85: 像素域超分旁支（per-clip 逐段 + final 全片，默认关）────────
@@ -5265,29 +5382,35 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                   f">= ws {_ws215:.1f}GB+2GB, 无需降驻留")
                 except Exception as _e215:
                     print(f"[H3 Extender] v14.224 workspace 平衡失败(可忽略): {_e215}")
-            # v14.250: ref2va conditioning 条件同步放大 —— 二采 latent 放大到
-            # _r_factor 倍后, 必须把 minimax_refs / minimax_keyframes 的 latent
-            # 坐标也放大, 否则参考图 CLIP 嵌入停留在低分辨率坐标, 二采 2K 级别
-            # 的参考控制力下降(官方 MiniMaxH3LatentUpscaleCombined 节点内部正是
-            # 同时做 latent upscale + conditioning upscale)。条件放大是纯函数
-            # (深拷贝后修改 metadata, 不碰 embedding 张量), 零显存增量, 零算力开销。
+            # v14.279 (2026-11-02 fix): ref2va conditioning 跟随二采 latent 的
+            # **实际几何**(而不是名义倍率), 根治 "每个 clip 二采都 shape mismatch":
+            # 旧 v14.250 直接按 _r_factor(本次 x1.02) 放大 cond, 但 latent 经
+            # align=40px 取整后仍是 34x60(尺寸未变), cond 却被插值到 36x62 ->
+            # PackedLayout 预留 9620 行 / cond 实到 10292 行 ->
+            # comfy/ldm/minimax/model.py:576 广播崩溃, 二采全部回退一采。
             if _FF_COND_UPSCALE_FN is not None and _r_factor > 1.0 and conditioning:
                 try:
-                    conditioning = _FF_COND_UPSCALE_FN(
-                        conditioning, _r_factor, "nearest-exact")
-                    _has_refs = False
-                    for _ce in (conditioning or []):
-                        if isinstance(_ce, (list, tuple)) and len(_ce) >= 2:
-                            _md = _ce[1] or {}
-                            if _md.get("minimax_refs") or _md.get("minimax_keyframes"):
-                                _has_refs = True
-                                break
-                    if _has_refs:
-                        print(f"[H3 Extender] v14.250 二采条件放大: "
-                              f"ref2va minimax_refs/keyframes × {_r_factor:.1f} "
-                              f"(cond 已跟随 latent 同步放大到二采分辨率空间)")
+                    _cm279, _ = _ff_extract_members(samples)
+                    _tg279_h = int(_cm279[0].shape[-2]) if _cm279 else 0
+                    _tg279_w = int(_cm279[0].shape[-1]) if _cm279 else 0
+                    _FF_COND_FIT_STATS.update({"ref": 0, "kf": 0, "resized": 0})
+                    _cond279 = _ff_fit_cond_geometry(
+                        conditioning, _tg279_h, _tg279_w)
+                    _nfit279 = int(_FF_COND_FIT_STATS.get("resized", 0))
+                    if _nfit279 > 0:
+                        conditioning = _cond279
+                        print(f"[H3 Extender] v14.279 二采条件几何对齐: "
+                              f"{_nfit279} 块 ref/keyframe latent -> "
+                              f"{_tg279_w}x{_tg279_h} "
+                              f"(ref={_FF_COND_FIT_STATS['ref']} "
+                              f"kf={_FF_COND_FIT_STATS['kf']}, 名义 x{_r_factor:.2f} "
+                              f"被 align 取整吸收, 行数与 PackedLayout 恒等)")
+                    else:
+                        print(f"[H3 Extender] v14.279 二采条件几何一致 "
+                              f"({_tg279_w}x{_tg279_h} 未变), 跳过 cond 放大 "
+                              f"(名义 x{_r_factor:.2f} 已被 align 取整吸收)")
                 except Exception as _e_cond_up:
-                    print(f"[H3 Extender] v14.250 二采条件放大跳过(可忽略): "
+                    print(f"[H3 Extender] v14.279 二采条件几何对齐跳过(可忽略): "
                           f"{_e_cond_up}")
 
             _r_guider = _BasicGuider(_refine_model)
@@ -5413,7 +5536,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _w_guider_w.set_conds(conditioning)
                 _stage_w = "prepare_noise"
                 _w_noise_w = _cs_w.prepare_noise(_wbase, int(seed) + 999, None)
-                _w_sig_w = list(_r_sigmas)[-2:]
+                # v14.279: NestedTensor.prepare_noise 在部分版本返回 list ->
+                # 采样器对 noise 调 .shape 时抛 "'list' object has no attribute
+                # 'shape'", 预热每次都被静默跳过(第 1 大步独自扛初始化税)。
+                if isinstance(_w_noise_w, (list, tuple)):
+                    _w_noise_w = _cnt_w.NestedTensor(tuple(_w_noise_w))
+                # v14.279: sigmas 必须保持 tensor —— 旧实现 list(_r_sigmas)[-2:]
+                # 把 tensor 变成 python list, sampler 对 sigmas 调 .shape 直接崩。
+                _w_sig_w = _r_sigmas[-2:]
                 _stage_w = "sample"
                 with _aimdo_disabled():
                     _w_guider_w.sample(
@@ -9156,8 +9286,28 @@ class BSAIH3FilmFactory:
         # _hv2x_decl 保持 1.0: 本档走真实 latent 放大, 不依赖 HyperVAE 2x 解码
         # (用户 VAE 是 minimax_h3_sol_vae, 挂 HyperVAE 声明会把 2K 变成假放大)。
         if one_shot_dual_2k:
-            steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
-            shift_video, shift_audio = 12.0, 3.0
+            # v14.279 (2026-11-02 fix): 渲染管道配方优先 —— 旧实现无条件写死
+            # steps/refine_steps/denoise = 8/4/0.45, 把用户在「渲染管道」选的
+            # 配方(日志 27 行声明 12/6/0.35)静默覆盖(日志 33 行 + 实跑),
+            # 所有渲染管道模式都等于不生效。现本档只保留**结构约束**:
+            # 开二采 / 单次采样 token 预算 / global 全上下文 / 不分块 /
+            # HyperVAE 声明 1.0; 数值配方与采样器/shift 交给渲染管道。
+            # 仅当未选中任何渲染管道时, 才回退到本档后备配方 8+4/0.45。
+            _rp_is_recipe279 = bool(locals().get("_rp_handled", False)) and \
+                str(_rp_mode or "").strip() not in ("", "(none)", "custom", "None")
+            if _rp_is_recipe279:
+                print(f"[H3 Extender] v14.279 一镜到底·2K双采: 渲染管道配方优先 "
+                      f"({_rp_mode}) -> 一采 {steps} 步 / 二采 {refine_steps} 步 / "
+                      f"denoise {float(refine_denoise):.2f} / sampler={sampler_name} "
+                      f"/ shift {float(shift_video):g}-{float(shift_audio):g} "
+                      f"(2K 档不再覆盖)")
+            else:
+                steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+                shift_video, shift_audio = 12.0, 3.0
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                print("[H3 Extender] v14.279 一镜到底·2K双采: 未选渲染管道, "
+                      "使用本档后备配方 一采 8 步 + 二采 4 步 (denoise 0.45) + euler")
             refine_enable = True
             _hv2x_decl = 1.0
             # v14.275 (fix): 二采强制 global 全上下文, 禁用空间分块。
@@ -9174,11 +9324,9 @@ class BSAIH3FilmFactory:
                 refine_mem_mode = "global (全上下文省显存)"
                 print("[H3 Extender] v14.275 一镜到底·2K双采: 二采强制 global 全上下文"
                       "(禁用 spatial 空间分块 —— 每块独立重构图会造成重影/碎屑)")
-            if str(sampler_name) != "euler":
-                sampler_name = "euler"
-            print("[H3 Extender] 🎥 v14.272 一镜到底·2K双采: 一采 8 步(蒸馏契约) + 二采 4 步"
-                  " (denoise 0.45) + euler + shift 12/3；二采倍率按单次采样 token 预算(<=350k)取,"
-                  " 整段一次采样不分块(v14.276 干净优先)")
+            print("[H3 Extender] 🎥 v14.279 一镜到底·2K双采: 只接管结构(二采/"
+                  "global/不分块), 二采倍率按单次采样 token 预算取; 步数/denoise "
+                  "以渲染管道为准")
         # v14.221 (自动提速护栏): 检测到 HyperVAE 2x 权重可用且当前二采会因
         # latent x2.0 放大导致 24GB 换页超时(实测 834s/步)时, 自动把二采
         # 降级到"双采2K"提速路径: factor=1.0 + HyperVAE 2x 解码直出 2K,
@@ -9355,6 +9503,14 @@ class BSAIH3FilmFactory:
                 print(f"[H3 Extender] v14.201 QAD-v2-8步(旧速度档遗留值兼容): 渲染管道已切 QAD-v2, 跳过二采, 一采 8 步蒸馏直出, shift 10/3 (官方 QAD-v2 NVFP4 schedule)")
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
+        # v14.279: 唯一权威配方日志 —— 打印在所有管道/速度档覆盖之后, 保证
+        # "日志声明 == 实际实跑", 不再出现渲染管道档声明 12/6 实跑 8/4 的分歧。
+        print(f"[H3 Extender] v14.279 EFFECTIVE-RECIPE: pipeline={_rp_mode or '(none)'} "
+              f"speed_preset={speed_preset} 一采 steps={steps} sampler={sampler_name} "
+              f"scheduler={scheduler} denoise={denoise} shift={shift_video}/{shift_audio} "
+              f"| 二采 enable={refine_enable} steps={refine_steps} "
+              f"denoise={refine_denoise} factor={refine_upscale_factor} "
+              f"tile={tile_count} mem={refine_mem_mode}")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
         unique_id = kwargs.get("unique_id", None)
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
@@ -9911,8 +10067,14 @@ class BSAIH3FilmFactory:
             manifest["first_pass_width"] = int(resolved_width)
             manifest["first_pass_height"] = int(resolved_height)
             manifest["declared_refine_factor"] = float(_decl_out_f)
-            manifest["output_width"] = int(round(float(resolved_width) * _decl_out_f))
-            manifest["output_height"] = int(round(float(resolved_height) * _decl_out_f))
+            # v14.279: 声明尺寸必须在 latent 空间按 align 取整并取偶, 直接
+            # round(像素×倍率) 会得到 979x555 这类奇数 -> yuv420p 编码失败。
+            _decl_w279, _decl_h279 = _ff_declared_output_px(
+                resolved_width, resolved_height,
+                (float(refine_upscale_factor) if bool(refine_enable) else 1.0),
+                _hv2x_decl, refine_align_to)
+            manifest["output_width"] = int(_decl_w279)
+            manifest["output_height"] = int(_decl_h279)
             # v14.276: 单次采样档的声明像素取二采实际几何(按 align 取整后的 latent),
             # 与倍率名义值差 1~2%, 直接用实际值避免成片再被重采样一次。
             if _os2k_decl_px is not None:
@@ -10076,8 +10238,17 @@ class BSAIH3FilmFactory:
             _decl_f = max(1.0, float(refine_upscale_factor)) if bool(refine_enable) else 1.0
             # v14.182: 双采2K 档计入 HyperVAE 2x 像素翻倍
             _decl_f = _decl_f * float(_hv2x_decl)
-            manifest["output_width"] = int(round(float(resolved_width) * _decl_f))
-            manifest["output_height"] = int(round(float(resolved_height) * _decl_f))
+            # v14.279: 与上方声明尺寸保持同一口径(latent 取整 + 偶数), 且单次
+            # 采样档直接复用本轮算好的实际几何 —— 旧代码在这里用
+            # round(960×1.02)=979x555 覆盖了上面的正确值, 导致 mp4 编码失败。
+            _decl_w279, _decl_h279 = _ff_declared_output_px(
+                resolved_width, resolved_height,
+                (float(refine_upscale_factor) if bool(refine_enable) else 1.0),
+                _hv2x_decl, refine_align_to)
+            if _os2k_decl_px is not None:
+                _decl_w279, _decl_h279 = _os2k_decl_px
+            manifest["output_width"] = int(_decl_w279)
+            manifest["output_height"] = int(_decl_h279)
             manifest["declared_refine_factor"] = float(_decl_f)
         except Exception:
             pass

@@ -2928,6 +2928,16 @@ def _decode_single_clip_to_blob(
         except Exception:
             pass
 
+    # v14.279 (2026-11-02 fix): 输出目标尺寸必须为偶数 —— libx264/hevc
+    # yuv420p 拒绝奇数宽高, ffmpeg 立即退出, 写帧抛 BrokenPipe, 该 clip 的
+    # mp4 根本没生成(日志 979x555 每段复现), clip 预览/下载全空。
+    if _tgt_w > 0 and _tgt_h > 0 and (_tgt_w % 2 or _tgt_h % 2):
+        _odd_w, _odd_h = _tgt_w, _tgt_h
+        _tgt_w -= _tgt_w % 2
+        _tgt_h -= _tgt_h % 2
+        print(f"[H3 Extender] v14.279 输出尺寸取偶: {_odd_w}x{_odd_h} -> "
+              f"{_tgt_w}x{_tgt_h} (yuv420p 编码器要求)")
+
     # If already decoded with the current version, skip.
     # v2 = trimmed overlap + audio included.  Old blobs (no version marker)
     # contained full frames (with overlap) and no audio, so we must rebuild.
@@ -3353,6 +3363,13 @@ def _decode_single_clip_to_blob(
 
         # Encode video and mux audio in one pass
         h, w = int(video_u8.shape[1]), int(video_u8.shape[2])
+        # v14.279: 最后一道偶数保护 —— yuv420p 的 libx264/nvenc 都不接受奇数
+        # 宽高(会直接断管), 这里裁掉最后一列/行(视觉不可见)而不是让整段失败。
+        if h % 2 or w % 2:
+            print(f"[H3 Extender] v14.279 编码前取偶: {w}x{h} -> "
+                  f"{w - w % 2}x{h - h % 2}")
+            video_u8 = video_u8[:, : h - h % 2, : w - w % 2]
+            h, w = int(video_u8.shape[1]), int(video_u8.shape[2])
         video_log = root / f"_{token}_video.log"
         proc = None
         log_f = None
