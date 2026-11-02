@@ -353,30 +353,54 @@ class BSAI_H3_TransparentKey:
 
     @classmethod
     def _resolve_target_size(cls, aspect_ratio, out_w, out_h, src_w, src_h):
-        """返回目标画布 (w,h)。
+        """返回目标画布 (w,h)，两边均为偶数。
 
-        宽高都填时以像素为准；只填一边时另一边按比例推算；都不填时沿用
-        上游尺寸（或按比例在上游总像素量下推算）。0 表示沿用上游。
+        语义：aspect_ratio 是用户的创作意图，优先级高于手动像素值。
+          - aspect_ratio 非 None（明确比例）：以比例为准；
+            * 只填一边 → 按比例推另一边；
+            * 两边都填但与比例不符 → 用较大边（用户通常填大尺寸）按比例推另一边；
+            * 两边都没填 → 用上游短边推算（保持画面在新画布下大致同等像素量）。
+          - aspect_ratio=None（Same as upstream）：
+            * 两边都填 → 直接用；
+            * 只填一边 → 按上游比例推另一边；
+            * 两边都没填 → 沿用上游尺寸。
+        输出宽高自动 clamp 到 [2, 4096] 并取偶数，避免视频编码 Broken pipe。
         """
         out_w, out_h = max(0, int(out_w)), max(0, int(out_h))
         ratio = _ASPECT_RATIOS.get(str(aspect_ratio or "").strip().lower())
-        if out_w > 0 and out_h > 0:
-            return cls._even_side(out_w), cls._even_side(out_h)
+
+        def final(w, h):
+            return min(4096, cls._even_side(max(2, int(w)))), min(4096, cls._even_side(max(2, int(h))))
+
         if ratio is None:
+            # Same as upstream
             if out_w <= 0 and out_h <= 0:
                 return src_w, src_h
-            if out_w > 0:
-                return cls._even_side(out_w), cls._even_side(out_w * src_h / float(src_w))
-            return cls._even_side(out_h * src_w / float(src_h)), cls._even_side(out_h)
+            if out_w <= 0:
+                return final(out_h * src_w / float(src_h), out_h)
+            if out_h <= 0:
+                return final(out_w, out_w * src_h / float(src_w))
+            return final(out_w, out_h)
+
+        # 明确给了 aspect_ratio：以比例为准；像素只用来定尺寸，不能定比例
+        if out_w > 0 and out_h > 0:
+            # 两个都填了但比例不符：选较小那个作基准推另一个，
+            # 保证画布不超过用户填的任何一边（"宁可小也不超出"）。
+            # 例如 16:9 + (960, 544) → 选 544 作基准推 width=968（或用
+            # 960 推 height=540 但 540<544，选小边更稳妥）。
+            if out_w <= out_h * ratio:
+                return final(out_w, out_w / ratio)
+            return final(out_h * ratio, out_h)
         if out_w > 0:
-            tw = cls._even_side(out_w)
-            return tw, cls._even_side(tw / ratio)
+            return final(out_w, out_w / ratio)
         if out_h > 0:
-            th = cls._even_side(out_h)
-            return cls._even_side(th * ratio), th
-        base = (float(src_w) * float(src_h) * ratio) ** 0.5
-        tw = cls._even_side(base)
-        return tw, cls._even_side(tw / ratio)
+            return final(out_h * ratio, out_h)
+        # 都没填：保持与上游相近的总像素量，按比例拆成 (w, h)
+        # w * h ≈ src_w * src_h，w / h = ratio → h = sqrt(src_w*src_h/ratio)
+        area = float(src_w) * float(src_h)
+        h = (area / ratio) ** 0.5
+        w = h * ratio
+        return final(w, h)
 
     @staticmethod
     def _fit_frames(rgb, alpha, out_w, out_h):
