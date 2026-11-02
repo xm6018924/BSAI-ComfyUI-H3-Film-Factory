@@ -253,9 +253,21 @@ class BSAI_H3_TransparentKey:
             # (头发/瞳孔)的轻微绿溢色不被误抠。
             key = excess / torch.clamp(ch, min=0.04)
             key = key * _smoothstep(0.0, 0.08, ch)
+            # v14.285: 亮度归一化会让"浅灰绿"混合像素看起来几乎不绿
+            # （实测指缝/指根 (0.58,0.64,0.42) 的 key 只有 0.04~0.10），
+            # 于是细指缝长期停在 alpha 0.7~0.8，观感上五指被一层淡绿网连住。
+            # 再叠加一个绝对溢色下限(超过 0.12 的 G-max(R,B) 开始扣)，
+            # 用 max 取两种判据的较大值：暗角深绿仍靠归一化 key，浅灰绿混合
+            # 靠绝对溢色，手指/皮肤本体(ex<=0)完全不受影响。
+            key = torch.maximum(key, excess / 0.40)
             # strength 越大 -> 阈值越低 -> 保留主体更多
             lo = 0.42 - 0.30 * strength
-            hi = 0.42 + 0.28 * (1.0 - strength)
+            # v14.285: 上限收得更狠。H3 绿幕片里手指/物体与背景的运动混合区
+            # 绿色占比(key)常在 0.30~0.45，旧 hi=0.42 让这些像素停留在
+            # alpha 0.3~0.7，细指缝被半透明"绿网"填住，观感就是五指糊成一团。
+            # 把 strength=1.0 的 hi 压到 0.30（lo 保持 0.12），混合区直接透明；
+            # 低/中 strength 只轻微收紧，保留毛发/烟雾的柔和过渡。
+            hi = 0.42 + 0.28 * (1.0 - strength) - 0.12 * strength
             alpha = 1.0 - _smoothstep(lo, hi, key)
             spill_ch = 1 if backdrop_color == "green" else 2
             spill = torch.maximum(rgb[:, spill_ch:spill_ch + 1]
@@ -301,22 +313,17 @@ class BSAI_H3_TransparentKey:
             alpha = _blur_alpha(alpha, softness)
         return _clamp01(alpha)
 
-    def _de_spill_rgb(self, rgb, alpha, spill, de_spill, backdrop_color):
+    def _de_spill_rgb(self, rgb, spill, de_spill, backdrop_color):
         if de_spill <= 0.0:
             return rgb
-        # v14.283: 轮廓带全强度去溢色。
-        # 旧权重 (1-alpha)^1.2 在 alpha≈0.95 的近不透明轮廓上只剩 ~6%，
-        # 去溢色正好在最显眼的那一圈失效（实测 alpha 0.8~0.999 波段仍有
-        # 23%~34% 像素绿色超出 0.03，手指轮廓一圈发绿）。
-        # 改为：用 alpha 膨胀/腐蚀差取"轮廓带"（主体内外各 2px），带内按
-        # de_spill 全强度压制；带外（主体内部）不碰，保护真正的绿色主体；
-        # 带边缘做羽化避免接缝。半透明区(alpha<0.5)整片都属于背景混合，
-        # 一并全强度压制。
-        core = (alpha > 0.5).float()
-        ring = _morph_pool(core, 2, "dilate") - _morph_pool(core, 2, "erode")
-        band = torch.maximum(_blur_alpha(_clamp01(ring), 1),
-                             _clamp01(1.0 - alpha))
-        edge_w = (de_spill * band).detach()
+        # v14.285: 全片去溢色。
+        # 之前按"轮廓带 + 轻度绿色门控"局部去溢色，实测溢光会大范围烤进
+        # 不透明皮肤：手指中段实测仍有 G-max(R,B) 0.05~0.15 的绿色，而那里
+        # 既不在轮廓带内，溢色又超过轻度门控的 0.12 阈值，于是整根手指发绿、
+        # 五指在观感上糊成一片。绿色屏拍摄的主体本来就不该有绿色分量，
+        # 这里直接对全画面按 de_spill 全强度扣掉 G-max(R,B) 的超出部分；
+        # 真正纯色的背景/强烈绿色物体 alpha 已接近 0，不受影响。
+        edge_w = float(de_spill)
         if backdrop_color == "green":
             g = rgb[:, 1:2] - edge_w * spill
             rgb = torch.cat([rgb[:, 0:1], _clamp01(g), rgb[:, 2:3]], dim=1)
@@ -493,7 +500,7 @@ class BSAI_H3_TransparentKey:
 
             alpha = self._apply_edges(alpha, int(fill_holes),
                                       int(edge_softness), float(edge_choke))
-            rgb = self._de_spill_rgb(rgb, alpha, spill, float(de_spill),
+            rgb = self._de_spill_rgb(rgb, spill, float(de_spill),
                                      backdrop_color)
             if resize_needed:
                 rgb, alpha = self._fit_frames(rgb, alpha, out_w, out_h)
