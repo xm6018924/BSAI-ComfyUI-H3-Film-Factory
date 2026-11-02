@@ -241,9 +241,18 @@ class BSAI_H3_TransparentKey:
 
         if backdrop_color in ("green", "blue"):
             if backdrop_color == "green":
-                key = rgb[:, 1:2] - torch.maximum(rgb[:, 0:1], rgb[:, 2:3])
+                ch = rgb[:, 1:2]
+                excess = ch - torch.maximum(rgb[:, 0:1], rgb[:, 2:3])
             else:
-                key = rgb[:, 2:3] - torch.maximum(rgb[:, 0:1], rgb[:, 1:2])
+                ch = rgb[:, 2:3]
+                excess = ch - torch.maximum(rgb[:, 0:1], rgb[:, 1:2])
+            # v14.282: 亮度归一化 key —— 绝对差阈值下暗角/阴影里的深绿
+            # (excess 绝对值低) 永远抠不掉(实测成片暗绿 alpha 99.9%);
+            # 除以主通道亮度变成"绿色占比", 暗角与亮区同一把尺。
+            # 近黑像素再乘主通道 smoothstep 门控, 保护深色主体
+            # (头发/瞳孔)的轻微绿溢色不被误抠。
+            key = excess / torch.clamp(ch, min=0.04)
+            key = key * _smoothstep(0.0, 0.08, ch)
             # strength 越大 -> 阈值越低 -> 保留主体更多
             lo = 0.42 - 0.30 * strength
             hi = 0.42 + 0.28 * (1.0 - strength)
