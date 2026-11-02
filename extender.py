@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.279-render-pipeline-authority"
+BUILD = "minimax-h3-extender-v14.280-mv-dual-pass-pipeline"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -8206,7 +8206,7 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift Dual-Pass (default)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)"],
+            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
                 "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model.",
@@ -8684,6 +8684,56 @@ class BSAIH3FilmFactory:
                     print(f"[H3 Extender] v14.210 默认管道 Sol-H3 Self-Lift 双采: refine_enable=False -> True (双采管道理应开二采)")
                 else:
                     print(f"[H3 Extender] v14.210 默认管道 Sol-H3 Self-Lift 双采: refine_enable 已 True")
+            elif _rp_mode == "MV Dual-Pass (电影工厂 v3.2 原版)":
+                # v14.280 (2026-11-02): MV 双采档 —— 参数完整照搬 BSAI_H3_Film_Factory
+                # 电影工厂128分钟大电影版-示例工作流 v3.2-MV.json（v2.115 旧版插件
+                # 保存的 45 键工作流, node 250 widgets_values 逐条反译确认）。
+                # 一采 8 步(euler + simple) + 二采 4 步(denoise 0.45) + latent x2.0
+                # 用 minimax_h3_latent_upscaler_3d_fp16.safetensors(SelfLift 同款 3D
+                # latent 放大) + 40px 对齐改到 32px + 二采分块(4 块 256 overlap)
+                # + audio_context_length=0(纯对口型档音频来自外部, 不进模型音频链)。
+                steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
+                refine_enable = True
+                refine_upscale_factor = 2.0
+                refine_align_to = 32
+                tiled_refine = True
+                tile_overlap = 256
+                audio_context_length = 0
+                refine_audio_denoise = 0.0   # 对口型档音频由外部 lip_audio 提供, 锁定不重绘
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print(f"[H3 Extender] v14.280 MV双采(渲染管道): 采样器强制 euler (MV 档契约)")
+                scheduler = "simple"
+                # 自动选用 minimax_h3_latent_upscaler_3d_fp16.safetensors(同 MV 工作流)
+                _mv_pick = None
+                try:
+                    for _nm in _ff_get_upscaler_models():
+                        _nml = str(_nm).lower()
+                        if "latent_upscaler_3d" in _nml and ("fp16" in _nml or "bf16" in _nml or "fp32" in _nml):
+                            _mv_pick = _nm; break
+                except Exception:
+                    pass
+                if _mv_pick is None:
+                    try:
+                        for _nm in _ff_get_upscaler_models():
+                            if "latent_upscaler_3d" in str(_nm).lower():
+                                _mv_pick = _nm; break
+                    except Exception:
+                        pass
+                if _mv_pick:
+                    refine_upscaler_model = _mv_pick
+                    print(f"[H3 Extender] v14.280 MV双采(渲染管道): 二采放大模型 = '{_mv_pick}' (MV 工作流同款)")
+                else:
+                    refine_upscaler_model = "(bilinear interpolation, no model)"
+                    print("[H3 Extender] ⚠️ v14.280 MV双采(渲染管道): 未探测到 H3 3D latent upscaler 模型,"
+                          "二采放大走 bilinear 插值(画质略降), 请安装 Comfyui_Minimax_h3_latent_Upscaler")
+                print("[H3 Extender] 🎵 v14.280 MV 双采 (电影工厂 v3.2 原版配方): "
+                      f"一采 {int(steps)} 步 euler+simple + 二采 {int(refine_steps)} 步 "
+                      f"(denoise {float(refine_denoise):.2f}, 3D latent upscaler x2.0, "
+                      f"align {int(refine_align_to)}px, tiled {int(tile_count)}x{int(tile_overlap)}, "
+                      f"audio_context_length=0) — 参数与 MV 示例工作流逐字一致")
             elif _rp_mode == "直播配音高清（音频≥12步）":
                 # v14.179 (2026-10-23): 直播带货 ref_audio 配音模式专用配方。
                 # 根因: H3 官方/社区实证 —— 音频 8 步最差, ≥12 步才可用;
