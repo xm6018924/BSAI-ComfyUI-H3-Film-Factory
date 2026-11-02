@@ -60,6 +60,21 @@ _MATTE_ALIASES = {
     "暗黑转白 dark on white": "dark_white", "暗黑转白": "dark_white",
 }
 
+# H3 上游固定 24fps（与 extender.py / nodes_clip.py 的 FPS 常量一致）
+_H3_FPS = 24
+
+# 手动输出尺寸的比例快捷值；None = 沿用上游画面比例
+_ASPECT_RATIOS = {
+    "same as upstream": None,
+    "16:9": 16.0 / 9.0,
+    "9:16": 9.0 / 16.0,
+    "1:1": 1.0,
+    "4:3": 4.0 / 3.0,
+    "3:4": 3.0 / 4.0,
+    "21:9": 21.0 / 9.0,
+    "2.39:1": 2.39,
+}
+
 
 def _norm_backdrop(value):
     """Backdrop dropdown value -> one of green / blue / black / white."""
@@ -144,6 +159,8 @@ class BSAI_H3_TransparentKey:
                    "or pure black/white backdrops -> straight-alpha RGBA + Matte + "
                    "checkerboard preview. Matte presets plus strength / white-clip / "
                    "shadow-retention / hole-fill and edge soften/choke/de-spill refinement. "
+                   "Optional manual aspect ratio / width / height (proportional scale with "
+                   "transparent padding) and output fps retiming. "
                    "Outputs plug directly into the transparent-video export node.")
 
     @classmethod
@@ -200,6 +217,19 @@ class BSAI_H3_TransparentKey:
                                         "tooltip": "Checkerboard preview short-side cap (px). Preview is for inspection only and does not need full resolution; keep the default for full-length 2K H3 videos (hundreds of frames) to save a lot of memory. 0=disable preview downsampling (not recommended)."}),
                 "matte_side": ("INT", {"default": 512, "min": 0, "max": 2048, "step": 64,
                                       "tooltip": "Matte grayscale short-side cap (px). 0=full resolution (only when exporting the matte as an exact mask; memory-heavy). Default downsamples to 512; the full-resolution alpha still comes from the A channel of images_rgba, so export is unaffected."}),
+                # Appended after the existing optional inputs so older workflow
+                # widget arrays keep their positional mapping.
+                "aspect_ratio": (
+                    ["Same as upstream", "16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "2.39:1"],
+                    {"default": "Same as upstream",
+                     "tooltip": "Target aspect ratio. Same as upstream keeps the incoming video ratio. When width and height are both 0 the canvas is derived from this ratio at the upstream pixel count; when only one side is set the other follows this ratio."},
+                ),
+                "output_width": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 2,
+                                         "tooltip": "Target canvas width (px). 0 = follow upstream width (or the width implied by aspect_ratio). Frames are scaled proportionally and centered on the canvas; leftover space is filled with transparent pixels, never stretched."}),
+                "output_height": ("INT", {"default": 0, "min": 0, "max": 4096, "step": 2,
+                                          "tooltip": "Target canvas height (px). 0 = follow upstream height (or the height implied by aspect_ratio)."}),
+                "output_fps": ("INT", {"default": _H3_FPS, "min": 1, "max": 60, "step": 1,
+                                       "tooltip": "Target frame rate. H3 upstream is 24fps, so 24 keeps the original timing; any other value resamples the frame count (duplicates/drops frames). Set the export node fps to the same value."}),
             },
         }
 
@@ -307,10 +337,61 @@ class BSAI_H3_TransparentKey:
         t_s = F.interpolate(t_chw, size=(nh, nw), mode="bilinear", align_corners=False)
         return t_s.permute(0, 2, 3, 1).contiguous()
 
+    @staticmethod
+    def _even_side(value):
+        """输出画布边长为偶数（视频编码要求），最小 2。"""
+        return max(2, int(round(float(value) / 2.0)) * 2)
+
+    @classmethod
+    def _resolve_target_size(cls, aspect_ratio, out_w, out_h, src_w, src_h):
+        """返回目标画布 (w,h)。
+
+        宽高都填时以像素为准；只填一边时另一边按比例推算；都不填时沿用
+        上游尺寸（或按比例在上游总像素量下推算）。0 表示沿用上游。
+        """
+        out_w, out_h = max(0, int(out_w)), max(0, int(out_h))
+        ratio = _ASPECT_RATIOS.get(str(aspect_ratio or "").strip().lower())
+        if out_w > 0 and out_h > 0:
+            return cls._even_side(out_w), cls._even_side(out_h)
+        if ratio is None:
+            if out_w <= 0 and out_h <= 0:
+                return src_w, src_h
+            if out_w > 0:
+                return cls._even_side(out_w), cls._even_side(out_w * src_h / float(src_w))
+            return cls._even_side(out_h * src_w / float(src_h)), cls._even_side(out_h)
+        if out_w > 0:
+            tw = cls._even_side(out_w)
+            return tw, cls._even_side(tw / ratio)
+        if out_h > 0:
+            th = cls._even_side(out_h)
+            return cls._even_side(th * ratio), th
+        base = (float(src_w) * float(src_h) * ratio) ** 0.5
+        tw = cls._even_side(base)
+        return tw, cls._even_side(tw / ratio)
+
+    @staticmethod
+    def _fit_frames(rgb, alpha, out_w, out_h):
+        """等比缩放并居中到目标画布，留白 alpha=0（透明），不拉伸画面。"""
+        b, _, h, w = rgb.shape
+        scale = min(out_w / float(w), out_h / float(h))
+        nh = max(1, int(round(h * scale)))
+        nw = max(1, int(round(w * scale)))
+        rgb_s = F.interpolate(rgb, size=(nh, nw), mode="bilinear", align_corners=False)
+        alpha_s = F.interpolate(alpha, size=(nh, nw), mode="bilinear", align_corners=False)
+        canvas_rgb = torch.zeros((b, 3, out_h, out_w), dtype=rgb.dtype, device=rgb.device)
+        canvas_alpha = torch.zeros((b, 1, out_h, out_w), dtype=alpha.dtype, device=alpha.device)
+        top = (out_h - nh) // 2
+        left = (out_w - nw) // 2
+        canvas_rgb[:, :, top:top + nh, left:left + nw] = rgb_s
+        canvas_alpha[:, :, top:top + nh, left:left + nw] = alpha_s
+        return canvas_rgb, canvas_alpha
+
     def key(self, images, backdrop_color, matte_preset, key_strength,
             clip_white, shadow_retention, fill_holes, edge_softness,
             edge_choke, de_spill, keep_mask, mask=None,
-            preview_side=512, matte_side=512):
+            preview_side=512, matte_side=512,
+            aspect_ratio="Same as upstream", output_width=0,
+            output_height=0, output_fps=_H3_FPS):
         # Normalise dropdown values (incl. legacy Chinese labels from old
         # workflow JSONs) to canonical keys: green/blue/black/white and
         # balanced/hard/fire/dark_white.
@@ -319,14 +400,21 @@ class BSAI_H3_TransparentKey:
         rgb_full = _to_hw_batch(images).to(images.device)
         b, c, h, w = rgb_full.shape
 
+        out_w, out_h = self._resolve_target_size(
+            aspect_ratio, output_width, output_height, w, h)
+        resize_needed = out_w != w or out_h != h
+        fps = max(1, int(output_fps))
+        resample_needed = fps != _H3_FPS
+
         # ---- 分块预算：控制峰值内存/显存 ----
         # 每块帧数上限：目标每块中间张量峰值不超过 ~1.5GB。
         # H,W 越大块越小；按输入所在设备分别给预算（CPU 保守 1GB，GPU 2GB）。
-        px = max(1, h * w)
+        px = max(1, h * w, out_w * out_h)
         is_cuda = rgb_full.device.type == "cuda"
         block_budget = (2 if is_cuda else 1) * (1024 ** 3)
         # 每帧主要副本：rgb(3ch)+alpha(1ch)+spill(1ch)+rgba(4ch)+matte(3ch)+preview(3ch) ≈ 15ch
-        frame_bytes = px * 15 * 4
+        # 缩放时还要同时持有源帧与目标画布，按 ~21ch 预算。
+        frame_bytes = px * (21 if resize_needed else 15) * 4
         chunk = max(1, min(b, block_budget // max(1, frame_bytes)))
         if chunk < 1:
             chunk = 1
@@ -363,6 +451,8 @@ class BSAI_H3_TransparentKey:
                                       int(edge_softness), float(edge_choke))
             rgb = self._de_spill_rgb(rgb, alpha, spill, float(de_spill),
                                      backdrop_color)
+            if resize_needed:
+                rgb, alpha = self._fit_frames(rgb, alpha, out_w, out_h)
 
             rgba = torch.cat([rgb, alpha], dim=1).permute(0, 2, 3, 1)
             matte = alpha.permute(0, 2, 3, 1).repeat(1, 1, 1, 3)
@@ -378,10 +468,24 @@ class BSAI_H3_TransparentKey:
         matte = torch.cat(matte_parts, dim=0)
         preview = torch.cat(prev_parts, dim=0)
 
+        src_frames = int(rgba.shape[0])
+        if resample_needed:
+            # 目标帧率与上游 24fps 不同：按时间轴重采样帧数（复制/丢弃帧），
+            # 输出时长不变；导出节点需设置为同一个 fps。
+            n_out = max(1, int(round(src_frames * fps / float(_H3_FPS))))
+            pick = (torch.arange(n_out, device=rgba.device) * _H3_FPS / fps).round().long()
+            pick = pick.clamp_(0, src_frames - 1)
+            rgba = rgba.index_select(0, pick)
+            matte = matte.index_select(0, pick)
+            preview = preview.index_select(0, pick)
+
         frames = int(rgba.shape[0])
         print(f"[BSAI H3 TransparentKey] {backdrop_color} / {matte_preset}: "
-              f"{frames} frames (chunk={chunk}) -> RGBA+Matte+preview (alpha mean "
-              f"{total_alpha_mean / max(1, frames) * 100:.1f}%)")
+              f"{frames} frames {out_w}x{out_h} @ {fps}fps (chunk={chunk}) -> RGBA+Matte+preview "
+              f"(alpha mean {total_alpha_mean / max(1, src_frames) * 100:.1f}%)")
+        if resample_needed:
+            print(f"[BSAI H3 TransparentKey] frames resampled {src_frames}@{_H3_FPS}fps -> "
+                  f"{frames}@{fps}fps; set the export node fps to {fps}.")
         return (rgba, matte, preview)
 
     @classmethod
