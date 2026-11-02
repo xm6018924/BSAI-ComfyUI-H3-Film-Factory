@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.280-mv-dual-pass-pipeline"
+BUILD = "minimax-h3-extender-v14.281-mv-faithful-single-refine"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -3796,7 +3796,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                # v14.276: 一镜到底·2K双采的"干净优先"单次采样。倍率已按 token
                # 预算压到 Sol-Attn 健康区, 整段一次调用即可; 时间分块(每段独立
                # 加噪 + 独立 seed)会在接缝处闪烁、段内碎花, 该档一律禁用。
-               refine_single_pass=False):
+               refine_single_pass=False,
+               # v14.281: MV 双采档忠实原版 —— 工作流里 temporal_chunk_tokens=0
+               # 就是"整段一次二采", 不允许 v14.270 的自动时间分块把它重新切成
+               # 4 段独立采样(段间换 seed 会在接缝闪烁/段内碎花)。
+               refine_no_temp_chunk=False):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -4666,7 +4670,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 守恒(tokens 均摊到段*块, 不膨胀), 预期 4 步总量 50-100s.
             # v14.276: 单次采样档不做自动时间分块 —— 倍率已按 token 预算压到
             # Sol-Attn 健康区, 整段一次调用最干净; 分块只会换来接缝闪烁与碎纹。
-            if not _use_temporal and not refine_single_pass:
+            # v14.281: MV 双采档同理 —— 原版 temporal_chunk_tokens=0 即整段一次,
+            # 由 refine_no_temp_chunk 显式关闭自动分块(空间 4 块保留)。
+            if refine_no_temp_chunk and not _use_temporal:
+                print("[H3 Extender] v14.281 MV 双采: 按原版 temporal_chunk_tokens=0 "
+                      "禁用自动时间分块 -> 整段一次二采(1 段 × 空间分块)", flush=True)
+            if not _use_temporal and not refine_single_pass and not refine_no_temp_chunk:
                 try:
                     _t_cand226 = None
                     _h_cand226 = 0
@@ -8670,6 +8679,9 @@ class BSAIH3FilmFactory:
         # v14.238 MiniMaxH3 Director 极速双采移植: 档位命中标志 —— 命中后
         # 分辨率接管(一采低清画布)与 refine factor 换算在解析完分辨率后执行。
         _director_fast_active = False
+        # v14.281: 档位级"禁用自动时间分块"标志。MV 双采档按原版
+        # temporal_chunk_tokens=0 整段一次二采, 由该标志传给 _sample_h3。
+        _rp_no_temp_chunk = False
         # v14.210: 默认管道 "Sol-H3 Self-Lift 双采 (默认)" 名字里就是 "双采",
         # 理应自动 enable refine_enable——之前被行 6686 显式排除(作为"无管道"回退),
         # 导致用户选了默认管道但 UI toggle refine_enable=false 时二采被跳过。
@@ -8692,6 +8704,12 @@ class BSAIH3FilmFactory:
                 # 用 minimax_h3_latent_upscaler_3d_fp16.safetensors(SelfLift 同款 3D
                 # latent 放大) + 40px 对齐改到 32px + 二采分块(4 块 256 overlap)
                 # + audio_context_length=0(纯对口型档音频来自外部, 不进模型音频链)。
+                # v14.281: 原版 temporal_chunk_tokens=0 = 整段一次二采, 禁止 v14.270
+                # 自动时间分块接管(段间独立加噪 -> 接缝闪烁/碎花)。24GB 上每空间块
+                # ~272k tokens 若确认活锁, 可临时设 BSAI_H3_MV_LEGACY_CHUNK=1 退回
+                # 自动分块(不改代码, 需重启 ComfyUI)。
+                _rp_no_temp_chunk = str(
+                    os.environ.get("BSAI_H3_MV_LEGACY_CHUNK", "")).strip().lower() not in ("1", "true", "on")
                 steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
                 refine_enable = True
                 refine_upscale_factor = 2.0
@@ -8734,6 +8752,10 @@ class BSAIH3FilmFactory:
                       f"(denoise {float(refine_denoise):.2f}, 3D latent upscaler x2.0, "
                       f"align {int(refine_align_to)}px, tiled {int(tile_count)}x{int(tile_overlap)}, "
                       f"audio_context_length=0) — 参数与 MV 示例工作流逐字一致")
+                print("[H3 Extender] v14.281 MV 双采: 时间分块 "
+                      + ("关闭(原版 temporal_chunk_tokens=0) — 二采整段一次 + 空间 4 块"
+                         if _rp_no_temp_chunk else
+                         "自动(BSAI_H3_MV_LEGACY_CHUNK 已置位) — v14.270 自动分块生效"))
             elif _rp_mode == "直播配音高清（音频≥12步）":
                 # v14.179 (2026-10-23): 直播带货 ref_audio 配音模式专用配方。
                 # 根因: H3 官方/社区实证 —— 音频 8 步最差, ≥12 步才可用;
@@ -9560,7 +9582,8 @@ class BSAIH3FilmFactory:
               f"scheduler={scheduler} denoise={denoise} shift={shift_video}/{shift_audio} "
               f"| 二采 enable={refine_enable} steps={refine_steps} "
               f"denoise={refine_denoise} factor={refine_upscale_factor} "
-              f"tile={tile_count} mem={refine_mem_mode}")
+              f"tile={tile_count} mem={refine_mem_mode} "
+              f"temp_chunk={'off(原版)' if _rp_no_temp_chunk else 'auto'}")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
         unique_id = kwargs.get("unique_id", None)
         stored_prompt_pack_signature = _prompt_pack_signature_from_state(clips_json)
@@ -11865,6 +11888,7 @@ class BSAIH3FilmFactory:
                     temporal_chunk_tokens=int(temporal_chunk_tokens),
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
                     refine_single_pass=bool(one_shot_dual_2k),
+                    refine_no_temp_chunk=bool(_rp_no_temp_chunk),
                     omni_8step_mode=omni_8step_mode,
                     honor_manual_steps=(str(speed_preset) == "custom"),
                     # v14.238 MiniMaxH3 Director 极速双采移植参数
