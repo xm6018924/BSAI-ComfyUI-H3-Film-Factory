@@ -304,13 +304,24 @@ class BSAI_H3_TransparentKey:
     def _de_spill_rgb(self, rgb, alpha, spill, de_spill, backdrop_color):
         if de_spill <= 0.0:
             return rgb
-        # 只在半透明边缘生效：权重 = (1 - alpha)^1.2
-        edge_w = torch.pow(_clamp01(1.0 - alpha), 1.2).detach()
+        # v14.283: 轮廓带全强度去溢色。
+        # 旧权重 (1-alpha)^1.2 在 alpha≈0.95 的近不透明轮廓上只剩 ~6%，
+        # 去溢色正好在最显眼的那一圈失效（实测 alpha 0.8~0.999 波段仍有
+        # 23%~34% 像素绿色超出 0.03，手指轮廓一圈发绿）。
+        # 改为：用 alpha 膨胀/腐蚀差取"轮廓带"（主体内外各 2px），带内按
+        # de_spill 全强度压制；带外（主体内部）不碰，保护真正的绿色主体；
+        # 带边缘做羽化避免接缝。半透明区(alpha<0.5)整片都属于背景混合，
+        # 一并全强度压制。
+        core = (alpha > 0.5).float()
+        ring = _morph_pool(core, 2, "dilate") - _morph_pool(core, 2, "erode")
+        band = torch.maximum(_blur_alpha(_clamp01(ring), 1),
+                             _clamp01(1.0 - alpha))
+        edge_w = (de_spill * band).detach()
         if backdrop_color == "green":
-            g = rgb[:, 1:2] - de_spill * edge_w * spill
+            g = rgb[:, 1:2] - edge_w * spill
             rgb = torch.cat([rgb[:, 0:1], _clamp01(g), rgb[:, 2:3]], dim=1)
         elif backdrop_color == "blue":
-            b = rgb[:, 2:3] - de_spill * edge_w * spill
+            b = rgb[:, 2:3] - edge_w * spill
             rgb = torch.cat([rgb[:, 0:1], rgb[:, 1:2], _clamp01(b)], dim=1)
         return rgb
 
