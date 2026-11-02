@@ -8311,11 +8311,14 @@ class BSAIH3FilmFactory:
         """Resolve @图N/@视频N/@音频N tags in clip prompts against the connected Asset Library.
         Replaces @图N with <Picture N>, @视频N with <Video N>, @音频N with <Audio 1>.
         Also loads referenced images as internal refs and audio as ref_audio path.
-        Returns (clips_with_resolved_prompts, resolved_image_paths, resolved_audio_paths, clip_asset_paths).
+
+        Returns (clips_with_resolved_prompts, resolved_image_paths, resolved_audio_paths,
+                 clip_asset_paths, speaker_audio_map).
+        speaker_audio_map: dict {图_index (int): audio_path (str)} — @图N → @音频N 声音参考绑定。
         """
         if not asset_library:
             print("[H3 Extender] asset_library is empty or None, skipping @图N resolution")
-            return clips, [], [], []
+            return clips, [], [], [], {}
 
         # asset_library can be a dict with 'images'/'videos'/'audios' lists
         if isinstance(asset_library, dict):
@@ -8328,7 +8331,7 @@ class BSAIH3FilmFactory:
             audios = []
         else:
             print(f"[H3 Extender] asset_library is unexpected type: {type(asset_library)}")
-            return clips, [], [], []
+            return clips, [], [], [], {}
 
         print(f"[H3 Extender] asset_library received: {len(images)} images, {len(videos)} videos, {len(audios)} audios")
         for i, img in enumerate(images[:3]):
@@ -8340,6 +8343,8 @@ class BSAIH3FilmFactory:
         resolved_audio_paths = []
         # v1.99: 每个 clip 依赖的资产图路径（per-clip 失效用）
         clip_asset_paths = [[] for _ in clips]
+        # v14.280: @图N ↔ @音频N 声音参考绑定 {图index: audio_path}
+        speaker_audio_map = {}
 
         def _find_asset_by_index(items, tag_num):
             """Find an asset by its 'index' field, falling back to positional."""
@@ -8371,6 +8376,13 @@ class BSAIH3FilmFactory:
                     resolved_image_paths.append(img_path)
                 if img_path not in clip_asset_paths[clip_idx]:
                     clip_asset_paths[clip_idx].append(img_path)
+                # v14.280: @图N 自动查找 @音频N 作为声音参考
+                aud_entry = _find_asset_by_index(audios, tag_num)
+                if aud_entry is not None and tag_num not in speaker_audio_map:
+                    aud_path = aud_entry.get("path", aud_entry.get("filename", "")) if isinstance(aud_entry, dict) else str(aud_entry)
+                    if aud_path:
+                        speaker_audio_map[tag_num] = aud_path
+                        print(f"[H3 Extender] 🎤 @图{tag_num} ↔ @音频{tag_num} voice ref bound: {aud_path[-60:]}")
                 ref_num = resolved_image_paths.index(img_path) + 1
                 return f"<Picture {ref_num}>"
             prompt = re.sub(r'@(?:图|img)(\d+)', _replace_image_tag, prompt, flags=re.IGNORECASE)
@@ -8411,8 +8423,154 @@ class BSAIH3FilmFactory:
         print(f"[H3 Extender] resolved {len(resolved_image_paths)} image paths, {len(resolved_audio_paths)} audio paths")
         for i, p in enumerate(resolved_image_paths):
             print(f"[H3 Extender]   resolved_img[{i}]: {p}")
+        if speaker_audio_map:
+            print(f"[H3 Extender] 🎤 Speaker-audio bindings: {speaker_audio_map}")
 
-        return clips, resolved_image_paths, resolved_audio_paths, clip_asset_paths
+        return clips, resolved_image_paths, resolved_audio_paths, clip_asset_paths, speaker_audio_map
+
+    # ── v14.280: 自动多人对话声音克隆 ──────────────────────────────────────
+    def _try_auto_dialogue_tts(self, clips, tts_model, speaker_audio_map, asset_library):
+        """从分镜脚本自动提取对话台词 → 调用 IndexTTS 多人对话合成 → 返回完整 AUDIO。
+
+        触发条件（全部满足才执行）:
+          1) tts_model 已连接
+          2) speaker_audio_map 非空（资产库 @图N ↔ @音频N 有绑定）
+          3) clips 中能解析出 ≥1 行对话台词
+
+        Returns:
+            AUDIO dict 或 None（不满足条件时返回 None，让调用方跳过）
+        """
+        import os as _os
+        import sys as _sys
+        import re as _re
+        import torchaudio
+        import soundfile as sf
+        import tempfile
+
+        # 条件 1: 有 tts_model
+        if tts_model is None:
+            return None
+
+        # 条件 2: 资产库有音频参考（speaker_audio_map 来自 @图N ↔ @音频N 绑定，
+        # 或直接有 audios 列表）
+        asset_audios = []
+        if isinstance(asset_library, dict):
+            asset_audios = asset_library.get("audios", [])
+        ref_audio_paths = list(speaker_audio_map.values()) if speaker_audio_map else [
+            a.get("path") for a in asset_audios if isinstance(a, dict) and a.get("path")
+        ]
+        if not ref_audio_paths:
+            print("[H3 AutoTTS] 资产库中没有 @音频N 参考 → 跳过自动对话合成")
+            return None
+
+        # 条件 3: 从 clips prompt 中提取对话台词
+        _DIALOGUE_LINE_RE = _re.compile(
+            r"^\s*(?:"
+            r"[【\[]([^】\]]{1,20})[】\]]\s*[:：]?\s*"  # 【角色名】台词
+            r"|(\S{1,20})\s*[:：]\s+"                       # 角色名: 台词
+            r"|@\s*(?:图|音频|img|aud)\s*(\d+)\s*[:：]\s*"  # @图N: 台词
+            r")(.+?)\s*$"
+        )
+
+        dialogue_lines = []
+        _non_dialogue_skip = {"镜头", "景别", "构图", "画面", "音效", "音乐",
+                              "BGM", "bgm", "环境音", "描述", "运动", "转场",
+                              "时长", "秒", "灯光", "光影", "场景", "画面描述"}
+        for _c in clips or []:
+            prompt = _c.get("prompt", "") if isinstance(_c, dict) else str(_c)
+            for _ln in prompt.splitlines():
+                _ln = _ln.strip()
+                if not _ln:
+                    continue
+                m = _DIALOGUE_LINE_RE.match(_ln)
+                if m:
+                    if m.group(1):
+                        speaker, text = m.group(1), m.group(4)
+                        if speaker in _non_dialogue_skip:
+                            continue
+                        dialogue_lines.append((speaker, text))
+                    elif m.group(2):
+                        speaker, text = m.group(2), m.group(4)
+                        if speaker in _non_dialogue_skip:
+                            continue
+                        dialogue_lines.append((speaker, text))
+                    elif m.group(3):
+                        asset_idx = int(m.group(3))
+                        text = m.group(4)
+                        dialogue_lines.append((f"asset_{asset_idx}", text))
+
+        if not dialogue_lines:
+            print("[H3 AutoTTS] 分镜脚本中没有识别到对话台词 → 跳过自动合成")
+            return None
+
+        print(f"[H3 AutoTTS] 解析到 {len(dialogue_lines)} 行对话台词，使用 {len(ref_audio_paths)} 个参考音色")
+        for _s, _t in dialogue_lines[:5]:
+            print(f"  {_s}: {_t[:40]}")
+
+        # ── 调用 voice_clone_node 的 BSAIDialogueVoiceClone ──
+        # 构造对话脚本文本格式
+        _nl = "\n"
+        _script_lines = []
+        for _s, _t in dialogue_lines:
+            # 如果 speaker 是 asset_N 格式，转成 @图N 标签
+            if _s.startswith("asset_"):
+                _idx_part = _s.split("_")[-1]
+                _script_lines.append(f"@图{_idx_part}: {_t}")
+            else:
+                _script_lines.append(f"{_s}: {_t}")
+        _full_script = _nl.join(_script_lines)
+
+        # 构造 speaker_map: asset_idx → ref_index（在 ref_audio_paths 列表中的位置）
+        # ref_audio_paths 来自 speaker_audio_map 或 asset_audios
+        _spk_map_entries = []
+        if speaker_audio_map:
+            # speaker_audio_map = {图index: audio_path}
+            _path_to_ref_idx = {p: i + 1 for i, p in enumerate(ref_audio_paths)}
+            for _img_idx, _aud_path in sorted(speaker_audio_map.items()):
+                _ref_idx = _path_to_ref_idx.get(_aud_path)
+                if _ref_idx is not None:
+                    _spk_map_entries.append(f"asset_{_img_idx}={_ref_idx}")
+
+        # 加载 voice_clone_node 模块
+        _vc_dir = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)))
+        if _vc_dir not in _sys.path:
+            _sys.path.insert(0, _vc_dir)
+        from voice_clone_node import BSAIDialogueVoiceClone
+
+        # 把参考音频文件加载成 AUDIO dict
+        def _load_ref_wav(path):
+            try:
+                wf, sr = torchaudio.load(path)
+            except Exception:
+                data, sr = sf.read(path)
+                wf = torch.from_numpy(data).float()
+                if wf.dim() == 1:
+                    wf = wf.unsqueeze(0)
+                else:
+                    wf = wf.T
+            if wf.shape[0] > 1:
+                wf = wf.mean(dim=0, keepdim=True)
+            return {"waveform": wf.unsqueeze(0), "sample_rate": sr}
+
+        _ref_audio_objs = [_load_ref_wav(p) for p in ref_audio_paths]
+
+        # 调用合成
+        _clone = BSAIDialogueVoiceClone()
+        _kwargs_call = {
+            "tts_model": tts_model,
+            "dialogue_script": _full_script,
+            "speaker_map": ",".join(_spk_map_entries),
+            "lang": "ZH",
+            "duration_factor": 1.0,
+            "crossfade_ms": 80,
+            "pause_ms": 0,
+        }
+        for _i, _ref in enumerate(_ref_audio_objs[:6], 1):
+            _kwargs_call[f"ref_audio_{_i}"] = _ref
+
+        _auto_audio, _auto_log = _clone.synthesize_dialogue(**_kwargs_call)
+        print(f"[H3 AutoTTS] 合成日志:\n{_auto_log}")
+        return _auto_audio
 
     def extend(self, model, clip, vae, **kwargs):
         # v1.21: keys are pure English now, direct kwargs.get()
@@ -9622,7 +9780,7 @@ class BSAIH3FilmFactory:
         if global_prompt:
             print(f"[H3 Extender] global_prompt received (len={len(str(global_prompt))}): '{str(global_prompt)[:80]}'")
             gp_clip = {"prompt": str(global_prompt)}
-            resolved_all, resolved_img_paths, resolved_aud_paths, _all_asset_paths = self._resolve_asset_library_refs(
+            resolved_all, resolved_img_paths, resolved_aud_paths, _all_asset_paths, _speaker_audio_map = self._resolve_asset_library_refs(
                 [gp_clip] + clips, asset_library
             )
             global_prompt = resolved_all[0]["prompt"]
@@ -9632,7 +9790,7 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] global_prompt after resolution: '{str(global_prompt)[:80]}'")
         else:
             print("[H3 Extender] no global_prompt connected")
-            clips, resolved_img_paths, resolved_aud_paths, clip_asset_paths = self._resolve_asset_library_refs(clips, asset_library)
+            clips, resolved_img_paths, resolved_aud_paths, clip_asset_paths, _speaker_audio_map = self._resolve_asset_library_refs(clips, asset_library)
             global_asset_paths = []
         external_prompt_pack = _normalize_external_prompt_pack(prompt_pack)
         clips, active_prompt_pack_signature, prompt_pack_imported, _prompt_pack_count_changed = (
@@ -10406,8 +10564,31 @@ class BSAIH3FilmFactory:
         else:
             _lip_voice_dummy = None
         _tts_model = kwargs.get("tts_model_TTS模型")
-        if _tts_model is not None:
-            print(f"[H3 LipSync] 检测到 tts_model 输入连接: tts_model=已连接 — 台词合成请走独立 IndexTTS 节点，合成音频接入 lip_voice 或 lip_audio 驱动口型")
+        # v14.280: 自动多人对话声音克隆 —— 当 tts_model + 资产库音频参考都在，
+        # 且没有外部 lip_audio/lip_voice 驱动时，从分镜脚本提取对话台词，
+        # 自动调用 BSAIDialogueVoiceClone 合成完整多说话人对话音频，
+        # 结果作为 lip_audio 驱动所有 @图N 角色的对口型。
+        if _tts_model is not None and lip_audio is None and _lip_voice is not None:
+            pass  # lip_voice 已接音频，不需要自动合成
+        elif _tts_model is not None and lip_audio is None and _lip_voice is None:
+            try:
+                # _speaker_audio_map 在资产库解析时已赋值（5元组返回值）
+                _am = locals().get("_speaker_audio_map", {})
+                _auto_tts_triggered = self._try_auto_dialogue_tts(
+                    clips=clips,
+                    tts_model=_tts_model,
+                    speaker_audio_map=_am,
+                    asset_library=asset_library,
+                )
+                if _auto_tts_triggered is not None:
+                    lip_audio = _auto_tts_triggered
+                    print(f"[H3 AutoTTS] ✅ 多人对话自动合成完成 → 已升级为 lip_audio 驱动口型")
+            except Exception as _e:
+                print(f"[H3 AutoTTS] 自动多人对话合成跳过（非致命）：{_e}")
+                import traceback as _tb
+                print(f"[H3 AutoTTS]  {_tb.format_exc()[-200:]}")
+        elif _tts_model is not None:
+            print(f"[H3 LipSync] 检测到 tts_model 输入连接，但 lip_audio/lip_voice 也已接入 → 外部音频优先，跳过自动多人对话合成")
         ref_items = None
         ref_blocks = None
         active_picture_slots = None

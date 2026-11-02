@@ -178,6 +178,17 @@ try:
 except Exception as e:
     print(f"[H3 Film Factory] bsai_h3_transparent.py import failed: {e}")
 
+# v14.280: 声音克隆节点（单人 + 多人对话）
+try:
+    from .voice_clone_node import (
+        NODE_CLASS_MAPPINGS as VOICE_CLONE_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as VOICE_CLONE_DISPLAY,
+    )
+    NODE_CLASS_MAPPINGS.update(VOICE_CLONE_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(VOICE_CLONE_DISPLAY)
+except Exception as e:
+    print(f"[H3 Film Factory] voice_clone_node.py import failed: {e}")
+
 # === Server-side API endpoints ===
 try:
     from . import server
