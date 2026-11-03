@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.301-dialogue-boundary-breath"
+BUILD = "minimax-h3-extender-v14.302-multitalk-audio-video-sync"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -850,7 +850,8 @@ def _ls_auto_clip_durations_by_audio(clips, lip_audio, fps=24.0):
     return new_clips, modified
 
 
-def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
+def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0,
+                              explicit_clip_durations=None):
     """Split a full lip-sync audio into per-clip segments based on clip durations.
 
     Args:
@@ -944,15 +945,26 @@ def _split_lip_audio_by_clips(lip_audio, clips, fps=24.0, context_frames=0):
     _ctx_ov_samples = int(round(_ctx_frames / float(fps) * sr)) if _ctx_frames else 0
 
     clip_durations = []
-    for idx, cfg in enumerate(clips):
-        dur = float(cfg.get("duration", 5.0))
-        _raw = max(5, int(round(dur * float(fps))))
-        _ctx_on = bool(cfg.get("context_enabled", True)) if idx < len(clips) else True
-        if idx > 0 and _ctx_on and _ctx_frames > 0:
-            _frames = max(5, _align_frame_count(_raw + _ctx_frames) - _ctx_frames)
-        else:
-            _frames = _align_frame_count(_raw)
-        clip_durations.append(float(_frames) / float(fps))
+    if (explicit_clip_durations is not None
+            and len(explicit_clip_durations) == len(clips)):
+        # v14.302: 多人对话逐段 TTS 路径传入每段实测音频时长，直接用，不再按
+        # cfg.duration 重算帧网格。原因：ctx_on 段的渲染净帧数 = align(raw+ctx)-ctx，
+        # 恒比网格化音频多 1~16 帧(最多 0.67s)，重算后每段"多占"下一段 0.5s 台词，
+        # 缺口累积到末段 → 末段台词被截断(实测 clip4 5.88s 音频只播 4.22s)。
+        # 直传实测时长后，音频段与台词严格同长；多出来的视频尾帧落成静默尾，
+        # 不侵占任何一段台词。
+        for _d in explicit_clip_durations:
+            clip_durations.append(max(1.0 / float(fps), float(_d)))
+    else:
+        for idx, cfg in enumerate(clips):
+            dur = float(cfg.get("duration", 5.0))
+            _raw = max(5, int(round(dur * float(fps))))
+            _ctx_on = bool(cfg.get("context_enabled", True)) if idx < len(clips) else True
+            if idx > 0 and _ctx_on and _ctx_frames > 0:
+                _frames = max(5, _align_frame_count(_raw + _ctx_frames) - _ctx_frames)
+            else:
+                _frames = _align_frame_count(_raw)
+            clip_durations.append(float(_frames) / float(fps))
 
     sum_clip_dur = sum(clip_durations)
 
@@ -3343,6 +3355,8 @@ def _ff_build_xfade_merge_cmd(ff, clip_paths, output_path, vfade=0.5, afade=0.05
     # Build chained xfade video filter
     vparts = []
     aparts = []
+    # v14.302: out_v/out_a 自带方括号，vlabel 必须存"裸标签"，
+    # 否则下一轮 f"[{vlabel}]" 会拼成 "[[v01]]" → ffmpeg filter 语法错误(EINVAL)。
     vlabel = "0:v"
     alabel = "0:a"
     cum_dur = durations[0]
@@ -3352,8 +3366,8 @@ def _ff_build_xfade_merge_cmd(ff, clip_paths, output_path, vfade=0.5, afade=0.05
         offset = max(0.1, cum_dur - vfade)
         vparts.append(f"[{vlabel}][{i}:v]xfade=transition=fade:duration={vfade}:offset={offset:.3f}{out_v}")
         aparts.append(f"[{alabel}][{i}:a]acrossfade=d={afade}:c1=tri:c2=tri{out_a}")
-        vlabel = out_v
-        alabel = out_a
+        vlabel = f"v{i:02d}"
+        alabel = f"a{i:02d}"
         cum_dur = cum_dur + durations[i] - vfade  # cumulative after overlap
 
     filter_complex = ";".join(vparts + aparts)
@@ -3362,8 +3376,8 @@ def _ff_build_xfade_merge_cmd(ff, clip_paths, output_path, vfade=0.5, afade=0.05
         cmd += ["-i", str(cp)]
     cmd += [
         "-filter_complex", filter_complex,
-        "-map", vlabel,
-        "-map", alabel,
+        "-map", f"[{vlabel}]",
+        "-map", f"[{alabel}]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "17",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k",
@@ -11361,7 +11375,8 @@ class BSAIH3FilmFactory:
                       f"{_sum_clip_dur:.2f}s → 自动追加延续分镜 CLIP +{_new_clip['duration']:.2f}s "
                       f"(id={_new_clip['id']}), 外部音频完整性已保证")
             lip_audio_segments = _split_lip_audio_by_clips(
-                lip_audio, clips, fps=float(FPS), context_frames=_ctx_frames)
+                lip_audio, clips, fps=float(FPS), context_frames=_ctx_frames,
+                explicit_clip_durations=locals().get("_auto_clip_durs"))
             print(f"[H3 LipSync] ✅ 已启用对口型模式，{len(lip_audio_segments)} 段音频已就绪 "
                   f"(context={_ctx_frames}帧, ctx_on 段按净时长推进)")
             # ── 声音参考共存模式（v2.121）──
@@ -13545,6 +13560,21 @@ class BSAIH3FilmFactory:
         # file to a standalone MP4 in ComfyUI's temp directory. The file
         # paths + metadata are returned as a JSON string so the Premiere
         # Pro node can add them to its timeline.
+        # v14.302: clip_videos 提取(以及后续合并)之前必须先等待所有异步编码落盘。
+        # 旧顺序里提取循环跑在 _pending_enc 等待之前：末段的 mp4 还在后台编码，
+        # seg["decoded_mp4_blob"] 仍是 None → "segment N has no decoded blob, skipping"，
+        # 结果最后一段既不进合成视频也不进 Premiere 时间线(实测 4 段只出 3 段)。
+        _enc_waited = False
+        for _enc_entry in _pending_enc:
+            try:
+                _enc_entry[0].wait(timeout=600)
+            except Exception:
+                pass
+            _enc_waited = True
+        _pending_enc = []
+        if _enc_waited:
+            print("[H3 Extender] v14.302 已等待全部异步编码落盘(clip_videos 提取前)")
+
         clip_videos_json = "[]"
         # v1.18: 单独生成/暂停后静默，不提取 clip_videos（等用户后续合并输出/全量渲染）。
         if not suppress_auto_merge:
@@ -13595,11 +13625,7 @@ class BSAIH3FilmFactory:
 
         # Decode any validated (cached, not re-generated) clips so the
         # v1.70: 等待所有 async encode 完成(blob 落盘), final AV 输出才能读全.
-        for _enc_entry in _pending_enc:
-            try:
-                _enc_entry[0].wait(timeout=600)
-            except Exception:
-                pass
+        # v14.302: 该等待已上移到 clip_videos 提取之前(见 _enc_waited), 此处不再重复。
         _pending_enc = []
 
         # IMAGE/AUDIO outputs always carry the complete film.

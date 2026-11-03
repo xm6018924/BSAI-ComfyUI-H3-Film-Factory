@@ -464,7 +464,11 @@ class BSAIDialogueVoiceClone:
         # --- Step 6: 拼接 ---
         if pause_ms > 0 and any_sr:
             pause_samples = int(any_sr * pause_ms / 1000)
-            silence = torch.zeros(1, 1, pause_samples)
+            # v14.302: 停顿不能填"精确 0"。H3 的 _split_lip_audio_by_clips 会剔除
+            # >=80ms 的精确全零断点(实测日志 "剔除源音频数字全零断点 4 处, 共 0.66s"),
+            # 换气节拍被删掉后换人处又会抢话。用 -70dB 级噪声填充：听感是静音，
+            # 但不会被当作断点剔除。
+            silence = torch.randn(1, 1, pause_samples) * 3e-4
             new_segs = []
             for i, seg in enumerate(audio_segments):
                 if i > 0:
