@@ -2,6 +2,23 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.299 (2026-11-03) — 渲染管道新增「PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)」档 / New render-pipeline tier: PIKA H3 Flex 6+2 SelfLift Dual-Pass
+
+**来源：** B 站教程 BV1Dy4u67EJo《Pika H3 Flex 全流程教学：5 秒视频仅用 30 秒，兼顾极致人脸一致性》 + Comfy 官方模板 `video_pika_h3_flex_ref2va` / docs.comfy.org Pika H3 Flex 页。Pika 把 MiniMax H3 蒸馏成 **6 步生成器**，以两个 LoRA 适配器发布（`pika_h3_flex_ref2va_v1_bf16` / `pika_h3_flex_fl2va_v1_bf16`，strength 必须 1.0，禁止再叠第二个加速 LoRA）。
+
+**配方（教程第三重加速落地方案）：**
+
+| 项 | 值 |
+|---|---|
+| 一采 | 6 步 euler + simple（教程两阶段采样防闪烁契约，替换官方 lcm + ManualSigmas） |
+| 二采 | 2 步 SelfLift 全分辨率精修，latent x2.0，denoise 0.5 |
+| 合计 | 8 NFE；shift 12 / 3 |
+| 锁脸 | Ref2VA @图N 参考驱动（教程实测换场景、梳头发依旧精准锁脸） |
+| Loader | 底模建议 `minimax_h3_ref2va_int8_convrot`，LoRA 槽挂 `pika_h3_flex_ref2va` (strength 1.0) |
+| 加速栈 | SegAttention(PathchSageAttentionKJ) + Sol-Attn + Sol VAE 齐备时，教程 4090 实测 5 秒片约 29s（官方默认工作流 125s） |
+
+**改动：** `extender.py`（`_RENDER_PIPELINE_EN2ZH` + INPUT_TYPES 枚举/tooltip + 配方链 elif）与 `web/extender.js`（QUICK_DEFS render_pipeline 的 cycle / cycleLabels / cycleAliases / tints 四数组同步追加、OPTIONS、ALIAS_CANON）同步注册；新增示例工作流 `example_workflows/BSAI_H3_Film_Factory电影工厂-PIKA H3 Flex 6+2锁脸双采-多人声音克隆版v1.3.json`（由多人声音克隆版 v1.2 改造：Film Factory 节点 render_pipeline 切到本档，SolH3 Loader 底模切 ref2va int8 卷积版）。
+
 ---
 
 ### v14.298 (2026-11-03) — 段标题的「人声状态标记」整块剔除 + 清掉规则里残留的否定词 / Strip vocal-state markers from segment titles
