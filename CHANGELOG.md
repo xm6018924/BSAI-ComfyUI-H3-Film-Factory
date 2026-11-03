@@ -2446,3 +2446,23 @@ One workflow bundles both **FastH3 (Sol-H3)** and **VDN-H3** model chains, switc
 
 ## Older / 更早版本
 See README.md sections for v1.31+ feature history. ｜ v1.31 及更早功能历史见 README.md。
+### v14.306 (2026-11-03) — 时间分块保持关闭，恢复空间分块修二采 OOM / Temporal chunking stays off, spatial tiling restored to fix refine OOM
+
+**起因**：v14.305 把空间分块也一并关闭后，实测 `tokens=546,720` 整段直跑在 24GB 卡上 OOM（sage attention 申请 499MiB 失败，自动 tile 兜底也被污染后的显存拖垮，最后退回一采 latent）。
+
+**定位**：整段 546k tokens 的 QKV 激活（546k×3072×2B≈3.4GB×4）叠 DiT 驻留 12.9GB 已超 23.86GB 卡容；本机 `comfy_kitchen` 无 sol_attn 原生核，torch 块稀疏回退扛不住整段。教程（BV1kN4G6rE89）能直出 30s 依赖原生核，本机不满足。
+
+**改动**：
+- **时间分块继续全线关闭**（`temporal_chunk_tokens` 强制 0，工作流传入值忽略；自动时间分块触发器保持关闭）。
+- **恢复空间分块**：`tiled_refine` / `tile_count` 恢复尊重工作流；130k token 自动开空间分块门恢复；>130k 的 dense 降级门恢复注入；`refine_mem_mode` 全局兜底分块恢复；MV 档 `tiled_refine=True` 恢复。
+- 空间分块带 128~256px overlap 混合，只切空间不切时间，不产生时间维接缝/闪烁。
+- 回退开关不变：`BSAI_H3_CHUNKED_DENOISE=1` 重启后连时间分块也恢复。
+
+**Background**: v14.305 disabled spatial tiling together with temporal chunking; a full 546k-token refine pass then OOMed on the 24GB card (QKV activations alone exceed capacity once the DiT is resident). This machine has no native sol_attn kernel (`comfy_kitchen` is empty), so the tutorial's single-pass 30s claim does not apply here.
+
+**Changes**:
+- Temporal chunking stays **off everywhere** (`temporal_chunk_tokens` forced to 0; auto-temporal trigger stays off).
+- Spatial tiling **restored**: workflow `tiled_refine`/`tile_count` honoured again; the 130k-token auto spatial gate, the >130k dense fallback injection, the global-mode fallback tiles and the MV preset tiling are back.
+- Tiles only split space, never time — with 128~256px overlap blending there are no temporal seams.
+- `BSAI_H3_CHUNKED_DENOISE=1` still re-enables temporal chunking after a restart.
+
