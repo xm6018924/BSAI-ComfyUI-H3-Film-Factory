@@ -12103,7 +12103,12 @@ class BSAIH3FilmFactory:
                 print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 命中景别/推拉词 "
                       f"{_os_hit_words}, 景别策略={_os_locked_size or '段间连续'}, "
                       f"本段景别 {_os_size_start or '无'} → {_os_size_end or '无'}, "
-                      f"已注入正向连续运镜指令(+轨迹锁定/景别规则/步态锁定)")
+                      f"已注入正向连续运镜指令(+连续运镜/段首承接/轨迹锁定/景别规则/步态锁定)")
+                # v14.289: 把**真正拼进条件文本的整段规则**打进日志 —— 之前只打印
+                # effective_prompt 的前 120 字符, 一镜到底注入的规则全在后面, 无法核对。
+                # 规则里若混入切镜词汇或否定句, 这一行会直接暴露。
+                print(f"[H3 Extender] v14.289 一镜到底 clip[{i}] 注入规则全文 "
+                      f"(len={len(_os_rule)}): {_os_rule}")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
