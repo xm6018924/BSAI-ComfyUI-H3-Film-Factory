@@ -20,6 +20,7 @@
 import argparse
 import glob
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -152,6 +153,23 @@ def seam(prev, cur):
             "head_diff": float(np.abs(b[0] - tail).mean()), "rows": best_rows}
 
 
+_SEG_RE = re.compile(r"h3_clip_\d+_(\d+)_\d+")
+
+
+def _seg_sort_key(p):
+    """段号排序键。文件名形如 h3_clip_<node>_<seg>_<ts>.mp4,
+    段号在下标 3 (不是下标 2 —— 那是节点号)。抓不到就退回文件名。"""
+    b = os.path.basename(p)
+    m = _SEG_RE.search(b)
+    if m:
+        return (0, int(m.group(1)), b)
+    parts = b.split("_")
+    for x in parts:
+        if x.isdigit():
+            return (1, int(x), b)
+    return (2, 0, b)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("files", nargs="*")
@@ -169,8 +187,9 @@ def main():
     files = list(a.files)
     if not files:
         d = a.dir or DEFAULT_DIR
-        files = sorted(glob.glob(os.path.join(d, GLOB_PAT)),
-                       key=lambda p: (os.path.basename(p).split("_")[2] if "_" in os.path.basename(p) else p))
+        files = sorted(glob.glob(os.path.join(d, GLOB_PAT)), key=_seg_sort_key)
+    else:
+        files = sorted(files, key=_seg_sort_key)
     if not files:
         print("!! 没有找到 clip 文件 (目录: %s)" % (a.dir or DEFAULT_DIR))
         return 2
