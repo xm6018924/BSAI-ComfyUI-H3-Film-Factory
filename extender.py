@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.300-switch-neutralize-voice-timecode"
+BUILD = "minimax-h3-extender-v14.301-dialogue-boundary-breath"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -9136,8 +9136,10 @@ class BSAIH3FilmFactory:
                 "speaker_map": _spk_map_str,
                 "lang": "ZH",
                 "duration_factor": 1.0,
-                "crossfade_ms": 80,
-                "pause_ms": 0,
+                # v14.296: 抢话修复——clip 内换人留 250ms 节拍；crossfade 80→30ms
+                # 避免两个说话人的声音在接缝处叠化(唇形模型会听到双人混音)。
+                "crossfade_ms": 30,
+                "pause_ms": 250,
             }
             for _i, _ref in enumerate(_ref_audio_objs[:6], 1):
                 _kwargs_call[f"ref_audio_{_i}"] = _ref
@@ -9156,6 +9158,16 @@ class BSAIH3FilmFactory:
             elif _sr != _clip_sr:
                 _rs = torchaudio.transforms.Resample(_sr, _clip_sr)
                 _w = _rs(_w[0]).unsqueeze(0)
+            # v14.296: 段尾追加 0.5s 换气静音（跨段抢话修复）。
+            # context_enabled=True 时下一段的口型音频段 = [边界-1.625s, 边界+净时长)，
+            # 重叠窗口会吃进本段末尾——若本段末尾仍是上一人台词，模型会把旧声音
+            # 贴到新画面的嘴上（女声口型配男声="抢话"）。追加静音尾后：
+            #   本段视频尾部 = 无人说话的换气节拍（口型闭合）；
+            #   下一段 context 重叠窗口吃到的是静音，新说话人在新帧干净开场。
+            _tail = int(round(0.5 * _clip_sr))
+            _w = torch.cat(
+                [_w, (torch.randn(_w.shape[0], _w.shape[1], _tail) * 3e-4).to(dtype=_w.dtype)],
+                dim=-1)
             # 台词音频按 H3 帧网格补齐(帧数 %17==5)，让 clip 时长与音频段严格等长。
             # 补的是极低幅噪声(-70dB 级)而非精确 0：_split_lip_audio_by_clips 会剔除
             # >=80ms 的精确全零段，纯零填充会被删掉并让后续 clip 音频整体前移。
