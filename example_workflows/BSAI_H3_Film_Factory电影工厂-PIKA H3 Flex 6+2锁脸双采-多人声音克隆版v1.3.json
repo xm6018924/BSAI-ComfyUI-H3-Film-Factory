@@ -5628,7 +5628,7 @@
         }
       },
       "widgets_values": [
-        "H3\\minimax_h3_ref2va_int8_convrot.safetensors",
+        "H3\\minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
         "default",
         true,
         0.5,
