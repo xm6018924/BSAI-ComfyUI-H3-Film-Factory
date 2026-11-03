@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""前端快捷按钮硬编码表(QUICK_DEFS) vs 后端 INPUT_TYPES 枚举 —— 一致性自检。
+r"""前端快捷按钮硬编码表(QUICK_DEFS) vs 后端 INPUT_TYPES 枚举 —— 一致性自检。
 
 为什么要这个工具
 ----------------
@@ -21,13 +21,21 @@ v14.218 起再加第三张表(可选):
                     * 旧工作流存的旧中文值, 档位序号/进度条/高亮依然算得对;
                     * 快捷下拉写回的永远是后端规范值(逐字合法, 等于后端 default)。
 
-本工具做四类检查:
+本工具做六类检查:
   1) cycle 与 cycleLabels 长度是否一致(缺一份 = 选到了但没名字/名字错位);
-  2) 后端枚举项是否都被前端表达(cycle 或 alias) —— 缺 = 下拉里选不到;
-  3) 前端 cycle / alias 里是否有后端已不存在的值 —— 多 = 选到无效值, 后端静默回落;
+  2) 后端枚举项是否都被前端表达(cycle 或 alias 目标) —— 缺 = 下拉里选不到;
+  3) 前端 cycle 里是否有后端已不存在的值 —— 多 = 选到无效值, 后端静默回落;
   4) **遗留兼容层**(`H3LegacyCompat` 的 OPTIONS 白名单 + DEFAULTS)与后端是否一致:
      OPTIONS 缺后端值 -> 载入工作流时该值会被当成"选项外"静默改写成默认值;
      DEFAULTS 不是后端合法值 -> 载入时会写进一个后端不认的值。
+  5) alias 目标必须是后端合法规范值; alias 键是**历史遗留值**(旧工作流存下来的
+     旧写法), 本来就不该出现在后端枚举里 —— 后端枚举早已统一成英文规范值,
+     中文只作显示层。所以"alias 键不是后端枚举值"是**误报**, 只在 alias 键与
+     cycle 规范值撞车(冗余别名)时提示 WARN。
+  6) **`ALIAS_CANON`(遗留兼容层的归一化表)与 `QUICK_DEFS.cycleAliases` 必须一致**:
+     这两份是同一张表的两个副本(JS 里的注释也这么写)。只改其中一份 ->
+     "快捷按钮写回的值"与"载入旧工作流时归一化出来的值"对不上, 前者选得到、
+     后者被静默重置。
 
 用法
 ----
@@ -261,12 +269,28 @@ def parse_legacy_tables(js_text):
     return options, keys, defaults
 
 
+def parse_alias_canon(js_text):
+    """解析遗留兼容层的 ALIAS_CANON 归一化表 (旧值 -> 规范值)。"""
+    out = {}
+    m = re.search(r"const\s+ALIAS_CANON\s*=\s*\{", js_text)
+    if not m:
+        return out
+    blob = js_text[m.start():_match_brace(js_text, m.start())]
+    for km in re.finditer(r"(\w+)\s*:\s*\{(.*?)\}", blob, re.S):
+        key = km.group(1)
+        pairs = re.findall(r'"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"', km.group(2))
+        if pairs:
+            out[key] = dict(pairs)
+    return out
+
+
 # -------------------------------------------------------------------- 主检查
 def main():
     js_text = io.open(JS, encoding="utf-8").read()
     backend = load_backend_enums()
     entries = parse_quick_defs(js_text)
     legacy_opts, legacy_keys, legacy_defaults = parse_legacy_tables(js_text)
+    alias_canon = parse_alias_canon(js_text)
 
     print(f"[前端] QUICK_DEFS 枚举项 {len(entries)} 个: {[e[0] for e in entries]}")
     print(f"[后端] 枚举型 widget {len(backend)} 个\n")
@@ -284,16 +308,28 @@ def main():
         issues = []
         if len(vals) != len(labels):
             issues.append(f"cycle({len(vals)}) != cycleLabels({len(labels)})")
-        missing = [x for x in b if x not in vals and x not in aliases]
+        alias_targets = set(aliases.values())
+        missing = [x for x in b if x not in vals and x not in alias_targets]
         extra = [x for x in vals if x not in b]
-        bad_alias_key = [k for k in aliases if k not in b]
-        bad_alias_target = [t for t in aliases.values() if t not in vals or t not in b]
+        bad_alias_target = [t for t in alias_targets if t not in vals or t not in b]
+        # v14.285 (2026-11-03) 修正误报:
+        #   alias **键** = 历史遗留值(旧工作流里存下来的旧写法), **本来就不该**
+        #   出现在后端枚举里 —— 后端枚举早已统一成英文规范值, 中文只作显示层。
+        #   旧值由 ALIAS_CANON 在 OPTIONS 白名单**之前**归一化
+        #   (web/extender.js 的 H3LegacyCompat.norm), 所以"alias 键不是后端
+        #   枚举值"从来不是错误。原先把它判成 ERROR, 导致每次跑本工具都报 8 条
+        #   DESYNC, 久而久之没人看它的输出 —— 真 bug(OPTIONS 缺后端值)被淹没。
+        #   现在只保留两条有意义的判定:
+        #     ① alias 键与 cycle 规范值撞车 -> 冗余别名(应直接从 cycle 取)
+        #     ② alias 键同时是后端枚举值     -> 归一化会自相矛盾
+        # 后者若不在 cycle 里, 已被上面的 missing 判为 ERROR(后端有前端没有)。
+        redundant_alias = [k for k in aliases if k in vals]
+        if redundant_alias:
+            issues.append("alias 键与 cycle 规范值重复(冗余别名): " + ", ".join(redundant_alias))
         if missing:
             issues.append("后端有前端没有(下拉里选不到): " + ", ".join(missing))
         if extra:
             issues.append("前端有后端没有(选到无效值): " + ", ".join(extra))
-        if bad_alias_key:
-            issues.append("alias 键不是后端枚举值: " + ", ".join(bad_alias_key))
         if bad_alias_target:
             issues.append("alias 目标不是合法 cycle 项: " + ", ".join(sorted(set(bad_alias_target))))
         verdict = "OK" if not issues else "MISMATCH: " + "; ".join(issues)
@@ -316,13 +352,57 @@ def main():
                 print(f"  {key:<24} ERROR {msg}")
                 errors.append((key, msg))
             if extra:
-                msg = ("白名单留了后端已不接受的遗留值: " + ", ".join(extra))
-                print(f"  {key:<24} WARN  {msg}")
-                warns.append((key, msg))
+                # v14.285: 白名单里保留后端已不接受的旧值, 只有在**没有任何地方认领**
+                # 它时才是问题 —— ALIAS_CANON 认领的旧值在 OPTIONS 之前就被归一化
+                # 成规范值(norm() 先查 ALIAS_CANON 再查 OPTIONS), 留着只是双保险,
+                # 冗余但无害。无人认领的才是死条目。
+                _ac = alias_canon.get(key, {})
+                _dead = [x for x in extra if x not in _ac]
+                _kept = [x for x in extra if x in _ac]
+                if _kept:
+                    print(f"  {key:<24} INFO  白名单保留的旧值已由 ALIAS_CANON 认领"
+                          f"(冗余但无害): " + ", ".join(_kept))
+                if _dead:
+                    msg = ("白名单留了后端已不接受的遗留值(且无别名认领, 属死条目): "
+                           + ", ".join(_dead))
+                    print(f"  {key:<24} WARN  {msg}")
+                    warns.append((key, msg))
             if not miss and not extra:
                 print(f"  {key:<24} OK    ({len(ov)} 项)")
     else:
         print("  (未找到 OPTIONS 表)")
+
+    print("\n[遗留兼容层 H3LegacyCompat] ALIAS_CANON vs QUICK_DEFS.cycleAliases")
+    if not alias_canon:
+        print("  (未找到 ALIAS_CANON 表)")
+    else:
+        qmap = {e[0]: e[3] for e in entries}
+        for key in sorted(set(qmap) | set(alias_canon)):
+            a_q = qmap.get(key)
+            a_c = alias_canon.get(key, {})
+            if a_q is None:
+                # 只在 ALIAS_CANON 里的 key(没进快捷按钮) -> 只校验目标是后端合法值
+                b = backend.get(key)
+                if not b:
+                    print(f"  {key:<24} SKIP  (仅 ALIAS_CANON, 后端无此 widget)")
+                    continue
+                bad = [t for t in a_c.values() if t not in b]
+                if bad:
+                    msg = "ALIAS_CANON 目标不是后端合法值: " + ", ".join(sorted(set(bad)))
+                    print(f"  {key:<24} ERROR {msg}")
+                    errors.append((key, msg))
+                else:
+                    print(f"  {key:<24} OK    (仅 ALIAS_CANON, {len(a_c)} 条, 目标均合法)")
+                continue
+            if a_q == a_c:
+                print(f"  {key:<24} OK    ({len(a_q)} 条一致)")
+            else:
+                only_q = {x: a_q[x] for x in a_q if a_c.get(x) != a_q[x]}
+                only_c = {x: a_c[x] for x in a_c if a_q.get(x) != a_c[x]}
+                msg = ("两份硬编码表漂移(快捷按钮写回的值 与 载入旧工作流归一化出来的值 "
+                       "会对不上): cycleAliases独有=" + str(only_q) + " ALIAS_CANON独有=" + str(only_c))
+                print(f"  {key:<24} ERROR {msg}")
+                errors.append((key, msg))
 
     print("\n[遗留兼容层 H3LegacyCompat] DEFAULTS 位置表 vs 后端枚举")
     dmap = {}

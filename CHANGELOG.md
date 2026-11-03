@@ -4,6 +4,43 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.285 (2026-11-03) — 枚举同步误报修正 + render_pipeline 档位丢失修复 / Fix enum-sync false positives + render_pipeline preset loss
+
+**场景：** `tools/check_quickbar_enum_sync.py` 长期报 8 条 DESYNC ERROR（`cycleAliases` 的中文旧值"不在后端枚举内" + `render_pipeline` 白名单缺 `MV Dual-Pass (电影工厂 v3.2 原版)`）。因为每次都红，真正的 bug 被淹没在噪声里。
+
+**分类（导出三张表逐项对照后判定）：**
+
+| 报错 | 真实性质 |
+|---|---|
+| 7 条「alias 键不是后端枚举值」 | **误报**。alias 键是**历史遗留值**（旧工作流存下来的旧写法），本来就不该出现在后端枚举里 —— 后端枚举早已统一成英文规范值，中文只作显示层。旧值由 `ALIAS_CANON` 在 OPTIONS 白名单**之前**归一化（`web/extender.js` 的 `H3LegacyCompat.norm()`），所以那条规则从来就不成立 |
+| 1 条「render_pipeline 白名单缺 MV Dual-Pass」 | **真 bug**。`norm()` → `ALIAS_CANON` 无此键 → `OPTIONS` 无此值 → 直接返回默认值。载入用该档位的工作流会被**静默重置**成默认管道。后端 `extender.py` 里该档确有实现，只是前端白名单漏了 |
+
+**修复 1（真 bug）：`web/extender.js` OPTIONS 白名单补齐**
+
+`OPTIONS.render_pipeline` 补上 `"MV Dual-Pass (电影工厂 v3.2 原版)"` —— 后端枚举 28 项 → 白名单 28 项。
+
+**修复 2（误报）：校验脚本改用正确的 alias 语义**
+
+- alias **目标**必须是后端合法规范值（保留 ERROR）
+- alias **键**不再要求出现在后端枚举里（历史遗留值的正常形态）
+- 新增：alias 键与 cycle 规范值撞车 → 冗余别名，报错
+- OPTIONS 里"后端已不接受的遗留值"：被 `ALIAS_CANON` 认领 → INFO（冗余但无害）；无人认领 → 才是死条目 WARN
+
+**修复 3（新增检查）：`ALIAS_CANON` 与 `QUICK_DEFS.cycleAliases` 一致性**
+
+这两份是同一张表的两个副本（JS 注释里也这么写），但校验脚本此前完全没管。只改其中一份 → 「快捷按钮写回的值」与「载入旧工作流归一化出来的值」对不上：前者选得到，后者被静默重置。新增解析 `ALIAS_CANON` 并逐 key 比对；只在 `ALIAS_CANON` 里存在的 key（`ref_image_size`/`refine_mem_mode`/`refine_sampler`，未进快捷按钮）额外校验其目标是后端合法值。
+
+**验证：**
+- 校验脚本：`=== SYNC OK (前端两份硬编码表 + 遗留兼容层与后端枚举完全一致) ===`，**0 ERROR / 0 WARN**，退出码 0（此前 8 ERROR）
+- `node --check web/extender.js` 通过
+- `norm()` 功能测试 19/19 通过：16 个旧中文值全部正确归一化；`MV Dual-Pass` 修复前被重置、修复后保住；真正的非法值仍回落到默认值（没有因为放宽容错而放过垃圾值）
+
+**注意：** `web/extender.js` 是浏览器静态资源，改动后需要**在页面硬刷新（Ctrl+F5）**才会生效。
+
+**/ Fix:** The enum-sync tool had been reporting 8 DESYNC errors for a long time, drowning the one real bug among false positives. After dumping all three hard-coded tables and comparing them item by item: the 7 "alias key is not a backend enum value" errors were **false positives** — alias keys are *legacy* values (the old spellings stored by older workflows) and by design are NOT current backend enum values (the backend enums were unified to English canonical values long ago; Chinese is display-only). Those legacy values are normalized by `ALIAS_CANON` **before** the OPTIONS whitelist is consulted (`H3LegacyCompat.norm()` in `web/extender.js`), so the rule never held. The 8th error was a **real bug**: `OPTIONS.render_pipeline` was missing `MV Dual-Pass (电影工厂 v3.2 原版)`, so loading a workflow using that preset silently rewrote it to the default pipeline (the backend *does* implement the preset — only the frontend whitelist was missing it). Fixes: (1) add the missing value to the whitelist; (2) correct the alias semantics in the checker — targets must be valid canonical values, keys are legacy values and are no longer required to be backend values; a key colliding with a cycle value is now reported as a redundant alias; (3) add a new check that `ALIAS_CANON` and `QUICK_DEFS.cycleAliases` stay in sync — they are two copies of the same table, and letting them drift means the quick-button value and the workflow-load normalization disagree. Verified: checker now reports 0 ERROR / 0 WARN (exit 0), `node --check` passes, and 19/19 `norm()` functional tests pass (16 legacy Chinese values normalize correctly, `MV Dual-Pass` is preserved after the fix but was reset before it, and genuinely invalid values still fall back to the default). The JS change requires a browser hard-refresh (Ctrl+F5) to take effect.
+
+---
+
 ### v14.284 (2026-11-03) — 一镜到底：段内切镜 + 人物倒走根治 / Fix intra-segment cuts + backward-walking subject in one-shot mode
 
 **场景：** 19 段一镜到底×歌曲链实渲。用户反馈三个问题：①clip1~clip3 **人物倒走**；②clip2 **第 3 秒切镜**；③clip3 同样倒走 + 切镜。
