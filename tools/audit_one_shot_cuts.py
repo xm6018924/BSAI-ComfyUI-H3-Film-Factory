@@ -12,7 +12,10 @@
                同时给出最佳对齐位移(帧), 正位移说明下一段首帧其实对应上一段更早的帧
                (即接缝处模型仍在重放上一段), 负位移说明下一段首帧比上一段末帧"超前".
 
-退出码: 0 = 全部通过; 1 = 发现切镜/断裂。
+  * 段内叠化: 差分平顶(每帧 1.2~3.0x)且中间帧是首尾两帧的线性混合(α 斜坡法),
+               双重曝光, 肉眼可见 —— 尖峰判据抓不到, 由 detect_dissolves 单独识别
+
+退出码: 0 = 全部通过; 1 = 发现切镜/叠化/断裂。
 """
 import argparse
 import glob
@@ -58,6 +61,59 @@ def load_gray(ff, path, width=480, height=272):
     return a.reshape(n, height, width).astype(np.float32)
 
 
+def detect_dissolves(g, diff, med, ratio_lo=1.2, n_mid_min=3, blend_tol=0.35):
+    """检测叠化(双重曝光)段落。
+
+    g     : (n, h, w) 灰度帧
+    diff  : (n,) 相邻帧平均绝对差
+    med   : 该 clip 的差分中位数
+
+    返回 [(i0, i1, peak_ratio, n_mid), ...]
+    """
+    if med <= 0 or len(g) < 12:
+        return []
+    n = len(g)
+    # 候选区间: 差分 >= ratio_lo x 中位数的极大连续段
+    cands = []
+    i = 1
+    while i < n:
+        if diff[i] / med >= ratio_lo:
+            j = i
+            while j < n and diff[j] / med >= ratio_lo:
+                j += 1
+            cands.append((i, j - 1))
+            i = j
+        else:
+            i += 1
+    out = []
+    for (i0, i1) in cands:
+        a_i, b_i = i0 - 3, i1 + 3
+        if a_i < 0 or b_i >= n:
+            continue
+        A = g[a_i].astype(np.float32)
+        B = g[b_i].astype(np.float32)
+        ab = float(np.abs(B - A).mean())
+        if ab < 1.0:
+            continue
+        D = (B - A).reshape(-1)
+        den = float((D * D).sum())
+        if den < 1e-6:
+            continue
+        n_mid = 0
+        for t in range(i0, i1 + 1):
+            G = g[t].astype(np.float32).reshape(-1)
+            al = float(((G - A.reshape(-1)) * D).sum() / den)
+            al = max(0.0, min(1.0, al))
+            blend = (1.0 - al) * A + al * B
+            res = float(np.abs(G - blend.reshape(-1)).mean())
+            if 0.10 < al < 0.90 and res < blend_tol * ab:
+                n_mid += 1
+        peak = float(max(diff[i] for i in range(i0, i1 + 1)) / med)
+        if n_mid >= n_mid_min and peak < 3.0:
+            out.append((i0, i1, peak, n_mid))
+    return out
+
+
 def analyze(ff, path):
     g = load_gray(ff, path)
     if g is None:
@@ -74,7 +130,8 @@ def analyze(ff, path):
             r = d[i] / med
             if r >= 2.0:
                 cuts.append((i, float(d[i]), float(r)))
-    return {"path": path, "frames": n, "gray": g, "diff": d, "median": med, "cuts": cuts}
+    return {"path": path, "frames": n, "gray": g, "diff": d, "median": med, "cuts": cuts,
+            "dissolves": detect_dissolves(g, d, med)}
 
 
 def seam(prev, cur):
@@ -132,8 +189,9 @@ def main():
     for info in infos:
         name = os.path.basename(info["path"])
         cuts = [c for c in info["cuts"] if c[2] >= a.cut]
-        status = "OK " if not cuts else "CUT"
-        if cuts:
+        dis = info.get("dissolves") or []
+        status = "OK " if not cuts and not dis else "CUT"
+        if cuts or dis:
             failed = True
         print("=" * 88)
         print("[%s] %s  frames=%d  帧差中位数=%.3f" % (status, name, info["frames"], info["median"]))
@@ -141,7 +199,11 @@ def main():
             print("   段内切镜 %d 处 (阈值 %.1f× 中位数), 按强度列前 12:" % (len(cuts), a.cut))
             for i, v, r in sorted(cuts, key=lambda x: -x[2])[:12]:
                 print("      f%-5d t=%6.3fs  diff=%8.3f  x_median=%5.2f" % (i, i / 24.0, v, r))
-        elif not a.quiet:
+        if dis:
+            print("   段内叠化 %d 处 (双重曝光, 尖峰判据抓不到):" % len(dis))
+            for (i0, i1, peak, n_mid) in dis:
+                print("      f%-5d..f%-5d  峰值=%.2f×中位数  中间态帧=%d" % (i0, i1, peak, n_mid))
+        if not cuts and not dis and not a.quiet:
             top = np.argsort(-info["diff"][1:])[:3] + 1
             print("   段内无切镜。最陡的 3 帧: " +
                   ", ".join("f%d(x%.2f)" % (int(i), info["diff"][int(i)] / info["median"]) for i in sorted(top)))
@@ -163,7 +225,7 @@ def main():
                      s["best_k"], s["best_diff"], s["ratio"]))
 
     print()
-    print("结论: %s" % ("发现切镜/断裂 —— 见上面 CUT 标记" if failed else "全部通过 (无段内切镜、接缝连续)"))
+    print("结论: %s" % ("发现切镜/叠化/断裂 —— 见上面 CUT 标记" if failed else "全部通过 (无段内切镜、无叠化、接缝连续)"))
     return 1 if failed else 0
 
 
