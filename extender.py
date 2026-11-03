@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.292-size-anchor-light-separation"
+BUILD = "minimax-h3-extender-v14.294-space-continuity-transit"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -6614,6 +6614,102 @@ _OS_LIGHT_COMPOSITION_RULE = (
 )
 
 
+# ── v14.294 (2026-11-03): 空间延续 / 空间过渡 ─────────────────────────
+#
+# 根因(用户 19 段一镜到底 MV, 2026-11-03 实测):
+#   * clip3 f13 一帧硬切 —— 段2 末帧已是"靛蓝天幕+第一颗星点"的夜景, 而段3 拍1/拍2
+#     的光影条款写的是"残晖"(橙金夕阳), 两段的光线时间线**自己往回跳**。模型为了
+#     让条件文本成立, 在段内 0.5s 处一帧硬切到夕照石阶(实测 f6-f16 仍是上一段的
+#     木栈桥夜景, f18 起变成夕照石阶)。
+#   * clip4 f118-f126 叠化 —— 段3 的木栈桥与段4 的公路路口双曝光。
+#   * 共同根因 = **条件文本与段首 motion context 关键帧冲突**: 关键帧钉住上一段
+#     末帧的画面, 正文要求的却是另一处空间/另一种光, 模型只能二选一 —— 先拖着旧
+#     画面再硬切, 或者把两处叠在一起。
+#
+# 修法(纯文本层, 不动用户脚本):
+#   [同场景延续] 本段与上一段是同一处空间 -> 布局与光线都从上一段末帧延续, 逐拍
+#                 只推进一小步(压住 clip3 的光线倒流与左右镜像)。
+#   [空间过渡]   本段换到另一处空间 -> 明确"走过去"而不是叠化, 两处空间由同一条
+#                 地面相连, 方位自始至终一致。
+#
+# 措辞纪律: 全文纯正向陈述; 不含任何 cut/转场/叠化/剪切/跳帧/闪白 等切镜词汇;
+# 不含否定句(H3 在 CFG=1.0 下没有负向分支)。方位/距离/景别/动作仍全部交给用户脚本。
+# 开关: BSAI_H3_SPACE_RULE=0 可关(便于 A/B)。
+_OS_SAME_SPACE_RULE = (
+    "\n[同场景延续] 本段与上一段处在同一处空间里：左右方位、脚下地面、两侧景物"
+    "与主体在画幅中的相对位置，本段全部延续上一段的布局；这一处空间里的光线与"
+    "色调也从上一段末帧那一刻的状态起算，整段只逐拍向前推进一小步；主体身上的"
+    "受光方向与地面上的光斑方向自始至终保持一致。"
+)
+
+_OS_SPACE_TRANSIT_RULE = (
+    "\n[空间过渡] 本段起始时，主体正从上一处空间走进这一处空间：上一处空间的"
+    "尽头还留在画面里，脚下的地面从上一处一路连到这一处，两侧的景物顺着前进的"
+    "方向一点点更替；这一处空间的景物是从上一处空间的尽头逐渐展开在画面里的，"
+    "左右方位自始至终保持一致，这一处空间由它自己的灯光照亮，步幅与节奏自始至终一致。"
+)
+
+# 段首标题里的图片标签 —— 段标题形如 "[分镜3]：滨海堤岸@图3-登上海堤石阶(…)"
+_OS_PICTURE_TAG_RE = re.compile(r"<Picture\s*\d+>|@图\s*\d+", re.IGNORECASE)
+
+
+def _one_shot_scene_catalog(global_prompt):
+    """v14.294: 从全局提示词的 [场景档案] 小节取出场景名清单。
+
+    场景名清单是"这一处空间叫什么"的权威来源 —— 用它来判定本段与上一段是不是
+    同一处空间, 比从标题里猜前缀可靠得多(标题里没有图片标签时直接放弃判定)。
+    """
+    names = []
+    s = str(global_prompt or "")
+    m = re.search(r"^\s*\[[^\[\]\n]*场景档案[^\[\]\n]*\]", s, re.MULTILINE)
+    if not m:
+        return names
+    tail = s[m.end():]
+    end = re.search(r"^\s*\[", tail, re.MULTILINE)
+    block = tail[:end.start()] if end else tail
+    for ln in block.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        mm = _OS_PICTURE_TAG_RE.search(ln)
+        nm = (ln[:mm.start()] if mm else ln).strip(" \t：:，,、-—·【】()（）")
+        if nm:
+            names.append(nm)
+    return names
+
+
+def _one_shot_scene_name(text, catalog=None):
+    """v14.294: 取段首标题里的场景名(不含图片标签)。
+
+    段标题形如 "[分镜3]：滨海堤岸@图3-登上海堤石阶(…)" —— 场景名 = 第一个图片标签
+    之前的那一小段文字。catalog 非空时优先用清单里的规范名做前缀匹配。
+    取不到返回 None —— 调用方据此不注入空间规则(其它用户的脚本没有场景档案时安全跳过)。
+    """
+    s = str(text or "")
+    head = ""
+    for ln in s.splitlines():
+        if ln.strip():
+            head = ln.strip()
+            break
+    if not head:
+        return None
+    m = _OS_PICTURE_TAG_RE.search(head)
+    if not m:
+        return None
+    pre = head[:m.start()]
+    pre = re.sub(r"^\s*\[[^\[\]]*\]\s*", "", pre)   # 去掉 [分镜N] 前缀
+    pre = re.split(r"[，,。；;：:\n]", pre)[-1]           # 取最后一段
+    pre = pre.strip(" \t：:，,、-—·【】[]")
+    if not pre:
+        return None
+    for nm in (catalog or []):
+        if pre.startswith(nm) or nm.startswith(pre):
+            return nm
+    if len(pre) > 24:
+        return None
+    return pre
+
+
 def _one_shot_size_anchor_rule(start=None, end=None):
     """v14.292: 取景锚定规则 —— 把脚本自己给的景别写成显式边界。
 
@@ -11718,6 +11814,21 @@ class BSAIH3FilmFactory:
         _os_locked_size = None
         _os_env_continuity = ""
         _os_prev_size_end = None      # v14.286: 上一段末帧景别(段间连续判定用)
+        # v14.294: 预先算出每一段的场景名 —— 判定"本段与上一段是否同一处空间"。
+        # 必须整链预扫: 缓存命中的段会 continue 掉, 在循环里算会让"上一段"的
+        # 场景名错位(重渲 clip_select 时尤其明显)。
+        _os_scene_catalog = _one_shot_scene_catalog(global_prompt) if one_shot_enabled else []
+        _os_scene_names = []
+        if one_shot_enabled:
+            for _osc_c in clips:
+                try:
+                    _os_scene_names.append(
+                        _one_shot_scene_name(_osc_c.get("prompt", ""), _os_scene_catalog)
+                    )
+                except Exception:
+                    _os_scene_names.append(None)
+        if one_shot_enabled and _os_scene_catalog:
+            print(f"[H3 Extender] v14.294 一镜到底: 场景清单 = {_os_scene_catalog}")
         if one_shot_enabled:
             _os_env_continuity = (
                 "\n[环境连续] 环境沿一条连续的物理路线逐步变化，每一处新环境都由"
@@ -12122,6 +12233,28 @@ class BSAIH3FilmFactory:
                     "运动；主体一路向前行走，脚下的路面与两侧景物在前进中连续地流过，"
                     "空间随着他的前进自然展开。"
                 )
+                # v14.294: 空间延续 / 空间过渡 —— 压住"段内硬切 / 段内叠化"的共同
+                # 根因(条件文本与段首 motion context 关键帧冲突)。
+                #
+                # 这里只补脚本没写、但一镜到底语义必须成立的那部分:
+                #   同一处空间 -> 布局与光线从上一段末帧延续, 逐拍只推进一小步;
+                #   换到另一处空间 -> 由主体走过去, 两处空间由同一条地面相连。
+                # 方位/距离/景别/动作仍旧全部交给用户脚本。
+                _os_scene_name = (_os_scene_names[i] if i < len(_os_scene_names) else None)
+                _os_prev_scene = (
+                    _os_scene_names[i - 1]
+                    if 0 < i <= len(_os_scene_names) - 1 else None
+                )
+                if (str(os.environ.get("BSAI_H3_SPACE_RULE", "1")).strip() != "0"
+                        and _os_scene_name and _os_prev_scene):
+                    if _os_scene_name == _os_prev_scene:
+                        _os_rule += _OS_SAME_SPACE_RULE
+                        _os_space_kind = "同场景延续"
+                    else:
+                        _os_rule += _OS_SPACE_TRANSIT_RULE
+                        _os_space_kind = "空间过渡"
+                    print(f"[H3 Extender] v14.294 一镜到底 clip[{i+1}]: 空间规则 = "
+                          f"{_os_space_kind} ({_os_prev_scene} → {_os_scene_name})")
                 # v14.292 (2026-11-03): 光影与构图分离 —— 光影描述只改光, 不改构图。
                 #
                 # 实测: clip2 f160 由"中近景(胸像)"硬切到"大远景剪影", 切点正好落在脚本第3拍
