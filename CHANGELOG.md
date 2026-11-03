@@ -4,6 +4,76 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.283 (2026-11-03) — 崩溃自动续渲 + decode 防 GPU 崩溃 / Auto-resume after crash + decode crash guards
+
+**场景：** 渲染到 clip8 HyperVAE2x decode 时进程被系统强杀（Windows TDR / commit 超 85% / GPU driver reset，日志中断无 Python 异常）。重跑同 workflow，此前全部 9 段 `validated=False`，extender 从头重新采样所有段（24min/段×9段=216min 白费）。
+
+**修复 1：每段 join 后立即 `validated=True`**
+
+extender.py 原代码：`disk_join.join(..., validated=False)` —— 每段采样成功但从不 commit 为已完成。修复：join 立即 commit `validated=True`，链强制校验 `motion_context_disk.py:1356` 已保证段间顺序（前 N-1 段全 validated 才能 validate 第 N 段）。
+
+**修复 2：启动时自动从 manifest 恢复 validated 状态**
+
+在采样循环开始前，扫描 manifest 已有段的 `validated` 字段 → 同步回 `clips[i]["validated"]=True`。主循环 `validated=True` 段自动 skip sampling → **从第一个未完成段续渲**。`replace_mode` / `select_override` 路径在此之前处理完，用户显式重渲的段被强制 False，不受影响。
+
+**修复 3：decode 前 GPU 减载 + OOM 自动重试**
+
+`motion_context_disk.py` 的 `_decode_single_clip_to_blob` 加三层防护：
+
+| 层 | 条件 | 动作 |
+|---|---|---|
+| ①预检查系统 commit | GetPerformanceInfo 显示 commit > 80% | `torch.cuda.empty_cache()` + `gc.collect()` |
+| ②预检查 GPU free | `mem_get_info` free < 6GB | 同上 |
+| ③Python OOM 重试 | `RuntimeError` / `torch.cuda.OutOfMemoryError` | GC + empty_cache 后重跑 decode |
+
+进程级 crash（TDR/segfault）Python try/except 接不住，但修复 1+2 保证：crash 后重跑，所有已采样段都在 manifest 里 validated=True，只 decode/merge，不重采样。
+
+**/ Fix:** Three fixes for the crash-resume problem — (1) each clip's `disk_join` now commits `validated=True` immediately instead of always `False`; (2) at render start, `clips[i]["validated"]` is synced from manifest so already-sampled clips skip sampling on restart; (3) VAE decode is wrapped with pre-checks (system commit pressure via Win32 API, GPU free memory) and an OOM retry path. Process-level crashes (TDR/segfault) can't be caught by Python, but v14.282's validated-auto-resume means restarting ComfyUI and queuing the same workflow picks up from the first un-finished clip — no wasted resampling.
+
+- 生效：重启 ComfyUI。当前 cache 里 9 段全 validated=False，重跑一次会重新采样所有段，之后崩溃就能自动续渲。
+- 注意：进程级 crash 仍需手动重启 ComfyUI，但不会浪费已采样时间。如需全自动重启可配外部 watchdog 脚本。
+
+---
+
+### v14.282 (2026-11-03) — 一镜到底 clip6+ 首帧冻结(与 clip5 完全相同)修复 / Fix per-clip first frame frozen from clip 6 in one-shot mode
+
+**实测（8 段成片首帧 pairwise mean-abs-diff, 分辨率缩至 640×430）：**
+
+| | clip1 | clip2 | clip3 | clip4 | clip5 | clip6 | clip7 | clip8 |
+|---|---|---|---|---|---|---|---|---|
+| clip5 | 47.3 | 35.4 | 34.9 | 18.5 | **0.0** | **2.8** | **3.6** | **3.9** |
+| clip6 | 47.2 | 35.5 | 35.1 | 18.4 | **2.8** | **0.0** | **1.3** | **2.0** |
+| clip7 | 47.1 | 35.5 | 35.2 | 18.5 | **3.6** | **1.3** | **0.0** | **1.3** |
+| clip8 | 46.9 | 35.4 | 35.3 | 18.7 | **3.9** | **2.0** | **1.3** | **0.0** |
+
+v14.281: 从 clip 5 起所有后续段首帧与 clip 5 首帧 diff<4(几乎同一画面)。
+
+**根因 (v14.249→v14.281 累积)：**
+
+段头锁 keep 三重保险过于激进：
+
+1. **noise_mask 前 1/3 行 `_mv=0.0`** — denoise_mask 直接调节 timestep, 0.0 使前 2 latent 行 timestep=0, **永不重建**(纯上段尾帧保持)
+2. **扰动凸形 2%→8%** — 首行仅 2% 噪声, latent 几乎完全是上段尾画面
+3. **渐变 0.1→1.0 (t²)** — 后 4 行放开太慢
+
+再叠加 motion context 的 minmax_keyframes 锚点 + v14.240 的 clip 统一 seed, 模型被锁死在上一段状态。场景图 @图4→@图5 切换时, 新 prompt/参考图的 conditioning 影响力不足以抵消三重锁 keep 的拉力 → 每段输出首帧都是上一段尾帧的冻结延续。
+
+**修复：**
+
+| 参数 | v14.281 | v14.282 | 效果 |
+|---|---|---|---|
+| 扰动强度 | 2%→8% (凸形) | **8%→20%** (凸形) | latent 更多样化, 摆脱尾帧锁定 |
+| noise_mask 前 1/3 行 | 0.0 (完全锁) | **0.15** (轻度锁) | timestep 非零, 模型在锁区就有去噪自由度 |
+| 渐变初值 | 0.1→1.0 | **0.3→1.0** (t²) | 更快放开, 减少中段锁定 |
+
+锁 keep 仍覆盖 trim 区前几帧(解码后被裁), 段间接缝仍无缝; 但输出区首帧不再冻结, 场景切换能自由响应新 prompt/@图N。
+
+**/ Fix:** Three fixes in the one-shot head-lock triple-insurance — (1) perturbation raised 2%→8% → 8%→20% (convex), (2) noise_mask front 1/3 rows raised 0.0 → 0.15 (light lock instead of total lock), (3) gradient starting value raised 0.1 → 0.3. The lock zone still covers the trim-overlap frames (decoded then cropped) so scene-to-scene junctions remain seamless, but the free zone after the trim now evolves freely and scene switches react to new prompts/@图N.
+
+- 生效：重启 ComfyUI; 已缓存的 clip5+ 必须重渲染(video tail/noise_mask/seed 都在采样时决定)。
+
+---
+
 ### v14.261 (2026-10-30) — clip2+ 段间原曲被吞 6 帧（clip3 段头从 24:12 而非 24:06 起）/ Fix the 6-frame song skip at every clip2+ boundary
 
 **实测（clip2/clip3 音轨对源曲《晚风》做归一化互相关，r≈0.99 且峰值唯一）：**

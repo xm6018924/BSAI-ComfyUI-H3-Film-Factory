@@ -8449,8 +8449,11 @@ class BSAIH3FilmFactory:
         import sys as _sys
         import re as _re
         import torchaudio
-        import soundfile as sf
-        import tempfile
+
+        try:
+            import soundfile as sf  # 可选兜底：torchaudio 解不了 mp3 时才用
+        except ImportError:
+            sf = None
 
         # 条件 1: 有 tts_model
         if tts_model is None:
@@ -8468,7 +8471,9 @@ class BSAIH3FilmFactory:
             print("[H3 AutoTTS] 资产库中没有 @音频N 参考 → 跳过自动对话合成")
             return None
 
-        # 条件 3: 从 clips prompt 中提取对话台词
+        # 条件 3: 从 clips prompt 中提取对话台词（按 clip 分组，逐段合成本段音频，
+        # 这样 clip 时长 = 本段台词音频时长，音画逐段严格对齐，不会出现
+        # "clip1 画面是角色A、音频却已经开始播角色B" 的错位）。
         # 注意 clips 到这里时 @图N 已被 _resolve_asset_library_refs 替换成 <Picture N>，
         # 因此除 @图N 外还必须识别 <Picture N>（v14.281）。
         _pc_map = picture_asset_map or {}
@@ -8482,68 +8487,53 @@ class BSAIH3FilmFactory:
             r")(.+?)\s*$"
         )
 
-        dialogue_lines = []
         _non_dialogue_skip = {"镜头", "景别", "构图", "画面", "音效", "音乐",
                               "BGM", "bgm", "环境音", "描述", "运动", "转场",
                               "时长", "秒", "灯光", "光影", "场景", "画面描述",
                               "参考图纪律", "服装锁定纪律"}
+        # [分镜1]：xxx / 【镜头2】xxx 这类分段标题会被方括号分支误当成台词行
+        _shot_header_re = _re.compile(r"^(?:分镜|镜头|Shot|shot|SHOT)\s*[\d一二三四五六七八九十]*$")
+        _dialogue_by_clip = []
         for _c in clips or []:
+            _lines = []
             prompt = _c.get("prompt", "") if isinstance(_c, dict) else str(_c)
             for _ln in prompt.splitlines():
                 _ln = _ln.strip()
                 if not _ln:
                     continue
                 m = _DIALOGUE_LINE_RE.match(_ln)
-                if m:
-                    if m.group(1):
-                        speaker, text = m.group(1), m.group(6)
-                        if speaker in _non_dialogue_skip:
-                            continue
-                        dialogue_lines.append((speaker, text))
-                    elif m.group(2):
-                        speaker, text = m.group(2), m.group(6)
-                        if speaker in _non_dialogue_skip:
-                            continue
-                        dialogue_lines.append((speaker, text))
-                    elif m.group(3):
-                        asset_idx = int(m.group(3))
-                        text = m.group(6)
-                        dialogue_lines.append((f"asset_{asset_idx}", text))
-                    elif m.group(4):
-                        asset_idx = int(_pc_map.get(int(m.group(4)), int(m.group(4))))
-                        text = m.group(6)
-                        dialogue_lines.append((f"asset_{asset_idx}", text))
-                    else:
-                        asset_idx = int(m.group(5))
-                        text = m.group(6)
-                        dialogue_lines.append((f"asset_{asset_idx}", text))
+                if not m:
+                    continue
+                if m.group(1):
+                    speaker, text = m.group(1), m.group(6)
+                    if speaker in _non_dialogue_skip or _shot_header_re.match(speaker):
+                        continue
+                    _lines.append((speaker, text))
+                elif m.group(2):
+                    speaker, text = m.group(2), m.group(6)
+                    if speaker in _non_dialogue_skip or _shot_header_re.match(speaker):
+                        continue
+                    _lines.append((speaker, text))
+                elif m.group(3):
+                    _lines.append((f"asset_{int(m.group(3))}", m.group(6)))
+                elif m.group(4):
+                    _asset_idx = int(_pc_map.get(int(m.group(4)), int(m.group(4))))
+                    _lines.append((f"asset_{_asset_idx}", m.group(6)))
+                else:
+                    _lines.append((f"asset_{int(m.group(5))}", m.group(6)))
+            _dialogue_by_clip.append(_lines)
 
-        if not dialogue_lines:
+        _total_lines = sum(len(_l) for _l in _dialogue_by_clip)
+        if not _total_lines:
             print("[H3 AutoTTS] 分镜脚本中没有识别到对话台词 → 跳过自动合成")
             return None
 
-        print(f"[H3 AutoTTS] 解析到 {len(dialogue_lines)} 行对话台词，使用 {len(ref_audio_paths)} 个参考音色")
-        for _s, _t in dialogue_lines[:5]:
-            print(f"  {_s}: {_t[:40]}")
-
-        # ── 调用 voice_clone_node 的 BSAIDialogueVoiceClone ──
-        # 构造对话脚本文本格式
-        _nl = "\n"
-        _script_lines = []
-        for _s, _t in dialogue_lines:
-            # 如果 speaker 是 asset_N 格式，转成 @图N 标签
-            if _s.startswith("asset_"):
-                _idx_part = _s.split("_")[-1]
-                _script_lines.append(f"@图{_idx_part}: {_t}")
-            else:
-                _script_lines.append(f"{_s}: {_t}")
-        _full_script = _nl.join(_script_lines)
+        print(f"[H3 AutoTTS] 解析到 {_total_lines} 行对话台词（{len(clips)} 个 clip），"
+              f"使用 {len(ref_audio_paths)} 个参考音色")
 
         # 构造 speaker_map: asset_idx → ref_index（在 ref_audio_paths 列表中的位置）
-        # ref_audio_paths 来自 speaker_audio_map 或 asset_audios
         _spk_map_entries = []
         if speaker_audio_map:
-            # speaker_audio_map = {图index: audio_path}
             _path_to_ref_idx = {p: i + 1 for i, p in enumerate(ref_audio_paths)}
             for _img_idx, _aud_path in sorted(speaker_audio_map.items()):
                 _ref_idx = _path_to_ref_idx.get(_aud_path)
@@ -8561,6 +8551,8 @@ class BSAIH3FilmFactory:
             try:
                 wf, sr = torchaudio.load(path)
             except Exception:
+                if sf is None:
+                    raise
                 data, sr = sf.read(path)
                 wf = torch.from_numpy(data).float()
                 if wf.dim() == 1:
@@ -8572,24 +8564,71 @@ class BSAIH3FilmFactory:
             return {"waveform": wf.unsqueeze(0), "sample_rate": sr}
 
         _ref_audio_objs = [_load_ref_wav(p) for p in ref_audio_paths]
-
-        # 调用合成
         _clone = BSAIDialogueVoiceClone()
-        _kwargs_call = {
-            "tts_model": tts_model,
-            "dialogue_script": _full_script,
-            "speaker_map": ",".join(_spk_map_entries),
-            "lang": "ZH",
-            "duration_factor": 1.0,
-            "crossfade_ms": 80,
-            "pause_ms": 0,
-        }
-        for _i, _ref in enumerate(_ref_audio_objs[:6], 1):
-            _kwargs_call[f"ref_audio_{_i}"] = _ref
+        _spk_map_str = ",".join(_spk_map_entries)
 
-        _auto_audio, _auto_log = _clone.synthesize_dialogue(**_kwargs_call)
-        print(f"[H3 AutoTTS] 合成日志:\n{_auto_log}")
-        return _auto_audio
+        # 逐 clip 合成 → 每段音频长度即该 clip 的时长
+        _clip_waves = []
+        _clip_durations = []
+        _clip_sr = None
+        for _ci, _lines in enumerate(_dialogue_by_clip):
+            if not _lines:
+                _clip_waves.append(None)
+                _clip_durations.append(0.0)
+                continue
+            _script_lines = []
+            for _s, _t in _lines:
+                if _s.startswith("asset_"):
+                    _script_lines.append(f"@图{_s.split('_')[-1]}: {_t}")
+                else:
+                    _script_lines.append(f"{_s}: {_t}")
+            _kwargs_call = {
+                "tts_model": tts_model,
+                "dialogue_script": "\n".join(_script_lines),
+                "speaker_map": _spk_map_str,
+                "lang": "ZH",
+                "duration_factor": 1.0,
+                "crossfade_ms": 80,
+                "pause_ms": 0,
+            }
+            for _i, _ref in enumerate(_ref_audio_objs[:6], 1):
+                _kwargs_call[f"ref_audio_{_i}"] = _ref
+            try:
+                _seg_audio, _seg_log = _clone.synthesize_dialogue(**_kwargs_call)
+            except Exception as _seg_e:
+                print(f"[H3 AutoTTS] clip{_ci + 1} 台词合成失败（该段将关闭渲染）：{_seg_e}")
+                _clip_waves.append(None)
+                _clip_durations.append(0.0)
+                continue
+            print(f"[H3 AutoTTS] clip{_ci + 1} 合成完成：\n{_seg_log}")
+            _w = _seg_audio["waveform"]
+            _sr = int(_seg_audio["sample_rate"])
+            if _clip_sr is None:
+                _clip_sr = _sr
+            elif _sr != _clip_sr:
+                _rs = torchaudio.transforms.Resample(_sr, _clip_sr)
+                _w = _rs(_w[0]).unsqueeze(0)
+            # 台词音频按 H3 帧网格补齐(帧数 %17==5)，让 clip 时长与音频段严格等长。
+            # 补的是极低幅噪声(-70dB 级)而非精确 0：_split_lip_audio_by_clips 会剔除
+            # >=80ms 的精确全零段，纯零填充会被删掉并让后续 clip 音频整体前移。
+            _frames = _duration_to_frames(float(_w.shape[-1]) / float(_clip_sr))
+            _pad = int(round(float(_frames) / float(FPS) * _clip_sr)) - int(_w.shape[-1])
+            if _pad > 0:
+                _noise = torch.randn(_w.shape[0], _w.shape[1], _pad) * 3e-4
+                _w = torch.cat([_w, _noise.to(dtype=_w.dtype)], dim=-1)
+            _clip_waves.append(_w)
+            _clip_durations.append(float(_w.shape[-1]) / float(_clip_sr))
+
+        if _clip_sr is None:
+            print("[H3 AutoTTS] 全部 clip 台词合成失败 → 跳过自动合成")
+            return None
+
+        _parts = [_w for _w in _clip_waves if _w is not None]
+        _full = _parts[0] if len(_parts) == 1 else torch.cat(_parts, dim=-1)
+        print(f"[H3 AutoTTS] 多人对话音频拼接完成：总长 "
+              f"{float(_full.shape[-1]) / float(_clip_sr):.2f}s, 逐段 "
+              f"{'/'.join(f'{d:.2f}s' if d > 0 else 'off' for d in _clip_durations)}")
+        return {"waveform": _full.cpu(), "sample_rate": _clip_sr}, _clip_durations
 
     def extend(self, model, clip, vae, **kwargs):
         # v1.21: keys are pure English now, direct kwargs.get()
@@ -10601,31 +10640,19 @@ class BSAIH3FilmFactory:
                     picture_asset_map=locals().get("_picture_asset_map", {}),
                 )
                 if _auto_tts_triggered is not None:
-                    lip_audio = _auto_tts_triggered
-                    # v14.281: 自动合成音频同样按实际时长重排 clip（与 lip_voice 分支一致）。
-                    # 仅在音频总时长 ≤ 现有 clip 时长上限总和时重排（缩短 clip、关闭多余段）；
-                    # 音频超长时保持原 clips，交给下方 v14.175 追加延续 clip 承载余下音频，
-                    # 避免 _ls_auto_clip_durations_by_audio 截断尾部台词。
-                    if clips:
-                        try:
-                            _auto_audio_sec = float(int(lip_audio["waveform"].shape[-1])) / float(
-                                max(1, int(lip_audio["sample_rate"])))
-                            _auto_cap_sec = 0.0
-                            for _c in clips:
-                                try:
-                                    _auto_cap_sec += float(_c.get("duration", 5.0))
-                                except (TypeError, ValueError):
-                                    _auto_cap_sec += 5.0
-                            if _auto_audio_sec <= _auto_cap_sec + 0.01:
-                                clips, _auto_audio_driven = _ls_auto_clip_durations_by_audio(
-                                    clips, lip_audio, fps=float(FPS))
-                                if _auto_audio_driven:
-                                    print(f"[H3 AutoTTS] 音频驱动 clip 时长重分配已生效")
+                    lip_audio, _auto_clip_durs = _auto_tts_triggered
+                    # v14.281: 每段台词音频长度直接作为该 clip 的时长 →
+                    # 后续 _split_lip_audio_by_clips 按这个时长切分，音画逐段严格对齐。
+                    # 没有台词（时长 0）的 clip 关闭渲染，不参与成片。
+                    if clips and len(_auto_clip_durs) == len(clips):
+                        for _c, _d in zip(clips, _auto_clip_durs):
+                            if _d <= 0.05:
+                                _c["render_enabled"] = False
                             else:
-                                print(f"[H3 AutoTTS] 音频 {_auto_audio_sec:.2f}s 超过 clip 上限总和 "
-                                      f"{_auto_cap_sec:.2f}s → 交由延续 clip 机制承载余下音频")
-                        except Exception as _e2:
-                            print(f"[H3 AutoTTS] clip 时长重分配跳过（非致命）：{_e2}")
+                                _c["duration"] = max(0.25, float(_d))
+                                _c["render_enabled"] = True
+                        print("[H3 AutoTTS] clip 时长已按逐段台词音频设置: "
+                              + "/".join((f"{_d:.2f}s" if _d > 0.05 else "off") for _d in _auto_clip_durs))
                     print(f"[H3 AutoTTS] ✅ 多人对话自动合成完成 → 已升级为 lip_audio 驱动口型")
             except Exception as _e:
                 print(f"[H3 AutoTTS] 自动多人对话合成跳过（非致命）：{_e}")
@@ -11197,6 +11224,34 @@ class BSAIH3FilmFactory:
                 _c["context_enabled"] = True
             if _os_forced:
                 print(f"[H3 Extender] 一镜到底: 强制开启 {len(_os_forced)} 个 CLIP 的段间 motion context (Add Guide 等效): CLIP {','.join(str(x) for x in _os_forced)}")
+
+        # v14.283 (2026-11-03): 崩溃自动续渲 —— 启动时从 manifest 恢复 validated 状态。
+        # 场景: 渲染到 clipN 时 ComfyUI 因 OOM/GPU 崩溃退出, 重跑同 workflow。
+        # 此前 join 每段都 validated=False → manifest 全 False → 重跑从 clip1 全量重采样
+        # (24min/段×9段=216min 白费)。现在 join 立即 commit validated=True, 重跑时这里
+        # 扫描 manifest, 所有已 validated=True 且有 latent 的段 → cfg["validated"]=True
+        # → 主循环 skip sampling, 直接从第一个未完成段续渲。replace_mode/select_override
+        # 路径在此之前已处理完, 用户显式重渲的段已被强制 False, 不受此处影响。
+        if not any_replace and select_override is None:
+            try:
+                _cr_m = _load_manifest_from_paths(data_path, manifest_path)
+                if _cr_m is not None:
+                    _cr_segs = _cr_m.get("segments", [])
+                    _cr_synced = 0
+                    for _i in range(min(len(clips), len(_cr_segs))):
+                        if bool(_cr_segs[_i].get("validated", False)):
+                            clips[_i]["validated"] = True
+                            _cr_synced += 1
+                    if _cr_synced > 0:
+                        _cr_next = _cr_synced + 1
+                        if _cr_synced < len(clips):
+                            print(f"[H3 Extender] ✅ v14.283 崩溃自动续渲: manifest 识别到 {_cr_synced} 段已采样(validated=True), "
+                                  f"将从 CLIP {_cr_next} 开始续渲, 跳过前置重采样。如需全量重渲请先点「♻️ 恢复缓存」再 Queue。")
+                        else:
+                            print(f"[H3 Extender] ✅ v14.283 崩溃自动续渲: manifest 识别到全部 {_cr_synced}/{len(clips)} 段已采样, "
+                                  f"将进入 Final Decode 合并输出。")
+            except Exception as _cr_err:
+                print(f"[H3 Extender] v14.283 manifest 自动恢复跳过(可忽略): {_cr_err}")
 
         # v2.68 fix: 异步预览队列消费提前——encode 完成后立即推送预览/落盘，
         # 不再等下一个 CLIP 渲染完。原逻辑只在每个 CLIP 渲染完成的循环体末尾消费一次；
@@ -11949,28 +12004,25 @@ class BSAIH3FilmFactory:
                                             print(f"[H3 Extender] v14.215 接缝锚点重采样失败(可忽略): {_rs_err}")
                                             raise
                                     if one_shot_enabled:
-                                        # v14.248 (fix, 2026-10-29): 一镜到底段头锁区改
-                                        # "扰动+缓坡渐变"—— 实测 20 段成片每段间首几帧画面
-                                        # 模糊, 根因: v14.240 全锁+纯尾帧使锁区为"完成态
-                                        # latent"(上一段尾清晰画面), 而自由区是 8 步去噪的
-                                        # "中间态 latent", 两者值域在 mask 边界(行 _n_head)
-                                        # 断裂 → 输出区首帧(紧邻锁区)解码出伪影/模糊。
-                                        # 修复: ①锁区恢复适度扰动(8%, 值域贴近中间态, 消除
-                                        # 边界断裂); ②mask 改"前 1/3 行全锁 + 后 2/3 行缓坡
-                                        # 渐变(0.1→1.0)"—— 锁区全部落在 trim 区(解码被裁),
-                                        # 渐变让模型在段头平滑从上一段尾状态演化, 输出区
-                                        # 首帧锐利且运动延续。纯尾帧零扰动已证明会产生
-                                        # 跳帧感(v14.240 日志), 此处取值 0.92/0.08。
-                                        # v14.249 (S5 凸形渐变): 均匀 8% → 逐行凸形 2%→8%。
-                                        # Rolling Forcing/Anchor Forcing 语义: 行0 近硬锚
-                                        # (2%≈上段尾画面最清晰延续), 向后凸形增噪到行末 8%
-                                        # (贴近中间态)—— 与下方 mask 渐变同向, 段头首帧
-                                        # 更实、值域过渡更平缓。
+                                        # v14.282 (fix, 2026-11-03): 一镜到底段头锁 keep 解冻
+                                        # —— 实测 clip6+ 首帧与 clip5 完全相同(diff<4)。
+                                        # 根因: v14.249 的"2%→8% 扰动 + 前 1/3 行 0.0 完全锁
+                                        # keep + mask 0.1→1.0 缓坡"三重保险太激进:
+                                        # 前 2 latent 行 timestep=0(永不重建), 扰动仅 2%
+                                        # 导致 latent 几乎完全保留上段尾画面, 再叠加 motion
+                                        # context 的 keyframe 锚点 + clip 统一 seed, 模型
+                                        # 被锁死在上一段状态, 场景图(@图4→@图5)切换时无
+                                        # 力响应 → 每段首帧冻结成同一画面。
+                                        # 修复: ①扰动 2%→8% 凸形 提升到 8%→20%, 让 latent
+                                        # 更多样化; ②noise_mask 前 1/3 行从 0.0(完全锁)
+                                        # 改为 0.15(轻度锁), timestep 非零使模型可去噪;
+                                        # ③渐变初值 0.1 提到 0.3, 更快放开。锁 keep 仍覆盖
+                                        # trim 区前几帧(解码被裁), 但输出区首帧能自由演化。
                                         _wv = torch.linspace(
                                             0.0, 1.0, int(_n_head),
                                             device=_src.device, dtype=_src.dtype,
                                         ) ** 2
-                                        _nw = (0.02 + 0.06 * _wv).view(
+                                        _nw = (0.08 + 0.12 * _wv).view(
                                             1, 1, int(_n_head), 1, 1
                                         )
                                         _vv2[:, :, :_n_head] = (
@@ -11987,21 +12039,24 @@ class BSAIH3FilmFactory:
                                         _mv, _ma = torch.ones_like(_vv2), torch.ones_like(_aa)
                                     _mv = _mv.clone()
                                     if one_shot_enabled:
-                                        # v14.248: 一镜到底锁区缓坡渐变 —— 前 1/3 行完全锁
-                                        # (接缝锚点, 解码后被裁), 后 2/3 行 0.1→1.0 缓坡放开,
-                                        # 消除 mask 边界值域断裂造成的输出首帧模糊。
-                                        # v14.249 (S5): 渐变段线性 → 凸形(t²) —— 中前段
-                                        # 更锁(与扰动凸形同向), 靠末端才快速放开。
+                                        # v14.282 (fix, 2026-11-03): noise_mask 解冻 ——
+                                        # 前 1/3 行从 0.0(完全锁, timestep=0 永不重建) 改为
+                                        # 0.15(轻度锁, timestep≈正常 15%), 让模型在锁区就有
+                                        # 一定去噪自由度; 渐变从 0.3→1.0(t²) 而非 0.1→1.0,
+                                        # 更快放开。根因: 全锁 + 弱扰动 + 统一 seed 把模型
+                                        # 锁死在上一段尾帧, 场景切换时无法响应新 prompt/@图N。
+                                        # 锁 keep 区仍覆盖 trim 前几帧(解码被裁), 输出区首帧
+                                        # 能自由演化、画面不冻结。
                                         _n_locked_os = max(1, _n_head // 3)
                                         for _k in range(_n_head):
                                             if _k < _n_locked_os:
-                                                _mv[:, :, _k] = 0.0
+                                                _mv[:, :, _k] = 0.15
                                             else:
                                                 _t = (_k - _n_locked_os) / max(
                                                     1, _n_head - _n_locked_os - 1
                                                 )
-                                                _mv[:, :, _k] = 0.1 + 0.9 * (_t * _t)
-                                        _lock_desc = f"凸形渐变锁keep(前{_n_locked_os}行全锁→0.1→1.0·t²)"
+                                                _mv[:, :, _k] = 0.3 + 0.7 * (_t * _t)
+                                        _lock_desc = f"凸形渐变锁keep(前{_n_locked_os}行轻锁0.15→0.3→1.0·t²)"
                                     else:
                                         # 分镜模式(场景可跳变): 头部渐进锁 keep, 0.0→1.0
                                         # 线性渐降, 首步完全保持(无缝进入), 逐步放开重绘,
@@ -12131,10 +12186,16 @@ class BSAIH3FilmFactory:
             _decode_native_hw = None
             if isinstance(sampled, dict):
                 _decode_native_hw = sampled.pop("decode_native_hw", None)
+            # v14.283 (2026-11-03): 每段 join 后立即 validated=True ——
+            # 崩溃重跑时 extender 才能识别哪些段已采样、直接跳过。此前全部段
+            # validated=False, 崩溃后重跑会从 clip1 重新采样所有 N 段(24min/段
+            # × 9 段 = 216min 白费)。现在 join 成功即 commit validated:True,
+            # 重跑 manifest 里每个有 latent 的段都会被识别为已完成 → 自动续渲
+            # 只采剩下的段。
             result = disk_join.join(
                 samples=sampled,
                 trim_frames=trim_frames,
-                validated=False,
+                validated=True,  # v14.283: 每段采完立即 commit
                 run_mode=str(run_mode),
                 fps=float(FPS),
                 previous_cache=previous_handle,

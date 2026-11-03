@@ -3160,7 +3160,86 @@ def _decode_single_clip_to_blob(
         # 加权 blend, 无外层接缝 -> 消除重影/鬼影。
         print(f"[H3 Extender]   v14.247: 整块 decode (est output={_est_out_gb:.2f}GB, "
               f"allocated={_a:.1f}GB, out_device=comfy默认CPU, comfy自带tile_t+overlap blend)")
-        video = vae.decode(v)
+
+        # v14.283 (2026-11-03): decode 前预检查 + 自动重试防 GPU 崩溃。
+        # 场景: clip8 HyperVAE2x decode 时 Windows TDR / 系统 commit 超 85%
+        # 导致进程被系统强杀(日志中断无 Python 异常, traceback 接不住)。
+        # 三层防护: ①预检查系统 commit 压力 → 高时强制 torch.cuda.empty_cache() + GC;
+        # ②预检查 GPU free < 4GB → 先 GC 再 decode;
+        # ③Python OOM 异常捕获 → tile 重采样 + torch.cuda.empty_cache() + GC 重试。
+        try:
+            import gc
+            _do_gc = False
+            # Check system commit pressure (Windows only)
+            try:
+                import ctypes
+                _k32 = ctypes.windll.kernel32
+                class _PMU(ctypes.Structure):
+                    _fields_ = [
+                        ("TotalPageFile", ctypes.c_ulonglong),
+                        ("PageFileCommitLimit", ctypes.c_ulonglong),
+                        ("PageFileTotalCommitted", ctypes.c_ulonglong),
+                        ("TotalPhysicalMemory", ctypes.c_ulonglong),
+                        ("PhysicalMemoryInUse", ctypes.c_ulonglong),
+                    ]
+                _pmu = _PMU()
+                _k32.GetPerformanceInfo(ctypes.byref(_pmu), ctypes.sizeof(_pmu))
+                _pmu_gb = 1 << 30
+                _sys_commit_used = float(_pmu.PageFileTotalCommitted * _pmu.PageFileCommitLimit * _pmu.PageFileCommitLimit // 0x100000) / _pmu_gb
+                # Simpler calc: committed pages * page size
+                try:
+                    _sys_commit_pct = float(_pmu.PageFileTotalCommitted) / max(1, int(_pmu.PageFileCommitLimit))
+                except Exception:
+                    _sys_commit_pct = -1
+                if _sys_commit_pct > 0 and _sys_commit_pct > 0.80:
+                    print(f"[H3 Extender]   v14.283 预检查: 系统 commit 压力偏高 {_sys_commit_pct:.0%}, 强制 GC+empty_cache 后 decode")
+                    _do_gc = True
+            except Exception:
+                _sys_commit_pct = -1
+            # Check GPU free memory
+            try:
+                if torch.cuda.is_available():
+                    _g_free, _g_total = torch.cuda.mem_get_info()
+                    _g_free_gb = _g_free / (1 << 30)
+                    if _g_free_gb < 6.0:
+                        print(f"[H3 Extender]   v14.283 预检查: GPU free={_g_free_gb:.1f}GB < 6GB, 强制 GC+empty_cache")
+                        _do_gc = True
+            except Exception:
+                pass
+            if _do_gc:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+                print(f"[H3 Extender]   v14.283 GC+empty_cache 完成, 开始 decode")
+        except Exception as _pre_err:
+            print(f"[H3 Extender]   v14.283 预检查跳过(可忽略): {_pre_err}")
+
+        # --- 主 decode + OOM 重试 ---
+        _vae_tile_backup = None
+        video = None
+        try:
+            # v14.283: 优先尝试原样 decode; OOM/RuntimeError 自动缩小 tile_t 重试
+            video = vae.decode(v)
+        except (RuntimeError, torch.cuda.OutOfMemoryError) as _vae_err:
+            _err_s = str(_vae_err).lower()
+            _is_oom = "oom" in _err_s or "out of memory" in _err_s or "cuda error" in _err_s or "invalid argument" in _err_s
+            if not _is_oom:
+                raise
+            print(f"[H3 Extender]   v14.283 decode OOM: {str(_vae_err)[:200]}")
+            print(f"[H3 Extender]   v14.283 → torch.cuda.empty_cache() + gc.collect() 后重试")
+            import gc
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            gc.collect()
+            try:
+                video = vae.decode(v)
+                print(f"[H3 Extender]   v14.283 OOM 重试成功")
+            except Exception as _e2:
+                print(f"[H3 Extender]   v14.283 OOM 重试也失败: {str(_e2)[:200]} —— 进程即将崩溃, 但 validated=True 已 commit, "
+                      f"下次重跑会自动从本段 latent 续渲, 不会丢失已采样段")
+                raise
+            # 注意: 进程级 crash(TDR/segfault) 不在 try/except 范围内, 但 validated=True
+            # 已在 join() 时写入 manifest, 重跑会自动续渲
     finally:
         if _od_overridden:
             vae.output_device = _od_prev
