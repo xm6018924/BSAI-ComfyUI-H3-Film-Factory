@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.286-oneshot-size-continuity"
+BUILD = "minimax-h3-extender-v14.287-dialogue-asset-tag-restore"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -10091,6 +10091,30 @@ class BSAIH3FilmFactory:
         clips = _parse_clips_json(clips_json)
         merge_output = _merge_output_from_state(clips_json)
 
+        # v14.285 (多人对话修复): 前端 card UI 手动编辑 clip.prompt 时极易误删
+        # @图N / @音频N 标签（尤其多角色分镜里 @图2/@图3/@图4），被删后资产参考
+        # 与音色绑定全部失效且无法从 clips_json 恢复。
+        # 补救：独立的 prompt_source 输入（PrimitiveStringMultiline 等）始终保留
+        # 原始分镜脚本，用其中 [分镜N] 段重建 clip.prompt——前端 parseStoryboard
+        # 本身不清洗资产标签，prompt_source 是标签的事实来源。
+        # 仅当 prompt_source 有 [分镜N] 标记且段数 == clip 数、且 segment 比原
+        # prompt 多出资产标签时触发（避免误伤手动构建的无标记 clips）。
+        if prompt_source and clips:
+            import re as _sb_re
+            _marker_re = _sb_re.compile(r'\[(?:分镜|Shot|shot|SHOT)\s*(\d+)\]')
+            _idxs = [(int(m.group(1)), m.end()) for m in _marker_re.finditer(str(prompt_source))]
+            if _idxs and len(_idxs) == len(clips):
+                for _i, _clip in enumerate(clips):
+                    _s_start = _idxs[_i][1]
+                    _s_end = _idxs[_i + 1][1] if _i + 1 < len(_idxs) else len(str(prompt_source))
+                    _seg = str(prompt_source)[_s_start:_s_end].strip()
+                    _old_tags = set(_sb_re.findall(r'@[图视频音频]\d+', str(_clip.get("prompt", ""))))
+                    _new_tags = set(_sb_re.findall(r'@[图视频音频]\d+', _seg))
+                    if _new_tags - _old_tags:
+                        _clip["prompt"] = _seg
+                        print(f"[H3 Extender] CLIP {_i + 1} prompt 已从 prompt_source 重建 "
+                              f"(恢复 @图N 标签: {_new_tags - _old_tags})")
+
         # v1.22: per-clip external prompt overrides (clip_prompt_1..clip_prompt_12).
         # Applied before @图N resolution so asset tags in the override are resolved too.
         for _ci in range(1, 13):
@@ -10936,8 +10960,14 @@ class BSAIH3FilmFactory:
                             else:
                                 _c["duration"] = max(0.25, float(_d))
                                 _c["render_enabled"] = True
+                                # v14.285: 多人对话逐段 TTS 路径强制关闭 context_enabled。
+                                # 逐段音频长度已 = clip 时长且按帧网格对齐，clip2+ 段
+                                # 再消费 context 会多推 ~12 帧，造成段间口型错位。
+                                if _c.get("context_enabled", True):
+                                    _c["context_enabled"] = False
                         print("[H3 AutoTTS] clip 时长已按逐段台词音频设置: "
-                              + "/".join((f"{_d:.2f}s" if _d > 0.05 else "off") for _d in _auto_clip_durs))
+                              + "/".join((f"{_d:.2f}s" if _d > 0.05 else "off") for _d in _auto_clip_durs)
+                              + " · context_enabled 已全部关闭（逐段对齐无上下文衔接）")
                     print(f"[H3 AutoTTS] ✅ 多人对话自动合成完成 → 已升级为 lip_audio 驱动口型")
             except Exception as _e:
                 print(f"[H3 AutoTTS] 自动多人对话合成跳过（非致命）：{_e}")

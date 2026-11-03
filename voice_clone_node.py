@@ -453,6 +453,8 @@ class BSAIDialogueVoiceClone:
                 log_lines.append(f"       ✓ {seg_status}")
             except Exception as e:
                 log_lines.append(f"       ✗ FAILED: {e}")
+                # 控制台同样可见（log 字符串只在接了显示节点时才看得到）
+                print(f"[DialogueClone] ✗ 第{i+1}行合成失败已跳过: {spk}: {text[:30]}... 原因: {e}")
                 # 跳过失败的行（不中断整体合成）
                 continue
 
@@ -505,6 +507,17 @@ def _synthesize_one(tts_model, text, reference_audio, lang="ZH", duration_factor
     elif ref_waveform.dim() == 1:
         ref_waveform = ref_waveform.unsqueeze(0)
 
+    # 参考音频响度归一：IndexTTS 会模仿参考音频的响度特征，高响度参考
+    # (如 rms 0.17+ 的录音) 会导致输出音量失控。统一到温和电平。
+    _ref = ref_waveform.float()
+    _ref_rms = float(torch.sqrt((_ref ** 2).mean()).item())
+    if _ref_rms > 0.15:
+        _ref = _ref * (0.13 / _ref_rms)
+    _ref_peak = float(_ref.abs().max().item())
+    if _ref_peak > 0.95:
+        _ref = _ref * (0.95 / _ref_peak)
+    ref_waveform = _ref
+
     temp_dir = tempfile.mkdtemp(prefix="bsai_dialogue_tts_")
     ref_audio_path = os.path.join(temp_dir, "reference.wav")
     out_audio_path = os.path.join(temp_dir, "output.wav")
@@ -520,6 +533,9 @@ def _synthesize_one(tts_model, text, reference_audio, lang="ZH", duration_factor
     }
 
     # 退化检测（与 IndexTTS 节点一致）
+    # 注意: "音量大" 不是退化! 实测某些参考音色(如高响度女声)会让模型输出
+    # rms 0.3+ 的正常语音, 误判为退化会导致该句被重试-重载模型-最终丢弃。
+    # 真正的退化 = 空/NaN/爆音削波; 响度问题交给后面的响度归一化处理。
     def _is_degenerate(waveform):
         if waveform is None or waveform.numel() == 0:
             return True, "empty"
@@ -531,9 +547,21 @@ def _synthesize_one(tts_model, text, reference_audio, lang="ZH", duration_factor
         rms = float(torch.sqrt((w ** 2).mean()).item())
         if sat_frac > 0.3:
             return True, f"clipped ({sat_frac:.1%})"
-        if rms > 0.25:
-            return True, f"too loud (rms={rms:.3f})"
+        if rms < 1e-4:
+            return True, f"silent (rms={rms:.5f})"
         return False, "ok"
+
+    def _normalize_loudness(waveform, target_rms=0.15, peak_cap=0.98):
+        """把输出响度归一到目标 RMS, 并做峰值限幅。
+        解决: (1) 不同参考音色导致各句响度差异大; (2) 高响度输出在拼接后削波。"""
+        w = waveform.float()
+        rms = float(torch.sqrt((w ** 2).mean()).item())
+        if rms > 1e-5:
+            w = w * (target_rms / rms)
+        peak = float(w.abs().max().item())
+        if peak > peak_cap:
+            w = w * (peak_cap / peak)
+        return w
 
     attempt = 0
     max_attempts = 2
@@ -571,6 +599,9 @@ def _synthesize_one(tts_model, text, reference_audio, lang="ZH", duration_factor
 
         if audio_waveform.shape[0] > 1:
             audio_waveform = audio_waveform.mean(dim=0, keepdim=True)
+
+        # 响度归一化（在退化检测之前做，避免正常但偏响的语音被误判）
+        audio_waveform = _normalize_loudness(audio_waveform)
 
         is_deg, reason = _is_degenerate(audio_waveform)
         if not is_deg:
