@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.281-mv-faithful-single-refine"
+BUILD = "minimax-h3-extender-v14.284-oneshot-demulti-lockedsize"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -6469,6 +6469,152 @@ def _one_shot_first_size(text):
     return _best
 
 
+# ── v14.284 (2026-11-03): 一镜到底 —— 全局提示词「去多镜头结构化」 ────────
+#
+# 根因(19 段一镜到底×歌曲链实测, 2026-11-03):
+#   用户的全局提示词带三张分镜表([场景连通表] / [场景串联核对表] / [人声分布总表],
+#   合计 59 行表格) 与 S1→S20 场景路线串。_strip_archive_sections 只剥离标题含
+#   "档案"的段落, 这三张表全部保留, 而全局提示词会被**前置到每一段**的条件里。
+#   H3 的时序先验把 "镜 1 | S1堤道中段 | T1防汛石阶 | S2阶顶平台东侧 | 镜2首帧同站位"
+#   这类行当成"本段要依次走完的镜头", 于是段内 2~4s 处自己切镜头并跳到表里的
+#   其它场景: 实测 clip2 第 78 帧(3.25s)由滨海堤岸**叠化**到老城街口, 景别/机位/
+#   主体朝向同时改变; 主体朝向翻转 180°(正面→背面)后, 同一段行走被反向重绘,
+#   观感上就是"人物倒走"。
+#
+# 一镜到底的语义 = 每段只有一个镜头, 条件文本里不允许出现任何多镜头结构。
+# 因此在编码前把全局/分段提示词里的多镜头结构整段清掉, 并用一句正向的
+# "环境连续渐变"陈述替代被删掉的"场景串联"(保留跨段衔接意图, 不含任何分镜表)。
+
+# 多镜头结构小节标题黑名单(标题命中即整节删除)
+_OS_SHOTLIST_SECTION_KEYS = (
+    "场景串联", "场景连通", "串联核对", "人声分布", "镜次", "分镜表",
+    "镜头表", "镜头分配", "景别表", "运镜表", "连拍表", "时间码表", "时间轴",
+    "场景清单", "场景表", "场次表", "镜头脚本", "转场表",
+)
+# 保护名单: 命中黑名单但属于"全片统一运镜/景别纪律"的小节必须保留
+_OS_SHOTLIST_KEEP_KEYS = ("统一运镜", "统一景别", "运镜纪律", "景别纪律", "机位纪律")
+
+# 方括号小节标题(半角 [] 与全角 【】 都要认)
+_OS_BRACKET_TITLE_RE = re.compile(r"[\[【]\s*([^\[\]【】\n]{0,30}?)\s*[\]】]")
+# 场景路线串: "S1xxx→S2yyy→S3zzz"(≥3 个场景编号)—— 一镜到底模式下这是分镜结构。
+# 尾巴必须以场景编号开头, 否则贪婪匹配会吃掉路线串后面的正常正文。
+_OS_ROUTE_CHAIN_RE = re.compile(
+    r"(?:S\d{1,2}[^→\n]{0,24}→\s*){2,}(?:S\d{1,2}[^；;。\n]{0,24})?"
+)
+
+# 否定式镜头口号 → 正向陈述。
+# H3 在 CFG=1.0 下没有负向分支, "不放大也不收窄" 这类否定句会被当画面内容渲染
+# (社区 PROMPTING.md 结论), 反而把镜头推向"该动一动"的相反方向。这里只做正向改写。
+_OS_NEG_TO_POS = (
+    ("不放大也不收窄", "保持同一景别与同一占画比例"),
+    ("不放大", "保持同一景别"),
+    ("不收窄", "保持同一景别"),
+    ("不出现突然的姿态跳变", "姿态自始至终连续自然"),
+    ("从不关机", "全程开机"),
+    ("不关机", "持续开机"),
+    ("不中断", "持续不断"),
+    ("不静止", "持续运动"),
+    ("不停留", "持续前行"),
+)
+
+
+def _one_shot_is_shotlist_title(title):
+    """标题是否属于"多镜头结构"(分镜表/镜次表/场景串联表)。"""
+    t = str(title or "").strip()
+    if not t:
+        return False
+    for _k in _OS_SHOTLIST_KEEP_KEYS:
+        if _k in t:
+            return False
+    for _k in _OS_SHOTLIST_SECTION_KEYS:
+        if _k in t:
+            return True
+    return False
+
+
+def _one_shot_drop_inline_shotlist_sections(line):
+    """删掉一行里内嵌的"多镜头结构"小节(标题起 → 下一个标题/行尾)。"""
+    _titles = list(_OS_BRACKET_TITLE_RE.finditer(line))
+    if not _titles:
+        return line
+    _spans = []
+    for _idx, _m in enumerate(_titles):
+        if not _one_shot_is_shotlist_title(_m.group(1)):
+            continue
+        _end = _titles[_idx + 1].start() if _idx + 1 < len(_titles) else len(line)
+        _spans.append((_m.start(), _end))
+    if not _spans:
+        return line
+    _out = []
+    _prev = 0
+    for _s, _e in _spans:
+        _out.append(line[_prev:_s])
+        _prev = _e
+    _out.append(line[_prev:])
+    return "".join(_out)
+
+
+def _one_shot_drop_shotlist_sections(text):
+    """删掉整块"多镜头结构"小节: 标题行 + 其后的正文行, 直到下一个标题行。"""
+    _out = []
+    _skipping = False
+    for _ln in str(text or "").splitlines():
+        _m = re.match(r"^\s*[\[【]\s*([^\[\]【】\n]{0,30}?)\s*[\]】]", _ln)
+        if _m:
+            _skipping = _one_shot_is_shotlist_title(_m.group(1))
+            if _skipping:
+                continue
+        elif _skipping:
+            # 表格行/正文行属于被删小节, 继续跳过
+            continue
+        _out.append(_one_shot_drop_inline_shotlist_sections(_ln))
+    return "\n".join(_out)
+
+
+def _one_shot_demulti_shot(text, label=""):
+    """v14.284: 一镜到底 —— 清除提示词里的多镜头结构(分镜表/场景路线/否定口号)。
+
+    返回清洗后的文本。清洗内容:
+      1. 多镜头结构小节(整节, 含表格正文行)
+      2. 表格行(≥2 个 '|')—— 即便标题没被识别也清掉
+      3. 场景路线串(S1→S2→S3)
+      4. 否定式镜头口号 → 正向陈述
+    """
+    s = str(text or "")
+    if not s.strip():
+        return s
+    _orig = len(s)
+    s = _one_shot_drop_shotlist_sections(s)
+    s = "\n".join(_ln for _ln in s.splitlines() if _ln.count("|") < 2)
+    s = _OS_ROUTE_CHAIN_RE.sub("", s)
+    for _a, _b in _OS_NEG_TO_POS:
+        s = s.replace(_a, _b)
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = re.sub(r"\n{3,}", "\n\n", s).strip()
+    if len(s) != _orig:
+        print(f"[H3 Extender] v14.284 一镜到底去多镜头结构[{label or 'clip'}]: "
+              f"{_orig} -> {len(s)} 字符 (已清分镜表/场景路线串/否定式切镜口号)")
+    return s
+
+
+def _one_shot_locked_size(text):
+    """v14.284: 从全局提示词的"景别小节"里取全片锁定的景别词; 取不到返回 None。
+
+    只看标题含"景别"的小节, 并取该小节正文里**最先出现**的景别词(与
+    _one_shot_first_size 同口径: 按字面首次出现位置, 不按尺度排序)。
+    """
+    s = str(text or "")
+    for _m in re.finditer(r"[\[【]\s*([^\[\]【】\n]{0,20}景别[^\[\]【】\n]{0,20})\s*[\]】]", s):
+        _seg = s[_m.end():]
+        _nxt = re.search(r"[\[【]", _seg)
+        if _nxt:
+            _seg = _seg[:_nxt.start()]
+        _w, _en = _one_shot_first_size(_seg)
+        if _w:
+            return _w
+    return None
+
+
 def _parse_clips_json(value: str):
     try:
         payload = json.loads(value or "{}")
@@ -11320,6 +11466,35 @@ class BSAIH3FilmFactory:
                     context_length = _os_ctx_floor
             except (TypeError, ValueError):
                 pass
+        # ── v14.284 (2026-11-03): 一镜到底 —— 全片统一景别锁定 ──────────
+        # 需求: "所有clip段间和段内不切镜, 不换景别, 从头到尾所有运镜必须保持
+        # 在一个摄影机运行轨迹上"。景别必须**全链唯一**: 之前每段各自从自己的
+        # 正文里取"最先出现的景别词"(v14.271), 各段取到的可能不同(实测
+        # clip3 正文同时含 近景/全景/中全景, 取到的基准与其它段不一致)→
+        # 段间景别跳变 = 观感上的"切镜"。现在改为: 优先取全局提示词"景别小节"
+        # 里声明的景别(全片导演声明), 其次才回退到第一段正文。
+        _os_locked_size = None
+        _os_env_continuity = ""
+        if one_shot_enabled:
+            _os_env_continuity = (
+                "\n[环境连续] 环境沿一条连续的物理路线逐步变化，每一处新环境都由"
+                "画面内可见的过渡物引入并逐渐展开，光线与色温随之平滑推移，"
+                "画面始终保持在同一片连续空间里。"
+            )
+            try:
+                _os_locked_size = _one_shot_locked_size(global_prompt or "")
+            except Exception:
+                _os_locked_size = None
+            if not _os_locked_size:
+                try:
+                    _os_locked_size, _ = _one_shot_first_size(
+                        str(clips[0].get("prompt", "") or "") if clips else ""
+                    )
+                except Exception:
+                    _os_locked_size = None
+            print(f"[H3 Extender] v14.284 一镜到底: 全片景别锁定 = "
+                  f"{_os_locked_size or '未声明(沿用各段正文)'}; "
+                  f"摄影机轨迹/主体步态将按同一锁定值注入每一段")
         # v14.240 (2026-10-28): 一镜到底 —— 强制全链同 seed（摄像机轨迹连续）。
         # 根因: 默认 seed_mode=randomize 每段独立随机噪声场, 即使段头锁 keep +
         # keyframe 参考把画面锚住, 段内中段的噪声路径仍逐段重启 → 运镜轨迹
@@ -11503,7 +11678,8 @@ class BSAIH3FilmFactory:
             # v14.271 一镜到底: 编码前把"0-3秒/3-6秒"分拍式剧本改写为单镜头连续散文。
             # 分拍标签会被 H3 当成镜头切分点(实测 clip2 在 3.25s ≈ 3-6秒拍点硬切)。
             if one_shot_enabled:
-                _os_flat = _one_shot_flatten_prompt(_clip_prompt_for_cond)
+                _os_demulti = _one_shot_demulti_shot(_clip_prompt_for_cond, label=f"clip{i+1}")
+                _os_flat = _one_shot_flatten_prompt(_os_demulti)
                 if _os_flat != _clip_prompt_for_cond:
                     print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 提示词已单镜头化(分拍时间标签→连续运镜陈述)")
                     _clip_prompt_for_cond = _os_flat
@@ -11581,7 +11757,17 @@ class BSAIH3FilmFactory:
                 # 里面若带"0-3秒"分拍标签或"不出现画面切换/绝不切换机位"这类
                 # 否定式切镜词, 会同时污染全部 clip(H3 会把否定句当画面渲染)。
                 if gp and one_shot_enabled:
+                    # v14.284: 一镜到底 —— 全局提示词必须"去多镜头结构化"。
+                    # 全局文本会被前置到**每一段**, 所以里面的分镜表/场景路线串
+                    # 等于"在每一段里都放一份 19 镜分镜表", H3 必然在段内自己
+                    # 切镜头(实测 clip2 3.25s 由堤岸叠化到老城街口)。
+                    # 清完后再单镜头化(去分拍时间标签 + 去否定式切镜口号)。
+                    gp = _one_shot_demulti_shot(gp, label="global")
                     gp = _one_shot_flatten_prompt(gp)
+                    # v14.284: 被删掉的"场景串联"用一句正向的连续性陈述替代 ——
+                    # 保留"环境沿路线渐变"的跨段衔接意图, 但不含任何分镜结构。
+                    if _os_env_continuity:
+                        gp = gp + "\n" + _os_env_continuity
                 if gp:
                     effective_prompt = gp + "\n" + effective_prompt
             # v14.193: 视觉锚点自动注入（参考 B站短剧导演台 V9 BV1m2HK6DEPX）。
@@ -11632,7 +11818,13 @@ class BSAIH3FilmFactory:
                             .replace(_REF_SHEET_RULE, "")
                             .replace(_OUTFIT_LOCK_RULE, ""))
                 _os_hit_words = [w for w in _os_shot_words if w in _os_body.lower()]
-                _os_anchor, _ = _one_shot_first_size(_os_body)
+                # v14.284: 景别改为**全链锁定**, 不再各段各取本段正文的景别词。
+                _os_body_size, _ = _one_shot_first_size(_os_body)
+                _os_anchor = _os_locked_size or _os_body_size
+                if _os_locked_size and _os_body_size and _os_body_size != _os_locked_size:
+                    print(f"[H3 Extender] ⚠️ v14.284 一镜到底 clip[{i+1}]: 本段正文出现"
+                          f"景别词'{_os_body_size}', 与全片锁定景别'{_os_locked_size}'不一致 —— "
+                          f"已按全片锁定值注入, 本段不会换景别")
                 _os_rule = (
                     "\n[One Continuous Take] 本段从头帧到尾帧只有一个镜头：摄影机沿一条"
                     "连续轨迹运动，提示词中先后出现的时间与运镜描述都是这条轨迹上依次"
@@ -11643,15 +11835,32 @@ class BSAIH3FilmFactory:
                     "段头呼吸渐稳、微小动作自然承接(脚步延续、视线微调、姿态汇入正在进行"
                     "的动作)；段尾姿态预先摆向下一动作，使下一段从动作中途接上。"
                 )
+                # v14.284: 摄影机轨迹锁定 —— 段内不得换机位。
+                # 实测: 段内机位从"主体正面"翻转 180° 到"主体背面"(3.45s 叠化处),
+                # 主体朝向随之反向重绘, 观感上就是"人物倒走"。这里用正向陈述把
+                # "机位与主体的相对关系恒定"钉死, 全文不含任何否定词。
+                _os_rule += (
+                    "\n[摄影机轨迹锁定] 摄影机与主体的相对关系自始至终保持同一状态："
+                    "机位固定在主体侧前方，与主体保持同距同高、朝向一致，随主体的"
+                    "行进方向同速平移。主体在画幅中的位置与大小全程保持不变，"
+                    "画面里只有背景随摄影机移动而缓慢流转。"
+                )
                 if _os_anchor:
+                    # v14.284: 景别锁定 —— 原来写"只通过同一条连续运镜缓慢推近或拉远",
+                    # 这等于允许景别变化, 与"不换景别"直接矛盾, 已改为完全锁定。
                     _os_rule += (
-                        f"\n[基准景别] 全段基准构图是{_os_anchor}：镜头从{_os_anchor}出发，"
-                        f"后续只通过同一条连续运镜缓慢推近或拉远，画面随推拉逐帧渐变，"
-                        f"主体在画面中的位置随运镜平滑移动。"
+                        f"\n[景别锁定] 全段保持{_os_anchor}构图：主体全身入画并居中，"
+                        "取景范围与主体占画比例自始至终保持一致，全程维持同一景别。"
                     )
+                # v14.284: 主体步态锁定 —— 正面走法与背面走法必须一致, 杜绝"倒走"。
+                _os_rule += (
+                    "\n[主体步态] 主体以稳定连续的步频持续向前行进，双腿交替迈出完整"
+                    "步幅，步幅与节奏自始至终保持一致，身体朝向与行进方向始终一致。"
+                )
                 effective_prompt = str(effective_prompt) + _os_rule
                 print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 命中景别/推拉词 "
-                      f"{_os_hit_words}, 基准景别={_os_anchor or '无'}, 已注入正向连续运镜指令")
+                      f"{_os_hit_words}, 全片锁定景别={_os_anchor or '无'}, "
+                      f"已注入正向连续运镜指令(+轨迹锁定/景别锁定/步态锁定)")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
@@ -11827,11 +12036,15 @@ class BSAIH3FilmFactory:
                 # (124-362 帧), 中后段"长度外推退化"→ 模型重新构图自切。把上一段
                 # 尾锚块(=全段基准构图, 与 v14.248 文本层基准景别锚定同向)钉在
                 # 本段输出区中点(≈7s), 图像层强制模型中段经过基准构图, 直接对冲
-                # 中段漂移。默认关闭: 锚帧来源(上段尾 latent)未经渲染实测, 先
-                # A/B(设 BSAI_H3_MID_ANCHOR=1 启用), 中段仍自切时再调锚点位置。
+                # 中段漂移。
+                # v14.284 (2026-11-03): **默认启用**(此前默认关闭, 需
+                # BSAI_H3_MID_ANCHOR=1 显式开启)。用户实测段内自切持续存在
+                # (clip2 3.25s 叠化切镜), 该锚点是唯一在图像层直接对冲"段内
+                # 重新构图"的机制, 继续默认关闭等于不生效。
+                # 逃生门: 设 BSAI_H3_MID_ANCHOR=0 关闭。
                 try:
                     if (one_shot_enabled
-                            and str(os.environ.get("BSAI_H3_MID_ANCHOR", "")).strip() == "1"):
+                            and str(os.environ.get("BSAI_H3_MID_ANCHOR", "1")).strip() != "0"):
                         _row_a = positive[0] if isinstance(positive, list) and positive else None
                         _dict_a = None
                         if isinstance(_row_a, (list, tuple)):
@@ -12084,6 +12297,15 @@ class BSAIH3FilmFactory:
             # 开头 0.9s 会被静默裁掉。
             if not _applied_ctx:
                 trim_frames = 0
+            # v14.284 (2026-11-03): 一镜到底接缝健康检查。
+            # 段间不切镜依赖"上一段尾 latent 锚定 + 段头锁 keep"。一旦
+            # motion context 没应用上(前段磁盘缓存缺失/前段未落盘), 段头就没有
+            # 任何延续锚点, 段间必然硬切 —— 而这条链路此前只有一行 "本段独立
+            # 渲染" 的提示, 很容易被忽略。这里显式告警, 避免误判成"提示词问题"。
+            if one_shot_enabled and i > 0 and not _applied_ctx:
+                print(f"[H3 Extender] ⚠️ v14.284 一镜到底接缝告警: clip[{i+1}] 未应用 "
+                      f"motion context (上一段尾 latent 不可用), 本段与上一段之间会出现"
+                      f"硬切 —— 请确认上一段已成功采样并落盘到链路缓存。")
 
             _send_extender_progress(
                 owner,

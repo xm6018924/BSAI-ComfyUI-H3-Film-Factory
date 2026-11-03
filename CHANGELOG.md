@@ -4,6 +4,47 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.284 (2026-11-03) — 一镜到底：段内切镜 + 人物倒走根治 / Fix intra-segment cuts + backward-walking subject in one-shot mode
+
+**场景：** 19 段一镜到底×歌曲链实渲。用户反馈三个问题：①clip1~clip3 **人物倒走**；②clip2 **第 3 秒切镜**；③clip3 同样倒走 + 切镜。
+
+**取证（本次实测，证据留档）：**
+
+| 证据 | 数据 |
+|---|---|
+| clip2 第 78 帧（3.25s） | **叠化转场**（抽帧可见双重曝光：堤岸夜色 + 老城街口叠加），不是硬切 —— 所以 ffmpeg `scene` 分数只有 0.047，肉眼看却是明显切镜 |
+| 同帧机位 | 主体正面 → **背面翻转 180°**，景别/机位/主体朝向同时改变 |
+| 倒走成因 | 机位翻转后，同一段行走被反向重绘 → 观感即"人物倒走"。二者**同源** |
+| 全局提示词残留 | `_strip_archive_sections` + `_one_shot_flatten_prompt` 之后，条件文本里仍有 **59 行分镜表格**（`[场景连通表]` 19 行 + `[场景串联核对表]` 19 行 + `[人声分布总表]` 19 行）+ 1 条 `S1→S20` 场景路线串 |
+| 段间接缝 | clip1 尾帧 → clip2 首帧**连续**（同地点同光线同构图），motion context 正常生效 |
+
+**真根因：** `_strip_archive_sections` 只剥离标题含"档案"的段落，而用户的全局提示词里带的是**分镜表**（`[场景串联核对表]` 每行就是一条镜头：`镜 | 起始场景 | 过渡物 | 结束场景`）。全局提示词会被**前置到每一段**的条件里 —— 等于在每个 12s 段里都塞了一份 19 镜分镜表。H3 的时序先验把 `镜1 | S1堤道中段 | T1防汛石阶 | S2阶顶平台东侧` 读成"本段要依次走完的镜头"，于是段内 2~4s 自己切镜头并跳到表里的其它场景。
+
+**修复 1（根因）：一镜到底全局提示词「去多镜头结构化」** — 新增 `_one_shot_demulti_shot()`，在编码前清除条件文本里的多镜头结构：
+
+- 整节删除多镜头结构小节（标题黑名单 + 保护名单，`【全片统一运镜】`/`【全片统一景别】` 必须保留）；
+- 删除表格行（≥2 个 `|`）—— 即便标题没被识别也清掉；
+- 删除场景路线串（`S1…→S2…→S3…`，尾巴必须以场景编号开头，避免吃掉后续正文）；
+- 否定式镜头口号 → 正向陈述（`不放大也不收窄` → `保持同一景别与同一占画比例`）。H3 在 CFG=1.0 下没有负向分支，否定句会被当画面内容渲染。
+
+实测本次的全局提示词：**5548 → 693 字符**，分镜表格行残留 0、场景路线串残留 0、切镜族词残留 0。
+
+**修复 2：全片统一景别锁定（不换景别）** — 之前每段各自从本段正文取"最先出现的景别词"，各段取到的可能不同（实测 clip3 正文同时含 近景/全景/中全景）。现改为：优先取全局提示词"景别小节"声明的景别（本次 = **中全景**），其次回退第一段正文；每段注入的 `[景别锁定]` 全部使用同一个锁定值，与锁定值冲突的段会打警告。
+
+**修复 3：摄影机轨迹锁定 + 主体步态锁定（不换机位 / 不倒走）** — 新增 `[摄影机轨迹锁定]`（机位固定在主体侧前方、同距同高朝向一致、主体在画幅中的位置与大小全程不变）与 `[主体步态]`（稳定连续步频、完整步幅、身体朝向与行进方向始终一致）。两条均为**纯正向陈述**，不含任何否定词。
+
+**修复 4：段中锚帧默认启用** — v14.249 的"段中锚帧"是唯一在图像层直接对冲"段内重新构图"的机制，此前默认关闭（需 `BSAI_H3_MID_ANCHOR=1`）等于不生效。现默认启用，逃生门 `BSAI_H3_MID_ANCHOR=0`。锚点来源是"上一段尾 latent"，因此**只对 clip2 以后生效**；clip1 没有上一段尾可锚，其段内防切完全依赖上面第 1/2/3 条的提示词层约束（这三条对 clip1 同样生效）。
+
+**修复 5：段间接缝健康检查** — 一镜到底下若某段未应用 motion context（上一段尾 latent 不可用），该段与上一段之间必然硬切。此前只有一行"本段独立渲染"的轻提示，现显式告警，避免误判成提示词问题。
+
+**修复 6：`[环境连续]` 正向替代** — 被删掉的"场景串联"改写成一句不含任何分镜结构的正向陈述，保留"环境沿连续路线渐变"的跨段衔接意图。
+
+**验证：** 用本次真实运行的全局提示词做离线回归 —— 分镜表格行 0、场景路线串 0、锁定景别=中全景、正常单镜头提示词零误伤、`【全片统一运镜】`/`【全片统一景别】` 均保留、`【角色档案】`/`【场景档案】` 均已剥离。
+
+**/ Fix:** The intra-segment cut and the "backward-walking" subject turned out to be the **same root cause**: the user's global prompt contains three 19-row storyboard tables (`[场景连通表]`, `[场景串联核对表]`, `[人声分布总表]`) plus an `S1→S20` scene route. `_strip_archive_sections` only strips sections whose title contains "档案", so all three tables survived — and the global prompt is prepended to **every** clip, i.e. every 12s segment was conditioned on a 19-shot storyboard. H3 read `镜1 | S1堤道中段 | T1防汛石阶 | S2阶顶平台东侧` as "shots to play in this segment", so it cut at ~3.25s (a **dissolve**, visible as double exposure in the extracted frames — which is why `ffmpeg scene` only scored 0.047) and jumped to a scene from the table. The camera also flipped 180° at that dissolve (front → back of the subject), which re-rendered the same walk in reverse — that is the "backward walking". Fixes: (1) `_one_shot_demulti_shot()` strips multi-shot structure (shot-list sections, table rows, scene-route chains) and rewrites negated camera slogans positively — 5548 → 693 chars on this run, 0 table rows / 0 route chains / 0 cut words left; (2) shot size is now **locked chain-wide** from the global "shot size" section (中全景 here) instead of per-clip; (3) new positive `[摄影机轨迹锁定]` + `[主体步态]` rules pin the camera-to-subject relation and the walk direction; (4) the v14.249 mid-segment anchor is now **enabled by default** (`BSAI_H3_MID_ANCHOR=0` to disable); (5) a hard warning when a clip fails to get motion context (guaranteed hard cut at that seam); (6) the removed "scene chaining" section is replaced by a positive `[环境连续]` statement.
+
+---
+
 ### v14.283 (2026-11-03) — 崩溃自动续渲 + decode 防 GPU 崩溃 / Auto-resume after crash + decode crash guards
 
 **场景：** 渲染到 clip8 HyperVAE2x decode 时进程被系统强杀（Windows TDR / commit 超 85% / GPU driver reset，日志中断无 Python 异常）。重跑同 workflow，此前全部 9 段 `validated=False`，extender 从头重新采样所有段（24min/段×9段=216min 白费）。
