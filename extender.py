@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.294-space-continuity-transit"
+BUILD = "minimax-h3-extender-v14.295-dialogue-context-restore"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -179,6 +179,8 @@ _OUTFIT_LOCK_RULE = (
     "【服装锁定纪律】画面主体人物（主播/主角）的实际穿着与 <Picture N> 参考图中"
     "该人物的真实服装完全一致：款式、颜色、材质、上下装搭配逐项复刻参考图，"
     "人物与参考图同框时穿的是同一件衣服，整部片里这套服装的款式与颜色始终保持一致。"
+    "人物转身、侧身、走动、做手势或表情变化时，身上的上衣、外套、衬衫、下装与"
+    "鞋子的款式和颜色保持不变，动作只改变肢体姿态，不改变身上穿的衣服。"
     "分镜正文中出现的衣着描述作为这套参考图服装的补充说明，画面里的上衣、外套与"
     "下装从头到尾都是参考图里的那几件。\n"
 )
@@ -8864,10 +8866,11 @@ class BSAIH3FilmFactory:
             # v14.205: 多视图参考图纪律（只加一次；无图片标签的 prompt 不加）
             if "<Picture " in prompt and _REF_SHEET_RULE not in prompt:
                 prompt = _REF_SHEET_RULE + prompt
-            # v14.221: 服装锁定纪律（紧随参考图纪律一并注入，只加一次）。
-            # 声明主体人物穿着以参考图为准，压制正文中与 @图N 相悖的服装指令。
+            # v14.221 / v14.295: 服装锁定纪律。v14.295 起改为 prepend（与参考图纪律
+            # 同置 prompt 首部），H3 对首部指令权重更高；并强调姿态/动作变化时服装
+            # 不变，解决侧身、转身等镜头下参考图西装被替换成开衫的问题。
             if "<Picture " in prompt and _OUTFIT_LOCK_RULE not in prompt:
-                prompt = prompt + "\n" + _OUTFIT_LOCK_RULE
+                prompt = _OUTFIT_LOCK_RULE + prompt
 
             if prompt != original_prompt:
                 print(f"[H3 Extender] clip[{clip_idx}] prompt resolved: '{original_prompt[:60]}' -> '{prompt[:60]}'")
@@ -11123,14 +11126,14 @@ class BSAIH3FilmFactory:
                             else:
                                 _c["duration"] = max(0.25, float(_d))
                                 _c["render_enabled"] = True
-                                # v14.285: 多人对话逐段 TTS 路径强制关闭 context_enabled。
-                                # 逐段音频长度已 = clip 时长且按帧网格对齐，clip2+ 段
-                                # 再消费 context 会多推 ~12 帧，造成段间口型错位。
-                                if _c.get("context_enabled", True):
-                                    _c["context_enabled"] = False
+                                # v14.295: 保留工作流的 context_enabled 设置。
+                                # 之前 v14.285/287 强制关闭 context 是为了口型对齐，
+                                # 但 v14.254 已修复 _split_lip_audio_by_clips 的
+                                # context 帧对齐（clip2+ 按净帧数推进音频），
+                                # context_enabled=True 不再错位；强制关闭反而导致
+                                # 段间无 motion context 衔接 → clip1→clip2 首帧跳变。
                         print("[H3 AutoTTS] clip 时长已按逐段台词音频设置: "
-                              + "/".join((f"{_d:.2f}s" if _d > 0.05 else "off") for _d in _auto_clip_durs)
-                              + " · context_enabled 已全部关闭（逐段对齐无上下文衔接）")
+                              + "/".join((f"{_d:.2f}s" if _d > 0.05 else "off") for _d in _auto_clip_durs))
                     print(f"[H3 AutoTTS] ✅ 多人对话自动合成完成 → 已升级为 lip_audio 驱动口型")
             except Exception as _e:
                 print(f"[H3 AutoTTS] 自动多人对话合成跳过（非致命）：{_e}")
