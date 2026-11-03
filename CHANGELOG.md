@@ -4,6 +4,36 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.287 (2026-11-03) — 多人对话声音克隆根因修复：台词丢失 + @图N 标签丢失 / Fix multi-speaker dialogue voice cloning: dropped lines + lost @图N asset tags
+
+**场景：** 多人对话模式下实测 **8 句只合成出 5 句**，且多角色分镜里参考图与音色绑定全部失效。
+
+**修复 1（voice_clone_node）—— 台词被静默丢弃的真正根因**
+
+- **退化判定误杀**：`_is_degenerate()` 里 `rms > 0.25` 被当作"too loud 退化"。但高响度参考音色（例如 `女声.mp3`，rms=0.171）会让 IndexTTS 输出 rms 0.3+ 的**正常语音** → 被误判退化 → 触发模型重载重试 → 最终该句被静默跳过。实测 8 句丢 3 句，全部是女声。
+- **响度归一化**：输出侧 RMS→0.15 / 峰值限幅 0.98；参考音频侧 rms>0.15 时归一到 0.13、峰值限幅 0.95。解决多说话人音量不一致与拼接削波。**归一化放在退化检测之前**，避免归一后的电平又被误判。
+- **真退化判定收窄**为：空 / NaN / 削波>30% / 纯静音（rms<1e-4）。"音量大"不再算退化。
+- **失败行不再静默**：合成失败的行会 `print` 到控制台（此前只进 log 字符串，不接显示节点就完全看不到）。
+
+**修复 2（extender）—— @图N 标签丢失导致资产引用全失效**
+
+- 前端 card UI 手动编辑 `clip.prompt` 时极易误删 `@图N` / `@音频N` 标签（尤其多角色分镜里的 `@图2/@图3/@图4`）。标签一丢，参考图与音色绑定全部失效，且**无法从 `clips_json` 恢复**。
+- 现在：独立的 `prompt_source` 输入（`PrimitiveStringMultiline` 等）始终保留原始分镜脚本，用其中的 `[分镜N]` 段重建 `clip.prompt` —— 前端 `parseStoryboard` 本身不清洗资产标签，`prompt_source` 是标签的事实来源。
+- 触发条件严格：仅当 `prompt_source` 有 `[分镜N]` 标记、**段数 == clip 数**、且该段比原 prompt **多出**资产标签时才重建。标签齐全时**不动**用户手动编辑的内容。
+
+**修复 3（extender）—— 多人对话逐段 TTS 路径强制 `context_enabled=False`**
+
+逐段台词音频已按帧网格对齐 clip 时长，clip2+ 再消费 context 会多推约 12 帧，造成**段间口型错位**。该路径下关闭 context。
+
+> ⚠️ **交互提示**：此开关只作用于 **AutoTTS 多人对话逐段合成** 路径。一镜到底 + `lip_audio` 段路径不受影响（已验证）。但若在**一镜到底**模式下同时启用 AutoTTS 逐段合成，context 关闭会让 v14.284 的**段中锚帧**与 motion context 都不再生效（两者都依赖上一段尾 latent），段间视觉衔接会变弱 —— 这是在「口型对齐」与「段间视觉衔接」之间的有意取舍。
+
+**验证：**
+- 离线复现：8/8 句合成成功，耗时 32.28s（修复前 5/8 句，19.15s）
+- 标签恢复测试：从 `extender.py` **源码提取**恢复逻辑后实测 —— 标签丢失时 19/19 段正确重建；标签齐全时**不**重建（用户手动编辑被保留）；段数与 clip 数不等时不触发
+- 与 v14.286 集成：重建后的 19 段 prompt 走 `demulti/flatten` 正常，**段间景别仍 19/19 连续**，`【转场】` 标签照常清除
+
+**/ Fix:** In multi-speaker dialogue mode only 5 of 8 lines were synthesised and every reference-image/voice binding in multi-character storyboards was dead. Root cause of the dropped lines: `_is_degenerate()` treated `rms > 0.25` as "too loud" degradation, but a loud reference voice (e.g. `女声.mp3`, rms=0.171) makes IndexTTS emit perfectly normal speech at rms 0.3+ — those lines were misclassified as degraded, retried, and then silently skipped (all three losses were the female voice). Loudness is now normalised (output RMS→0.15 / peak 0.98, reference rms>0.15→0.13 / peak 0.95) **before** the degeneracy check, and degeneracy now means only empty / NaN / >30% clipping / pure silence. Failed lines are also printed to the console instead of vanishing into a log string nobody sees. On the extender side, manually editing `clip.prompt` in the card UI easily drops `@图N` / `@音频N` asset tags — which kills every reference and voice binding and cannot be recovered from `clips_json`; the independent `prompt_source` input always keeps the original script, so each `[分镜N]` segment can rebuild `clip.prompt`. The rebuild fires only when the marker count equals the clip count **and** the segment carries asset tags the prompt is missing, so hand-edited prompts are never overwritten. Finally, the AutoTTS per-line dialogue path now forces `context_enabled=False`, because the per-line audio is already frame-grid-aligned and letting clip2+ consume context pushed ~12 extra frames and desynchronised lip-sync across segments (this path does not affect one-shot + `lip_audio`; note that in one-shot mode with AutoTTS enabled, closing context also disables v14.284's mid-clip anchor, a deliberate trade-off in favour of lip-sync accuracy).
+
 ### v14.286 (2026-11-03) — 一镜到底「不换景别」改为段间连续 + 清除【转场】切镜风险词 / One-shot shot-size continuity instead of a hard lock + strip the 【转场】 cut-risk token
 
 **背景：** v14.284 把景别改成「全链锁死单一景别」（取全局 `[景别]` 小节，取不到就回退到 clip1 的首个景别词），并向每段注入 `[景别锁定] 全段保持X构图`。对用户的 19 段一镜到底 MV 脚本做实测审计后发现：
