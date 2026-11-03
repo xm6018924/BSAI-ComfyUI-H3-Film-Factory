@@ -2,6 +2,26 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.305 (2026-11-03) — 全线取消去噪分块 / 时间分块，改由 Sol-Attn 整段直跑 / Disable all chunked denoising, run the full segment through Sol-Attn
+
+**来源**：B站教程 BV1kN4G6rE89《MinimaxH3取消去噪分块反而更快更稳？直出30秒都不爆显存？ ComfyUI Sol-Attn渐进式采样器实测分享》。
+
+**改动**：
+- 所有渲染管道的**时间分块二采**（`temporal_chunk_tokens`）一律置 0，工作流传入的分块值被忽略，整段一次二采。
+- 所有渲染管道的**分块二采**（`tiled_refine` / `tile_count`）一律关闭，`tiled_refine` 强制 False、`tile_count` 强制 1。
+- 自动分块的三处触发器全部跳过：显存预算自动开分块、130k token 自动开空间分块、自动时间分块（`BSAI_H3_TEMPORAL_TRIGGER`）。
+- 130k token 的 **dense 降级门**在分块关闭时不再注入（`sol_max_tokens` 不下发），二采交给 Sol-Attn 稀疏注意力整段跑，避免整段被打成 dense 显存爆掉。
+- **回退开关**：设环境变量 `BSAI_H3_CHUNKED_DENOISE=1` 后重启 ComfyUI，恢复原来的分块行为。
+
+**原因**：分块带来接缝、重叠区重复计算与段间闪烁；教程实测取消分块后更快更稳，30s 直出不爆显存。
+
+**All render pipelines now run denoise in one pass:**
+- temporal chunking forced off (`temporal_chunk_tokens = 0`), workflow values ignored;
+- spatial tile refine forced off (`tiled_refine = False`, `tile_count = 1`);
+- the three auto-enable triggers (VRAM budget, 130k-token gate, auto temporal) are skipped;
+- the 130k-token dense fallback is no longer injected while chunking is off, so the full segment stays on Sol-Attn sparse attention instead of blowing up VRAM.
+- **Rollback**: set `BSAI_H3_CHUNKED_DENOISE=1` and restart ComfyUI to restore chunked behaviour.
+
 ### v14.303 (2026-11-03) — 新增渲染管道：TaoMate HD 3步 渐进放大双采 (2+1 1080p直出) / TaoMate HD 3-Step Progressive Lift Dual-Pass
 
 **来源**：B站教程 BV1Ui4G6nEXs《卷！卷完加速卷放大！H3 Taomate HD光速出1080p视频》；

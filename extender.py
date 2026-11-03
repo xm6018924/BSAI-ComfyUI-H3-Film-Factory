@@ -118,7 +118,13 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.302-multitalk-audio-video-sync"
+BUILD = "minimax-h3-extender-v14.305-no-chunked-denoise"
+
+# v14.305: 去噪分块/时间分块全线关闭，改由 Sol-Attn 稀疏注意力整段直跑
+# （B站 BV1kN4G6rE89 实测：取消分块反而更快更稳、30s 直出不爆显存）。
+# 分块带来的接缝、重叠重复计算、段间闪烁全部去掉；需要旧行为时设
+# BSAI_H3_CHUNKED_DENOISE=1 后重启 ComfyUI。
+_CHUNKED_DENOISE_ON = str(os.environ.get("BSAI_H3_CHUNKED_DENOISE", "0")).strip().lower() in ("1", "true", "on")
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -4476,7 +4482,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if (not tiled_refine) and (_chosen2 is None or _chosen2 < _orig_f - 1e-6):
                     _ws_tiled_tbl = {1.0: 0.8, 1.5: 0.9, 2.0: 1.1}
                     _ws_tiled = _ws_tiled_tbl.get(round(_orig_f, 1), 1.1)
-                    if min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tiled - 3.0 >= 10.0:
+                    if min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tiled - 3.0 >= 10.0 and _CHUNKED_DENOISE_ON:
                         tiled_refine = True
                         _auto_tiled = True
                         _chosen2 = _orig_f
@@ -4705,7 +4711,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             if refine_no_temp_chunk and not _use_temporal:
                 print("[H3 Extender] v14.281 MV 双采: 按原版 temporal_chunk_tokens=0 "
                       "禁用自动时间分块 -> 整段一次二采(1 段 × 空间分块)", flush=True)
-            if not _use_temporal and not refine_single_pass and not refine_no_temp_chunk:
+            if _CHUNKED_DENOISE_ON and not _use_temporal and not refine_single_pass and not refine_no_temp_chunk:
                 try:
                     _t_cand226 = None
                     _h_cand226 = 0
@@ -5229,7 +5235,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # dense 门. 分块成功时每块 ~262k tokens 已在 Sol-Attn 健康区, 不需要
             # dense 回退. 同时显式清理 transformer_options 里可能从上个 clip 残留
             # 的 sol_max_tokens.
-            if _r_call_tok > _r_gate_limit and _r_restore_tiles is None and refine_mem_mode != "global":
+            if _r_call_tok > _r_gate_limit and _r_restore_tiles is None and refine_mem_mode != "global" and _CHUNKED_DENOISE_ON:
                 try:
                     import os as _os_t3, importlib.util as _ilu_t3
                     _tiles_path3 = _os_t3.path.join(_os_t3.path.dirname(_os_t3.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -5263,7 +5269,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # latent tokens 命中病态区, 才需要强制 dense 回退 (KJNodes 分组+
             # SageAttention). 分块成功时 tile 级 token 已在健康区, 稀疏 Sol-Attn
             # 直接跑通, 不注入 sol_max_tokens.
-            if _r_call_tok > _r_gate_limit and _r_restore_tiles is None:
+            if not _CHUNKED_DENOISE_ON:
+                print(f"[H3 Extender] v14.305 分块关闭: 二采单次调用 tokens={_r_call_tok:,}, "
+                      f"Sol-Attn 稀疏整段直跑(不注入 dense 门)", flush=True)
+            elif _r_call_tok > _r_gate_limit and _r_restore_tiles is None:
                 try:
                     _r_to_gate = _refine_model.model_options.get("transformer_options", {})
                     if isinstance(_r_to_gate, dict):
@@ -5352,7 +5361,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # v14.275: 时间分块已启用时不再补 spatial 分块保底 —— 每次调用只剩
             # chunk 帧(~236k tokens, 在 Sol-Attn 健康区), 不存在"全序列路径不可用"
             # 的问题; 硬补 8 块反而把画面切成 8 条独立重构图(重影/碎屑)。
-            if _r_global_fallback_tiles and _r_restore_tiles is None and not _use_temporal:
+            if _r_global_fallback_tiles and _r_restore_tiles is None and not _use_temporal and _CHUNKED_DENOISE_ON:
                 try:
                     import os as _os_t4, importlib.util as _ilu_t4
                     _tiles_path4 = _os_t4.path.join(_os_t4.path.dirname(_os_t4.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -9390,8 +9399,11 @@ class BSAIH3FilmFactory:
                 denoise = 1.0
             print("[H3 Extender] 🚀 FastH3 Omni 8步单采模式已启用：跳过二采(Self-Lift)，一采 8 步蒸馏直出。"
                   "确认 Loader 使用 fasth3_omniref_8step_pruned_int8_convrot.safetensors + BlockSparseAttention(VSA keep_percent=10)。")
-        tiled_refine = bool(kwargs.get("tiled_refine", False))
-        tile_count = int(kwargs.get("tile_count", 4))
+        _req_tiled = bool(kwargs.get("tiled_refine", False))
+        tiled_refine = _req_tiled if _CHUNKED_DENOISE_ON else False
+        tile_count = int(kwargs.get("tile_count", 4)) if _CHUNKED_DENOISE_ON else 1
+        if not _CHUNKED_DENOISE_ON and _req_tiled:
+            print("[H3 Extender] v14.305 分块二采全线关闭 -> 整段一次二采 (BSAI_H3_CHUNKED_DENOISE=1 可恢复)", flush=True)
         # v14.181 (2026-10-23): 回滚 v14.180 的 overlap 钳制 64px -> 恢复 128px。
         # 实测崩坏(分镜模式, 22:00 渲染): v14.179 声称 overlap 64 的接缝由
         # motion-context keyframe 对齐兜底, 但该兜底仅在一镜到底(one_shot=on)
@@ -9426,6 +9438,9 @@ class BSAIH3FilmFactory:
             temporal_chunk_tokens = 48
         else:
             temporal_chunk_tokens = _safe_int(_tc_raw, 0)
+        if not _CHUNKED_DENOISE_ON and temporal_chunk_tokens > 0:
+            print(f"[H3 Extender] v14.305 时间分块关闭 (工作流请求 {temporal_chunk_tokens} token/段 -> 整段一次)", flush=True)
+            temporal_chunk_tokens = 0
         # v14.152: 兼容老工作流 'global_inherit' 等历史字符串 — 非数字一律取默认 8
         temporal_overlap_tokens = _safe_int(kwargs.get("temporal_overlap_tokens"), 8)
         # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 小 MLP 残差混合 cond token.
@@ -9505,7 +9520,7 @@ class BSAIH3FilmFactory:
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
-                tiled_refine = True
+                tiled_refine = _CHUNKED_DENOISE_ON
                 tile_overlap = 256
                 audio_context_length = 0
                 refine_audio_denoise = 0.0   # 对口型档音频由外部 lip_audio 提供, 锁定不重绘
