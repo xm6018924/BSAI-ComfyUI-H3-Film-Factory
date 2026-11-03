@@ -4,6 +4,48 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.286 (2026-11-03) — 一镜到底「不换景别」改为段间连续 + 清除【转场】切镜风险词 / One-shot shot-size continuity instead of a hard lock + strip the 【转场】 cut-risk token
+
+**背景：** v14.284 把景别改成「全链锁死单一景别」（取全局 `[景别]` 小节，取不到就回退到 clip1 的首个景别词），并向每段注入 `[景别锁定] 全段保持X构图`。对用户的 19 段一镜到底 MV 脚本做实测审计后发现：
+
+| 审计项 | 实测结果 |
+|---|---|
+| 19 段脚本的段间景别 | **19/19 全部连续对接**（每段末帧景别 == 次段首帧景别，脚本里甚至明写"起幅承接上一段末帧的…机位"） |
+| v14.284 锁死值（clip1 首词 = 中全景）与各段正文 | **14/19 段冲突**（正文写中景 / 中近景 / 大远景） |
+| 后果 | 正文与锁定指令互相打架，模型只能折中 → 主体忽大忽小（另一种景别跳变），并抹掉脚本精心设计的连续推进（中全景→中景→中近景→大远景） |
+
+也就是说 —— 用户的脚本**本来就没有景别跳变**，v14.284 的锁死是过度约束，与"不换景别"的真实诉求（不跳变）相冲突。
+
+**修复 1：景别策略改为「段间连续」（默认）**
+
+- 移除「回退到 clip1 首个景别词」的锁定；**只有用户显式声明全局 `[景别]` 小节时才锁死**，且此时同步把正文里冲突的景别词改写成声明值（新增 `_one_shot_force_size()`），杜绝两个相反指令并存。
+- 默认改为注入正向的 `[景别连续]` 声明：景别只随摄影机连续的推移与升降连续变化，段末取景范围与次段首帧完全一致。
+- 跨档接缝（上一段末帧景别 != 本段首帧景别）时追加 `[景别衔接]`：段头保持上一段末帧的取景范围，用连续的后退或推近逐帧过渡过去。
+
+**修复 2：景别链解析口径（`_one_shot_size_chain`）**
+
+- 景别必须**按拍段**取，且要在 `flatten` **之前**算 —— flatten 会把 `[景别/构图]` 之类拍段标签整体改写成连续散文，之后分不清哪个景别词属于哪个拍段。
+- 支持两种脚本格式：新格式 `[景别/构图]中全景…`；老格式 `0-3秒：…运镜（…）、中全景。…`（括号内的运镜描述里出现的景别词不算景别声明）。
+- **最长匹配优先**扫描：`中全景` 不再被拆成 `全景`；并补上词表缺失的 `大远景`（此前 `大远景` 被拆成 `远景`，凭空造出一次 中全景→大远景 的跨档跳变）。
+- 段标题里的**目标**景别不参与判定 —— 段19 标题写"上升至大远景"，但起幅拍段是"中全景"（承接上一段末帧），按全文首词取会误判。
+- 兜底的全文扫描标记为**不可靠**，此时不做接缝判定（分不清归属就宁可不判）。
+
+**修复 3：清除【转场】切镜风险词**
+
+段11 标题里的 `【转场】` 是**人声状态**标记（`转场·人声2:04.6起`），不是画面指令，但 H3 只认字面 —— "转场"出现在段首会被读成画面转场，直接诱发段内切镜。现在纯删除该标签，保留后面的人声时间码（口型由 lip_audio 驱动）。
+
+**修复 4：正向措辞**
+
+`[景别连续]` / `[景别衔接]` / `[摄影机轨迹锁定]` 里的否定词（"没有…""看不到…""保持不变"）全部改写为正向陈述 —— H3 在 CFG=1.0 下没有负向分支，否定词会被当画面内容渲染。
+
+**验证：**
+- 单元测试 20/20 通过（词表最长匹配、新旧两种格式解析、锁死分支正文改写、否定词/切镜词零残留、段11 标签清除且时间码保留）
+- 用户 19 段脚本：**段间景别 19/19 连续**，不再注入任何 `[景别锁定]`，零接缝告警
+- 跨 33 个工作流回归：新格式脚本跨档 0/18；老格式脚本（`128分钟大电影版` 系列）跨档为**真实跳变**（那些脚本本就是多镜头分镜结构），衔接声明按实况注入
+- `py_compile` 通过；`tools/check_quickbar_enum_sync.py` 仍 `=== SYNC OK ===`（0 ERROR / 0 WARN，退出码 0）
+
+**/ Fix:** v14.284 locked the shot size to a single value chain-wide, falling back to clip1's first size word when the global prompt declared none. An audit of the user's actual 19-segment one-shot MV script showed that script already has **19/19 continuous shot-size hand-offs** (each segment's final size equals the next segment's opening size — the script even spells out "起幅承接上一段末帧的…机位"), while the v14.284 lock **conflicted with 14/19 segments** and would have fought the script's deliberate continuous push (medium-wide → medium → medium-close → extreme wide). Fixes: (1) the default strategy is now *shot-size continuity* — a positive `[景别连续]` declaration plus a `[景别衔接]` transition clause at genuinely mismatched seams — and a hard lock is applied **only** when the user explicitly declares a global shot-size section, in which case the body text is rewritten to match so no contradictory instruction survives; (2) shot sizes are now parsed **per shot beat and before `flatten`** (flatten rewrites the `[景别/构图]` beat labels into prose), supporting both the new `[景别/构图]` format and the legacy `…）、<size>。` format, always with longest-match scanning (so `中全景` is never split into `全景`, and the previously missing `大远景` entry no longer fabricates a three-step jump); the segment title's *target* size is excluded because it describes the destination, not the opening frame; (3) the inline `【转场】` label — a vocal-state marker, not a camera instruction — is stripped, since H3 reads the literal word as a picture cut; (4) all negation words in the new shot-size clauses were rewritten positively, because at CFG=1.0 H3 has no negative branch. Verified by 20/20 unit tests, a 19/19 continuous hand-off result on the user's script, a 33-workflow regression (new-format scripts: 0 mismatches; legacy scripts: mismatches are genuine, because those are multi-shot storyboard scripts by design), `py_compile`, and an unchanged `=== SYNC OK ===` from the enum-sync checker.
+
 ### v14.285 (2026-11-03) — 枚举同步误报修正 + render_pipeline 档位丢失修复 / Fix enum-sync false positives + render_pipeline preset loss
 
 **场景：** `tools/check_quickbar_enum_sync.py` 长期报 8 条 DESYNC ERROR（`cycleAliases` 的中文旧值"不在后端枚举内" + `render_pipeline` 白名单缺 `MV Dual-Pass (电影工厂 v3.2 原版)`）。因为每次都红，真正的 bug 被淹没在噪声里。

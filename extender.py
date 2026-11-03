@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.285-enum-sync-fix"
+BUILD = "minimax-h3-extender-v14.286-oneshot-size-continuity"
 
 # v14.240: 二采 workspace reserve 记忆。
 # 自适应让位(见 Refine 二采 workspace 探针)一次就够了: 链式渲染 clip>=2 时
@@ -6406,6 +6406,9 @@ _OS_SIZE_WORDS = (
     ("中全景", "MEDIUM WIDE SHOT"),
     ("中景", "MEDIUM SHOT"),
     ("全景", "WIDE SHOT"),
+    # v14.286: 补 "大远景" —— 词表原本缺这条, 脚本里的 "大远景" 会被最长匹配
+    # 拆成 "远景", 景别链判定因此误报跨档跳变(段19 实测 中全景→远景 跨 3 档)。
+    ("大远景", "EXTREME WIDE SHOT"),
     ("远景", "EXTREME WIDE SHOT"),
 )
 
@@ -6467,6 +6470,136 @@ def _one_shot_first_size(text):
         if _best_pos is None or _p < _best_pos:
             _best, _best_pos = (_w, _en), _p
     return _best
+
+
+def _one_shot_size_chain(text):
+    """v14.286: 返回 (起始景别, 结束景别, 命中列表, 是否可靠)。
+
+    景别来源按优先级:
+      1. 新格式拍段字段 "[景别/构图]中全景…"
+      2. 老格式拍段行 "0-3秒：…运镜（…）、中全景。…" —— 景别在括号之后的顿号后
+      3. 全文最长匹配扫描(兜底, **不可靠**: 分不清哪个景别词属于哪个拍段)
+
+    为什么不能只看全文首个景别词: 段标题的【本段运镜: …缓缓上升至大远景】说的是
+    **本段的目标**, 不是起幅景别。段19 实测: 标题写"至大远景", 但 0-3 秒拍段是
+    "中全景低机位侧后方"(承接上一段末帧) —— 按全文首词取会凭空造出一次
+    中全景→大远景 的跨档跳变。
+
+    扫描一律**最长匹配优先**, 所以 "中全景" 不会被拆成 "全景"、"大远景" 不会被
+    拆成 "远景"。命中列表元素为 (序号, 景别词, 英文名)。
+    """
+    s = str(text or "")
+
+    def _scan(seg):
+        out = []
+        i = 0
+        n = len(seg)
+        while i < n:
+            hit = None
+            for _w, _en in _OS_SIZE_WORDS:
+                if seg.startswith(_w, i):
+                    hit = (_w, _en)
+                    break
+            if hit:
+                out.append(hit)
+                i += len(hit[0])
+            else:
+                i += 1
+        return out
+
+    def _pick(frag):
+        _h = _scan(frag)
+        return (_h[0][0], _h[0][1]) if _h else None
+
+    # ── 1. 新格式: [景别/构图] ──
+    hits = []
+    for _idx, _seg in enumerate(re.findall(r"\[\s*景别\s*/\s*构图\s*\]\s*([^；;。\n]{0,60})", s)):
+        _p = _pick(_seg)
+        if _p:
+            hits.append((_idx, _p[0], _p[1]))
+    if hits:
+        return hits[0][1], hits[-1][1], hits, True
+
+    # ── 2. 老格式: 拍段行 "…）、<景别>。" ──
+    hits = []
+    for _idx, _ln in enumerate(s.splitlines()):
+        if not re.match(r"^\s*[\d\u2013\u2014\-~]+\s*秒", _ln):
+            continue
+        _seg = re.sub(r"[（(][^）)]*[）)]", "", _ln)      # 去括号(运镜描述里的景别词不算)
+        _m = re.search(r"[、]\s*([^\n。；;、，]{1,10})。", _seg)
+        if not _m:
+            continue
+        _p = _pick(_m.group(1))
+        if _p:
+            hits.append((_idx, _p[0], _p[1]))
+    if hits:
+        return hits[0][1], hits[-1][1], hits, True
+
+    # ── 3. 兜底: 全文扫描(不可靠) ──
+    _all = _scan(s)
+    hits = [(_i, _w, _en) for _i, (_w, _en) in enumerate(_all)]
+    if not hits:
+        return None, None, [], False
+    return hits[0][1], hits[-1][1], hits, False
+
+
+def _one_shot_force_size(text, target):
+    """v14.286: 把 text 里所有景别词替换成 target(最长匹配优先)。
+
+    只在用户**显式声明**全片景别时使用 —— 声明了就以声明为准, 正文里冲突的
+    景别词必须同步改写, 否则"正文写中景 + 锁定指令写中全景"会让模型左右为难。
+    """
+    s = str(text or "")
+    if not target or not s:
+        return s
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        hit = None
+        for _w, _en in _OS_SIZE_WORDS:
+            if s.startswith(_w, i):
+                hit = _w
+                break
+        if hit:
+            out.append(target)
+            i += len(hit)
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
+
+
+def _one_shot_size_rule(locked_size=None, prev_end=None, cur_start=None):
+    """v14.286: 生成景别相关的一镜到底规则文本(纯函数, 主循环与测试共用一份)。
+
+    返回 (text, seam_mismatch):
+      locked_size —— 用户显式声明的全片景别; 非空 → 锁死该景别
+      prev_end    —— 上一段末帧景别
+      cur_start   —— 本段首帧景别
+
+    全文只用正向陈述 —— H3 在 CFG=1.0 下没有负向分支, "没有/看不到/禁止" 这类
+    否定词会被当成画面内容渲染。
+    """
+    if locked_size:
+        return (
+            "\n[景别锁定] 全段保持{0}构图：主体的取景范围与占画比例自始至终保持一致，"
+            "全程维持同一景别。".format(locked_size),
+            False,
+        )
+    text = (
+        "\n[景别连续] 景别自始至终只随摄影机连续的推移与升降而连续变化，"
+        "本段末帧的取景范围与下一段首帧的取景范围完全一致，"
+        "主体在画幅中的大小全程连续演进，画面里的景别始终平缓渐进。"
+    )
+    mismatch = bool(prev_end and cur_start and cur_start != prev_end)
+    if mismatch:
+        text += (
+            "\n[景别衔接] 本段起幅时保持上一段末帧的{0}取景范围，"
+            "摄影机以连续的后退或推近逐帧把取景范围过渡到本段的{1}，"
+            "过渡过程平滑连续，画面里的景别始终平缓渐进。".format(prev_end, cur_start)
+        )
+    return text, mismatch
 
 
 # ── v14.284 (2026-11-03): 一镜到底 —— 全局提示词「去多镜头结构化」 ────────
@@ -6579,6 +6712,7 @@ def _one_shot_demulti_shot(text, label=""):
       2. 表格行(≥2 个 '|')—— 即便标题没被识别也清掉
       3. 场景路线串(S1→S2→S3)
       4. 否定式镜头口号 → 正向陈述
+      5. 【转场】行内标签 —— 画面切镜高危词(见下)
     """
     s = str(text or "")
     if not s.strip():
@@ -6589,6 +6723,11 @@ def _one_shot_demulti_shot(text, label=""):
     s = _OS_ROUTE_CHAIN_RE.sub("", s)
     for _a, _b in _OS_NEG_TO_POS:
         s = s.replace(_a, _b)
+    # v14.286: 删掉行内的【转场】标签。
+    # 段标题里的 【转场】 是**人声状态**标记(转场·中途入唱), 不是画面指令, 但
+    # H3 只认字面 —— "转场" 在段首出现会被读成画面转场, 直接诱发段内切镜。
+    # 这里纯删除标签本身, 保留后面的人声时间码(口型由 lip_audio 驱动)。
+    s = re.sub(r"[【\[]\s*转场\s*[】\]]\s*[·・:：]?", "", s)
     s = re.sub(r"[ \t]{2,}", " ", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     if len(s) != _orig:
@@ -11468,13 +11607,20 @@ class BSAIH3FilmFactory:
                 pass
         # ── v14.284 (2026-11-03): 一镜到底 —— 全片统一景别锁定 ──────────
         # 需求: "所有clip段间和段内不切镜, 不换景别, 从头到尾所有运镜必须保持
-        # 在一个摄影机运行轨迹上"。景别必须**全链唯一**: 之前每段各自从自己的
-        # 正文里取"最先出现的景别词"(v14.271), 各段取到的可能不同(实测
-        # clip3 正文同时含 近景/全景/中全景, 取到的基准与其它段不一致)→
-        # 段间景别跳变 = 观感上的"切镜"。现在改为: 优先取全局提示词"景别小节"
-        # 里声明的景别(全片导演声明), 其次才回退到第一段正文。
+        # 在一个摄影机运行轨迹上"。
+        #
+        # v14.286 (2026-11-03) 修正 v14.284 的过度约束:
+        #   v14.284 把景别改成"全链锁死单一景别"(全局景别小节 → 否则回退到 clip1
+        #   的首个景别词), 并向每段注入 "[景别锁定] 全段保持X构图"。实测用户的
+        #   19 段脚本 **段间景别本来就 19/19 全部连续对接**(每段末帧景别 ==
+        #   次段首帧景别, 脚本里甚至明写"起幅承接上一段末帧的…机位"), 而锁死
+        #   会与 14/19 段的正文构图(中景/中近景/大远景)直接矛盾, 还会抹掉脚本
+        #   精心设计的连续推进(中全景→中景→中近景→大远景)。
+        #   现在: **只有用户显式声明全局景别小节时才锁死**(并同步改写正文景别词);
+        #   否则按"段间景别连续"处理 —— 声明连续性 + 在跨档接缝处给出连续过渡。
         _os_locked_size = None
         _os_env_continuity = ""
+        _os_prev_size_end = None      # v14.286: 上一段末帧景别(段间连续判定用)
         if one_shot_enabled:
             _os_env_continuity = (
                 "\n[环境连续] 环境沿一条连续的物理路线逐步变化，每一处新环境都由"
@@ -11485,16 +11631,9 @@ class BSAIH3FilmFactory:
                 _os_locked_size = _one_shot_locked_size(global_prompt or "")
             except Exception:
                 _os_locked_size = None
-            if not _os_locked_size:
-                try:
-                    _os_locked_size, _ = _one_shot_first_size(
-                        str(clips[0].get("prompt", "") or "") if clips else ""
-                    )
-                except Exception:
-                    _os_locked_size = None
-            print(f"[H3 Extender] v14.284 一镜到底: 全片景别锁定 = "
-                  f"{_os_locked_size or '未声明(沿用各段正文)'}; "
-                  f"摄影机轨迹/主体步态将按同一锁定值注入每一段")
+            print(f"[H3 Extender] v14.286 一镜到底: 景别策略 = "
+                  f"{('全片锁死 ' + str(_os_locked_size)) if _os_locked_size else '段间连续(不锁死)'}; "
+                  f"摄影机轨迹/主体步态将按同一规则注入每一段")
         # v14.240 (2026-10-28): 一镜到底 —— 强制全链同 seed（摄像机轨迹连续）。
         # 根因: 默认 seed_mode=randomize 每段独立随机噪声场, 即使段头锁 keep +
         # keyframe 参考把画面锚住, 段内中段的噪声路径仍逐段重启 → 运镜轨迹
@@ -11675,6 +11814,21 @@ class BSAIH3FilmFactory:
                 _refs_for_clip = _plan["refs"]
                 _clip_prompt_for_cond = _plan["clip_prompt"]
                 _gp_for_cond = _plan["global_prompt"]
+            # v14.286: 景别链必须在 **flatten 之前** 算。
+            # flatten 会把拍段标签([镜头运动]/[景别/构图] 等)整体改写成连续散文,
+            # 之后既分不清哪个景别词属于哪个拍段, 标题里的"目标景别"也会混进来
+            # (段19 实测: 标题写"上升至大远景", 但起幅拍段是"中全景" —— 按正文
+            #  首个景别词取会凭空造出一次 中全景→大远景 的跨档跳变)。
+            _os_size_start, _os_size_end, _os_size_hits = (None, None, [])
+            _os_size_reliable = False
+            if one_shot_enabled:
+                try:
+                    _os_size_start, _os_size_end, _os_size_hits, _os_size_reliable = (
+                        _one_shot_size_chain(_clip_prompt_for_cond)
+                    )
+                except Exception:
+                    _os_size_start, _os_size_end, _os_size_hits = (None, None, [])
+                    _os_size_reliable = False
             # v14.271 一镜到底: 编码前把"0-3秒/3-6秒"分拍式剧本改写为单镜头连续散文。
             # 分拍标签会被 H3 当成镜头切分点(实测 clip2 在 3.25s ≈ 3-6秒拍点硬切)。
             if one_shot_enabled:
@@ -11683,6 +11837,18 @@ class BSAIH3FilmFactory:
                 if _os_flat != _clip_prompt_for_cond:
                     print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 提示词已单镜头化(分拍时间标签→连续运镜陈述)")
                     _clip_prompt_for_cond = _os_flat
+                # v14.286: 用户**显式声明**全片景别时, 正文里的景别词必须同步改写成
+                # 声明值 —— 否则正文写"中景"、锁定指令写"中全景", 两个相反指令同时
+                # 出现, 模型只能折中, 观感上就是主体忽大忽小(另一种景别跳变)。
+                if one_shot_enabled and _os_locked_size:
+                    try:
+                        _os_forced = _one_shot_force_size(_clip_prompt_for_cond, _os_locked_size)
+                        if _os_forced != _clip_prompt_for_cond:
+                            _clip_prompt_for_cond = _os_forced
+                            print(f"[H3 Extender] v14.286 一镜到底 clip[{i+1}]: "
+                                  f"正文景别词已统一改写为全片声明值 '{_os_locked_size}'")
+                    except Exception:
+                        pass
             # Determine ref_audio for this clip.
             # lip_audio 模式：lip_audio_segment 已注入 AV latent 锁定口型，
             # 不需要再作为 ref_block。全局 ref_audio（音色参考）保留为 ref_block。
@@ -11818,13 +11984,12 @@ class BSAIH3FilmFactory:
                             .replace(_REF_SHEET_RULE, "")
                             .replace(_OUTFIT_LOCK_RULE, ""))
                 _os_hit_words = [w for w in _os_shot_words if w in _os_body.lower()]
-                # v14.284: 景别改为**全链锁定**, 不再各段各取本段正文的景别词。
-                _os_body_size, _ = _one_shot_first_size(_os_body)
-                _os_anchor = _os_locked_size or _os_body_size
+                # v14.286: 景别链已在 flatten 之前算好(见上), 这里直接用。
+                _os_body_size = _os_size_start
                 if _os_locked_size and _os_body_size and _os_body_size != _os_locked_size:
-                    print(f"[H3 Extender] ⚠️ v14.284 一镜到底 clip[{i+1}]: 本段正文出现"
-                          f"景别词'{_os_body_size}', 与全片锁定景别'{_os_locked_size}'不一致 —— "
-                          f"已按全片锁定值注入, 本段不会换景别")
+                    print(f"[H3 Extender] ⚠️ v14.286 一镜到底 clip[{i+1}]: 本段正文出现"
+                          f"景别词'{_os_body_size}', 与全片声明景别'{_os_locked_size}'不一致 —— "
+                          f"正文景别词已统一改写为声明值")
                 _os_rule = (
                     "\n[One Continuous Take] 本段从头帧到尾帧只有一个镜头：摄影机沿一条"
                     "连续轨迹运动，提示词中先后出现的时间与运镜描述都是这条轨迹上依次"
@@ -11842,16 +12007,26 @@ class BSAIH3FilmFactory:
                 _os_rule += (
                     "\n[摄影机轨迹锁定] 摄影机与主体的相对关系自始至终保持同一状态："
                     "机位固定在主体侧前方，与主体保持同距同高、朝向一致，随主体的"
-                    "行进方向同速平移。主体在画幅中的位置与大小全程保持不变，"
+                    "行进方向同速平移。主体在画幅中的位置与大小全程稳定保持同一状态，"
                     "画面里只有背景随摄影机移动而缓慢流转。"
                 )
-                if _os_anchor:
-                    # v14.284: 景别锁定 —— 原来写"只通过同一条连续运镜缓慢推近或拉远",
-                    # 这等于允许景别变化, 与"不换景别"直接矛盾, 已改为完全锁定。
-                    _os_rule += (
-                        f"\n[景别锁定] 全段保持{_os_anchor}构图：主体全身入画并居中，"
-                        "取景范围与主体占画比例自始至终保持一致，全程维持同一景别。"
-                    )
+                # v14.286: 景别规则(段间连续 / 全片锁死) —— 单一真相源的纯函数。
+                # 锁死分支下正文景别词已在 demulti 之后统一改写成声明值, 两者不再打架。
+                # 只有**可靠**解析出景别链时才做接缝判定 —— 兜底的全文扫描分不清
+                # 哪个景别词属于哪个拍段, 据此判定跨档会凭空造出不存在的跳变。
+                _os_size_rule, _os_seam_mismatch = _one_shot_size_rule(
+                    _os_locked_size,
+                    _os_prev_size_end if _os_size_reliable else None,
+                    _os_size_start if _os_size_reliable else None,
+                )
+                _os_rule += _os_size_rule
+                if _os_seam_mismatch:
+                    print(f"[H3 Extender] ⚠️ v14.286 一镜到底 clip[{i+1}]: 接缝景别"
+                          f"{_os_prev_size_end} → {_os_size_start} 不一致 —— "
+                          f"已注入连续过渡声明")
+                # 更新"上一段末帧景别"给下一段用(锁死模式 / 解析不可靠时不更新)
+                if not _os_locked_size and _os_size_reliable and _os_size_end:
+                    _os_prev_size_end = _os_size_end
                 # v14.284: 主体步态锁定 —— 正面走法与背面走法必须一致, 杜绝"倒走"。
                 _os_rule += (
                     "\n[主体步态] 主体以稳定连续的步频持续向前行进，双腿交替迈出完整"
@@ -11859,8 +12034,9 @@ class BSAIH3FilmFactory:
                 )
                 effective_prompt = str(effective_prompt) + _os_rule
                 print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 命中景别/推拉词 "
-                      f"{_os_hit_words}, 全片锁定景别={_os_anchor or '无'}, "
-                      f"已注入正向连续运镜指令(+轨迹锁定/景别锁定/步态锁定)")
+                      f"{_os_hit_words}, 景别策略={_os_locked_size or '段间连续'}, "
+                      f"本段景别 {_os_size_start or '无'} → {_os_size_end or '无'}, "
+                      f"已注入正向连续运镜指令(+轨迹锁定/景别规则/步态锁定)")
             print(f"[H3 Extender] clip[{i}] effective_prompt: '{effective_prompt[:120]}'")
             # v1.21: 多 CLIP 连续渲染时，上一 CLIP 的 H3 主模型（~20GB）仍驻留显存，
             # 会挤占本 CLIP 的 TE 文本编码空间导致 OOM——先卸载全部模型释放显存。
