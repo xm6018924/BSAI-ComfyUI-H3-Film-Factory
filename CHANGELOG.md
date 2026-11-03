@@ -4,6 +4,42 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.288 (2026-11-03) — 回退两处有害改动：段中锚帧默认关闭 + 摄影机轨迹规则去掉与脚本冲突的硬约束 / Revert two harmful changes: mid-clip anchor off + camera-trajectory rule no longer fights the script
+
+**背景：** 用户实测反馈「改完之后段间原本的无缝衔接被破坏了，而且段内还在切镜」。本条按实测证据定位并回退两处改动 —— 这两处都是 v14.284 引入的。
+
+**根因 1（图像层）：段中锚帧默认开启 → 段间断裂 + 中点硬切**
+
+v14.249 的段中锚帧原本是**默认关闭**的（需显式设 `BSAI_H3_MID_ANCHOR=1`），原注释就写着「锚帧来源（上段尾 latent）**未经渲染实测**，先 A/B」。v14.284 把它改成了默认开启，理由是「继续默认关闭等于不生效」—— **这个判断是错的**。
+
+该锚帧把「上一段尾 latent」追加为**第二个** `minimax_keyframes`（context 已经在段首放了一份同样的 latent），并钉在本段输出区**中点 ≈7s**。两份「上一段尾」并存导致：
+
+1. **中点硬切**：clip2 在 **7.167s** 出现 scene score **0.52** 的硬切，天空由晚霞突变到星夜 —— 7.167s 正是锚帧的中点位置；
+2. **段间接不上**：模型把中点当成另一个段落边界，时序规划被打乱，段首重新构图 → clip1 尾帧是**近景**（头胸入画），clip2 首帧却是**中全景**（腰部以下），跨 2 档跳变。
+
+链路 manifest 显示 `trim_frames=22` → **motion context 本身是生效的**，所以断裂不是 context 丢失，而是锚帧把时序规划打乱了。用户的脚本本来就写着「起幅承接上一段末帧的机位」、段间景别 19/19 连续对接，不需要这个锚。
+
+**修复**：`BSAI_H3_MID_ANCHOR` 默认改回**关闭**（`== "1"` 才启用，与 v14.249 原始语义一致）；显式开启时打印已知副作用警告。
+
+**根因 2（提示词层）：`[摄影机轨迹锁定]` 与脚本的绕行/推近直接矛盾 → 段内切镜**
+
+v14.284 写的是「机位**固定**在主体侧前方，与主体保持同距同高、朝向一致…主体在画幅中的位置与大小**全程稳定保持同一状态**，画面里**只有**背景随摄影机移动而缓慢流转」。而用户脚本几乎每段都有**绕行/环绕/推近**：
+
+- 段2「由平视中景起，**绕行至侧后方**并缓缓上升」
+- 段7「由正侧方绕至侧后方」／段18「绕至侧后方并持续拉远」
+- 各段还有「缓慢推近」「景别自然收窄」「后退拉远」
+
+两个相反指令同时出现，模型只能在中途选一个 —— 实测精确对应：
+
+| clip | 对应段 | 脚本是否绕行 | 实测切镜 |
+|---|---|---|---|
+| clip1 | 段1 | 否（低机位仰视→抬升平视） | **零切镜**（scene 分数表为空） |
+| clip2 | 段2 | **是**（绕行至侧后方） | **5.083s 切镜**（中景→中近景，主体朝向翻转） |
+
+**修复**：只保留两条不与脚本冲突的正向约束（相对关系连续演进 / 主体朝行进方向前进，防倒走）；方位、距离、景别的具体变化交回脚本，由 `[One Continuous Take]` 里原有的「绕到侧后方…由摄影机连续环绕或横移逐帧完成」承接。
+
+**/ Fix:** After v14.284 the user reported that the previously seamless inter-clip hand-off had been broken *and* the intra-clip cuts had not been fixed. Two v14.284 changes are responsible, both reverted here on measured evidence. (1) *Image layer* — v14.249's mid-clip anchor was originally **off by default** (the original comment even said the anchor's source "has not been validated by rendering; A/B it first"), but v14.284 flipped it on, reasoning that "leaving it off by default means it never takes effect". That reasoning was wrong. The anchor appends a **second** copy of the previous segment's tail latent to `minimax_keyframes` (motion context already places one at the segment head) and pins it at the segment's **midpoint ≈7s**. Two copies of "previous tail" in one list cause (a) a hard cut at the midpoint — measured scene score **0.52** at **7.167s** in clip2, with the sky flipping from sunset to a starry night, and (b) the model treating the midpoint as a second scene boundary, so the segment head re-composes — clip1 ends on a **close shot** (head and chest) while clip2 opens on a **medium wide** (waist down), a two-stop jump. The chain manifest shows `trim_frames=22`, i.e. motion context *was* applied, so the break is not a context loss but a disrupted temporal plan. `BSAI_H3_MID_ANCHOR` is back to off-by-default (opt in with `=1`), and enabling it explicitly now prints a warning about the known side effects. (2) *Prompt layer* — v14.284's camera-trajectory clause said the camera stays "fixed at the subject's front side, same distance, same height, same heading… the subject's position and size in frame stay constant, only the background drifts". The user's script asks for **orbiting and pushing in** almost every segment (段2 "orbits to the rear side", 段7, 段18, plus "slow push in", "framing naturally tightens", "pull back"). Two opposing instructions force the model to pick one mid-way, and the measurement lines up exactly: clip1 (segment 1, no orbit) shows **zero** cuts, while clip2 (segment 2, "orbits to the rear side") cuts at **5.083s**. The clause now keeps only the two constraints that do not fight the script (the camera-subject relationship evolves continuously; the subject always faces its direction of travel) and leaves heading, distance and framing to the script, which `[One Continuous Take]` already covers.
+
 ### v14.287 (2026-11-03) — 多人对话声音克隆根因修复：台词丢失 + @图N 标签丢失 / Fix multi-speaker dialogue voice cloning: dropped lines + lost @图N asset tags
 
 **场景：** 多人对话模式下实测 **8 句只合成出 5 句**，且多角色分镜里参考图与音色绑定全部失效。
