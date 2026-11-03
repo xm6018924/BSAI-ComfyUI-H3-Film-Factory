@@ -2,6 +2,55 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.307 (2026-11-04) — 🏁 里程碑：全部渲染管道统一为「时间分块关闭 + 空间分块保留」 / Milestone: all render pipelines standardized on "temporal chunking off + spatial tiling on"
+
+**口径**：逐档核对 `extender.py` 的全部渲染管道（`render_pipeline` 30 档 + 运行模式档），统一为：
+- **时间分块（`temporal_chunk_tokens`）全线关闭**：工作流传入值被忽略，`_use_temporal` 恒 False，自动时间分块触发器保持关闭。
+- **空间分块（`tiled_refine` / `tile_count`）全线保留**：需要二采的档位一律走空间 tile，130k token 自动开分块门与 >130k dense 降级门均生效。
+- 回退开关不变：`BSAI_H3_CHUNKED_DENOISE=1` 重启后恢复时间分块。
+
+**逐档核对结果**：
+
+| 档位 | 处理 |
+|---|---|
+| TaoMate HD 4+3 半分辨率提升双采 | 修正 `tiled_refine = _CHUNKED_DENOISE_ON`（默认等于关分块）→ **True**（4 块，128px overlap） |
+| MV Dual-Pass | 原本 `tiled_refine=True`，保持 |
+| 其余所有二采档（Sol-H3 Self-Lift / FastH3 / Turbo / DMAD / 4-in-1 / SolarRenderer / PDMD / PTD / PIKA / PRISM / OpenH3 / H25 / 直播配音 / QAD-v2 / Director 等） | 不硬编码覆盖，尊重工作流 `tiled_refine` + 自动分块门 |
+| 直播带货（全自动） | **保留 global 全上下文**（历史横带叠加问题，属不需要空间分块的档位） |
+| 一镜到底·2K双采 | **保留 global 全上下文**（历史重影/碎屑问题，属不需要空间分块的档位） |
+| 极速-VDN（速度预设，非渲染管道） | 保持原设计（DynamicVRAM 下全帧比 4 块快） |
+
+**同步**：TaoMate HD 示例工作流已更新为 960x544 画布 / 一采 4 步 / 二采 3 步 0.45 / latent x2.0 / `h3_clean_latent_upscaler_film_epoch200.safetensors` / align 32px（v14.304 修复配方）。
+
+**Milestone**：`v14.307` 打里程碑标签，作为"B站 BV1kN4G6rE89 去分块实验"收敛后的稳定基线：时间维不再有任何分块（无接缝闪烁），显存由空间分块兜底。
+
+**Scope**: audited every `render_pipeline` branch plus run-mode tiers in `extender.py`:
+- temporal chunking **off everywhere** (`temporal_chunk_tokens` forced 0, `_use_temporal` always False, auto-temporal trigger stays off);
+- spatial tiling **kept on every pipeline that needs a refine pass** (workflow `tiled_refine`/`tile_count` honoured, 130k-token auto gate and >130k dense fallback active);
+- fixed the TaoMate HD tier, which still carried `tiled_refine = _CHUNKED_DENOISE_ON` (i.e. tiling off by default) — now `True` with 4 tiles / 128px overlap;
+- Live Commerce (fully automatic) and One-Shot 2K Dual-Pass intentionally stay on `global` full-context mode; their global path exists precisely to avoid the horizontal-band / ghost-double artifacts of spatial tiles, so they are the tiers that do not need tiling;
+- `BSAI_H3_CHUNKED_DENOISE=1` still restores temporal chunking after a restart.
+
+### v14.306 (2026-11-03) — 时间分块保持关闭，恢复空间分块修二采 OOM / Temporal chunking stays off, spatial tiling restored to fix refine OOM
+
+**起因**：v14.305 把空间分块也一并关闭后，实测 `tokens=546,720` 整段直跑在 24GB 卡上 OOM（sage attention 申请 499MiB 失败，自动 tile 兜底也被污染后的显存拖垮，最后退回一采 latent）。
+
+**定位**：整段 546k tokens 的 QKV 激活（546k×3072×2B≈3.4GB×4）叠 DiT 驻留 12.9GB 已超 23.86GB 卡容；本机 `comfy_kitchen` 无 sol_attn 原生核，torch 块稀疏回退扛不住整段。教程（BV1kN4G6rE89）能直出 30s 依赖原生核，本机不满足。
+
+**改动**：
+- **时间分块继续全线关闭**（`temporal_chunk_tokens` 强制 0，工作流传入值忽略；自动时间分块触发器保持关闭）。
+- **恢复空间分块**：`tiled_refine` / `tile_count` 恢复尊重工作流；130k token 自动开空间分块门恢复；>130k 的 dense 降级门恢复注入；`refine_mem_mode` 全局兜底分块恢复；MV 档 `tiled_refine=True` 恢复。
+- 空间分块带 128~256px overlap 混合，只切空间不切时间，不产生时间维接缝/闪烁。
+- 回退开关不变：`BSAI_H3_CHUNKED_DENOISE=1` 重启后连时间分块也恢复。
+
+**Background**: v14.305 disabled spatial tiling together with temporal chunking; a full 546k-token refine pass then OOMed on the 24GB card (QKV activations alone exceed capacity once the DiT is resident). This machine has no native sol_attn kernel (`comfy_kitchen` is empty), so the tutorial's single-pass 30s claim does not apply here.
+
+**Changes**:
+- Temporal chunking stays **off everywhere** (`temporal_chunk_tokens` forced to 0; auto-temporal trigger stays off).
+- Spatial tiling **restored**: workflow `tiled_refine`/`tile_count` honoured again; the 130k-token auto spatial gate, the >130k dense fallback injection, the global-mode fallback tiles and the MV preset tiling are back.
+- Tiles only split space, never time — with 128~256px overlap blending there are no temporal seams.
+- `BSAI_H3_CHUNKED_DENOISE=1` still re-enables temporal chunking after a restart.
+
 ### v14.305 (2026-11-03) — 全线取消去噪分块 / 时间分块，改由 Sol-Attn 整段直跑 / Disable all chunked denoising, run the full segment through Sol-Attn
 
 **来源**：B站教程 BV1kN4G6rE89《MinimaxH3取消去噪分块反而更快更稳？直出30秒都不爆显存？ ComfyUI Sol-Attn渐进式采样器实测分享》。
@@ -21,6 +70,26 @@ All notable changes, bilingual. 所有重要版本双语说明。
 - the three auto-enable triggers (VRAM budget, 130k-token gate, auto temporal) are skipped;
 - the 130k-token dense fallback is no longer injected while chunking is off, so the full segment stays on Sol-Attn sparse attention instead of blowing up VRAM.
 - **Rollback**: set `BSAI_H3_CHUNKED_DENOISE=1` and restart ComfyUI to restore chunked behaviour.
+
+### v14.304 (2026-11-03) — 修复 TaoMate HD 档出片崩坏（竖直波纹/人脸抹平）/ Fix TaoMate HD mush output
+
+**现象**：v14.303 的 2+1 步配方实机出片满屏竖直波纹、人脸被抹平。
+
+**根因**三条：
+1. 「3 NFE 契约」只有 TaoMate 自家 teacher-state 渐进采样器才成立；用通用 euler 跑
+   2 步全 sigma + 1 步 `denoise=0.5` 二采属严重欠采样，结构直接糊掉。
+2. ×1.6 不是 3D latent upscaler 的训练倍率，只能 bislerp 非整数重采样，
+   二采再欠采样就把重采样波纹固化成画面纹理。
+3. 二采被 130k token 触发的自动时间分块切成 3 段（每段独立噪声种子）→ 接缝闪烁 / 段内碎花。
+
+**修复配方（仍是 TaoMate 加速 + 放大）**：
+- 一采 **4 步**（euler+simple，低分画布，画布取目标的一半：1080p → **960×544**）；
+- 二采 **3 步**、`refine_denoise=0.45`、latent **×2.0**（3D upscaler 训练倍率，
+  自动挑选 `h3_clean_latent_upscaler_*`，找不到才退 bislerp 并提示）；
+- 合计 7 NFE 直出 1920×1088；`refine_align_to=32`；二采禁用自动时间分块；
+- shift 12/3，cfg 1.0，LoRA 槽仍挂 `TaoMate-HD-preview-comfy.safetensors`（strength 1.0，不叠第二个加速 LoRA）。
+
+**示例工作流同步改配**（同名文件，画布 960×544 / steps 4 / refine 3 步 0.45 / ×2.0 / 3D upscaler）。
 
 ### v14.303 (2026-11-03) — 新增渲染管道：TaoMate HD 3步 渐进放大双采 (2+1 1080p直出) / TaoMate HD 3-Step Progressive Lift Dual-Pass
 
@@ -2446,23 +2515,3 @@ One workflow bundles both **FastH3 (Sol-H3)** and **VDN-H3** model chains, switc
 
 ## Older / 更早版本
 See README.md sections for v1.31+ feature history. ｜ v1.31 及更早功能历史见 README.md。
-### v14.306 (2026-11-03) — 时间分块保持关闭，恢复空间分块修二采 OOM / Temporal chunking stays off, spatial tiling restored to fix refine OOM
-
-**起因**：v14.305 把空间分块也一并关闭后，实测 `tokens=546,720` 整段直跑在 24GB 卡上 OOM（sage attention 申请 499MiB 失败，自动 tile 兜底也被污染后的显存拖垮，最后退回一采 latent）。
-
-**定位**：整段 546k tokens 的 QKV 激活（546k×3072×2B≈3.4GB×4）叠 DiT 驻留 12.9GB 已超 23.86GB 卡容；本机 `comfy_kitchen` 无 sol_attn 原生核，torch 块稀疏回退扛不住整段。教程（BV1kN4G6rE89）能直出 30s 依赖原生核，本机不满足。
-
-**改动**：
-- **时间分块继续全线关闭**（`temporal_chunk_tokens` 强制 0，工作流传入值忽略；自动时间分块触发器保持关闭）。
-- **恢复空间分块**：`tiled_refine` / `tile_count` 恢复尊重工作流；130k token 自动开空间分块门恢复；>130k 的 dense 降级门恢复注入；`refine_mem_mode` 全局兜底分块恢复；MV 档 `tiled_refine=True` 恢复。
-- 空间分块带 128~256px overlap 混合，只切空间不切时间，不产生时间维接缝/闪烁。
-- 回退开关不变：`BSAI_H3_CHUNKED_DENOISE=1` 重启后连时间分块也恢复。
-
-**Background**: v14.305 disabled spatial tiling together with temporal chunking; a full 546k-token refine pass then OOMed on the 24GB card (QKV activations alone exceed capacity once the DiT is resident). This machine has no native sol_attn kernel (`comfy_kitchen` is empty), so the tutorial's single-pass 30s claim does not apply here.
-
-**Changes**:
-- Temporal chunking stays **off everywhere** (`temporal_chunk_tokens` forced to 0; auto-temporal trigger stays off).
-- Spatial tiling **restored**: workflow `tiled_refine`/`tile_count` honoured again; the 130k-token auto spatial gate, the >130k dense fallback injection, the global-mode fallback tiles and the MV preset tiling are back.
-- Tiles only split space, never time — with 128~256px overlap blending there are no temporal seams.
-- `BSAI_H3_CHUNKED_DENOISE=1` still re-enables temporal chunking after a restart.
-

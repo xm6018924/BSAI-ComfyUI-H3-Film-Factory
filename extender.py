@@ -118,8 +118,14 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.306-temporal-off-spatial-restore"
+BUILD = "minimax-h3-extender-v14.307-milestone-spatial-on-temporal-off"
 
+# v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
+# 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
+# (默认环境变量下等于关掉空间分块, 与 v14.306 口径相反)。直播带货(全自动)
+# 与一镜到底·2K双采保持 global 全上下文: 这两档的 global 是为规避空间分块
+# 每块独立重构造成的横带叠加/重影, 属于"不需要空间分块"的档位。
+#
 # v14.306: 时间分块二采全线关闭（B站 BV1kN4G6rE89），但空间分块(tile)恢复。
 # v14.305 把空间分块也关了，546,720 tokens 整段直跑在 24GB 卡上 OOM：
 # QKV 激活(546k×3072×2B≈3.4GB×4)叠 DiT 驻留 12.9GB 已超卡容。
@@ -10124,34 +10130,55 @@ class BSAIH3FilmFactory:
                 # 《卷！卷完加速卷放大！H3 Taomate HD光速出1080p视频》,
                 # 节点包 github.com/slmonker/ComfyUI-TaoMateHD,
                 # LoRA huggingface slmonker/TaoMate-HD-preview-comfy)。
-                # TaoMate HD = 3 步蒸馏渐进放大 (教师状态 0/16/33/49), 官方节点
-                # 三阶段 = 低分前向 x2 (low_scale 0.625) + 耦合提升 (coupled lift)
-                # + 高分前向 x1, cfg 1.0 蒸馏契约。本档用电影工厂 SelfLift 双采
-                # 机械复刻该契约: 一采 2 步在低分画布 (目标分辨率 x0.625,
-                # 1080p 对应 1200x680) + bislerp 耦合提升 latent x1.6 +
-                # 二采 1 步高分精修 = 3 NFE 直出 1920x1088。
-                # 提升段禁用 3D upscaler (1.6x 非其训练倍率), 走 bislerp 插值;
+                # v14.304 (2026-11-03 修复): 原 v14.303 照搬"3 NFE 契约"(2+1 步 +
+                # denoise 0.5 单步二采 + x1.6 bislerp 提升)出片满屏竖直波纹、
+                # 人脸被抹平 —— 实机 clip 复现。根因三条:
+                # ① 3 NFE 只有 TaoMate 自家 teacher-state 渐进采样器才成立,
+                #    用通用 euler 跑 2 步全 sigma + 1 步 denoise 0.5 = 严重欠采样,
+                #    结构直接糊掉; ② x1.6 不是 3D latent upscaler 的训练倍率,
+                #    只能走 bislerp 非整数重采样, 二采再欠采样就固化成一圈圈波纹;
+                # ③ 二采被 v14.270 自动时间分块切成 3 段(每段独立 seed),
+                #    接缝闪烁/段内碎花。
+                # 现配方 = 半分辨率一采 + 训练倍率 x2.0 语义放大 + 足步数精修:
+                # 一采 4 步(euler+simple, 低分画布) + 二采 3 步(denoise 0.45,
+                # 3D latent upscaler x2.0) = 7 NFE, 二采禁用自动时间分块。
                 # cfg 1.0 由 _BasicGuider 天然满足; shift 12/3。
                 # LoRA 槽挂 TaoMate-HD-preview-comfy.safetensors (strength 1.0,
                 # 禁止再叠第二个加速 LoRA —— 适配器本身已是 3 步蒸馏)。
-                steps, refine_steps, tile_count, refine_denoise = 2, 1, 4, 0.5
+                steps, refine_steps, tile_count, refine_denoise = 4, 3, 4, 0.45
                 refine_enable = True
-                refine_upscale_factor = 1.6   # low_scale 0.625 的倒数: 1200x680 -> 1920x1088
-                refine_upscaler_model = "(bilinear interpolation, no model)"  # 1.6x 非 3D upscaler 训练倍率, 走 bislerp 提升
+                refine_upscale_factor = 2.0   # 3D latent upscaler 的训练倍率; 低分画布 x0.5 -> 1080p
+                refine_align_to = 32
+                tiled_refine = True   # v14.307: 空间分块保留(x2.0 放大后 tokens 大, 防二采 OOM)
+                tile_overlap = 128
+                # v14.281 同款: 时间分块 = 每段独立加噪 + 独立 seed, 接缝闪烁/
+                # 段内碎花, 该档一律禁用(空间分块保留)。
+                _rp_no_temp_chunk = True
+                # 优先挂 3D 语义 latent 放大权重(训练倍率 x2.0); 都没有则退 bislerp
+                # (v14.274 保范数), 并在状态栏提示降级。
+                _tm_pick = None
+                try:
+                    for _nm in _ff_get_upscaler_models():
+                        if "latent_upscaler" in str(_nm).lower() or "latent_upscaler_3d" in str(_nm).lower():
+                            _tm_pick = _nm
+                            if "h3_clean_latent_upscaler" in str(_nm).lower():
+                                break
+                except Exception:
+                    _tm_pick = None
+                refine_upscaler_model = _tm_pick if _tm_pick else ""
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
-                    print(f"[H3 Extender] v14.303 TaoMate HD(渲染管道): 采样器强制 euler + simple (TaoMate 3步蒸馏契约)")
+                    print(f"[H3 Extender] v14.304 TaoMate HD(渲染管道): 采样器强制 euler + simple")
                 scheduler = "simple"
-                print("[H3 Extender] 🚀 v14.303 TaoMate HD 3步 渐进放大双采 (2+1 1080p直出): "
-                      "TaoMate HD 3步蒸馏渐进放大 LoRA (slmonker/TaoMate-HD-preview-comfy, "
-                      "教师状态 0/16/33/49) —— 一采 2 步低分 (画布=目标x0.625, "
-                      "1080p 对应 1200x680) + bislerp 耦合提升 latent x1.6 + "
-                      "二采 1 步高分精修 = 3 NFE 直出 1920x1088; "
-                      "LoRA 槽挂 TaoMate-HD-preview-comfy.safetensors (strength 1.0, "
-                      "禁止叠加第二个加速 LoRA), 底模建议 minimax_h3_ref2va_int8_convrot; "
-                      "cfg 1.0 (BasicGuider 天然满足), shift 12/3")
+                print("[H3 Extender] 🚀 v14.304 TaoMate HD 4+3 半分辨率提升双采: "
+                      "TaoMate HD 3步蒸馏渐进放大 LoRA (slmonker/TaoMate-HD-preview-comfy) —— "
+                      "一采 4 步低分画布 + 二采 3 步精修 (denoise 0.45, latent x2.0, "
+                      f"upscaler={refine_upscaler_model or 'bislerp 插值(无 3D 权重)'}) = 7 NFE; "
+                      "自动时间分块已禁用(防接缝闪烁); 空间分块保留(4 块, 防二采 OOM); "
+                      "画布请设半尺寸(1080p 出片 -> 960x544), LoRA 槽挂 TaoMate-HD-preview-comfy.safetensors "
+                      "(strength 1.0, 禁止叠加第二个加速 LoRA); cfg 1.0, shift 12/3")
             else:
                 _rp_handled = False
             if _rp_handled:
