@@ -2,6 +2,23 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.303 (2026-11-03) — 新增渲染管道：TaoMate HD 3步 渐进放大双采 (2+1 1080p直出) / TaoMate HD 3-Step Progressive Lift Dual-Pass
+
+**来源**：B站教程 BV1Ui4G6nEXs《卷！卷完加速卷放大！H3 Taomate HD光速出1080p视频》；
+节点包 github.com/slmonker/ComfyUI-TaoMateHD；LoRA huggingface slmonker/TaoMate-HD-preview-comfy
+（3 步蒸馏渐进放大，教师状态 0/16/33/49，strength 1.0，禁止叠加第二个加速 LoRA）。
+
+**配方**（用电影工厂 SelfLift 双采机械复刻官方三阶段渐进采样契约）：
+一采 2 步低分（画布 = 目标分辨率 ×0.625，1080p 对应 1200×680）
+→ bislerp 耦合提升 latent ×1.6（1.6x 非 3D upscaler 训练倍率，强制走插值提升）
+→ 二采 1 步高分精修（refine_denoise 0.5）= **3 NFE 直出 1920×1088**；
+euler+simple，shift 12/3，cfg 1.0 蒸馏契约（`_BasicGuider` 天然满足）。
+
+**配套示例工作流**：
+`example_workflows/BSAI_H3_Film_Factory电影工厂-TaoMate HD 2+1渐进放大1080p-多人声音克隆版v1.0.json`
+（基于 PIKA v1.3 工作流改配：画布 1200×680、steps=2、refine 1 步 ×1.6、
+Sol Loader 加速 LoRA 槽换挂 `H3\H3加速\TaoMate\TaoMate-HD-preview-comfy.safetensors`）。
+
 ### v14.300 (2026-11-03) — 残留「切换」正向化 + 正文全片绝对时间码剥离 / Neutralize leftover "switch" wording + strip full-film timecodes
 
 **问题**：`「切换」` 是切镜族词 —— **H3 只认字面**，"明暗切换"会被直接读成"画面切换"。
