@@ -46,15 +46,25 @@ MAX_REF_VIDEOS = 3
 MAX_REF_AUDIOS = 3
 
 
-def _safe_asset_path(type_dir, fname):
-    """Resolve an uploaded filename strictly under its asset subfolder.
-    Reject absolute paths and any '..' traversal that would escape the asset
-    base directory. Returns the resolved path, or None if it escapes."""
+def _find_asset_file(type_dir, fname, input_dir):
+    """Resolve an asset filename under its type subfolder, falling back to the
+    input root (files uploaded via LoadAudio/UploadImage land there). Rejects
+    any '..' traversal that would escape those directories. Returns the path
+    or None, warning loudly when the file is nowhere so a missing @音频N
+    reference never silently drops the voice binding (that silent drop is what
+    made the multi-speaker workflow fall back to H3's default male voice)."""
+    name = str(fname or "")
     base = os.path.realpath(type_dir)
-    candidate = os.path.realpath(os.path.join(base, str(fname or "")))
-    if os.path.commonpath([base, candidate]) != base:
-        return None
-    return candidate
+    candidate = os.path.realpath(os.path.join(base, name))
+    if os.path.commonpath([base, candidate]) == base and os.path.exists(candidate):
+        return candidate
+    root = os.path.realpath(input_dir)
+    alt = os.path.realpath(os.path.join(root, name))
+    if os.path.commonpath([root, alt]) == root and os.path.exists(alt):
+        print(f"[BSAI AssetLibrary] '{name}' not under bsai_assets, using input-root copy")
+        return alt
+    print(f"[BSAI AssetLibrary] ⚠ asset file not found: {name} (searched bsai_assets subfolder and input root)")
+    return None
 
 
 def _resolve_directory(path):
@@ -190,8 +200,8 @@ class BSAI_AssetLibraryInput:
 
         img_dir = os.path.join(asset_base, "images")
         for fname in img_list:
-            fpath = _safe_asset_path(img_dir, fname)
-            if fpath and os.path.exists(fpath):
+            fpath = _find_asset_file(img_dir, fname, input_dir)
+            if fpath:
                 library["images"].append({
                     "path": fpath,
                     "name": fname,
@@ -200,8 +210,8 @@ class BSAI_AssetLibraryInput:
 
         vid_dir = os.path.join(asset_base, "videos")
         for fname in vid_list:
-            fpath = _safe_asset_path(vid_dir, fname)
-            if fpath and os.path.exists(fpath):
+            fpath = _find_asset_file(vid_dir, fname, input_dir)
+            if fpath:
                 entry = {
                     "path": fpath,
                     "name": fname,
@@ -219,8 +229,8 @@ class BSAI_AssetLibraryInput:
 
         aud_dir = os.path.join(asset_base, "audios")
         for fname in aud_list:
-            fpath = _safe_asset_path(aud_dir, fname)
-            if fpath and os.path.exists(fpath):
+            fpath = _find_asset_file(aud_dir, fname, input_dir)
+            if fpath:
                 library["audios"].append({
                     "path": fpath,
                     "name": fname,
