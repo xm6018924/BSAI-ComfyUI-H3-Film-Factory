@@ -172,8 +172,8 @@ AUDIO_LATENT_FPS = 40
 #   这类负面素材词会被当画面内容渲染，等于把要防的东西递给了模型。
 #   正向版只描述"画面里应该是什么样"，不点名任何不要出现的东西。
 _REF_SHEET_RULE = (
-    "【参考图纪律】<Picture N> 通常是同一角色的多角度/多视图设定拼版；画面里出现的"
-    "是这一位角色本人的外形、发型与服装，这一位角色在整部片里始终是同一个人，"
+    "【参考图纪律】{slots} 是画面人物的参考图，通常是同一角色的多角度/多视图设定拼版；"
+    "画面里出现的是这一位角色本人的外形、发型与服装，这一位角色在整部片里始终是同一个人，"
     "身体完整地出现在画面中，两条手臂自然地随动作摆动；拼版里的各个视角与局部细节"
     "统一体现为这一位角色本人的完整身影。\n"
 )
@@ -190,7 +190,7 @@ _REF_SHEET_RULE = (
 #   (一采 latent 相位离群 1.37x, 像素域 5.81x)，与"改换颜色/更换外套"同型。
 #   正向版只反复陈述"穿的就是参考图里那几件、款式与颜色始终一致"。
 _OUTFIT_LOCK_RULE = (
-    "【服装锁定纪律】画面主体人物（主播/主角）的实际穿着与 <Picture N> 参考图中"
+    "【服装锁定纪律】画面主体人物（主播/主角）的实际穿着与 {slots} 参考图中"
     "该人物的真实服装完全一致：款式、颜色、材质、上下装搭配逐项复刻参考图，"
     "人物与参考图同框时穿的是同一件衣服，整部片里这套服装的款式与颜色始终保持一致。"
     "人物转身、侧身、走动、做手势或表情变化时，身上的上衣、外套、衬衫、下装与"
@@ -198,6 +198,72 @@ _OUTFIT_LOCK_RULE = (
     "分镜正文中出现的衣着描述作为这套参考图服装的补充说明，画面里的上衣、外套与"
     "下装从头到尾都是参考图里的那几件。\n"
 )
+
+# v14.313 (2026-11-04): 物品/道具锁定纪律。
+#   实测故障: 分镜写"双手捧起一支小瓶香薰@图4 / 这款香薰蜡烛@图4"，资产库 @图4 是
+#   香薰蜡烛罐的参考图，成片却画成一支黑盖香水瓶——品牌字样被抄了，物品类别被
+#   文本先验"小瓶香薰"顶掉。根因是插件此前只注入"参考图=角色多视图设定板"与
+#   "服装锁定"两条纪律，@图4 被当成角色/服装参考，没有任何"这件物品必须照参考图
+#   复刻"的指令。本纪律按标签编号精确绑定物品参考，并用正向措辞（H3 CFG=1.0 无
+#   负向分支）声明类别、轮廓、结构、标签逐项一致。
+_PROP_LOCK_RULE = (
+    "【物品锁定纪律】{slots} 是画面中将要出现的物品（道具/产品）参考图，"
+    "画面里这件物品与参考图完全一致：物品类别、外形轮廓、高宽比例、颜色、材质与"
+    "表面质感、盖子与罐身结构、标签位置与上面的文字逐项复刻参考图；"
+    "分镜正文里对这件物品的称法（例如“香薰”“小瓶”“蜡烛”“产品”）指的就是参考图里"
+    "这件物品本身，画面里拿在手上、摆在前景的就是它，外观与参考图一致。\n"
+)
+
+# v14.313: 场景锁定纪律。场景参考（如"场景@图3"、"背景为场景@图3"）此前被并进
+# "角色设定板"纪律，模型容易把场景图当人物参考而弱化环境一致性。正向声明环境以
+# 参考图为准，只改机位不改地点。
+_SCENE_LOCK_RULE = (
+    "【场景锁定纪律】{slots} 是画面环境（场景）参考图，画面环境以该参考图的建筑、"
+    "地形、地面材质、光源方向与整体色调为准，整段片子都在这个地点里拍摄，"
+    "镜头只改变机位与景别，场景本身保持前后连续。\n"
+)
+
+# 参考图角色判定词表。中文习惯把名词写在标签前（"场景@图3"、"小瓶香薰@图4"），
+# 所以只看标签前的窗口，避免把后一个标签的定语误判给前一个标签。
+_PROP_CUES = (
+    "香薰", "蜡烛", "香水", "精油", "香氛", "瓶", "罐", "盒", "包装", "礼盒",
+    "产品", "商品", "道具", "物品", "口红", "面霜", "精华", "眼影", "粉饼",
+    "手机", "耳机", "手表", "手链", "项链", "戒指", "包", "鞋", "帽", "杯",
+    "壶", "零食", "饮料", "酒", "咖啡", "相机", "玩具", "花束", "灯", "伞",
+    "扇", "海报", "样机",
+)
+_SCENE_CUES = (
+    "场景", "背景", "环境", "路口", "街道", "街口", "广场", "桥", "堤岸",
+    "河岸", "海边", "海面", "巷", "长廊", "林荫道", "公园", "校园", "办公室",
+    "厨房", "客厅", "卧室", "车厢", "车站", "机场", "大楼", "天台", "屋顶",
+)
+
+
+def _classify_picture_roles(prompt):
+    """按 <Picture N> 出现处的前置词判定该参考图的角色。
+
+    返回 {slot: "person"|"prop"|"scene"}，同一编号取首次出现的判定。
+    没有任何线索时按人物处理，保持既有角色纪律的默认行为。
+    """
+    roles = {}
+    for m in re.finditer(r"<Picture\s+(\d+)>", str(prompt), re.IGNORECASE):
+        slot = int(m.group(1))
+        before = str(prompt)[max(0, m.start() - 14):m.start()]
+        role = "person"
+        if any(c in before for c in _PROP_CUES):
+            role = "prop"
+        elif any(c in before for c in _SCENE_CUES):
+            role = "scene"
+        roles.setdefault(slot, role)
+    return roles
+
+
+def _strip_ref_rules(text):
+    """剥掉参考/服装/物品/场景四条锁定纪律（一镜到底场景名与景别判定只看正文）。"""
+    return re.sub(
+        r"【(?:参考图|服装锁定|物品锁定|场景锁定)纪律】[^\n]*\n?",
+        "", str(text),
+    )
 
 
 def _comfyui_temp_dir():
@@ -9032,14 +9098,28 @@ class BSAIH3FilmFactory:
                 return "<Audio 1>"
             prompt = re.sub(r'@(?:音频|aud)(\d+)', _replace_audio_tag, prompt, flags=re.IGNORECASE)
 
-            # v14.205: 多视图参考图纪律（只加一次；无图片标签的 prompt 不加）
-            if "<Picture " in prompt and _REF_SHEET_RULE not in prompt:
-                prompt = _REF_SHEET_RULE + prompt
-            # v14.221 / v14.295: 服装锁定纪律。v14.295 起改为 prepend（与参考图纪律
-            # 同置 prompt 首部），H3 对首部指令权重更高；并强调姿态/动作变化时服装
-            # 不变，解决侧身、转身等镜头下参考图西装被替换成开衫的问题。
-            if "<Picture " in prompt and _OUTFIT_LOCK_RULE not in prompt:
-                prompt = _OUTFIT_LOCK_RULE + prompt
+            # v14.313: 参考图按角色分纪律注入。此前不区分参考图类型，所有 <Picture N>
+            # 都被声明成"角色多视图设定板 + 服装参照"，产品/场景参考图因此没有绑定
+            # 指令（实测 @图4 香薰蜡烛被画成香水瓶）。这里按标签前置词判定
+            # 人物/物品/场景，分别注入对应纪律，并用具体编号替代原来的占位 N。
+            if "<Picture " in prompt and "【参考图纪律】" not in prompt:
+                _roles = _classify_picture_roles(prompt)
+                _person = [f"<Picture {s}>" for s in sorted(_roles) if _roles[s] == "person"]
+                _props = [f"<Picture {s}>" for s in sorted(_roles) if _roles[s] == "prop"]
+                _scenes = [f"<Picture {s}>" for s in sorted(_roles) if _roles[s] == "scene"]
+                _heads = []
+                if _person:
+                    _slots = "、".join(_person)
+                    _heads.append(_REF_SHEET_RULE.format(slots=_slots))
+                    _heads.append(_OUTFIT_LOCK_RULE.format(slots=_slots))
+                if _props:
+                    _heads.append(_PROP_LOCK_RULE.format(slots="、".join(_props)))
+                if _scenes:
+                    _heads.append(_SCENE_LOCK_RULE.format(slots="、".join(_scenes)))
+                if _heads:
+                    prompt = "".join(_heads) + prompt
+                    print(f"[H3 Extender] v14.313 clip[{clip_idx}] 参考图角色判定: "
+                          f"人物={_person} 物品={_props} 场景={_scenes}")
 
             if prompt != original_prompt:
                 print(f"[H3 Extender] clip[{clip_idx}] prompt resolved: '{original_prompt[:60]}' -> '{prompt[:60]}'")
@@ -12103,9 +12183,7 @@ class BSAIH3FilmFactory:
                     # "v14.294 空间规则 = " 从未出现)。后果正是段内硬切: 段3 正文写
                     # "残晖"夕阳, 而段2 末帧已是"靛蓝天幕+第一颗星点"的夜景, 条件文本
                     # 与段首 motion context 关键帧冲突, 模型只能先拖旧画面再一帧硬切。
-                    _osc_body = (str(_osc_c.get("prompt", ""))
-                                 .replace(_REF_SHEET_RULE, "")
-                                 .replace(_OUTFIT_LOCK_RULE, ""))
+                    _osc_body = _strip_ref_rules(_osc_c.get("prompt", ""))
                     _os_scene_names.append(
                         _one_shot_scene_name(_osc_body, _os_scene_catalog)
                     )
@@ -12472,9 +12550,7 @@ class BSAIH3FilmFactory:
                                   "close shot", "full shot"]
                 # 只扫本段正文(剥掉参考图纪律/服装锁定纪律), 否则模板词会污染基准景别
                 # 判定(v14.241 实机恒定输出"基准景别=特写", 与正文"中景"冲突)。
-                _os_body = (str(_clip_prompt_for_cond)
-                            .replace(_REF_SHEET_RULE, "")
-                            .replace(_OUTFIT_LOCK_RULE, ""))
+                _os_body = _strip_ref_rules(_clip_prompt_for_cond)
                 _os_hit_words = [w for w in _os_shot_words if w in _os_body.lower()]
                 # v14.286: 景别链已在 flatten 之前算好(见上), 这里直接用。
                 _os_body_size = _os_size_start
