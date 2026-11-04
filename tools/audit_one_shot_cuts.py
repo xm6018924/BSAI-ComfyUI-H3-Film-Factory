@@ -115,6 +115,53 @@ def detect_dissolves(g, diff, med, ratio_lo=1.2, n_mid_min=3, blend_tol=0.35):
     return out
 
 
+def lowfreq(gray, k=8):
+    """块平均降采样: (n, h, w) -> (n, h//k, w//k)。抹掉人物细节, 只留场景布局。"""
+    if gray.ndim == 2:
+        h, w = gray.shape
+        hh, ww = (h // k) * k, (w // k) * k
+        return gray[:hh, :ww].reshape(hh // k, k, ww // k, k).mean(axis=(1, 3))
+    n, h, w = gray.shape
+    hh, ww = (h // k) * k, (w // k) * k
+    return gray[:, :hh, :ww].reshape(n, hh // k, k, ww // k, k).mean(axis=(2, 4))
+
+
+def scene_layer(gray):
+    """场景层(低频)分析。
+
+    返回 (lf_diff, lf_med, still_spans, lf_cuts)
+      lf_diff   : (n,) 低频相邻帧差
+      lf_med    : 低频差分中位数
+      still_spans: [(i0, i1, mean_diff)] 背景几乎不变的连续段(>= 12 帧)
+      lf_cuts   : [(i, diff, ratio)] 背景结构整体突变点(>= 3x 中位)
+    """
+    n = len(gray)
+    lf = lowfreq(gray)
+    lfd = np.zeros(n, dtype=np.float32)
+    for i in range(1, n):
+        lfd[i] = float(np.abs(lf[i] - lf[i - 1]).mean())
+    body = lfd[1:]
+    lf_med = float(np.median(body)) if len(body) else 0.0
+    still = []
+    lf_cuts = []
+    if lf_med > 0:
+        for i in range(1, n):
+            if lfd[i] >= 3.0 * lf_med:
+                lf_cuts.append((i, float(lfd[i]), float(lfd[i] / lf_med)))
+        i = 1
+        while i < n:
+            if lfd[i] < 0.6 * lf_med:
+                j = i
+                while j < n and lfd[j] < 0.6 * lf_med:
+                    j += 1
+                if (j - i) >= 12:
+                    still.append((i, j - 1, float(lfd[i:j].mean())))
+                i = j
+            else:
+                i += 1
+    return lfd, lf_med, still, lf_cuts
+
+
 def analyze(ff, path):
     g = load_gray(ff, path)
     if g is None:
@@ -131,8 +178,10 @@ def analyze(ff, path):
             r = d[i] / med
             if r >= 2.0:
                 cuts.append((i, float(d[i]), float(r)))
+    _lfd, _lfmed, _still, _lfcuts = scene_layer(g)
     return {"path": path, "frames": n, "gray": g, "diff": d, "median": med, "cuts": cuts,
-            "dissolves": detect_dissolves(g, d, med)}
+            "dissolves": detect_dissolves(g, d, med),
+            "lf_diff": _lfd, "lf_median": _lfmed, "lf_still": _still, "lf_cuts": _lfcuts}
 
 
 def seam(prev, cur):
@@ -222,6 +271,17 @@ def main():
             print("   段内叠化 %d 处 (双重曝光, 尖峰判据抓不到):" % len(dis))
             for (i0, i1, peak, n_mid) in dis:
                 print("      f%-5d..f%-5d  峰值=%.2f×中位数  中间态帧=%d" % (i0, i1, peak, n_mid))
+        _still = info.get("lf_still") or []
+        _lfcuts = info.get("lf_cuts") or []
+        if _still:
+            print("   场景层静止段 %d 处 (低频差 < 0.6x中位, 背景几乎不动 —— 典型: 段首沿用上一段场景):" % len(_still))
+            for (_i0, _i1, _m) in _still[:6]:
+                print("      f%-5d..f%-5d  (%5.2fs)  低频均差=%.3f"
+                      % (_i0, _i1, (_i1 - _i0 + 1) / 24.0, _m))
+        if _lfcuts:
+            print("   场景层突变 %d 处 (低频差 >= 3x中位, 背景结构被整体换掉):" % len(_lfcuts))
+            for (_i, _v, _r) in sorted(_lfcuts, key=lambda x: -x[2])[:8]:
+                print("      f%-5d t=%6.3fs  lf_diff=%8.3f  x_lf=%5.2f" % (_i, _i / 24.0, _v, _r))
         if not cuts and not dis and not a.quiet:
             top = np.argsort(-info["diff"][1:])[:3] + 1
             print("   段内无切镜。最陡的 3 帧: " +
@@ -231,7 +291,19 @@ def main():
 
     if len(infos) >= 2:
         print("=" * 88)
-        print("段间接缝:")
+        print("段间接缝(场景层/低频 —— 比值小 = 段首还在上一段场景里赖着没换):")
+        for i in range(1, len(infos)):
+            _pa, _cb = infos[i - 1], infos[i]
+            _la = lowfreq(_pa["gray"][-1])
+            _lb = lowfreq(_cb["gray"][0])
+            _d = float(np.abs(_lb - _la).mean())
+            _base = _cb.get("lf_median") or 0.0
+            _r = (_d / _base) if _base > 0 else 0.0
+            print("   %s -> %s : 低频差=%7.3f, x_lf_median=%5.2f"
+                  % (os.path.basename(_pa["path"])[:22], os.path.basename(_cb["path"])[:22],
+                     _d, _r))
+        print("=" * 88)
+        print("段间接缝(像素域):")
         for i in range(1, len(infos)):
             s = seam(infos[i - 1], infos[i])
             bad = s["ratio"] >= a.seam
