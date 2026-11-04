@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.307-milestone-spatial-on-temporal-off"
+BUILD = "minimax-h3-extender-v14.310-space-anchor-transit-boundary"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -6754,6 +6754,31 @@ _OS_LIGHT_COMPOSITION_RULE = (
 # 已经展开的空间里」—— 实测段6/段7 的失败形态是模型在「上下文关键帧里的旧场景」
 # 与「本段正文要求的新场景」之间**来回横跳**(乒乓), 单次换场规则压不住。
 # 开关: BSAI_H3_SPACE_RULE=0 可关(便于 A/B)。
+# ── v14.301 (2026-11-04): 换场段的空间锚定 ───────────────────────────────
+#
+# 实测证据(用户 2026-11-04 反馈 + 像素域审计 + 抽帧):
+#   * 段4 是换场段(@图3 滨海堤岸 -> @图4 滨海公路路口)。
+#   * 段4 正文**第 1 拍**就写"前方钠灯序列""湿润沥青路面", 但实际渲出来的前
+#     5.7 秒全是**段3 的木栈桥 + 路灯**; f138 一帧硬切成沥青公路 + 警示牌 +
+#     中全景 —— 场景与景别**同时**跳变。
+#   * 接缝像素差只有 1.57x, 因为段4 开头**重复**了段3 的画面。
+#   * 机制: [One Continuous Take] 写着"主体始终处在同一片连续空间里"(与换场冲突);
+#     [段首承接] 把段4 第一帧钉死在段3 的构图上并给了"慢慢展开"的许可;
+#     [空间过渡] 说"上一处空间的尽头还留在画面里"却**没给时间边界**。
+_OS_SPACE_TRANSIT_HEAD_RULE = (
+    "\n[段首承接] 本段的第一帧直接接着上一段末帧那一帧往下拍："
+    "同一时刻、同一段连续行走，摄影机从上一段末尾所处的位置与运动状态继续它正在做的"
+    "运动，主体的步幅、身体姿态与视线方向从上一段末尾的状态平滑延续下来；"
+    "主体一路向前行走，脚下的路面与两侧景物在前进中连续地流过。"
+)
+
+_OS_SCENE_ANCHOR_RULE = (
+    "\n[场景锚定] 本段画面里的地面材质、灯具与招牌样式、两侧的建筑与景物，"
+    "都与本段脚本所写的这一处空间一致；这一处空间的景物一旦出现在画面里就留在"
+    "画面里，本段后续的画面都由这一处空间的景物与灯光构成。"
+)
+
+
 _OS_SAME_SPACE_RULE = (
     "\n[同场景延续] 本段与上一段处在同一处空间里：左右方位、脚下地面、两侧景物"
     "与主体在画幅中的相对位置，本段全部延续上一段的布局；这一处空间里接着出现的"
@@ -6764,9 +6789,11 @@ _OS_SAME_SPACE_RULE = (
 )
 
 _OS_SPACE_TRANSIT_RULE = (
-    "\n[空间过渡] 本段起始时，主体正从上一处空间走进这一处空间：上一处空间的"
-    "尽头还留在画面里，脚下的地面从上一处一路连到这一处，两侧的景物顺着前进的"
-    "方向一点点更替；这一处空间的景物是从上一处空间的尽头逐渐展开在画面里的，"
+    "\n[空间过渡] 本段的第一拍起，画面里的空间就已经是这一处空间：上一处空间与"
+    "这一处空间是两处不同的空间，两者的地面材质、灯具样式、两侧建筑与景物各自不同；"
+    "上一处空间在开头的一瞬位于画幅边缘，随主体向前走出画幅；脚下的地面从上一处"
+    "一路连到这一处，两侧的景物顺着前进的方向连续地换成这一处的景物，"
+    "这一处空间的景物从上一处空间的尽头逐渐展开在画面里，"
     "展开之后就一直展开着，本段后续的画面都处在这一处已经展开的空间里；左右方位"
     "自始至终保持一致，这一处空间由它自己的灯光照亮，步幅与节奏自始至终一致。"
 )
@@ -12439,10 +12466,27 @@ class BSAIH3FilmFactory:
                     print(f"[H3 Extender] ⚠️ v14.286 一镜到底 clip[{i+1}]: 本段正文出现"
                           f"景别词'{_os_body_size}', 与全片声明景别'{_os_locked_size}'不一致 —— "
                           f"正文景别词已统一改写为声明值")
+                # v14.301: 场景判定提前 —— [段首承接] 与 [One Continuous Take] 都要
+                # 按"同场/换场"分流, 所以先算出 _os_space_kind。
+                _os_scene_name = (_os_scene_names[i] if i < len(_os_scene_names) else None)
+                _os_prev_scene = (
+                    _os_scene_names[i - 1]
+                    if 0 < i <= len(_os_scene_names) - 1 else None
+                )
+                _os_space_kind = None
+                if (str(os.environ.get("BSAI_H3_SPACE_RULE", "1")).strip() != "0"
+                        and _os_scene_name and _os_prev_scene):
+                    _os_space_kind = ("同场景延续" if _os_scene_name == _os_prev_scene
+                                      else "空间过渡")
+                # 空间绑定句: 同场景段**逐字沿用**原文(段1-3 等已渲好的段因此依然有效);
+                # 换场段改说"同一次连续行走", 不把主体钉在同一片空间里。
+                _os_space_clause = (
+                    "主体始终处在同一片连续空间里。" if _os_space_kind != "空间过渡"
+                    else "主体始终处在同一次连续行走之中。")
                 _os_rule = (
                     "\n[One Continuous Take] 本段从头帧到尾帧只有一个镜头：摄影机沿一条"
                     "连续轨迹运动，提示词中先后出现的时间与运镜描述都是这条轨迹上依次"
-                    "经过的阶段，画面随运镜逐帧连续变化，主体始终处在同一片连续空间里。"
+                    "经过的阶段，画面随运镜逐帧连续变化，" + _os_space_clause +
                     "这些阶段由同一次连续运动连起来，每一步的机位、光线与姿态都是从上一步"
                     "的状态平滑变化过来的。"
                     "机位高度与镜头光轴只通过连续的推移、升降与环绕平滑改变，速度连贯地延续。"
@@ -12469,13 +12513,18 @@ class BSAIH3FilmFactory:
                 # 措辞纪律: 全为正向陈述; 不出现任何 cut/转场/叠化 词汇; 不出现否定句
                 # (H3 在 CFG=1.0 下没有负向分支); 不写死具体景别数值(景别由脚本决定);
                 # 允许场景随主体行走自然变化(段4 堤道→公路路口), 因此不写"同一片空间"。
-                _os_rule += (
-                    "\n[段首承接] 本段的第一帧直接接着上一段末帧那一帧往下拍："
-                    "同一时刻、同一段连续行走，主体在画幅中的位置与大小接着上一段末尾"
-                    "往下延续，摄影机从上一段末尾所处的位置与运动状态继续它正在做的"
-                    "运动；主体一路向前行走，脚下的路面与两侧景物在前进中连续地流过，"
-                    "空间随着他的前进自然展开。"
-                )
+                if _os_space_kind == "空间过渡":
+                    # v14.301: 换场段只承接**运动与姿态**, 不把段首构图钉死在上一段
+                    # 末帧上 —— 否则第一帧就是旧空间, 后面必然要硬切一次。
+                    _os_rule += _OS_SPACE_TRANSIT_HEAD_RULE
+                else:
+                    _os_rule += (
+                        "\n[段首承接] 本段的第一帧直接接着上一段末帧那一帧往下拍："
+                        "同一时刻、同一段连续行走，主体在画幅中的位置与大小接着上一段末尾"
+                        "往下延续，摄影机从上一段末尾所处的位置与运动状态继续它正在做的"
+                        "运动；主体一路向前行走，脚下的路面与两侧景物在前进中连续地流过，"
+                        "空间随着他的前进自然展开。"
+                    )
                 # v14.294: 空间延续 / 空间过渡 —— 压住"段内硬切 / 段内叠化"的共同
                 # 根因(条件文本与段首 motion context 关键帧冲突)。
                 #
@@ -12483,20 +12532,13 @@ class BSAIH3FilmFactory:
                 #   同一处空间 -> 布局与光线从上一段末帧延续, 逐拍只推进一小步;
                 #   换到另一处空间 -> 由主体走过去, 两处空间由同一条地面相连。
                 # 方位/距离/景别/动作仍旧全部交给用户脚本。
-                _os_scene_name = (_os_scene_names[i] if i < len(_os_scene_names) else None)
-                _os_prev_scene = (
-                    _os_scene_names[i - 1]
-                    if 0 < i <= len(_os_scene_names) - 1 else None
-                )
-                if (str(os.environ.get("BSAI_H3_SPACE_RULE", "1")).strip() != "0"
-                        and _os_scene_name and _os_prev_scene):
-                    if _os_scene_name == _os_prev_scene:
-                        _os_rule += _OS_SAME_SPACE_RULE
-                        _os_space_kind = "同场景延续"
-                    else:
-                        _os_rule += _OS_SPACE_TRANSIT_RULE
-                        _os_space_kind = "空间过渡"
-                    print(f"[H3 Extender] v14.294 一镜到底 clip[{i+1}]: 空间规则 = "
+                if _os_space_kind == "同场景延续":
+                    _os_rule += _OS_SAME_SPACE_RULE
+                elif _os_space_kind == "空间过渡":
+                    _os_rule += _OS_SPACE_TRANSIT_RULE
+                    _os_rule += _OS_SCENE_ANCHOR_RULE
+                if _os_space_kind:
+                    print(f"[H3 Extender] v14.301 一镜到底 clip[{i+1}]: 空间规则 = "
                           f"{_os_space_kind} ({_os_prev_scene} → {_os_scene_name})")
                 # v14.292 (2026-11-03): 光影与构图分离 —— 光影描述只改光, 不改构图。
                 #
