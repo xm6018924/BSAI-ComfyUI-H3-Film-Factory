@@ -12052,8 +12052,19 @@ class BSAIH3FilmFactory:
         if one_shot_enabled:
             for _osc_c in clips:
                 try:
+                    # v14.309: 场景名必须从**正文**里取。
+                    # 段首已被 prepend 了参考图纪律 / 服装锁定纪律(v14.295 起 prepend),
+                    # 两条纪律各含一个 <Picture N> —— _one_shot_scene_name 只扫首行,
+                    # 于是只看得到纪律那一行, 解析失败返回 None, 导致 v14.294 的
+                    # [同场景延续]/[空间过渡] 整场一次都不注入(实测日志里
+                    # "v14.294 空间规则 = " 从未出现)。后果正是段内硬切: 段3 正文写
+                    # "残晖"夕阳, 而段2 末帧已是"靛蓝天幕+第一颗星点"的夜景, 条件文本
+                    # 与段首 motion context 关键帧冲突, 模型只能先拖旧画面再一帧硬切。
+                    _osc_body = (str(_osc_c.get("prompt", ""))
+                                 .replace(_REF_SHEET_RULE, "")
+                                 .replace(_OUTFIT_LOCK_RULE, ""))
                     _os_scene_names.append(
-                        _one_shot_scene_name(_osc_c.get("prompt", ""), _os_scene_catalog)
+                        _one_shot_scene_name(_osc_body, _os_scene_catalog)
                     )
                 except Exception:
                     _os_scene_names.append(None)
