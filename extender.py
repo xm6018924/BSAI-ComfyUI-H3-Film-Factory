@@ -2788,16 +2788,25 @@ def _apply_h3_tst(model, enable, tau):
         return model
 
 
+# Pika H3 Flex 官方 ManualSigmas 契约 (docs.comfy.org Pika H3 Flex FAQ, SGLang 实现):
+# 固定 6 步的 sigma 结 1000/750/500/250/100/40, 加终点 0 共 7 值 —— 蒸馏训练就是
+# 这条调度, 少一个值即破坏 schedule, 加步数也不涨细节。shift 由 model_sampling
+# 内置 (video 12 / audio 3 经双轨迹 time_snr_shift)。
+_PIKA_H3_SIGMA_KNOTS = (1000.0, 750.0, 500.0, 250.0, 100.0, 40.0, 0.0)
+
 def _sigmas(model, scheduler: str, steps: int, denoise: float):
     steps = max(1, int(steps))
     denoise = float(denoise)
     if denoise <= 0.0:
         return torch.FloatTensor([])
+    ms = model.get_model_object("model_sampling")
+    if str(scheduler) == "pika_manual":
+        return ms.sigma(torch.tensor(_PIKA_H3_SIGMA_KNOTS, dtype=torch.float32)).cpu()
     total_steps = steps
     if denoise < 1.0:
         total_steps = max(steps, int(steps / denoise))
     sigmas = comfy.samplers.calculate_sigmas(
-        model.get_model_object("model_sampling"),
+        ms,
         str(scheduler),
         total_steps,
     ).cpu()
@@ -8828,7 +8837,7 @@ class BSAIH3FilmFactory:
             ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
-                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.309, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step first pass (lcm+simple, the official distilled-schedule contract; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step - 3.5x speedup over 6+2 baseline) = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3.",
+                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3.",
             },
         )
         # v14.185 (2026-10-24): 一镜到底采样档 —— 追加在 render_pipeline 之后（optional
@@ -10129,17 +10138,20 @@ class BSAIH3FilmFactory:
                       "需要 Ref2VA 底模(未剪枝 ~140GB, 或社区 ComfyUI-PTD-Compact int8 版), "
                       "无对应底模时不要选此档; ref_image_size 保持用户值不强制")
             elif _rp_mode == "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)":
-                # v14.309 (2026-11-04): Pika H3 Flex 配方 (B站教程 BV1Dy4u67EJo,
+                # v14.310 (2026-11-04): Pika H3 Flex 配方 (B站教程 BV1Dy4u67EJo,
                 # 官方模板 video_pika_h3_flex_ref2va / docs.comfy.org Pika H3 Flex)。
                 # Pika 把 H3 蒸馏成 6 步生成器, 以两个 LoRA 适配器发布
                 # (pika_h3_flex_ref2va_v1_bf16 / pika_h3_flex_fl2va_v1_bf16,
                 # strength 必须 1.0, 禁止再叠第二个加速 LoRA —— 适配器本身已是
                 # 6 步蒸馏, 叠加会破坏输出)。
+                # v14.310 对齐官方 ManualSigmas: 蒸馏调度是固定 sigma 结
+                # 1000/750/500/250/100/40 (+0), 不是 ComfyUI 的 simple 等间距
+                # (1000/833/667/500/333/167/0) —— 用 simple 等于让蒸馏适配器跑
+                # 没训练过的调度, 画质/稳定性都会掉。见 _PIKA_H3_SIGMA_KNOTS。
                 # 实测修正 (h3_clip_250_2 耗时 >30min): 二采 SelfLift latent x2.0
                 # 每步 287s, 10s clip tokens=587k 是教程 5s clip 的 4x; 关闭 refine,
-                # 仅一采 6 步 lcm+simple 直接出 960x544 latent → VAE decode 到 1920x1088
-                # (H3 VAE 天然 x16 放大) = 每 clip 6 步 × ~45s ≈ 4.5min 采样
-                # + ~1min decode/encode ≈ 5.5min/clip × 4 = 22min 端到端。
+                # 仅一采 6 步直出 960x544 latent → VAE decode 到 1920x1088
+                # (H3 VAE 天然 x16 放大)。
                 # 底模保留 hybrid b25-49 (分段链路 FL2VA 末帧接力, 勿切纯 ref2va);
                 # 加速栈 SegAttention + Sol-Attn + Sol VAE。
                 steps, refine_steps, tile_count, refine_denoise = 6, 0, 4, 0.5
@@ -10148,14 +10160,14 @@ class BSAIH3FilmFactory:
                 denoise = 1.0
                 if str(sampler_name) != "lcm":
                     sampler_name = "lcm"
-                    print(f"[H3 Extender] v14.309 PIKA H3 Flex(渲染管道): 采样器强制 lcm + simple (Pika 6步蒸馏官方契约)")
-                scheduler = "simple"
-                print("[H3 Extender] 🎬 v14.309 PIKA H3 Flex 6 步单采 (Ref2VA 锁脸, v14.309 实测关 refine 提速 x3.5): "
+                    print("[H3 Extender] v14.310 PIKA H3 Flex(渲染管道): 采样器强制 lcm (Pika 6步蒸馏官方契约)")
+                scheduler = "pika_manual"
+                print("[H3 Extender] 🎬 v14.310 PIKA H3 Flex 6 步单采 (Ref2VA 锁脸): "
                       "Pika H3 Flex 蒸馏适配器 (Pika-Labs/Pika-H3-Flex, 50步->6步) —— "
-                      "一采 6 步 lcm+simple, 跳过二采 SelfLift (h3_clip_250_2 二采每步 287s 是黑洞); "
+                      "lcm + ManualSigmas 固定结 1000/750/500/250/100/40 (官方契约, 非 simple 等间距), "
+                      "shift 12/3, 跳过二采 SelfLift; "
                       "LoRA 槽挂 pika_h3_flex_ref2va_v1_bf16.safetensors (strength 1.0, 禁叠第二个加速 LoRA), "
-                      "底模留 hybrid b25-49 (分段链路 FL2VA 接力, 勿切纯 ref2va); "
-                      "预期单 clip 采样 4.5min × 4 ≈ 22min 端到端 (含 decode/encode)")
+                      "底模留 hybrid b25-49 (分段链路 FL2VA 接力, 勿切纯 ref2va)")
             elif _rp_mode == "TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)":
                 # v14.303 (2026-11-03): TaoMate HD 配方 (B站教程 BV1Ui4G6nEXs
                 # 《卷！卷完加速卷放大！H3 Taomate HD光速出1080p视频》,

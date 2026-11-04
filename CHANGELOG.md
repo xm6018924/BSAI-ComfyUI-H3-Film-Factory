@@ -2,6 +2,32 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.310 (2026-11-04) — PIKA 档改用官方 ManualSigmas（对齐 B站 BV1yQx96tEDA 实测配置）/ PIKA tier switched to official ManualSigmas (matching Bilibili BV1yQx96tEDA)
+
+**背景**：B站《MiniMax H3 本地加速方案大比拼：Pika 称王？》(BV1yQx96tEDA) 的 Pika 方案用的是"官方 reference-to-video 模板 + 配套加速模板参数"。逐条比对后，我们唯一真正的偏差是 **sigma 调度**：
+
+| 项 | 视频/官方模板 | 我们 (v14.309) | 结论 |
+|---|---|---|---|
+| 采样器 | lcm | lcm | 一致 |
+| 调度 | **ManualSigmas** 固定结 1000/750/500/250/100/40 (+0) | `simple` 等间距 1000/833/667/500/333/167(+0) | **必须改** |
+| 步数 | 6 | 6 | 一致 |
+| cfg | 1.0（BasicGuider 单前向） | 1.0（只挂 positive） | 一致 |
+| shift | 视频 12 / 音频 3 | 12 / 3 | 一致 |
+| LoRA strength | 1.0 | 1.0 | 一致 |
+
+shift 12 下的实际 sigma 差：
+- Pika 官方：`1.0 / 0.973 / 0.923 / 0.800 / 0.571 / 0.333 / 0`
+- 我们的 simple：`1.0 / 0.984 / 0.960 / 0.923 / 0.858 / 0.706 / 0`
+
+最后一步从 0.706 一步落 0（细节来不及收敛 → 糊、脏、闪烁），Pika 是 0.333 落 0。蒸馏适配器只训练过前者，用 simple 等于让它跑没见过的调度。
+
+**改动**：
+- `extender.py`：新增 `_PIKA_H3_SIGMA_KNOTS = (1000,750,500,250,100,40,0)`，`_sigmas()` 增加 `pika_manual` 分支，经 `model_sampling.sigma()` 自动套用模型的 shift（视频 12 / 音频 3 由双轨迹内置）；
+- PIKA 档 `scheduler` 由 `simple` 改为 `pika_manual`；tooltip 与日志同步；
+- `web/extender.js` desc_en 同步。
+
+**保持不变的**：底模仍为 hybrid b25-49（官方模板的纯 ref2va 底模适合单发，本插件分段链路需要 FL2VA 末帧接力）；LoRA 槽 pika ref2va strength 1.0；二采 SelfLift 保持关闭（587k token 每步 287s）。
+
 ### v14.307 (2026-11-04) — 🏁 里程碑：全部渲染管道统一为「时间分块关闭 + 空间分块保留」 / Milestone: all render pipelines standardized on "temporal chunking off + spatial tiling on"
 
 **口径**：逐档核对 `extender.py` 的全部渲染管道（`render_pipeline` 30 档 + 运行模式档），统一为：
