@@ -10273,7 +10273,10 @@ class BSAIH3FilmFactory:
                 # cfg 1.0 由 _BasicGuider 天然满足; shift 12/3。
                 # LoRA 槽挂 TaoMate-HD-preview-comfy.safetensors (strength 1.0,
                 # 禁止再叠第二个加速 LoRA —— 适配器本身已是 3 步蒸馏)。
-                steps, refine_steps, tile_count, refine_denoise = 4, 3, 4, 0.45
+                # v14.315: tile_count 4 -> 8。x2.0 放大后整段 709,920 tokens, 4 块
+                # 每块 ~272k, 24GB 卡上 DiT 只驻留得住 ~13.8GB, 单块 forward 仍要 3.1GB
+                # → 实机 OOM。8 块每块 ~136k, 激活减半; 接缝由 128px overlap 融合。
+                steps, refine_steps, tile_count, refine_denoise = 4, 3, 8, 0.45
                 refine_enable = True
                 refine_upscale_factor = 2.0   # 3D latent upscaler 的训练倍率; 低分画布 x0.5 -> 1080p
                 refine_align_to = 32
@@ -10314,7 +10317,7 @@ class BSAIH3FilmFactory:
                       "TaoMate HD 3步蒸馏渐进放大 LoRA (slmonker/TaoMate-HD-preview-comfy) —— "
                       "一采 4 步低分画布 + 二采 3 步精修 (denoise 0.45, latent x2.0, "
                       f"upscaler={refine_upscaler_model or 'bislerp 插值(无 3D 权重)'}) = 7 NFE; "
-                      "自动时间分块已禁用(防接缝闪烁); 空间分块保留(4 块, 防二采 OOM); "
+                      f"自动时间分块已禁用(防接缝闪烁); 空间分块保留({tile_count} 块, 防二采 OOM); "
                       "画布请设半尺寸(1080p 出片 -> 960x544), LoRA 槽挂 TaoMate-HD-preview-comfy.safetensors "
                       "(strength 1.0, 禁止叠加第二个加速 LoRA); cfg 1.0, shift 12/3")
             else:
