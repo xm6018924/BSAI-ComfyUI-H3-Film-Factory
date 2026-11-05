@@ -2,6 +2,31 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.322 (2026-11-05) — 新增第 31 档渲染管道：SingularityV2+Pika H3 8步 高动态长视频 (导演台双采) / New tier 31: Singularity V2 + Pika H3 8-step High-Motion
+
+**来源**：B站《逼近SeeDance！Singularity V2 + Pika H3 + 高动态LoRA H3导演台长视频生成》（BV1y8446DExi，大凯AI，8分27秒）。逐字稿 5 章 + 全文已提取，简介资源清单逐条对照本机。
+
+**决策**：新建第 31 档，**不改动现有 30 档任何配方**（避免回归）。教程方案是"Singularity V2 基模 + 8 步 turbo + 两阶段 LoRA 分组 + SelfLift 渐进二采 + 上下文长视频"的组合件——#20 PRISM（Singularity 合并模型 10 步单采）、#29 PIKA（6 步单采跳二采）、#24 Director（8+3 导演控制）单档各自只覆盖一部分，缺组合档。
+
+**配方**（`render_pipeline` = "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)"）：
+- 一采 8 步（euler+simple，CFG 1.0，shift video 12.0 / audio 3.0）；8 步同时跨过 H3 音频 ~6 步劣化下限。
+- 二采 SelfLift 渐进：3 步 denoise 0.40，latent x2.0，3D latent upscaler（无权重退 bilinear），tiled 4x128，`refine_audio_denoise=0.0` 音频锁定。
+- 总 11 NFE。
+
+**LoRA 契约（关键，教程实测纪律）**：
+- 加速 LoRA：`pika_h3_flex_turbo_8step_hd_ref2va.safetensors`（官方契约：8 步 / CFG 1.0 / euler|lcm|res_multistep + simple / shift 12/3；Flex style 0.6 已烘焙；奖励 6–8 步）。等价替代 LightX2V v1.0 8步 768P（`minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16`）。
+- 高动态动作 LoRA **三选一，禁止全开**（教程原话：叠加太多互相干扰、还会和参考图冲突）：`Motion_Repair_V2`（修崩坏动作，配战斗类最佳）/ `H3_Fight_Flow_V1`（双人对打）/ `H3_Combat_V2`。枪战/打击/武器对战类（GunFu / SMACK / Bunny Weapon Combat）本机未落盘，需要时按教程 HF 链接补。
+- 两阶段强度：一采 0.5~0.6，**二采降到 0.3~0.4**（教程原话：不用开到 0.6）。
+- 音频优化 LoRA 默认关闭（会多 6 步采样，换更好音质）。
+
+**长视频用法**：27s 一镜到底 / 30s 双人战斗（3×10s 链）= `one_shot_mode=on` + motion context + H3 时间线扩展；已知缺陷：同一击打动作可能重复、闪避动作需多版提示词调。
+
+**前端同步（快捷按钮，v14.322 补齐）**：`web/extender.js` 里 `render_pipeline` 由**两份硬编码列表**驱动，不是 ComfyUI 原生 combo。本次按「后端枚举 → cycle → cycleLabels → 旧值兼容表 → DEFAULTS → 跑自检」同步：`QUICK_DEFS.render_pipeline` 的 `cycle` / `cycleLabels` / `tints` / `cycleAliases` 全部 30→31；兼容层 `H3LegacyCompat.OPTIONS` 白名单与 `ALIAS_CANON` 旧中文标签表同步补齐。**顺带修复 v14.303 遗留**：第 30 档 TaoMate 从未录入这两份表，旧工作流里它的值会被 `norm()` 判为"选项外"并静默回落默认档。`DEFAULTS` 65 号位未动（默认档不变）。今后新增/改名/调序档位必须按同一顺序改，漏改前端 = UI 选不到新档 + 旧工作流值被吃掉。
+
+**验证**：`py_compile` 通过；`node --check` 通过；后端 options / EN2ZH / 分支与前端 cycle / OPTIONS / ALIAS 三向 31 档逐字一致（脚本自检 `RESULT: PASS`）；运行期 `object_info/BSAIH3FilmFactory` 返 31 项且末项为新档，服务下发的 `extender.js`（456782 B）已含新档与 TaoMate。`RENDER_PIPELINES_REFERENCE.md` 同步为 31 档。实机出片仍需单独验收。
+
+---
+
 ### v14.319 (2026-11-05) — 光影因果化：无画面内原因的整体换色改写为连续推进 / Light causality: causeless global re-lighting becomes a continuous push
 
 **用户实测（19 段一镜到底 MV，2026-11-05）**：只有段2 在成片 `00:01:23`（≈f47）有一刀，其余 18 段用户确认完美。

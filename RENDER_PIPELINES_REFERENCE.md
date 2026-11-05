@@ -1,6 +1,6 @@
 # BSAI-H3-Film-Factory 渲染管道 / 模式 / LoRA 搭配速查表
 
-> 基于 `extender.py` v14.311 源码整理（2026-11-05）。
+> 基于 `extender.py` v14.322 源码整理（2026-11-05）。
 > LoRA 一律挂在 H3 Loader 的标准 LoRA 槽，强度按各档推荐。
 
 ---
@@ -37,7 +37,7 @@
 
 ---
 
-## 三、渲染管道（render_pipeline）全 30 档
+## 三、渲染管道（render_pipeline）全 31 档
 
 ### A. 默认/通用
 
@@ -70,6 +70,7 @@
 | 28 | **PTD 4-step Ref2VA** | 4单采 | 默认 | per-hop Ref2VA 加速 LoRA；需 Ref2VA 基模 | 参考图加速 |
 | 29 | **PIKA H3 Flex 6+2** | 6单采（refine跳过） | 强制 lcm，ManualSigmas knots 1000/750/500/250/100/40，shift 12/3，cfg 1.0 | `pika_h3_flex_ref2va_v1_bf16`(1.0，**禁叠第二个加速LoRA**)；基模 hybrid b25-49 | 直出1080p(960x544 latent→VAE原生1920x1088) |
 | 30 | **TaoMate HD 3-Step Progressive** | 2+1=3 | euler+simple，cfg 1.0，shift 12/3 | `TaoMate-HD-preview-comfy.safetensors`(1.0，**禁叠第二个加速LoRA**)；节点 slmonker/ComfyUI-TaoMateHD | 1080p直出，0.625x低采→bislerp x1.6→1步精修 |
+| 31 | **SingularityV2+Pika H3 8步 高动态长视频** | 8+3=11 | euler+simple，cfg 1.0，shift 12/3；二采 denoise 0.40，latent x2.0，3D upscaler，tiled 4x128，音频锁定 | 基模 `Minimax-h3_Singularity_ref2va_v2_int8`（链式一镜到底可留 hybrid b25-49）；加速 LoRA `pika_h3_flex_turbo_8step_hd_ref2va`(1.0，style 0.6 已烘焙) 或 `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16`；动作 LoRA **三选一** `Motion_Repair_V2` / `H3_Fight_Flow_V1` / `H3_Combat_V2` | 高动态动作 + 27s/30s 导演台长视频（BV1y8446DExi） |
 
 ### D. 分辨率/画质档
 
@@ -121,9 +122,32 @@
 | **极速预览/草稿** | PDMD 2-step Turbo Draft | off | — | pdmd_2step_lora |
 | **少步高质量一镜到底** | PDMD 4-step SelfLift Dual-Pass | on | Single-pass seamless | pdmd_4step_lora |
 | **直出1080p** | PIKA H3 Flex 6+2 | on | Single-pass seamless | pika_h3_flex_ref2va_v1 |
+| **高动态动作/长视频** | SingularityV2+Pika H3 8步 高动态长视频 | on | Dual-pass seamless (8+4) 或 Single-pass seamless | pika_h3_flex_turbo_8step_hd_ref2va + 动作LoRA三选一（一采 0.5~0.6 / 二采 0.3~0.4） |
 | **结构控制分镜** | SolarRenderer Structure Control | off 或 on | 按需 | solarrenderer 控制LoRA + 4步LoRA |
 | **直播带货一键出片** | Live Commerce (fully automatic) | off | — | 无（12+4 配方） |
 | **4K 电影感** | 4K Direct Secret Sauce | off | — | turbo_v4_step600 + MysticXXX_V4 |
+
+---
+
+## 六、新增 / 改名 / 调序档位的维护规程（必读）
+
+`render_pipeline` 下拉**不是** ComfyUI 原生 combo，而是插件在 `web/extender.js` 里用自定义 DOM 下拉渲染的，取值来自**后端枚举 + 三份硬编码数据**。任何新增/改名/调序（含改快捷按钮）必须一次改全，顺序如下：
+
+| 序 | 位置 | 文件 | 改什么 |
+|---|---|---|---|
+| 1 | 后端枚举 | `extender.py` `render_pipeline` options | 追加/改英文档名（必须与前端取值逐字一致） |
+| 2 | 英文→中文映射 | `extender.py` `_RENDER_PIPELINE_EN2ZH` | 新英文档名 → 中文分支 label |
+| 3 | 分支实现 | `extender.py` `elif _rp_mode == "<中文label>":` | 写该档配方，末尾由 `_rp_handled` 收口 |
+| 4 | cycle | `extender.js` `QUICK_DEFS.render_pipeline` | 与后端 options 逐字一致、顺序一致 |
+| 5 | cycleLabels | 同上一条 def | 按钮显示名，长度必须 = cycle |
+| 6 | tints | 同上一条 def | 颜色梯度，长度必须 = cycle |
+| 7 | cycleAliases | 同上一条 def | 旧中文 label → 新英文值（既有档位改名时必须补） |
+| 8 | 旧值兼容表-白名单 | `extender.js` `H3LegacyCompat.OPTIONS.render_pipeline` | 值不在白名单会被 `norm()` 静默回落默认档 |
+| 9 | 旧值兼容表-别名 | `extender.js` `H3LegacyCompat.ALIAS_CANON.render_pipeline` | 中文旧标签 → 英文规范值 |
+| 10 | DEFAULTS | `extender.js` `H3LegacyCompat.DEFAULTS` 第 65 位 | 仅在改默认档时才动 |
+| 11 | 跑自检 | `node --check web/extender.js`、`py_compile extender.py`、三表逐字比对、重启后 `/object_info/BSAIH3FilmFactory` 计 31 项 | 全通过才算改完 |
+
+两条硬约束：任何新 widget 只能追加在 `optional` 最末尾（现役最后一项是 `refine_sigmas`），不得挤占既有 widget index；只改后端不改前端的效果是"UI 里选不到新档 + 含新档的旧工作流加载被打回默认档"。
 
 ---
 
