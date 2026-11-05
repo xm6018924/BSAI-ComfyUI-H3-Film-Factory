@@ -10286,7 +10286,7 @@ class BSAIH3FilmFactory:
                 # (v14.274 保范数), 并在状态栏提示降级。
                 _tm_pick = None
                 try:
-                    # v14.310: 只挂**本机加载器真能吃下**的 pure-3D 权重。
+                    # v14.314: 只挂**本机加载器真能吃下**的 pure-3D 权重。
                     # 原优先选 "h3_clean_latent_upscaler"(clean 因子化注意力架构:
                     # base.*/stem/to_delta), 但本机缺 h3_upscaler_dispatch.py 分派模块,
                     # 3D 加载器 strict load 必失败 → 静默退成 bislerp 插值。改为优先
