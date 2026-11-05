@@ -2,6 +2,26 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.312 (2026-11-05) — 取景连续：允许缓推拍唇形，禁止硬切 / Continuous dolly-in for lip-sync, no hard cut
+
+**用户实测（19段一镜到底 MV，2026-11-05）**：clip5（S5老城牌坊→S6窄街灯箱廊）出片后：
+- clip5 f0~f20（0~0.83s）正常承接 clip4 末帧：背影中全景走向牌坊；
+- **f23（0.96s）一帧硬切**：从背影中全景跳到正面胸像中近景，背景换成"老牌砚"窄巷，diff=55.8（7.89×中位数），背景 x_lf=13.03；
+- 人眼在拼接成片中看到的就是"clip4→clip5 接缝后约1秒处硬切到正面近景拍嘴型"。
+
+**根因**：
+- 用户全局脚本【全片统一景别】声明"中全景，全程不放大不收窄"，管道 [景别锁定] 据此返回"全段保持中全景构图，全程维持同一景别"；
+- 但段 prompt 要求"唇形以 lip_audio 逐字贴合"，中全景背影根本看不到嘴型；
+- 模型为了同时满足"全程中全景"和"拍清唇形"，只能**一帧硬切**到正面胸像近景——不是连续推近，而是直接跳。
+
+**修复**（纯文本层）：
+1. **[景别锁定] → [取景连续]**（`_one_shot_size_rule` locked_size 分支）：
+   旧："全段保持中全景构图，全程维持同一景别"；
+   新："起幅保持中全景：需要呈现唇形时沿原方向缓慢推近到人物面部，推近过程每一步都连续；唇形段落结束后再缓慢推回中全景。推近与推回速度全程均匀，主体占画比例逐帧连续变化，景别之间只通过摄影机连续推移完成过渡。"
+2. **恢复换场段光线锚定**（`_OS_SPACE_TRANSIT_RULE`）：换场段光线从上一段末帧状态起算，只向更暗的夜色推进，新灯光渐显。
+
+**English**：The locked-size rule no longer freezes the medium-wide shot. It now authorizes a continuous dolly-in to the face for lip-sync, then a slow dolly back out — so the model reaches the close-up through camera movement rather than a hard cut. Light-start anchoring on transition segments is restored.
+
 ### v14.310 (2026-11-04) — PIKA 档改用官方 ManualSigmas（对齐 B站 BV1yQx96tEDA 实测配置）/ PIKA tier switched to official ManualSigmas (matching Bilibili BV1yQx96tEDA)
 
 **背景**：B站《MiniMax H3 本地加速方案大比拼：Pika 称王？》(BV1yQx96tEDA) 的 Pika 方案用的是"官方 reference-to-video 模板 + 配套加速模板参数"。逐条比对后，我们唯一真正的偏差是 **sigma 调度**：

@@ -6877,7 +6877,10 @@ _OS_SPACE_TRANSIT_RULE = (
     "一路连到这一处，两侧的景物顺着前进的方向连续地换成这一处的景物，"
     "这一处空间的景物从上一处空间的尽头逐渐展开在画面里，"
     "展开之后就一直展开着，本段后续的画面都处在这一处已经展开的空间里；左右方位"
-    "自始至终保持一致，这一处空间由它自己的灯光照亮，步幅与节奏自始至终一致。"
+    "自始至终保持一致；本段的光线与色调从上一段末帧那一刻的明暗与色温状态起算，"
+    "整段只逐拍向更深的夜色推进一小步，这一处空间里新出现的灯光在原有环境光上"
+    "由暗到亮逐渐显形，天空的亮度与色温随行走连续地向夜的深处演进，"
+    "步幅与节奏自始至终一致。"
 )
 
 # 段首标题里的图片标签 —— 段标题形如 "[分镜3]：滨海堤岸@图3-登上海堤石阶(…)"
@@ -6977,8 +6980,10 @@ def _one_shot_size_rule(locked_size=None, prev_end=None, cur_start=None):
     """
     if locked_size:
         return (
-            "\n[景别锁定] 全段保持{0}构图：主体的取景范围与占画比例自始至终保持一致，"
-            "全程维持同一景别。".format(locked_size),
+            "\n[取景连续] 起幅保持{0}：摄影机沿同一条轨迹连续推进，需要呈现唇形时"
+            "沿原方向缓慢推近到人物面部，推近过程每一步都连续；唇形段落结束后再缓慢"
+            "推回{0}。推近与推回的速度全程均匀，主体在画幅中的占画比例逐帧连续变化，"
+            "景别之间只通过摄影机的连续推移完成过渡。".format(locked_size),
             False,
         )
     text = (
@@ -10281,10 +10286,20 @@ class BSAIH3FilmFactory:
                 # (v14.274 保范数), 并在状态栏提示降级。
                 _tm_pick = None
                 try:
+                    # v14.310: 只挂**本机加载器真能吃下**的 pure-3D 权重。
+                    # 原优先选 "h3_clean_latent_upscaler"(clean 因子化注意力架构:
+                    # base.*/stem/to_delta), 但本机缺 h3_upscaler_dispatch.py 分派模块,
+                    # 3D 加载器 strict load 必失败 → 静默退成 bislerp 插值。改为优先
+                    # minimax_h3_latent_upscaler_3d_fp16(与 MV 档同款、实机已验证),
+                    # 没有才退任意 3D 权重; 都没有则退 bislerp。
                     for _nm in _ff_get_upscaler_models():
-                        if "latent_upscaler" in str(_nm).lower() or "latent_upscaler_3d" in str(_nm).lower():
+                        if "minimax_h3_latent_upscaler_3d_fp16" in str(_nm).lower():
                             _tm_pick = _nm
-                            if "h3_clean_latent_upscaler" in str(_nm).lower():
+                            break
+                    if _tm_pick is None:
+                        for _nm in _ff_get_upscaler_models():
+                            if "latent_upscaler_3d" in str(_nm).lower():
+                                _tm_pick = _nm
                                 break
                 except Exception:
                     _tm_pick = None

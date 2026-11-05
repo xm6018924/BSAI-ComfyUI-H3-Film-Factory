@@ -7,13 +7,139 @@
 
 ---
 
-| 📖 介绍 | 🧩 节点 | ⚙️ 参数 | 🎬 透明视频 | 📝 更新说明 | 📦 安装 | 🎬 示例 |
-|---|---|---|---|---|---|---|
-| [插件介绍](#插件介绍--introduction) | [节点清单](#节点清单--node-list) | [主节点参数](#主节点参数--main-node-parameters) | [透明视频管道](#透明视频渲染管道--transparent-video-pipeline-v14233) | **[👉 全部更新说明](./CHANGELOG.md)** | [安装](#安装--installation) | [工作流示例](#示例工作流--example-workflows) |
+| 📖 介绍 | 🚀 渲染管道速查 | 🧩 节点 | ⚙️ 参数 | 🎬 透明视频 | 📝 更新说明 | 📦 安装 | 🎬 示例 |
+|---|---|---|---|---|---|---|---|
+| [插件介绍](#插件介绍--introduction) | [渲染管道速查与画质/速度最佳设置](#渲染管道速查与画质速度最佳设置--render-pipeline-guide) | [节点清单](#节点清单--node-list) | [主节点参数](#主节点参数--main-node-parameters) | [透明视频管道](#透明视频渲染管道--transparent-video-pipeline-v14233) | **[👉 全部更新说明](./CHANGELOG.md)** | [安装](#安装--installation) | [工作流示例](#示例工作流--example-workflows) |
 
 
 
-## 插件介绍 / Introduction
+## 渲染管道速查与画质/速度最佳设置 / Render Pipeline Guide
+
+> 本节为 v14.311 新增，帮助你在 30 个渲染管道档位中快速选到**最佳画质**或**最佳速度**的搭配。
+> This section (added v14.311) helps you pick the best-quality or best-speed recipe among the 30 render-pipeline tiers.
+
+### 一、先选模式：分镜剪辑 vs 一镜到底 / Pick the mode first
+
+| 模式 | 何时用 | one_shot_mode | 段间拼接 |
+|---|---|---|---|
+| **分镜剪辑（默认）** | 多镜头 MV、广告、有明确切镜 | `off (storyboard)` | xfade 转场 |
+| **一镜到底** | 30s+ 连续跟拍、长镜头 | `on (one-shot)` | 无缝 concat（零转场） |
+
+**一镜到底时再选采样档 one_shot_sampling：**
+
+| 采样档 | 接缝漂移 | 什么时候选 |
+|---|---|---|
+| **Single-pass seamless（推荐）** | 零漂移 | 快速出片、6~8步 turbo LoRA 链 |
+| **Dual-pass seamless (8+4)** | 已修复 | 需要二采 refine 但不要接缝漂移 |
+| **Dual-pass seamless 2K (8+4)** | 已修复 | 一镜到底直出 2K 成片 |
+| Dual-pass HD (seam risk) | 有漂移 | 不推荐，仅老工作流兼容 |
+
+### 二、最佳画质配置 / Best-Quality Settings
+
+> 目标：细节最锐、色彩最准、动作最稳，单段耗时较长但一次出片不返工。
+
+| 项 | 推荐值 | 原因 |
+|---|---|---|
+| **render_pipeline** | `Sol-H3 Self-Lift Dual-Pass (default)` | 默认双采 refine，SelfLift TST 校闪屏/身份漂移 |
+| **speed_preset** | `Fine`（8+6，denoise 0.5） | 步数最多，细节最足 |
+| **one_shot_mode** | off（或 on + Dual-pass seamless 2K） | 一镜到底时选 2K 档 |
+| **refine_mem_mode** | `global (full-context, low VRAM)` | 全序列注意力无 tile 接缝 |
+| **selflift_tst_enable** | **on**（tau 0.2） | 少步补偿，防闪/防漂移 |
+| **dual_track_shift** | on（shift_video=12, shift_audio=3） | 官方双轨迹，A/V 同步最好 |
+| **face_lock_mode** | `auto (face-lock)` | 锁五官一致 |
+| **block_cache / cache_dit** | **off** | 追求画质时关闭缓存 |
+| **LoRA** | 不挂加速 LoRA（用原生 20~24 步）；或 `MysticXXX_MMH3-V4`(0.3~0.5) 去油光 | 加速 LoRA 会损失细节 |
+| **分辨率** | 1920×1088（默认双采）或 2K 档 | |
+
+**画质天花板**：`4K Direct Secret Sauce`（4K直出）或 `4K Regenerate OpenH3Regenerate2K`（768P→2560 重生成），适合最终交付的电影感成片。
+
+### 三、最佳速度配置 / Best-Speed Settings
+
+> 目标：单段最快出片，用于分镜预览、草稿、迭代。最终交付前再切画质档。
+
+| 项 | 推荐值 | 单段耗时 | 原因 |
+|---|---|---|---|
+| **render_pipeline** | `PDMD 2-step Turbo Draft` | ~3 min | 2 NFE 极速单采，**仅草稿** |
+| 或 | `TaoMate HD 3-Step Progressive` (2+1) | ~5 min | 3 NFE 直出 1080p，速度/质量平衡最佳 |
+| 或 | `PIKA H3 Flex 6+2` | ~8 min | 6步直出 1080p，Ref2VA 锁脸 |
+| 或 | `PDMD 4-step SelfLift Dual-Pass` (4+2) | ~10 min | 6 NFE，少步高质量 |
+| **speed_preset** | `Turbo`（4+3） | ~20 min | 不换管道时的快速档 |
+| **one_shot_sampling** | `Single-pass seamless` | — | 跳过二采，链 latent 不被重绘 |
+| **selflift_tst_enable** | on（tau 0.2） | +1~2% | 少步必开，否则闪屏/漂移 |
+| **分辨率** | 960×544 latent（VAE 原生解码 1920×1088） | — | PIKA/TaoMate 都走这条 |
+
+**速度 LoRA 必挂**（按管道选）：
+- `minimax_h3_pdmd_2step_lora_avg_rank_38_bf16`（2步草稿）
+- `minimax_h3_pdmd_4step_lora_avg_rank_57_bf16`（4步双采）
+- `TaoMate-HD-preview-comfy.safetensors`（3步渐进，strength 1.0）
+- `pika_h3_flex_ref2va_v1_bf16`（6步，strength 1.0，**禁叠第二个加速 LoRA**）
+
+### 四、30 个渲染管道速查 / All 30 Pipelines at a Glance
+
+| # | 管道 | NFE | 推荐 LoRA / 基模 | 定位 |
+|---|---|---|---|---|
+| 1 | Sol-H3 Self-Lift Dual-Pass（默认） | 自定义 | 无强制；SelfLift TST on | **画质默认** |
+| 2 | MV Dual-Pass（电影工厂原版） | 自定义 | 无 | 老工作流 |
+| 3 | Live Dub HD | 12+4 | ref2va_int8_convrot | 配音 |
+| 4 | FastH3-Trim | 8+4 | nvfp4 剪枝 | 省显存 |
+| 5 | FastH3 4-step VSA | 4+2 | 4步蒸馏+VSA | 快速预览 |
+| 6 | Turbo-v4 | 6+4 | turbo_v4_step600(0.5~0.8)+MysticXXX_V4(0.3~0.5) | 日常加速 |
+| 7 | DMAD 4-step | 4+2 | DMAD 4步 LoRA（强制 lcm） | 动作 |
+| 8 | Action Combo | 8+4 | action/DMAD via H3LoraStack | 动作片 |
+| 9 | **4K Direct Secret Sauce** | 6+3 | turbo_v4+MysticXXX_V4+DLSS5 | **4K画质** |
+| 10 | FastH3 Omni 8-step Single-Pass | 8单采 | fasth3_omniref_8step_pruned_int8 + VSA keep=10 | 极速单采 |
+| 11 | Dual-Pass 2K (HyperVAE) | 8+4 | VAE: hyper*2x*.safetensors | 2K快速 |
+| 12 | QAD-v2 8-step | 8单采 | QAD-v2 NVFP4 全套（118→30GB） | 量化省显存 |
+| 13 | Live Commerce 01 Text Dubbing | 12+4 | 无 | 纯文本配音 |
+| 14 | Live Commerce 02 ref_audio | 12+4 | 无 | 音色参考 |
+| 15 | Live Commerce 03 lip_voice | 12+4 | 无 | TTS对口型 |
+| 16 | Live Commerce（全自动） | 12+4 | 无（一键档） | 直播带货 |
+| 17 | FastH3 Omni x SelfLift Upscale | 8 | Omni 8步 + SelfLift 渐进 | 蒸馏+放大 |
+| 18 | H25 Hybrid 8-step Multi-Ref | 8单采 | fl2v_turbo_8step(1.0)；FL2VA+Ref2VA b25-49 | 多参考图 |
+| 19 | **4K Regenerate OpenH3Regenerate2K** | 3 | OpenH3 Refiner(0.7)+fl2v turbo(1.0)+lms sharp(1.0) | **4K画质**（不含EU/UK/KR/US） |
+| 20 | PRISM 10-step Motion | 10单采 | Singularity v2 x 10Eros-Max 合并模型 | 运动表现 |
+| 21 | Transparent Video Single-Pass | 10单采 | 纯色背景 + BSAI_H3_TransparentKey | 抠像/透明 |
+| 22 | 4-in-1 Ultimate Speedup | 6+2 | DMAD 4步+SegAttention 2.2.0+半分辨率参考 | 极限加速 |
+| 23 | SolarRenderer Structure Control | 4+4 | 控制LoRA+4步LoRA(0.8)；FastH3-Omni/Singularity V2 | 结构控制 |
+| 24 | Director Turbo Dual-Pass | 8+4 | Director 控制视频代替 ref2va | 导演分镜 |
+| 25 | Dual-Pass 2K (official condition upscale) | 8+4 | 官方 MiniMaxH3LatentUpscaleCombined | 官方2K |
+| 26 | **PDMD 4-step SelfLift Dual-Pass** | 4+2 | pdmd_4step_lora_avg_rank_57_bf16 | **少步高质量** |
+| 27 | **PDMD 2-step Turbo Draft** | 2单采 | pdmd_2step_lora_avg_rank_38_bf16 | **极速草稿** |
+| 28 | PTD 4-step Ref2VA | 4单采 | per-hop Ref2VA 加速 LoRA | 参考图加速 |
+| 29 | **PIKA H3 Flex 6+2** | 6单采 | pika_h3_flex_ref2va_v1(1.0，禁叠加速LoRA) | **直出1080p** |
+| 30 | **TaoMate HD 3-Step Progressive** | 2+1 | TaoMate-HD-preview-comfy(1.0，禁叠加速LoRA) | **1080p性价比王** |
+
+### 五、全局开关默认值（出片前核对）/ Global Switches
+
+| 参数 | 最佳画质 | 最佳速度 |
+|---|---|---|
+| `dual_track_shift` | on（12/3） | on（12/3） |
+| `selflift_tst_enable` / tau | on / 0.2 | on / 0.2 |
+| `temporal_chunk_tokens` | 0（关） | 0（关） |
+| `refine_mem_mode` | global（无接缝） | spatial（4块，快） |
+| `face_lock_mode` | auto | auto |
+| `block_cache` / `cache_dit` | off（画质） | on（速度） |
+| `semantic_bridge_enable` | 按需（增强指令遵循） | off |
+
+### 六、按场景一键选 / Pick by Scenario
+
+| 场景 | render_pipeline | one_shot | LoRA |
+|---|---|---|---|
+| 电影感最终交付 | 4K Direct Secret Sauce / OpenH3Regenerate2K | off | turbo_v4+MysticXXX_V4 |
+| 日常一镜到底 MV | Sol-H3 Self-Lift Dual-Pass | on + Dual-pass seamless 2K | 无 |
+| 一镜到底快速预览 | PDMD 4-step / PIKA H3 Flex | on + Single-pass seamless | 对应加速 LoRA |
+| 直出 1080p 性价比 | TaoMate HD 3-Step (2+1) | on/off 均可 | TaoMate-HD-preview-comfy |
+| 分镜草稿迭代 | PDMD 2-step Turbo Draft | off | pdmd_2step_lora |
+| 直播带货成片 | Live Commerce (fully automatic) | off | 无（12+4 一键） |
+| 结构控制短片 | SolarRenderer Structure Control | off | 控制LoRA+4步LoRA |
+| 抠像/透明素材 | Transparent Video Single-Pass | off | 无 |
+
+> **完整 LoRA 文件名与强度**见 [`RENDER_PIPELINES_REFERENCE.md`](./RENDER_PIPELINES_REFERENCE.md)。
+> Full LoRA filenames & strengths: see [RENDER_PIPELINES_REFERENCE.md](./RENDER_PIPELINES_REFERENCE.md).
+
+---
+
+
 
 **H3 Film Factory** 是 BSAI 出品的 MiniMax H3 一站式电影制作节点集。它把"剧本分镜 → 逐镜头生成 → 画质修复 → 字幕 → 拼接成片"的完整影视流程整合进 ComfyUI：
 
