@@ -27,6 +27,35 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 ---
 
+### v14.321 (2026-11-05) — 场景路线串正则接受 T 编号中间态：S4→T4→S5 不再残留 / Route-chain regex accepts T-numbered intermediate states
+
+**用户实测（19 段一镜到底 MV，2026-11-05）**：段5 在 f31–f32 出现一帧硬切，画面从老城巷口直接跳到街口牌坊。
+
+**根因**：脚本的场景路线串里夹着 T 编号中间态（`S4 窄巷 → T4 路灯下的老城巷口 → S5 街口牌坊 → … → S11 石拱桥`）。`_OS_ROUTE_CHAIN_RE` 的段首只认 `S\d{1,2}`，T4 这一环不匹配，整条链被判为「不是路线串」而原样留在 prompt 里。H3 于是把链里的「S5 街口牌坊」「S11 石拱桥」当成这一段里可见的目标，走到 f31 就切了过去。
+
+**改动**：`_OS_ROUTE_CHAIN_RE` 段首编号 `S\d{1,2}` → `[ST]\d{1,2}`，段内长度上限 24 → 36 字符（T 中间态的描写通常更长），尾巴仍为可选编号。`S1→S2→S3` 与 `S1→T2→S3` 现在都能整条剥掉。
+
+**影响面**：只作用于「≥3 段由 → 连接」的分镜结构识别；不含箭头链的正文与脚本逐字不变。
+
+**English**：The route-chain regex only accepted `S` scene numbers, so a chain containing a `T`-numbered intermediate state was left in the prompt verbatim and the model treated its later scenes as targets of the current clip, producing a hard cut at f31. The segment prefix now accepts `[ST]\d{1,2}` and the per-segment length budget grows from 24 to 36 characters.
+
+---
+
+### v14.320 (2026-11-05) — 空间过渡段禁用叠化措辞：双重曝光改为行走硬切换 / No dissolve wording on space-transition clips
+
+**用户实测（19 段一镜到底 MV，2026-11-05）**：clip4 f118–f126（4.9s）木栈桥与公路路口**双曝光叠化**，两个空间同时出现在画面里；clip5 段头淡入淡出，中间有 2–3 帧双重曝光。
+
+**根因**：`_OS_SPACE_TRANSIT_RULE` 原来写「两侧的景物顺着前进的方向**连续地换成**这一处的景物」「这一处空间的景物从上一处空间的尽头**逐渐展开**在画面里」。H3 把「连续地换成」「逐渐展开」理解成**叠化**指令，直接渲染成两处空间的双重曝光；后文「场景锚定」里「一旦出现就留住」的优先级压不过前面的渐变措辞。
+
+**改动**（纯文本层，不动用户脚本，同场景延续段不受影响）：
+- `_OS_SPACE_TRANSIT_RULE`：删掉「连续地换成」「逐渐展开」，换成正向硬约束「主体向前行走的同时就进入了新的空间，画面里始终只有主体当下所处的那一处空间的景物，两处空间之间由主体的行走动作完成切换」。
+- `_OS_SPACE_TRANSIT_HEAD_RULE`：段首承接里的「脚下的路面与两侧景物在前进中**连续地流过**」改为「走过的景物留在画框后方，前方的景物随步伐自然进入」，去掉「流过」的渐变歧义。
+- 不使用否定句式（H3 在 CFG 1.0 下不认「不要叠化」这类否定），改用「始终只有」这种正向限定量。
+
+**English**：The space-transition rule used to say the scenery "continuously turns into" and "gradually unfolds" — H3 read that as a dissolve and rendered two spaces double-exposed. Both phrases are replaced by a positive constraint: the frame only ever holds the space the subject currently stands in, and the walk itself performs the switch. The head rule's "continuously flows past" became "scenery already walked past stays behind the frame". No negation is used, because H3 at CFG 1.0 ignores it.
+
+---
+
 ### v14.319 (2026-11-05) — 光影因果化：无画面内原因的整体换色改写为连续推进 / Light causality: causeless global re-lighting becomes a continuous push
 
 **用户实测（19 段一镜到底 MV，2026-11-05）**：只有段2 在成片 `00:01:23`（≈f47）有一刀，其余 18 段用户确认完美。
