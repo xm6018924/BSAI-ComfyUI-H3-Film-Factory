@@ -2,6 +2,29 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.319 (2026-11-05) — 光影因果化：无画面内原因的整体换色改写为连续推进 / Light causality: causeless global re-lighting becomes a continuous push
+
+**用户实测（19 段一镜到底 MV，2026-11-05）**：只有段2 在成片 `00:01:23`（≈f47）有一刀，其余 18 段用户确认完美。
+
+**逐帧取证**：
+- 段1 全段拼图：f0~f88 是**橙粉落日 + 45° 侧面**，f96 起天空压成靛蓝、机位转到**背面**，到片尾是**靛紫夜空 + 背面跟拍** —— 脚本里的"橙粉残阳"在段1 内部已经演完。
+- 段2 全段拼图：f0~f40 石阶平台（靛紫夜空 + 背面），**f48 起天空翻回暖橙、机位甩成侧面、铁闸门凭空出现**，f192 以后是城市街道与斑马线。
+- 段3 全段拼图：**整段背面机位、整段钠灯夜色、零换色**（对照组）。
+
+**根因**：段2 的 `[光影氛围]` 写的是「暮色压低主光，天际由橘红转暗橙，海面碎光变稀变冷；穿门后钠灯昏黄约2000K接管…」。前半句是一句**没有画面内原因的整体换色** —— 此刻段2 既没穿过门洞也没别的过渡物被触发，却要求天空是橘红；而继承下来的 motion context 关键帧（段1 末帧）是靛紫夜空。模型要同时满足这两条，只能把天空从靛紫一路渐变回橘红，这条整体色温斜坡在 f47 附近被眼睛读成"切镜"。段3 的光影全是灯具级描述（钠灯/站棚/树影），同样继承靛紫夜空却零换色，反证了判据。
+
+**改动**：
+- 新增 `_one_shot_relight_global_tone()`：只处理光影小节，一句同时满足「含整体色调名词」+「含整体色温变化动词」+「**不含**画面内可见的过渡物」时，改写为「画面里的整体明暗与色温接着上一段末帧那一刻的状态起算，整段画面只有这一次连续的整体色温变化，天光随着主体向前行走一路沉入更深的夜色」；带过渡物的句子（穿门后 / 出洞后 / 穿过缺口后 …）一律不动 —— 段19 的「天色由靛蓝转浅橙」挂在「穿过缺口后」上，因此安全。
+- 接入点：一镜到底模式下 demulti 之后、flatten 之前（flatten 会抹掉 `[光影氛围]` 标签，所以要赶在前面）。
+- 开关 `BSAI_H3_LIGHT_CONTINUITY=0` 关闭。
+
+**影响面**：本脚本 19 段里**只有段2 命中**（离线逐段核验：其余 18 段的换色句都挂在过渡物上），其余各段条件文本逐字不变，已渲好的成片不受影响。
+
+**English**：A global re-lighting that has no cause inside the frame (e.g. "the sky turns from orange-red to dark orange" with no transition object being crossed) is rewritten into a continuous push that starts from the previous segment's last frame. Clauses bound to a visible transition object are left untouched. In the reference script only clip 2 matches; every other clip's condition text stays byte-identical.
+
+---
+
+
 ### v14.312 (2026-11-05) — 取景连续：允许缓推拍唇形，禁止硬切 / Continuous dolly-in for lip-sync, no hard cut
 
 **用户实测（19段一镜到底 MV，2026-11-05）**：clip5（S5老城牌坊→S6窄街灯箱廊）出片后：

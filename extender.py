@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.318-taomate-x20-t16"
+BUILD = "minimax-h3-extender-v14.319-light-causality"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -7038,6 +7038,103 @@ _OS_SPACE_TRANSIT_RULE = (
     "步幅与节奏自始至终一致。"
 )
 
+# v14.319 (2026-11-05): 光影因果化 —— 把"没有画面内原因的整体换色"改写成
+# 与上一段末帧衔接的连续推进。
+#
+# 实测根因 (用户 19 段一镜到底, 段2 f47 切镜, 2026-11-05):
+#   段1 尾帧 = 靛紫夜空 + 背面机位 —— 脚本里"橙粉残阳"那段在段1 内部已经演完;
+#   段2 的 [光影氛围] 写的是"暮色压低主光, 天际由橘红转暗橙, 海面碎光变稀变冷",
+#   这是一句**没有画面内原因**的整体换色 —— 此刻段2 既没穿过门洞也没别的过渡物
+#   被触发。模型要同时满足"继承下来的靛紫夜空"和"天际是橘红", 只能把天空从靛紫
+#   一路渐变回橘红。这条整体色温斜坡在 f47 附近被眼睛读成"切镜"。
+#   对照: 段3 的光影全是灯具级描述(钠灯/站棚/树影), 同样继承靛紫夜空, 全段零换色。
+#
+# 判据 (只动光影小节, 且必须同时满足三条):
+#   (a) 含整体色调名词(天际/天色/天空/天幕/暮色/晚霞/夜色/海平线/海面/河面);
+#   (b) 含整体色温变化动词(转/变/接管/推开/让位/褪/跃出/压低/沉入/加深);
+#   (c) **不含**画面内可见的过渡物(穿/登/拐/出/经/迈/踏/进入/落位/过/之后/行至)。
+# 带 (c) 的句子(穿门后/出洞后/穿过缺口后...)有画面内原因, 一律不动 ——
+# 段19 的"天色由靛蓝转浅橙"挂在"穿过缺口后"上, 因此不会被改写。
+#
+# 措辞纪律: 全文纯正向陈述; 不出现 cut/转场/叠化/剪切/跳帧 等切镜词汇;
+# 不出现否定句 (H3 在 CFG=1.0 下没有负向分支); 不写死具体色温数值。
+_OS_RELIGHT_SECTION_RE = re.compile(
+    r"[\[\u3010]\s*(光影|光线|照明|氛围)[^\[\]\u3010\u3011\n]{0,8}\s*[\]\u3011]")
+_OS_GLOBAL_TONE_NOUNS = ("天际", "天色", "天空", "天幕", "暮色", "晚霞", "夜色",
+                          "海平线", "海面", "河面", "整片天")
+_OS_TONE_CHANGE_VERBS = ("转", "变", "接管", "推开", "让位", "褪", "跃出",
+                          "压低", "沉入", "加深")
+_OS_TONE_CAUSAL_MARKERS = ("穿", "登", "拐", "出", "经", "迈", "踏", "进入",
+                            "落位", "过", "之后", "行至", "抵达", "路过")
+_OS_RELIGHT_CANON = (
+    "画面里的整体明暗与色温接着上一段末帧那一刻的状态起算，整段画面只有这一次连续的"
+    "整体色温变化，天光随着主体向前行走一路沉入更深的夜色"
+)
+
+
+def _one_shot_relight_sentence(sent):
+    """v14.319: 判定并改写单句光影描述。返回改写后的句子(没命中则原样返回)。"""
+    t = str(sent or "")
+    if not t.strip():
+        return t
+    if "上一段末帧那一刻" in t:      # 已经改写过 —— 幂等
+        return t
+    if not any(n in t for n in _OS_GLOBAL_TONE_NOUNS):
+        return t
+    if not any(v in t for v in _OS_TONE_CHANGE_VERBS):
+        return t
+    if any(c in t for c in _OS_TONE_CAUSAL_MARKERS):
+        return t
+    # 逐小句: 丢掉带整体色调名词的小句, 保留纯局部描述
+    subs = re.split(r"([，,])", t)
+    keep = []
+    dropped = False
+    for sub in subs:
+        if sub in ("，", ","):
+            keep.append(sub)
+            continue
+        if any(n in sub for n in _OS_GLOBAL_TONE_NOUNS):
+            dropped = True
+            continue
+        keep.append(sub)
+    if not dropped:
+        return t
+    rest = "".join(keep).strip("，,；;。 ")
+    if rest:
+        return _OS_RELIGHT_CANON + "；" + rest
+    return _OS_RELIGHT_CANON
+
+
+def _one_shot_relight_global_tone(text):
+    """v14.319: 光影小节里的"无因整体换色" -> 与上一段末帧衔接的连续推进。
+
+    只改写光影小节; 其它小节(镜头运动/景别/角色状态/道具交互)逐字不动。
+    """
+    s = str(text or "")
+    if not s.strip():
+        return s
+    m = _OS_RELIGHT_SECTION_RE.search(s)
+    if not m:
+        return s
+    tail = s[m.end():]
+    nxt = re.search(r"[\[\u3010][^\[\]\u3010\u3011\n]{0,30}[\]\u3011]", tail)
+    body = tail[:nxt.start()] if nxt else tail
+    if not body.strip():
+        return s
+    parts = re.split(r"([；;。])", body)
+    out = []
+    changed = False
+    for seg in parts:
+        if seg and seg not in ("；", ";", "。"):
+            new = _one_shot_relight_sentence(seg)
+            if new != seg:
+                changed = True
+                seg = new
+        out.append(seg)
+    if not changed:
+        return s
+    return s[:m.end()] + "".join(out) + tail[len(body):]
+
 # 段首标题里的图片标签 —— 段标题形如 "[分镜3]：滨海堤岸@图3-登上海堤石阶(…)"
 _OS_PICTURE_TAG_RE = re.compile(r"<Picture\s*\d+>|@图\s*\d+", re.IGNORECASE)
 
@@ -12595,6 +12692,19 @@ class BSAIH3FilmFactory:
             # 分拍标签会被 H3 当成镜头切分点(实测 clip2 在 3.25s ≈ 3-6秒拍点硬切)。
             if one_shot_enabled:
                 _os_demulti = _one_shot_demulti_shot(_clip_prompt_for_cond, label=f"clip{i+1}")
+                # v14.319: 光影因果化 —— 光影小节里"无因的整体换色"(段2 的
+                # "天际由橘红转暗橙")会被模型当成段内一次独立事件, 在段中某个
+                # 任意时刻整体换一次色, 实测在段2 f47 读成切镜。这里把它改写成
+                # 与上一段末帧衔接的连续推进; 其余小节逐字不动。
+                if str(os.environ.get("BSAI_H3_LIGHT_CONTINUITY", "1")).strip() != "0":
+                    try:
+                        _os_relight = _one_shot_relight_global_tone(_os_demulti)
+                        if _os_relight != _os_demulti:
+                            print(f"[H3 Extender] v14.319 一镜到底 clip[{i+1}]: "
+                                  f"光影小节里的无因整体换色已改写为连续推进")
+                            _os_demulti = _os_relight
+                    except Exception:
+                        pass
                 _os_flat = _one_shot_flatten_prompt(_os_demulti)
                 if _os_flat != _clip_prompt_for_cond:
                     print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 提示词已单镜头化(分拍时间标签→连续运镜陈述)")
