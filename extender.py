@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.316-taomate-x15-bicubic"
+BUILD = "minimax-h3-extender-v14.317-latent-hardcut-guard"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -3114,6 +3114,79 @@ def _ff_video_hw(samples):
     return None
 
 
+def _ff_detect_latent_hard_cut(samples, pixel_thr=1.6, lf_thr=1.8, trim_frames=0):
+    """v14.317: 在一采 latent 序列里找"场景整体换掉"的硬切点。
+
+    判据(用**真实一采 latent** 标定, 见 tools/audit_one_shot_latent.py 的相位口径):
+      * 相邻行差分 > pixel_thr x **同相位(row mod 5)** 中位数
+      * 且 低频(空间 8x8 块平均)相邻行差分 > lf_thr x 同相位中位数
+    两项必须同时成立(AND): 低频项是**必要条件** —— 只看行差分会把
+    "人物大幅运动/转身"误判成切镜, 低频项只看大面积明暗与结构, 对人物自身运动不敏感。
+
+    标定值(阈值 1.6 / 1.8 在 v14.289 真实 4 段 latent 上: 3 处硬切全中, 零误报):
+      段2 row53 (成片 f160) 相位1.89 低频3.76 | 段3 row11 (f13) 1.88/2.20
+      段3 row68 (f210) 相位1.87 低频3.42 | 段1 最高 1.22/1.22 | 段4 最高 1.32/1.49
+    (低频项用 mean_C(|Δ|) 无符号口径 —— 若先降通道再取绝对差, 正负会抵消,
+     比值虚高 2~5 倍, 阈值必须按无符号口径标定)
+
+    阈值平台区: 相位 ∈ [1.4, 1.8] x 低频 ∈ [1.3, 2.2] 结果完全一致;
+    相位 >= 2.0 会漏掉全部硬切。
+
+    返回 [{"row": latent 行号, "out_frame": ≈成片帧号, "dr":..., "lr":...}, ...]
+    """
+    try:
+        members, _ = _ff_extract_members(samples)
+        v = members[0] if members else None
+        if v is None or v.dim() != 5:
+            return []
+        # (B, C, T, H, W) -> (C, T, H, W), 取 batch 0, 全通道
+        x = v[0].detach().to("cpu", torch.float32)
+        if x.dim() != 4:
+            return []
+        _c = int(x.shape[0])
+        _t = int(x.shape[1])
+        _h = int(x.shape[2])
+        _w = int(x.shape[3])
+        if _t < 12:
+            return []
+        # 时序行差分(全通道平均绝对差)
+        d = (x[:, 1:] - x[:, :-1]).abs().mean(dim=(0, 2, 3))
+        # 空间低频: 8x8 块平均(latent 网格上 8x8 块 = 像素域 32x32, 与像素域审计同口径)
+        _k = 8
+        _hh = (_h // _k) * _k
+        _ww = (_w // _k) * _k
+        if _hh < _k or _ww < _k:
+            return []
+        y = x[:, :, :_hh, :_ww].reshape(_c, _t, _hh // _k, _k, _ww // _k, _k).mean(dim=(3, 5))
+        lfd = (y[:, 1:] - y[:, :-1]).abs().mean(dim=(0, 2, 3))
+        # 同相位基线: H3 latent 每 5 行 = 17 帧, 行差分自带 5 行周期
+        med = [0.0] * 5
+        lmed = [0.0] * 5
+        for _ph in range(5):
+            _idx = [i for i in range(_t - 1) if ((i + 1) % 5) == _ph]
+            if _idx:
+                med[_ph] = float(d[_idx].median())
+                lmed[_ph] = float(lfd[_idx].median())
+        _trim = float(trim_frames or 0)
+        out = []
+        for _i in range(_t - 1):
+            _row = _i + 1
+            _b = med[_row % 5]
+            _lb = lmed[_row % 5]
+            if _b <= 0.0 or _lb <= 0.0:
+                continue
+            _dr = float(d[_i]) / _b
+            _lr = float(lfd[_i]) / _lb
+            if _dr > pixel_thr and _lr > lf_thr:
+                _gf = _row * 17.0 / 5.0
+                out.append({"row": _row, "gen_frame": _gf, "out_frame": _gf - _trim,
+                            "dr": _dr, "lr": _lr})
+        return out
+    except Exception as _e:
+        print(f"[H3 Extender] v14.317 硬切检测异常(忽略): {_e}")
+        return []
+
+
 def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
     """v14.179 (2026-10-23): 二采分块粒度自适应 —— 不再盲目扩块到 Sol-Attn 健康区。
 
@@ -3919,7 +3992,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                # v14.281: MV 双采档忠实原版 —— 工作流里 temporal_chunk_tokens=0
                # 就是"整段一次二采", 不允许 v14.270 的自动时间分块把它重新切成
                # 4 段独立采样(段间换 seed 会在接缝闪烁/段内碎花)。
-               refine_no_temp_chunk=False):
+               refine_no_temp_chunk=False,
+               # v14.317: 本段 motion context 裁掉的上下文帧数 —— 只用于把
+               # latent 行号换算成成片帧号(日志用), 不参与采样。
+               one_shot_trim_frames=0):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -4388,6 +4464,85 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             except Exception:
                 pass
     samples = samples.to(comfy.model_management.intermediate_device())
+
+    # ── v14.317: 段内硬切拦截(结果层) ─────────────────────────────────────
+    # 动机(用户 2026-11-05 实测): clip2 f48 从"蓝调入夜胸像"一帧跳到"橙粉落日
+    # 海边中景" —— 像素域帧间差 12.26x 中位、低频差 24.29x 中位, 像素层与场景层
+    # 同时暴涨。v14.312 的 prompt 层规则在代码里却没拦住这一刀: 光线时间线
+    # 倒流(入夜又回到落日)是**条件文本内部**的矛盾, 模型在某一帧突然"想起"
+    # 脚本里的落日, 一帧硬切过去。文字规则能减少概率, 不能保证。
+    #
+    # 所以拦截做在**结果层**: 一采 latent 里检出这种硬切就换 seed 重采样。
+    # 判据用**真实一采 latent** 标定过(阈值 1.6/1.8, 相位感知基线),
+    # 详见函数 docstring 与 CHANGELOG。
+    #
+    # 重采样保持同一份 latent_image / noise_mask —— 段间 motion context 锚点
+    # (上一段尾 latent)不动, 所以段间接缝不受影响; 只换噪声种子重掷这一段。
+    _cut_guard_on = str(os.environ.get("BSAI_H3_CUT_GUARD", "1")).strip().lower() \
+        not in ("0", "false", "off")
+    try:
+        _cut_retries = max(0, int(os.environ.get("BSAI_H3_CUT_RETRIES", "2")))
+        _cut_pthr = float(os.environ.get("BSAI_H3_CUT_PIX_THR", "1.6"))
+        _cut_lthr = float(os.environ.get("BSAI_H3_CUT_LF_THR", "1.8"))
+    except Exception:
+        _cut_retries, _cut_pthr, _cut_lthr = 2, 1.6, 1.8
+    if _cut_guard_on:
+        _cut_hits = _ff_detect_latent_hard_cut(samples, _cut_pthr, _cut_lthr, one_shot_trim_frames)
+        if _cut_hits:
+            _cut_best = samples
+            _cut_best_hits = _cut_hits
+            for _cut_try in range(_cut_retries):
+                _h = _cut_best_hits[0]
+                print(f"[H3 Extender] v14.317 硬切拦截: 一采 latent 检出硬切 row={_h['row']} "
+                      f"(≈成片帧 {_h['out_frame']:.0f}) 帧间差 {_h['dr']:.2f}x中位 "
+                      f"低频差 {_h['lr']:.2f}x中位 共{len(_cut_best_hits)}处 "
+                      f"-> 换 seed 重采样({_cut_try + 1}/{_cut_retries})", flush=True)
+                _cut_seed = int(seed) + 7919 * (_cut_try + 1)
+                _cut_alloc = None
+                try:
+                    _cut_alloc = BSAIOrch.allocate("sampling", requester="8191")
+                except Exception:
+                    _cut_alloc = None
+                _cut_samples = None
+                try:
+                    _cut_noise = comfy.sample.prepare_noise(latent_image, _cut_seed, batch_inds)
+                    _cut_samples = guider.sample(
+                        _cut_noise,
+                        latent_image,
+                        sampler,
+                        sigmas,
+                        denoise_mask=noise_mask,
+                        callback=callback,
+                        disable_pbar=disable_pbar,
+                        seed=_cut_seed,
+                    )
+                    _cut_samples = _cut_samples.to(comfy.model_management.intermediate_device())
+                except Exception as _cut_err:
+                    print(f"[H3 Extender] v14.317 硬切拦截重采样失败(保留原结果): {_cut_err}",
+                          flush=True)
+                    _cut_samples = None
+                finally:
+                    try:
+                        if _cut_alloc is not None:
+                            _cut_alloc.release()
+                    except Exception:
+                        pass
+                if _cut_samples is None:
+                    break
+                _cut_new = _ff_detect_latent_hard_cut(
+                    _cut_samples, _cut_pthr, _cut_lthr, one_shot_trim_frames)
+                print(f"[H3 Extender] v14.317 硬切拦截: seed={_cut_seed} 重采样完成, "
+                      f"剩余硬切 {len(_cut_new)} 处(原 {len(_cut_best_hits)} 处)", flush=True)
+                if len(_cut_new) < len(_cut_best_hits):
+                    _cut_best = _cut_samples
+                    _cut_best_hits = _cut_new
+                if not _cut_best_hits:
+                    print("[H3 Extender] v14.317 硬切拦截: 重采样后无硬切, 采用该结果", flush=True)
+                    break
+            samples = _cut_best
+            if _cut_best_hits:
+                print(f"[H3 Extender] v14.317 硬切拦截: 重采样次数用尽, 仍剩 "
+                      f"{len(_cut_best_hits)} 处硬切(保留最优的一次)", flush=True)
 
     # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
     # 技术流程（对齐 BSAI-ComfyUI-Sol-H3 LatentUpscaleAlign 极速版）：
@@ -13289,6 +13444,7 @@ class BSAIH3FilmFactory:
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
                     refine_single_pass=bool(one_shot_dual_2k),
                     refine_no_temp_chunk=bool(_rp_no_temp_chunk),
+                    one_shot_trim_frames=int(trim_frames or 0),
                     omni_8step_mode=omni_8step_mode,
                     honor_manual_steps=(str(speed_preset) == "custom"),
                     # v14.238 MiniMaxH3 Director 极速双采移植参数
