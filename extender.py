@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.310-space-anchor-transit-boundary"
+BUILD = "minimax-h3-extender-v14.316-taomate-x15-bicubic"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -10276,9 +10276,14 @@ class BSAIH3FilmFactory:
                 # v14.315: tile_count 4 -> 8。x2.0 放大后整段 709,920 tokens, 4 块
                 # 每块 ~272k, 24GB 卡上 DiT 只驻留得住 ~13.8GB, 单块 forward 仍要 3.1GB
                 # → 实机 OOM。8 块每块 ~136k, 激活减半; 接缝由 128px overlap 融合。
+                # v14.316: x2.0 -> x1.5。24GB 卡上 8 块分块 x2.0 仍 OOM
+                # (DiT 驻留 16GB, 单块激活 2.7GB, fallback 21.6GB+2.2GB 仍爆)。
+                # x1.5 后 latent 120x68 -> 90x51, tokens 750k -> 422k (-44%),
+                # 8 块每块 ~53k tokens, 单块激活 ~1.5GB, 24GB 可装下。
+                # 3D upscaler 按 x2.0 训练, x1.5 不挂 3D 权重, 退 bislerp 插值。
                 steps, refine_steps, tile_count, refine_denoise = 4, 3, 8, 0.45
                 refine_enable = True
-                refine_upscale_factor = 2.0   # 3D latent upscaler 的训练倍率; 低分画布 x0.5 -> 1080p
+                refine_upscale_factor = 1.5   # v14.316: 2.0->1.5 防 24GB OOM
                 refine_align_to = 32
                 tiled_refine = True   # v14.307: 空间分块保留(x2.0 放大后 tokens 大, 防二采 OOM)
                 tile_overlap = 128
@@ -10306,17 +10311,24 @@ class BSAIH3FilmFactory:
                                 break
                 except Exception:
                     _tm_pick = None
-                refine_upscaler_model = _tm_pick if _tm_pick else ""
+                # v14.316: x1.5 不是 3D latent upscaler 的训练倍率(它是按 x2.0
+                # 训练的) -> 本档**不挂** 3D 权重, 退 bislerp 插值。
+                # 挂错倍率的权重比不挂更糟: 结构分布与训练不一致, 二采欠采样会把它
+                # 固化成横带/波纹(v14.304 实机记录过同一类故障)。
+                if _tm_pick:
+                    print("[H3 Extender] v14.316 TaoMate HD: 本档二采倍率为 x1.5, "
+                          "3D latent upscaler 按 x2.0 训练 -> 不挂 3D 权重, 退 bislerp 插值")
+                refine_upscaler_model = ""
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
                     print(f"[H3 Extender] v14.304 TaoMate HD(渲染管道): 采样器强制 euler + simple")
                 scheduler = "simple"
-                print("[H3 Extender] 🚀 v14.304 TaoMate HD 4+3 半分辨率提升双采: "
+                print("[H3 Extender] 🚀 v14.316 TaoMate HD 4+3 半分辨率提升双采: "
                       "TaoMate HD 3步蒸馏渐进放大 LoRA (slmonker/TaoMate-HD-preview-comfy) —— "
-                      "一采 4 步低分画布 + 二采 3 步精修 (denoise 0.45, latent x2.0, "
-                      f"upscaler={refine_upscaler_model or 'bislerp 插值(无 3D 权重)'}) = 7 NFE; "
+                      "一采 4 步低分画布 + 二采 3 步精修 (denoise 0.45, latent x1.5, "
+                      f"upscaler={refine_upscaler_model or 'bislerp 插值(x1.5 不挂 3D 权重)'}) = 7 NFE; "
                       f"自动时间分块已禁用(防接缝闪烁); 空间分块保留({tile_count} 块, 防二采 OOM); "
                       "画布请设半尺寸(1080p 出片 -> 960x544), LoRA 槽挂 TaoMate-HD-preview-comfy.safetensors "
                       "(strength 1.0, 禁止叠加第二个加速 LoRA); cfg 1.0, shift 12/3")
