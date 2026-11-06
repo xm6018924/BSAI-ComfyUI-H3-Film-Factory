@@ -2,6 +2,16 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.323 (2026-11-06) — 新增第 31 档渲染管道：TaoMate HD (8+4) 一采8步 + 二采4步 / New tier 31: TaoMate HD (8+4)
+
+**需求**：TaoMate HD（4+3）档保持不变，在其后**新增**一档同 LoRA 配方、只拉步数的质量档：一采 8 步 + 二采 4 步 = 12 NFE。快捷按钮下拉里紧挨在 (4+3) 之后。
+
+**配方**：与 (2+1) 档共用全部参数 —— 半分辨率一采画布（1080p 出片 → 960x544）、euler+simple、cfg 1.0、shift 12/3、二采 denoise 0.45、latent x2.0（3D latent upscaler 训练倍率）、16 块分块 + 128px overlap、禁用自动时间分块；仅 `steps / refine_steps` 由 4/3 变为 8/4（同一 elif 分支内按档位分叉，不新增分支）。
+
+**前端同步（按既定顺序）**：后端枚举 → `_RENDER_PIPELINE_EN2ZH` → `QUICK_DEFS` 的 `cycle / cycleLabels / cycleAliases / tints` → `H3LegacyCompat.OPTIONS` → `ALIAS_CANON` → 跑自检。新档插在 TaoMate HD (4+3) 之后、Singularity 之前；`DEFAULTS` 65 号位未动（默认档不变）。
+
+**验证**：`py_compile` 通过；`node --check` 通过；`tools/check_quickbar_enum_sync.py` 三向 32 档 `SYNC OK`；`RENDER_PIPELINES_REFERENCE.md` 与 README 同步为 32 档。实机出片仍需单独验收。
+
 ### v14.322 (2026-11-05) — 新增第 31 档渲染管道：SingularityV2+Pika H3 8步 高动态长视频 (导演台双采) / New tier 31: Singularity V2 + Pika H3 8-step High-Motion
 
 **来源**：B站《逼近SeeDance！Singularity V2 + Pika H3 + 高动态LoRA H3导演台长视频生成》（BV1y8446DExi，大凯AI，8分27秒）。逐字稿 5 章 + 全文已提取，简介资源清单逐条对照本机。

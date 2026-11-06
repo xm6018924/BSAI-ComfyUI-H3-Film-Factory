@@ -108,6 +108,7 @@
 | 28 | PTD 4-step Ref2VA | 4单采 | per-hop Ref2VA 加速 LoRA | 参考图加速 |
 | 29 | **PIKA H3 Flex 6+2** | 6单采 | pika_h3_flex_ref2va_v1(1.0，禁叠加速LoRA) | **直出1080p** |
 | 30 | **TaoMate HD 3-Step Progressive** | 2+1 | TaoMate-HD-preview-comfy(1.0，禁叠加速LoRA) | **1080p性价比王** |
+| 31 | **TaoMate HD 8+4 Progressive** | 8+4 | TaoMate-HD-preview-comfy(1.0，禁叠加速LoRA) | **1080p画质版** |
 
 ### 五、全局开关默认值（出片前核对）/ Global Switches
 

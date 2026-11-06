@@ -37,7 +37,7 @@
 
 ---
 
-## 三、渲染管道（render_pipeline）全 31 档
+## 三、渲染管道（render_pipeline）全 32 档
 
 ### A. 默认/通用
 
@@ -70,7 +70,8 @@
 | 28 | **PTD 4-step Ref2VA** | 4单采 | 默认 | per-hop Ref2VA 加速 LoRA；需 Ref2VA 基模 | 参考图加速 |
 | 29 | **PIKA H3 Flex 6+2** | 6单采（refine跳过） | 强制 lcm，ManualSigmas knots 1000/750/500/250/100/40，shift 12/3，cfg 1.0 | `pika_h3_flex_ref2va_v1_bf16`(1.0，**禁叠第二个加速LoRA**)；基模 hybrid b25-49 | 直出1080p(960x544 latent→VAE原生1920x1088) |
 | 30 | **TaoMate HD 3-Step Progressive** | 2+1=3 | euler+simple，cfg 1.0，shift 12/3 | `TaoMate-HD-preview-comfy.safetensors`(1.0，**禁叠第二个加速LoRA**)；节点 slmonker/ComfyUI-TaoMateHD | 1080p直出，0.625x低采→bislerp x1.6→1步精修 |
-| 31 | **SingularityV2+Pika H3 8步 高动态长视频** | 8+3=11 | euler+simple，cfg 1.0，shift 12/3；二采 denoise 0.40，latent x2.0，3D upscaler，tiled 4x128，音频锁定 | 基模 `Minimax-h3_Singularity_ref2va_v2_int8`（链式一镜到底可留 hybrid b25-49）；加速 LoRA `pika_h3_flex_turbo_8step_hd_ref2va`(1.0，style 0.6 已烘焙) 或 `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16`；动作 LoRA **三选一** `Motion_Repair_V2` / `H3_Fight_Flow_V1` / `H3_Combat_V2` | 高动态动作 + 27s/30s 导演台长视频（BV1y8446DExi） |
+| 31 | **TaoMate HD 8+4 Progressive** | 8+4=12 | euler+simple，cfg 1.0，shift 12/3；二采 denoise 0.45，latent x2.0，3D latent upscaler，tiled 16x128 | `TaoMate-HD-preview-comfy.safetensors`(1.0，**禁叠第二个加速LoRA**)；节点 slmonker/ComfyUI-TaoMateHD | 1080p直出画质版，半分辨率一采8步→3D latent x2.0→4步精修 |
+| 32 | **SingularityV2+Pika H3 8步 高动态长视频** | 8+3=11 | euler+simple，cfg 1.0，shift 12/3；二采 denoise 0.40，latent x2.0，3D upscaler，tiled 4x128，音频锁定 | 基模 `Minimax-h3_Singularity_ref2va_v2_int8`（链式一镜到底可留 hybrid b25-49）；加速 LoRA `pika_h3_flex_turbo_8step_hd_ref2va`(1.0，style 0.6 已烘焙) 或 `minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16`；动作 LoRA **三选一** `Motion_Repair_V2` / `H3_Fight_Flow_V1` / `H3_Combat_V2` | 高动态动作 + 27s/30s 导演台长视频（BV1y8446DExi） |
 
 ### D. 分辨率/画质档
 
