@@ -2,6 +2,20 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.325 (2026-11-07) — 建筑类场景词补全 + 角色判定只看紧贴标签的名词短语 / Architecture scene cues; role probe narrowed to the adjacent noun phrase
+
+**用户实测（20 段建筑巡游，资产库 22 张图）**：每段标题形如 `S2 雅典帕特农神庙·卫城山门@图4`、`S11 伦敦塔桥·桥头塔楼@图13`，但日志里这些编号全被判成**人物**（`clip[1] 人物=['<Picture 1>', '<Picture 3>', '<Picture 4>']`）。场景锁定纪律因此从不注入，环境一致性全靠正文文字。
+
+**根因**：`_SCENE_CUES` 只有「场景/背景/街道/广场/桥/巷/公园」这类通用词，建筑名（神庙/教堂/塔楼/拱廊/石阶）一个都不命中；而 `_PROP_CUES` 和 `_SCENE_CUES` 都按"标签前 14 字"整窗做子串匹配，所以补词后又会误伤 —— 实测 `…沿平台前行 主播<Picture 1>` 会因为窗口里有「平台」把**人物**判成场景。
+
+**修复**：
+1. `_SCENE_CUES` 补建筑类词，按 场所（神庙/教堂/清真寺/宫殿/城堡/遗址…）、塔桥（塔/塔楼/斜塔/大桥/桥头…）、门廊庭院（拱门/山门/券门/拱廊/回廊/内庭…）、阶台栈道（石阶/台阶/平台/栈道…）、城防水岸（城墙/城台/筒子河/河畔/石栏…）分组。
+2. `_classify_picture_roles` 的匹配范围从"前 14 字整窗"收紧到**紧贴标签的名词短语**（以空格、间隔号 `·`、括号、箭头、标点切分；标签紧跟标点时退回整窗）。这样 `卫城山门<Picture 4>` 判场景、`主播<Picture 1>` 判人物，互不污染。
+
+**验证**（离线重放日志里的真实线路串）：clip1/7/13/19 四段均为 `场景=线路上的建筑编号、人物=1、物品=2`；既有用例不回退 —— `小瓶香薰<Picture 4>`→物品、`场景<Picture 2>`→场景、无前置线索→人物。
+
+**English**：The scene lexicon only had generic space words, so architectural names (temple, cathedral, tower, arcade, stone steps) never matched and those references were typed as people — the scene discipline never fired. Adding the words alone was not enough: the 14-character window before a tag also contains the previous beat's motion clause, so `…walking along the platform 主播<Picture 1>` became a scene. The probe now only scans the noun phrase directly adjacent to the tag (split on spaces, interpuncts, brackets, arrows and punctuation), falling back to the full window when the tag follows punctuation directly.
+
 ### v14.324 (2026-11-07) — 参考图纪律修复：不再写 `<Picture N>` 编号，改为按角色注入 / Reference-discipline fix: role-based, no picture numbers
 
 **用户实测日志（20 段一镜到底建筑巡游，22 张资产图）**：每段 `effective_prompt` 的纪律句退化成一串空分隔符：
