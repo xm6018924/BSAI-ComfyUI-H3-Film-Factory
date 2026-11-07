@@ -2,6 +2,25 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.324 (2026-11-07) — 参考图纪律修复：不再写 `<Picture N>` 编号，改为按角色注入 / Reference-discipline fix: role-based, no picture numbers
+
+**用户实测日志（20 段一镜到底建筑巡游，22 张资产图）**：每段 `effective_prompt` 的纪律句退化成一串空分隔符：
+
+```
+[H3 Extender] clip[0] effective_prompt: '【参考图纪律】、、、、、、、、、、、、、、、、 是画面人物的参考图，…'
+```
+
+**根因**：v14.313 把每张参考图的编号（`<Picture 1>、<Picture 3>…`）拼进纪律文本。每段的参考图重映射（`_remap_prompt_text`）只保留该段前 `MAX_IMAGE_REFS=9` 个出现的编号，其余编号被**直接替换为空串**（该函数原本的语义是"超出槽位的引用整条丢弃"）。纪律句写在正文最前面，clip[0] 的 17 个人物编号全部落在这 9 个名额之外，于是标签全被删、只剩 `、`。副作用是这些编号还**抢占**了每段的 9 个参考图槽位（真实正文引用反而被挤掉）。
+
+**修复**（纯文本层，不改任何采样参数）：
+- 四条纪律（参考图 / 服装锁定 / 物品锁定 / 场景锁定）去掉 `{slots}` 占位，改为按角色描述：例如"画面中将要出现的物品（道具/产品）的参考图…"。具体是哪一张由正文里的标签自身说明，纪律只负责声明"参考图里的物品/服装/场景必须逐项复刻"。
+- 注入点仍按标签前置词判定人物/物品/场景，只在对应角色存在时注入对应纪律；日志改为打印编号列表（仅日志用，不进提示词）。
+- 纪律文本不再参与编号收集，因此不再影响每段参考图的排序与槽位预算。
+
+**English**：The discipline text used to embed each reference's `<Picture N>` number. Per-clip reference remapping keeps only the first `MAX_IMAGE_REFS=9` numbers found in the prompt and replaces every other tag with an empty string, and because the disciplines were prepended, all of clip 0's 17 person numbers fell outside that budget — leaving bare `、` separators and stealing the slot budget from the clip's real references. The four rules are now role-based with no numbers, so the text no longer collides with remapping.
+
+**验证**：`py_compile` 通过；同一条 20 段脚本离线重放注入逻辑，纪律句恢复为完整中文表述，无空分隔符，注入前后正文逐字不变。实机出片仍需单独验收。
+
 ### v14.323 (2026-11-06) — 新增第 31 档渲染管道：TaoMate HD (8+4) 一采8步 + 二采4步 / New tier 31: TaoMate HD (8+4)
 
 **需求**：TaoMate HD（4+3）档保持不变，在其后**新增**一档同 LoRA 配方、只拉步数的质量档：一采 8 步 + 二采 4 步 = 12 NFE。快捷按钮下拉里紧挨在 (4+3) 之后。

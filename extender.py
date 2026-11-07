@@ -171,8 +171,12 @@ AUDIO_LATENT_FPS = 40
 #   只保留两条手臂" —— H3 在 CFG=1.0 下**没有负向分支**，否定句与"半截肢体"
 #   这类负面素材词会被当画面内容渲染，等于把要防的东西递给了模型。
 #   正向版只描述"画面里应该是什么样"，不点名任何不要出现的东西。
+# v14.324: 纪律文本里不再写 <Picture N> 编号。编号在每段参考图重映射时会被
+# 整段丢弃(未进前 MAX_IMAGE_REFS 的标签直接替换为空串), 纪律句因此退化成
+# 一串空分隔符(实测 "【参考图纪律】、、、、、、…"), 同时这些编号还会抢占
+# 每段的参考图槽位预算。改用角色描述, 具体是哪一张由正文里的标签自己说明。
 _REF_SHEET_RULE = (
-    "【参考图纪律】{slots} 是画面人物的参考图，通常是同一角色的多角度/多视图设定拼版；"
+    "【参考图纪律】画面人物的参考图通常是同一角色的多角度/多视图设定拼版；"
     "画面里出现的是这一位角色本人的外形、发型与服装，这一位角色在整部片里始终是同一个人，"
     "身体完整地出现在画面中，两条手臂自然地随动作摆动；拼版里的各个视角与局部细节"
     "统一体现为这一位角色本人的完整身影。\n"
@@ -190,7 +194,7 @@ _REF_SHEET_RULE = (
 #   (一采 latent 相位离群 1.37x, 像素域 5.81x)，与"改换颜色/更换外套"同型。
 #   正向版只反复陈述"穿的就是参考图里那几件、款式与颜色始终一致"。
 _OUTFIT_LOCK_RULE = (
-    "【服装锁定纪律】画面主体人物（主播/主角）的实际穿着与 {slots} 参考图中"
+    "【服装锁定纪律】画面主体人物（主播/主角）的实际穿着与画面人物参考图中"
     "该人物的真实服装完全一致：款式、颜色、材质、上下装搭配逐项复刻参考图，"
     "人物与参考图同框时穿的是同一件衣服，整部片里这套服装的款式与颜色始终保持一致。"
     "人物转身、侧身、走动、做手势或表情变化时，身上的上衣、外套、衬衫、下装与"
@@ -204,10 +208,10 @@ _OUTFIT_LOCK_RULE = (
 #   香薰蜡烛罐的参考图，成片却画成一支黑盖香水瓶——品牌字样被抄了，物品类别被
 #   文本先验"小瓶香薰"顶掉。根因是插件此前只注入"参考图=角色多视图设定板"与
 #   "服装锁定"两条纪律，@图4 被当成角色/服装参考，没有任何"这件物品必须照参考图
-#   复刻"的指令。本纪律按标签编号精确绑定物品参考，并用正向措辞（H3 CFG=1.0 无
+#   复刻"的指令。本纪律按角色绑定物品参考，并用正向措辞（H3 CFG=1.0 无
 #   负向分支）声明类别、轮廓、结构、标签逐项一致。
 _PROP_LOCK_RULE = (
-    "【物品锁定纪律】{slots} 是画面中将要出现的物品（道具/产品）参考图，"
+    "【物品锁定纪律】画面中将要出现的物品（道具/产品）的参考图，"
     "画面里这件物品与参考图完全一致：物品类别、外形轮廓、高宽比例、颜色、材质与"
     "表面质感、盖子与罐身结构、标签位置与上面的文字逐项复刻参考图；"
     "分镜正文里对这件物品的称法（例如“香薰”“小瓶”“蜡烛”“产品”）指的就是参考图里"
@@ -218,7 +222,7 @@ _PROP_LOCK_RULE = (
 # "角色设定板"纪律，模型容易把场景图当人物参考而弱化环境一致性。正向声明环境以
 # 参考图为准，只改机位不改地点。
 _SCENE_LOCK_RULE = (
-    "【场景锁定纪律】{slots} 是画面环境（场景）参考图，画面环境以该参考图的建筑、"
+    "【场景锁定纪律】画面环境（场景）的参考图，画面环境以该参考图的建筑、"
     "地形、地面材质、光源方向与整体色调为准，整段片子都在这个地点里拍摄，"
     "镜头只改变机位与景别，场景本身保持前后连续。\n"
 )
@@ -9380,25 +9384,26 @@ class BSAIH3FilmFactory:
             # v14.313: 参考图按角色分纪律注入。此前不区分参考图类型，所有 <Picture N>
             # 都被声明成"角色多视图设定板 + 服装参照"，产品/场景参考图因此没有绑定
             # 指令（实测 @图4 香薰蜡烛被画成香水瓶）。这里按标签前置词判定
-            # 人物/物品/场景，分别注入对应纪律，并用具体编号替代原来的占位 N。
+            # 人物/物品/场景，分别注入对应纪律。
+            # v14.324: 纪律文本不再携带 <Picture N> 编号 —— 编号在每段参考图重映射
+            # 时会被整段丢弃, 纪律句会退化成空分隔符, 还会抢占每段 9 个参考图槽位。
             if "<Picture " in prompt and "【参考图纪律】" not in prompt:
                 _roles = _classify_picture_roles(prompt)
-                _person = [f"<Picture {s}>" for s in sorted(_roles) if _roles[s] == "person"]
-                _props = [f"<Picture {s}>" for s in sorted(_roles) if _roles[s] == "prop"]
-                _scenes = [f"<Picture {s}>" for s in sorted(_roles) if _roles[s] == "scene"]
+                _person = sorted(s for s, r in _roles.items() if r == "person")
+                _props = sorted(s for s, r in _roles.items() if r == "prop")
+                _scenes = sorted(s for s, r in _roles.items() if r == "scene")
                 _heads = []
                 if _person:
-                    _slots = "、".join(_person)
-                    _heads.append(_REF_SHEET_RULE.format(slots=_slots))
-                    _heads.append(_OUTFIT_LOCK_RULE.format(slots=_slots))
+                    _heads.append(_REF_SHEET_RULE)
+                    _heads.append(_OUTFIT_LOCK_RULE)
                 if _props:
-                    _heads.append(_PROP_LOCK_RULE.format(slots="、".join(_props)))
+                    _heads.append(_PROP_LOCK_RULE)
                 if _scenes:
-                    _heads.append(_SCENE_LOCK_RULE.format(slots="、".join(_scenes)))
+                    _heads.append(_SCENE_LOCK_RULE)
                 if _heads:
                     prompt = "".join(_heads) + prompt
-                    print(f"[H3 Extender] v14.313 clip[{clip_idx}] 参考图角色判定: "
-                          f"人物={_person} 物品={_props} 场景={_scenes}")
+                    print(f"[H3 Extender] v14.324 clip[{clip_idx}] 参考图角色判定: "
+                          f"人物={_person} 物品={_props} 场景={_scenes}（纪律按角色注入，不绑定编号）")
 
             if prompt != original_prompt:
                 print(f"[H3 Extender] clip[{clip_idx}] prompt resolved: '{original_prompt[:60]}' -> '{prompt[:60]}'")
