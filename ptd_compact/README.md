@@ -1,0 +1,112 @@
+# ComfyUI-PTD-Compact
+
+A loader, sampler and sigmas node for MiniMax-H3 PTD few-step adapters in ComfyUI. It loads the PTD
+releases below, in their original form or as smaller int8 files, on the full or the pruned base:
+
+| Release | Task | Steps | Adapter files |
+|---|---|---|---|
+| EPFL ([epfl-vita/PTD-weights](https://huggingface.co/epfl-vita/PTD-weights)) | fl2va | 4, 6 | bf16 / int8 / int8 r5 in [nynxz/MiniMax-H3-PTD-LoRAs](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs) |
+| taobao-content-ai ([MiniMax-H3-PTD-LoRAs](https://huggingface.co/taobao-content-ai/MiniMax-H3-PTD-LoRAs)) | Ref2VA | 4, 8 | their bf16 files, or `ptd_h3_ref2va_{4,8}step_int8` in [nynxz/MiniMax-H3-PTD-LoRAs](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs) |
+| taobao-content-ai ([MiniMax-H3-PTD-RefAsymOPD-LoRAs](https://huggingface.co/taobao-content-ai/MiniMax-H3-PTD-RefAsymOPD-LoRAs)) | Ref2VA | 8 | their bf16 file, or `ptd_h3_ref2va_refasymopd_8step_int8` in [nynxz/MiniMax-H3-PTD-LoRAs](https://huggingface.co/nynxz/MiniMax-H3-PTD-LoRAs) |
+
+## Install
+
+Clone it into `custom_nodes`; no pip install is needed:
+
+    cd ComfyUI/custom_nodes
+    git clone https://github.com/Nynxz/ComfyUI-PTD-Compact
+
+It carries the runtime part of the official [ComfyUI-PTD](https://github.com/vita-epfl/PTD-inference) pack in
+`ptd_inference/` and registers its PTD Loader / Sampler / Sigmas nodes too, so workflows built for the official
+pack run without it installed.
+
+Put the adapter files in `ComfyUI/models/ptd/`, then wire
+
+`Load Diffusion Model → Load PTD MiniMax-H3 Adapters (compact) → Basic Guider + PTD Sampler (compact) +
+PTD Sigmas (compact) → SamplerCustomAdvanced`
+
+For Ref2VA files, load a **ref2va** base and condition with **MiniMax H3 Reference to Video**. The step count
+comes from the file. With this loader in the graph, the official PTD Sampler / Sigmas work
+too, for both releases (they are pointed at the same code). If you still have the official pack cloned without
+its pip install, its `No module named 'ptd'` error in the log is harmless: this pack registers those nodes itself.
+If it is pip-installed and loads, its own copy of the nodes is used instead.
+
+## Options
+
+`kernels`:
+
+- **exact (PTD reference)**, the default: PTD's own bf16 block maths, as the adapters were trained.
+- **fast (native kernels)**: ComfyUI's fused native blocks, about 4–8% faster per step. Only the rounding
+  order differs.
+
+## Base model
+
+Use the base the adapters were trained on, fl2va for the EPFL files and ref2va for Ref2VA.
+
+| `diffusion_models/` file | Works |
+|---|---|
+| `minimax_h3_{fl2va,ref2va}_bf16` | yes, the validated bases |
+| `minimax_h3_{fl2va,ref2va}_pruned_bf16` | yes, this loader only |
+| `…_int8_convrot`, `…_pruned_int8_convrot`, `…_pruned_fp8_scaled` | yes |
+| `…_pruned_w6a8` | no, its video head is quantized |
+
+The pruned bases keep every layer PTD adapts byte-identical to the original and replace only the time path
+with a small curve table, which matches the original AdaLN to within 0.03% at both releases' step times
+(10× below the original's own bf16 rounding). Comfy-Org's ref2va is byte-identical to MiniMax's
+`transformer_ref`, which the Ref2VA adapters were trained on.
+
+## int8 files
+
+Each per-step adapter's error against the original is under 1.2% (mean 0.4–0.9%), at a quarter (EPFL) or
+half (Ref2VA, from bf16) of the size. To make one from a Ref2VA file:
+
+    python tools/ref2va_int8.py MiniMax-H3-Ref2VA-PTD-4Step.safetensors ptd_h3_ref2va_4step_int8.safetensors
+
+In side-by-side renders (same seed), swapping bf16 for int8 adapters, the pruned int8 base for the pruned
+bf16 one, or `exact` for `fast` each changes the video by the same small amount, at the level of rounding
+noise. The int8 base runs about 3× faster than the bf16 one on a 32 GB card.
+
+## Notes
+
+- **Memory:** the adapter bank stays in system RAM (int8: about 2.8 GB for a 4-step file). Each layer
+  copies only the current step's factors to the GPU.
+- **DynamicVRAM:** supported, including ComfyUI's allocation compiler. The log shows per-step residency,
+  e.g. `PTD hop 2 VRAM: base model resident 19.5/19.5 GB …`, and a run summary,
+  `PTD: 4 hops in 41.8 s (10.45 s/hop)`. If the compiler ever fails (`aimdo memory compile error`), that run
+  is sampled again without it and a warning is logged.
+- **Ref2VA** output matches taobao-content-ai's own ComfyUI implementation bit for bit in `exact` mode.
+- **Other LoRAs** stack with PTD in either order.
+
+## SelfLift (experimental)
+
+**PTD SelfLift Sampler (compact, experimental)** applies [SelfLift](https://github.com/facok/comfyui-SelfLift)'s
+progressive resolution to the Ref2VA files. Hops `0 … transition_hop-1` run on a `lowres_scale` latent, the
+last of them predicts the clean video, SelfLift lifts it to full size (nearest, its pixel-VAE anchor `rho`, or
+its external H3 latent upscaler) and the remaining hops run at full size. The hop count is unchanged and every
+hop still runs at its trained time. It needs comfyui-SelfLift installed next to this pack, and it replaces
+`SamplerCustomAdvanced`: wire the PTD model, the positive conditioning, the video VAE and the empty latent from
+MiniMax H3 Reference to Video straight into it.
+
+Neither H3 nor the adapters were trained at the low resolution, so treat it as a speed experiment and compare
+against a plain PTD render on the same seed.
+
+## Tests
+
+From the `tests` directory (run from the pack root, pytest collects the pack's own `__init__.py`):
+
+    cd tests
+    COMFYUI=/path/to/ComfyUI PYTHONPATH=/path/to/ComfyUI:/path/to/custom_nodes \
+        python -m pytest . -q --import-mode=importlib
+
+Set `PTD_REPO` to an official PTD-inference checkout to include the tests that load it alongside this pack,
+and `PTD_SELFLIFT_DIR` to a comfyui-SelfLift checkout to include the SelfLift tests.
+
+To update the vendored code, run `python tools/vendor_ptd.py /path/to/PTD-inference` on a checkout of its
+`release/comfyui-inference` branch.
+
+## License
+
+Apache-2.0, like the official ComfyUI-PTD pack it builds on and vendors (`ptd_inference/`, with its LICENSE
+and NOTICE); the Ref2VA support follows
+taobao-content-ai's ComfyUI-MiniMaxH3-PTD (Apache-2.0), see [NOTICE](NOTICE). The adapter weights and
+MiniMax-H3 have their own licences; see the model repos.

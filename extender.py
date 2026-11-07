@@ -607,6 +607,73 @@ def _read_frames_from_mp4(path, ffmpeg, total_frames, trim, width, height):
     return torch.from_numpy(arr.copy()).float().div_(255.0)
 
 
+# ---------------------------------------------------------------------------
+# v14.330 全片 IMAGE 预览累积预算（内存止血）
+#
+# 每段 decode 得到的 IMAGE 是 float32 [T,H,W,C] 0..1：
+#   1920x1088 / 289 帧 ≈ 6.75 GB/段，19 段 ≈ 128 GB。
+# 全部 append 到 out_images 会把系统提交内存顶到 130GB+，在 63.5GB 物理内存的机器上
+# 必然触发 pagefile 抖动 —— 实测墙钟 52min / 72min / 95min 一段，而实际采样只有 8~10min。
+#
+# 全片 MP4 已按段落盘（output/bsai_clips），合并由 BSAI Premiere Pro 节点完成；
+# IMAGE 端口只用于 UI 预览，_concat_clip_av 在 OOM 时本来就降级为单帧占位。
+# 因此这里给累积设预算：超预算即停止累积、只留 1 帧占位，内存增长归零。
+#   BSAI_H3_AV_BUDGET_GB  默认 6（uint8 字节上限）
+# ---------------------------------------------------------------------------
+def _av_acc_budget_bytes():
+    try:
+        return int(float(os.environ.get("BSAI_H3_AV_BUDGET_GB", "6")) * (1024 ** 3))
+    except Exception:
+        return 6 * 1024 ** 3
+
+
+def _av_acc_push(out_images, img, state, budget):
+    """把单段 IMAGE 以 uint8 追加进预览累积队列；超预算则清空并停止累积。
+
+    返回 True=本段已累积（或无需累积），False=已因超预算跳过。
+    调用方无论如何都要把该段标记为已解码，避免收尾时重复 decode。
+    """
+    if img is None or int(img.shape[0]) == 0:
+        return True
+    if state.get("skip"):
+        return False
+    try:
+        n = int(img.numel())
+    except Exception:
+        return True
+    if (state.get("used", 0) + n) > budget:
+        keep = None
+        try:
+            if out_images:
+                keep = out_images[0][:1]
+        except Exception:
+            keep = None
+        out_images.clear()
+        if keep is not None:
+            out_images.append(keep)
+        state["skip"] = True
+        print(
+            f"[H3 Extender] v14.330 IMAGE 预览累积超预算 {budget / 1024 ** 3:.1f}GB："
+            f"已停止全片 IMAGE 累积（保留 1 帧占位）。全片以 per-clip MP4 / 合并 MP4 为准；"
+            f"避免每段 {n / 1024 ** 3:.2f}GB 的 float32 常驻把系统内存撑爆"
+        )
+        return False
+    try:
+        u8 = img.detach()
+        if u8.is_floating_point():
+            u8 = u8.clamp_(0.0, 1.0).mul_(255.0).round_().to(torch.uint8)
+        elif u8.dtype != torch.uint8:
+            u8 = u8.to(torch.uint8)
+        u8 = u8.contiguous()
+        out_images.append(u8)
+        state["used"] = state.get("used", 0) + int(u8.numel())
+    except Exception as _av_e:
+        print(f"[H3 Extender] v14.330 IMAGE 预览累积降级(保留 float32): {_av_e}")
+        out_images.append(img)
+        state["used"] = state.get("used", 0) + n
+    return True
+
+
 def _mp_has_ck_quant_weights(model):
     """检测 ModelPatcher 是否携带 comfy_kitchen 量化权重（QuantizedTensor 参数）。
 
@@ -7048,11 +7115,31 @@ _OS_LIGHT_COMPOSITION_RULE = (
 #   不用否定句(H3 CFG=1.0 不认), 用正向"始终只有"替代"不同时出现"。
 # 同时改 HEAD_RULE 里的「脚下的路面与两侧景物在前进中连续地流过」为
 #   「走过的景物留在画框后方, 前方的景物随步伐自然进入」—— 避免"流过"的渐变歧义。
+# ── v14.332 (2026-11-07): 换场段把"换场"压进段首一瞬, 且由门墙遮挡完成 ────────
+#
+# 实测证据(用户 19 段一镜到底 MV, clip5 h3_clip_250_5_1794036207.mp4):
+#   * 段内 scene 检测全片只有一处突变: pts 1.541667s, scene_score=0.2546;
+#     抽帧(1.05/1.22/1.38s vs 1.55/1.72/1.88s)证实是**整幅背景替换**:
+#     夜景街道(路灯/店铺/柏油路面) → 哥特尖拱石廊内景(拱门/石柱/地毯/吊灯),
+#     人物胸像构图几乎不动 —— 即"门洞两侧"被模型做成了硬切, 而不是跨过。
+#   * 旧文本自相矛盾: 第二句写"本段的第一拍起, 画面里的空间就已经是这一处空间",
+#     第四句又写"上一处空间在开头的一瞬位于画幅边缘, 随主体向前走出画幅"。
+#     H3 同时满足两句的办法只有一个: 段首先给 1.4s 旧空间, 再用一帧换掉整幅背景。
+#   * 旧 HEAD_RULE 又要求"第一帧直接接着上一段末帧", 等于把第一帧钉死在**旧空间**
+#     的画面上, 换场于是被推迟到段中 —— 段内硬切的位置就是这么来的。
+#
+# 修法(纯文本层, 不动用户脚本; 同场景延续段完全不受影响):
+#   1) HEAD_RULE 改成"第一帧就是主体正跨过门洞的一刻", 换场落在段首(该处正是
+#      22 帧重叠区, 合片时被裁掉), 段中不再有第二个空间;
+#   2) SPACE_TRANSIT_RULE 删掉"上一处空间在开头的一瞬位于画幅边缘"这条许可,
+#      改成"画幅被门墙挡住的那一瞬完成景物置换"——遮挡置换是连续的镜头语言,
+#      机位/步频/画幅位置在遮挡前后一致, 画面本身没有跳变。
+#   措辞纪律沿用: 纯正向陈述, 不含 cut/转场/叠化/闪白/跳帧 等词, 不含否定句。
 _OS_SPACE_TRANSIT_HEAD_RULE = (
-    "\n[段首承接] 本段的第一帧直接接着上一段末帧那一帧往下拍："
-    "同一时刻、同一段连续行走，摄影机从上一段末尾所处的位置与运动状态继续它正在做的"
-    "运动，主体的步幅、身体姿态与视线方向从上一段末尾的状态平滑延续下来；"
-    "主体一路向前行走，走过的景物留在画框后方，前方的景物随步伐自然进入。"
+    "\n[段首承接] 本段的第一帧就是主体正跨过门前那道门洞的一刻：摄影机的高度、"
+    "朝向与运动状态从上一段末尾连续延续，主体的步幅、身体姿态与视线方向也从上一段"
+    "末尾的状态连续延续；门洞的石框从画幅一侧掠过，画面就在这一次跨过里落到门内"
+    "这一处空间，之后整段镜头都跟着同一次行走在门内向前。"
 )
 
 _OS_SCENE_ANCHOR_RULE = (
@@ -7072,16 +7159,15 @@ _OS_SAME_SPACE_RULE = (
 )
 
 _OS_SPACE_TRANSIT_RULE = (
-    "\n[空间过渡] 本段的第一拍起，画面里的空间就已经是这一处空间：上一处空间与"
-    "这一处空间是两处不同的空间，两者的地面材质、灯具样式、两侧建筑与景物各自不同；"
-    "上一处空间在开头的一瞬位于画幅边缘，随主体向前走出画幅；脚下的地面从上一处"
-    "一路连到这一处，主体向前行走的同时就进入了新的空间，画面里始终只有主体当下"
-    "所处的那一处空间的景物，两处空间之间由主体的行走动作完成切换，"
-    "展开之后就一直展开着，本段后续的画面都处在这一处已经展开的空间里；左右方位"
+    "\n[空间过渡] 本段只有一条连续行走：门外那一路的地面、灯具与建筑是上一处的，"
+    "门里这一路的地面、灯具与建筑是这一处的，两处空间在画面里由那道真实的门洞与"
+    "门墙分开。主体跨过门洞时，画幅被门墙与门框挡住的那一瞬，墙外的景物换成墙内的"
+    "景物；遮挡前后是同一台摄影机、同一个步频、同一个画幅位置，主体在画面中的朝向"
+    "与大小连续。跨过之后，本段画面里只有门里这一处空间的地面、墙面、灯具与建筑，"
+    "它们在同一次行走里逐帧展开，越往前走越展开，展开之后就一直展开着；左右方位"
     "自始至终保持一致；本段的光线与色调从上一段末帧那一刻的明暗与色温状态起算，"
-    "整段只逐拍向更深的夜色推进一小步，这一处空间里新出现的灯光在原有环境光上"
-    "由暗到亮逐渐显形，天空的亮度与色温随行走连续地向夜的深处演进，"
-    "步幅与节奏自始至终一致。"
+    "整段只逐拍向更深的夜色推进一小步，门里新出现的壁灯在原有环境光上由暗到亮"
+    "逐渐显形，天空的亮度与色温随行走连续地向夜的深处演进，步幅与节奏自始至终一致。"
 )
 
 # v14.319 (2026-11-05): 光影因果化 —— 把"没有画面内原因的整体换色"改写成
@@ -7265,18 +7351,33 @@ def _one_shot_size_anchor_rule(start=None, end=None):
     )
 
 
-def _one_shot_size_rule(locked_size=None, prev_end=None, cur_start=None):
+def _one_shot_size_rule(locked_size=None, prev_end=None, cur_start=None,
+                        full_sing=False):
     """v14.286: 生成景别相关的一镜到底规则文本(纯函数, 主循环与测试共用一份)。
 
     返回 (text, seam_mismatch):
       locked_size —— 用户显式声明的全片景别; 非空 → 锁死该景别
       prev_end    —— 上一段末帧景别
       cur_start   —— 本段首帧景别
+      full_sing   —— v14.332: 本段整段都在唱/说(lip_audio 覆盖全段)
 
     全文只用正向陈述 —— H3 在 CFG=1.0 下没有负向分支, "没有/看不到/禁止" 这类
     否定词会被当成画面内容渲染。
+
+    v14.332 实测(clip5): 锁死中全景 + "需要呈现唇形时推近、唇形段落结束后推回"
+    在**整段演唱**的段里没有"段落结束"这个时刻, 模型只执行了推近那一半 ——
+    12 秒全程停在胸像近景, 与 [全片统一景别] 的中全景互相矛盾。整段演唱时改成
+    "取景范围全程固定", 口型改在中全景画幅里表达。
     """
     if locked_size:
+        if full_sing:
+            return (
+                "\n[取景连续] 起幅、段中与末帧都保持{0}：摄影机沿同一条轨迹与他同速"
+                "同行、同距同高，取景范围整段固定为{0}，主体在画幅中的占画比例自始至终"
+                "稳定；他一路边走边唱，口型在中全景的画幅里直接可辨，嘴唇与下颌的开合"
+                "随歌声逐字清晰可见。".format(locked_size),
+                False,
+            )
         return (
             "\n[取景连续] 起幅保持{0}：摄影机沿同一条轨迹连续推进，需要呈现唇形时"
             "沿原方向缓慢推近到人物面部，推近过程每一步都连续；唇形段落结束后再缓慢"
@@ -11638,6 +11739,13 @@ class BSAIH3FilmFactory:
         # 比较，链上一有段就误判"分辨率变化"而清链。这里改用 latent 几何
         # 对比：cache geometry(video_w/h) vs 一采 latent(÷16) × refine 倍率。
         _rfu = float(refine_upscale_factor) if bool(refine_enable) else 1.0
+        # v14.331（2026-11-07）：一镜到底·单采无缝档实际不跑二采（refine 被跳过，
+        # 见 v14.185），链几何就是一采 latent。旧逻辑仍按「声明 refine 倍率」比较
+        # (34×2.0=68 vs 链上实测 60)，于是每次启动都误判“分辨率变化”并把整条链清空
+        # ——日志里明明写着 960x544 -> 960x544，刚恢复的 238MB 快照照样作废，
+        # 断点续渲被毁、19 段只得从 clip1 重来。此处把实际不生效的二采倍率折返为 1.0。
+        if bool(refine_enable) and bool(one_shot_enabled) and bool(one_shot_single_pass):
+            _rfu = 1.0
         _req_lw = max(1, int(resolved_width // 16))
         _req_lh = max(1, int(resolved_height // 16))
         _cg_geom = manifest.get("geometry") if isinstance(manifest, dict) else None
@@ -12461,6 +12569,9 @@ class BSAIH3FilmFactory:
         out_images = []
         out_audios = []
         _av_decoded = set()
+        # v14.330: IMAGE 预览累积预算（全片 float32 累积会撑爆系统内存 → pagefile 抖动）
+        _av_acc_budget = _av_acc_budget_bytes()
+        _av_acc_state = {"used": 0, "skip": False}
         paused_break = False  # v1.13: 用户暂停/停止后禁止自动合并
         _pending_enc = []  # v1.70: async encode 队列 [(done_event, 链内索引, 全局clip索引)]
 
@@ -12515,7 +12626,8 @@ class BSAIH3FilmFactory:
                 try:
                     _cimg, _caud = _decode_clip_to_av(owner, _j, vae, audio_vae, float(FPS))
                     if _cimg is not None and int(_cimg.shape[0]) > 0:
-                        out_images.append(_cimg)
+                        # v14.330: 走预算化 uint8 累积，超预算即停止（全片 MP4 已落盘）
+                        _av_acc_push(out_images, _cimg, _av_acc_state, _av_acc_budget)
                         _av_decoded.add(_j)
                     if _caud is not None:
                         out_audios.append(_caud)
@@ -13064,6 +13176,9 @@ class BSAIH3FilmFactory:
                 if _os_space_kind:
                     print(f"[H3 Extender] v14.301 一镜到底 clip[{i+1}]: 空间规则 = "
                           f"{_os_space_kind} ({_os_prev_scene} → {_os_scene_name})")
+                    if _os_space_kind == "空间过渡":
+                        print("[H3 Extender] v14.332 换场段: 换场已压入段首一瞬"
+                              "(门墙遮挡置换), 段中不再出现第二处空间")
                 # v14.292 (2026-11-03): 光影与构图分离 —— 光影描述只改光, 不改构图。
                 #
                 # 实测: clip2 f160 由"中近景(胸像)"硬切到"大远景剪影", 切点正好落在脚本第3拍
@@ -13099,12 +13214,30 @@ class BSAIH3FilmFactory:
                 # 锁死分支下正文景别词已在 demulti 之后统一改写成声明值, 两者不再打架。
                 # 只有**可靠**解析出景别链时才做接缝判定 —— 兜底的全文扫描分不清
                 # 哪个景别词属于哪个拍段, 据此判定跨档会凭空造出不存在的跳变。
+                # v14.332: 整段演唱(lip_audio 覆盖全段)时不写"推近后再推回" ——
+                # 演唱段没有"唇形段落结束"这个时刻, 模型只会执行推近那一半。
+                # 判定必须扫**原始分段正文**(cfg["prompt"])：demulti/flatten 已经把
+                # 场景路线串里的"（【演唱中】·人声0:48.0起）"标记一并剥掉,
+                # 扫 effective_prompt 会恒为 False —— v14.333 实机验证发现。
+                _os_sing_src = str(cfg.get("prompt") or "")
+                _os_full_sing = bool(
+                    lip_audio_segments is not None
+                    and "演唱中" in _os_sing_src
+                    and "不唱" not in _os_sing_src
+                    and "中途入唱" not in _os_sing_src
+                )
                 _os_size_rule, _os_seam_mismatch = _one_shot_size_rule(
                     _os_locked_size,
                     _os_prev_size_end if _os_size_reliable else None,
                     _os_size_start if _os_size_reliable else None,
+                    full_sing=_os_full_sing,
                 )
                 _os_rule += _os_size_rule
+                # v14.333: 打印判定结果, 便于实机核对(上一轮扫 effective_prompt 恒 False)
+                if _os_locked_size:
+                    print(f"[H3 Extender] v14.333 景别规则 clip[{i+1}]: 锁死={_os_locked_size}, "
+                          f"整段演唱={_os_full_sing} → "
+                          f"{'取景范围全程固定(不推近)' if _os_full_sing else '允许唇形推近再推回'}")
                 # v14.292: 取景锚定 —— 把脚本给的景别写成显式边界。
                 #
                 # 实测: clip3 脚本写"下降回平视并推近", 模型一路推过头到"极端躯干特写(头都在画外)",
@@ -14298,7 +14431,8 @@ class BSAIH3FilmFactory:
                                     cimg = cimg.detach().to("cpu")
                             except Exception:
                                 pass
-                            out_images.append(cimg)
+                            # v14.330: 同样走预算化累积
+                            _av_acc_push(out_images, cimg, _av_acc_state, _av_acc_budget)
                         if caud is not None:
                             try:
                                 _cw = caud.get("waveform") if isinstance(caud, dict) else None
@@ -14319,7 +14453,12 @@ class BSAIH3FilmFactory:
                 import torch as _t223b
                 _dev223 = _t223b.cuda.current_device()
                 out_images = [
-                    (im.to(_dev223) if (im is not None and not getattr(im, "is_cuda", False)) else im)
+                    (
+                        (im.to(_dev223) if not getattr(im, "is_cuda", False) else im)
+                        .float()
+                        .div_(255.0) if getattr(im, "dtype", None) == _t223b.uint8
+                        else (im.to(_dev223) if (im is not None and not getattr(im, "is_cuda", False)) else im)
+                    )
                     for im in out_images
                 ]
             except Exception:
