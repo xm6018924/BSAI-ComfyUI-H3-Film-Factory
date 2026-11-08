@@ -15617,11 +15617,23 @@ if getattr(PromptServer, "instance", None) is not None:
                             })
                         except Exception:
                             pass
-            # No file-manager window is opened for an HTTP caller: any client
-            # that can reach this route would otherwise be able to pop a window
-            # on the host desktop. The folder path is returned, and the UI
-            # offers a copy-to-clipboard button.
+            # A one-click "open the folder" only for a caller on this machine;
+            # any other client that can reach this route just gets the path,
+            # so a remote request cannot pop a window on the host desktop.
             opened = False
+            peer = str(getattr(request, "remote", "") or "")
+            if peer in ("127.0.0.1", "::1"):
+                try:
+                    if os.name == "nt":
+                        os.startfile(str(d))
+                    else:
+                        subprocess.Popen(
+                            ["xdg-open", str(d)],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        )
+                    opened = True
+                except Exception as open_err:
+                    print(f"[BSAI H3 Film Factory] open cache dir failed: {open_err}")
             return web.json_response({
                 "ok": True,
                 "kind": kind,
