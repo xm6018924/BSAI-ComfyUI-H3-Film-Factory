@@ -150,12 +150,18 @@
 
 **45s 源视频的例子 / 45-second example**：分镜里写一次 `@视频N` 即可。后端探测源视频 45s → `ceil(45/15)=3` 段，每段 ≈15s（帧数对齐 H3 的 17k+5 网格）；分镜只有 1 张就自动补成 3 张（自动补的卡片 `id` 带 `_recast_k` 后缀），逐段替换后按顺序拼接成片。分镜多于所需时，多出来的段没有源画面可换，会被跳过并打印说明。
 
-**后端强制参数（手改 widget 无效，除 denoise）**：一采 8 步 `euler`+`simple`、shift 12/3、denoise 0.65、二采关闭、段间 motion context 全关、源原声锁定（音频 `noise_mask=0`）。`denoise` 是唯一开放的旋钮：调高（→0.9）= 更听参考图、换得更彻底，但动作/构图更易偏离原片；调低（→0.35）= 更贴原片、换得不够彻底。默认 0.65 是两者折中。
+**后端强制参数（手改 widget 无效，除 denoise）**：一采 8 步 `euler`+`simple`、shift 12/3、denoise 0.72（v14.337 起）、二采关闭、段间 motion context 全关、源原声锁定（音频 `noise_mask=0`）。`denoise` 是唯一开放的旋钮：调高（→0.9）= 更听参考图、换得更彻底，但动作/构图更易偏离原片；调低（→0.35）= 更贴原片、换得不够彻底。
+
+**场景锁定（v14.337 / region-locked redraw）**：视频 `noise_mask` 不再是全 1。后端逐帧调本机 NPU 服务（`POST /detect_pose` + `POST /segment_foreground`，YOLO 人体框 + GrabCut + RMBG-1.4），把「人物区域」做成掩码：**人区 = 1（允许重绘），其余 = 0（直接锁定源像素）**，再按 H3 的 17 帧步长采样到 latent 网格。于是背景、街景、道具、光源是源片本身的像素，模型没有机会把夜景换成室内；人物区连同衣服一起放开重绘，配合提示词纪律块（"原视频服装与配饰一律不得保留"）拿到参考图那套服装。日志会打印 `人物掩码已生成：N/M 帧分割成功，人区占画面 xx%` 与每段 `重绘区=人物掩码 xx%`。掩码失败（NPU 服务掉线）时退回全画幅重绘并告警 —— 此时场景会漂，先查 `GET /health`。
+
+> 环境变量微调：`BSAI_H3_RECAST_SUBJECT_MASK=0` 关掉掩码；`BSAI_H3_RECAST_MASK_DILATE`（默认 13 像素，人区外扩）、`BSAI_H3_RECAST_MASK_FEATHER`（默认 10，边缘羽化）、`BSAI_H3_RECAST_MASK_PORT`（默认取 ComfyUI 端口）。
+
 
 **注意 / Notes**：
 - 源视频按**当前画布分辨率**等比放大 + 居中裁切后再编码，源片比例与画布不一致时会被裁边；
 - 源视频没有音轨（或没接 `audio_vae`）时，音频行改由模型重新生成，日志会告警 —— 此时口型不再跟随源片；
-- 替换档会忽略 `lip_audio` 对口型输入，日志提示一次；
+- 替换档会忽略 `lip_audio` 对口型输入（v14.336 起在分镜重排之前就剔除），日志提示一次 —— 本档口型由源原声逐帧锁定，另接 `lip_audio` 只会把单段拉成 200s 级长段并爆显存；
+- v14.336 起：分镜提示词里**没有 `@视频N`**（或资产库 Videos 位没有源视频）时，本档**直接报错中止**，不再静默退回普通渲染；
 - 依赖 ffmpeg（整合包自带 / `imageio-ffmpeg` 提供），时长探测走 ffprobe 优先、`ffmpeg -i` 兜底。
 
 > **完整 LoRA 文件名与强度**见 [`RENDER_PIPELINES_REFERENCE.md`](./RENDER_PIPELINES_REFERENCE.md)。

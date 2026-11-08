@@ -2,6 +2,47 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.337 (2026-11-08) — 第 33 档改成「只重绘人物、场景锁死源像素」/ Tier 33 now redraws the person only, scene pinned to source pixels
+
+**问题（实机出片取证）**：`h3_clip_250_1_1794129045.mp4` 人物确实换了，但两个硬伤：①人物穿的还是源片的黄绿运动外套，不是 `@图1` 的白裙白手套；②背景从夜晚霓虹街景整片换成室内玻璃砖墙走廊。根因：`_rc_vmask = torch.ones_like(_rc_v)` 把视频 `noise_mask` 全置 1，等于**全画幅允许重绘**，denoise 0.65 下场景与服装一起被模型重画；而参考图是"白底 5 视图设定图"，背景大面积纯白，对全局的扰动强于对人物身份的约束。
+
+**改动**：
+- `extender.py`：新增 `_recast_npu_base_url` / `_recast_npu_post` / `_recast_decode_alpha_b64` / `_recast_frame_person_mask` / `_recast_subject_mask`。逐帧调本机 NPU 服务（`POST /detect_pose` 取 YOLO 人体框、`POST /segment_foreground` 取 RMBG-1.4 alpha），**GrabCut（框内初值）∪ RMBG alpha，再限制在人体框内**，去碎块、闭运算补洞、按 `_RECAST_MASK_DILATE`（默认 13px）外扩、`_RECAST_MASK_FEATHER`（默认 10px）羽化，按 H3 的 17 帧步长采样 22 行后 `INTER_AREA` 下采样到 latent 网格，得 `[1,1,T,h/16,w/16]` 掩码。
+- `extender.py`：`_recast_build_av_latent` 增加第 4 个返回值 `subject_mask`（失败为 `None`）；per-clip 注入处 `_rc_vmask` 由「全 1」改为 `_rc_subject_mask.expand_as(_rc_v)`（人区 1 重绘 / 背景 0 锁死），时间行与 `_rc_v` 同步截断或末行补齐；音频 mask 仍全 0；三个分支（有音轨 / 无音轨 / 无 audio_vae）都覆盖。
+- `extender.py`：`_RECAST_DISCIPLINE` 重写为五条纪律（① 背景/建筑/天空/地面/家具/光源/色温与原视频逐像素一致、不得室内外互换；② 脸型五官发型体型与整套服装鞋袜帽手套配饰必须与参考图完全一致、原视频服装不得保留残片；③ 多视角设定图取最清晰正视图、不得拼贴分身；④ 动作/口型逐帧跟随；⑤ 不得出现参考图本身）。`BUILD = minimax-h3-extender-v14.337-recast-subject-mask`。
+- 工作流 `-v14.336-修正版.json`（就地改）：denoise 0.65 → **0.72**（背景已被掩码锁死，抬高只作用于人物区）；三张卡片提示词重写为「人物服装鞋袜配饰按 @图1 / 场景机位运动构图原样保留 / 不得出现参考图本身」；Note 2058 全文重写（掩码机制、日志口径、环境变量、参考图裁单视图的建议）。
+
+**mask 语义（本机核对 `comfy/model_base.py::process_timestep`）**：`denoise_mask * timestep → patchify`，掩码即"每 token 的时间步"，`0` = 该 token 不参与去噪（保持源 latent），`1` = 完整重绘；`comfy.utils.reshape_mask` 用 trilinear 把掩码插值到 latent 网格，故 0/1 之间的小数可做软过渡。
+
+**验证（已做）**：
+- `ast.parse` 通过（15798 行）；BUILD、纪律块关键字（场景一致 / 服装一致 / `<Video N>` 已被摘除）断言通过。
+- 用 3 张真源帧拼出 `[362,672,896,3]` 假 frames 调 `_recast_subject_mask(frames, 22, 42, 56)`：`22/22 帧分割成功`、人区 45.2%、张量 `(1,1,22,42,56)`、`expand_as` 到 24 通道 OK、`comfy.utils.reshape_mask` 输出形状与均值一致、画布四角掩码为 0（背景锁死）。
+- `tools/check_quickbar_enum_sync.py` 退出码 0（`render_pipeline` 33/33/33/33，末行 `=== SYNC OK ===`）；`tools/check_recast_pipeline.py` 22 项断言全 PASS（45s → 3 段 × 15.08s、362 帧/段、无音轨返回 None、无 `@视频N` 不触发）。
+- C / G 两包 `extender.py` 同为 922519 字节（G 包旧版已备份 `extender.py.bak_20261108_v14336`）。
+
+**未验证（需实机验收）**：真实 H3 权重下掩码版出片效果（是否彻底"场景原样 + 服装一致"）；RMBG 在人物占满画面的特写镜头上仍依赖 GrabCut 兜底，边缘可能出现轻微接缝。
+
+**英文**：Tier 33 output showed the swapped person still wearing the source's green jacket while the neon night street was replaced by an indoor glass-brick corridor. Root cause: the video `noise_mask` was all ones, so at denoise 0.65 the model was free to repaint the whole frame. Fix: build a per-frame **person mask** (YOLO person box via `/detect_pose` + GrabCut ∪ RMBG-1.4 alpha via `/segment_foreground`, restricted to the person box, dilated 13px, feathered 10px, sampled every 17 frames down to the latent grid) and use it as the video `noise_mask`: person = 1 (redraw), everything else = 0 (locked to source pixels). Audio mask stays 0. The discipline block now spells out scene-pinning and outfit fidelity ("clothing and accessories must match the reference exactly, none of the source outfit may survive"). Workflow updated in place: denoise 0.72, rewritten clip prompts, rewritten usage note. Verified offline: AST clean, mask helper returns `(1,1,22,42,56)` with 22/22 frames segmented (45.2% area), `expand_as`/`reshape_mask` compatible, corners = 0, enum sync and recast pipeline tests pass. Effect under real weights still needs a live render.
+
+### v14.336 (2026-11-08) — 修复第 33 档两个「静默降级 → 爆显存」隐患 / Fix two silent-downgrade paths in tier 33 that end in OOM
+
+**问题（实机日志复现）**：用户在「视频替换」档上跑了一个 1 张空卡片 + 225s `lip_audio`（《晚风》）的分镜，结果：
+1. `[H3 Recast] 未在分镜提示词里找到 <Video N>` —— 分镜提示词是空的，替换计划建不起来，**旧版只是打印一句然后静默退回普通渲染**；
+2. 退回普通渲染后 `lip_audio` 接管：`对口型音频 225.29s > 分镜总时长 15.00s → 自动追加延续分镜 CLIP +210.58s`，把 1 个 15s 分镜扩成 `15.08s + 209.77s` 两段；
+3. 209.77s 单段 = 5088 帧 × 960×544，H3 一采 8 步跑到第 2 段第 1 步就 `torch.OutOfMemoryError: Allocation on device 0 would exceed allowed memory`（allocated 35.52GiB / 请求 7.65GiB / 上限 23.86GiB），**渲染 8 分钟才炸**。
+
+**改动**：
+- `extender.py`：在 `_rp_mode` 判定后、LipSync「分镜重排 / 音频预分割」之前，替换档**先剔除 `lip_audio` 与 `lip_voice`**（`lip_audio` 在 `extend()` 里是后置绑定的局部变量，拦截点必须落在 `lip_audio = kwargs.get(...)` / `_lip_voice = kwargs.get(...)` 之后，否则会 `UnboundLocalError`）—— 本档锁源原声、口型随源片逐帧对齐，外部音频会另灌一套并把分镜强行拉成 200s 级长段（单段 >15s 必爆）。原来这一步放在替换计划构建之后，计划失败就走了 lip 路径。
+- `extender.py`：替换计划为空或构建异常时**直接 `raise RuntimeError` 中止**，不再退回普通渲染；报错里逐条写明「提示词要写 @视频N / 资产库 Videos 要有源视频 / 参考图放 Images 位并用 @图N」。单段 AV latent 编码/注入失败同样 `raise`（原来只打印「本段回退普通渲染」，等于悄悄出一段没替换的片子）。
+- 第一版拦截点插在 `_rp_mode` 解析处（10373 行），早于 `lip_audio` 的局部绑定 → 实机报 `UnboundLocalError: cannot access local variable 'lip_audio'`；现已下移到两个音频变量绑定之后（12322 行），并用 AST 静态断言「绑定行 < 拦截行 < lip_voice 升级行 < 分镜重排调用行 < 音频预分割行」。
+- `BUILD = minimax-h3-extender-v14.336-video-recast-hardfail`。
+
+**验证（已做）**：
+- `ast.parse` 通过；静态确认「剔除 lip_audio」代码位于 `# ── Lip Sync Audio 预分割 ──` 之前（第 484846 字符 vs 606377 字符）。
+- 用用户实机工作流的修正版跑真实后端函数：`@视频1 → <Video 1>` 解析成功；`_recast_build_plan` 得 `45.0s → 3 段 × 15.083s`（时间轴 0 / 15.08 / 30.17）；`_recast_read_segment_frames` 在 960×544 抽到 `(362, 544, 960, 3)`；抽音 `(1,2,20)` 行；无 `@视频N` 时返回 `None`（上层现在会 raise）。
+
+**英文**：Tier 33 got two silent-downgrade paths fixed. (1) If the storyboard has no `<Video N>` / `@视频N`, the old code printed a line and fell back to normal rendering; the fallback then let `lip_audio` take over, auto-extending one 15s clip into `15.08s + 209.77s` (225.29s song), and a 209.77s = 5088-frame single clip at 960×544 blew VRAM at step 1 of the second segment. Now the tier strips `lip_audio` **before** the LipSync clip-reshuffle/audio split (its locked source soundtrack owns the lips), and a missing recast plan raises a `RuntimeError` that names the three things to fix instead of silently rendering something else. Verified: AST clean, guard ordering asserted statically, and a real-source run gives 45.0s → 3 segments of 15.083s, frames `(362,544,960,3)`, audio rows as expected, `None` plan on tag-less prompts.
+
 ### v14.335 (2026-11-08) — 新增第 33 档「视频替换 (V2V 人物替换)」/ New tier 33: Video Recast (H3 V2V character swap)
 
 **需求（用户口径）**：资产库上传被替换的源视频 → `@视频N`，上传替换的人物参考图 → `@图N`；在固定分镜脚本里让 `@图N` 替换 `@视频N` 里的人物，可单人/多人、可跨多个 `clipN`；源视频超过 15s（如 45s）时导入 `@视频N` 后按每段 15s 自动切成 3 个 clip 逐段替换。落地方式：在渲染管道（`render_pipeline`）新增一档「视频替换」渲染模式。

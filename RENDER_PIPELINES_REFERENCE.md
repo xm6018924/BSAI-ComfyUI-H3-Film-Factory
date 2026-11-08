@@ -1,6 +1,6 @@
 # BSAI-H3-Film-Factory 渲染管道 / 模式 / LoRA 搭配速查表
 
-> 基于 `extender.py` v14.335 源码整理（2026-11-08；v14.322 起整理，新增第 33 档「视频替换」）。
+> 基于 `extender.py` v14.337 源码整理（2026-11-08；v14.322 起整理，新增第 33 档「视频替换」，v14.337 起该档改为人物区域掩码重绘）。
 > LoRA 一律挂在 H3 Loader 的标准 LoRA 槽，强度按各档推荐。
 
 ---
@@ -96,13 +96,15 @@
 | 22 | **4-in-1 Ultimate Speedup** | 6+2，latent x2.0 | DMAD 4步LoRA + SegAttention 2.2.0 + 半分辨率参考输入 + SelfLift 双采 | 极限加速 |
 | 23 | **SolarRenderer Structure Control** | 4+4=8NFE，ref_image_size强制max | 控制LoRA(逐帧读3D灰盒/法线/姿态/深度) + 4步LoRA(强度~0.8)；基模 FastH3-Omni/Singularity V2 | 结构控制 |
 
-### F. 视频人物替换 / Video Recast (V2V character swap · v14.335)
+### F. 视频人物替换 / Video Recast (V2V character swap · v14.335，v14.337 改为人物区域掩码）
 
 | # | 管道 | 一采+二采 | 关键参数 | 配套 | 适用 |
 |---|---|---|---|---|---|
-| 33 | **视频替换 (V2V 人物替换)**<br>`Video Recast (H3 V2V character swap)` | 8 步单采（**refine 强制关**） | euler + simple，shift 12/3；denoise 0.65（用户显式改过 widget 则用用户值并夹到 0.35~0.95）；`noise_mask` = 视频全 1 / 音频全 0 | 源视频放资产库 → `@视频N`；替换的人物参考图放资产库 → `@图N`；LoRA 槽建议 `minimax_h3_角色替换character_swap_v1.5.safetensors`(0.6~0.8，**该权重名尚未在本机目录核实，不可当既有事实引用**) | V2V 人物替换：保留源片机位/运动/构图/剪辑点/口型，只换人物身份 |
+| 33 | **视频替换 (V2V 人物替换)**<br>`Video Recast (H3 V2V character swap)` | 8 步单采（**refine 强制关**） | euler + simple，shift 12/3；denoise 0.72（用户显式改过 widget 则用用户值并夹到 0.35~0.95）；`noise_mask` = 视频**人物区域掩码**（人区 1 重绘 / 背景 0 锁死源像素，v14.337）/ 音频全 0 | 源视频放资产库 → `@视频N`；替换的人物参考图放资产库 → `@图N`；LoRA 槽建议 `minimax_h3_角色替换character_swap_v1.5.safetensors`(0.6~0.8，**该权重名尚未在本机目录核实，不可当既有事实引用**) | V2V 人物替换：保留源片机位/运动/构图/剪辑点/口型，只换人物身份 |
 
-**链路**：源片段 → ffmpeg 精确 seek（`-ss` 在 `-i` 之后）抽 24fps、等比放大 + 居中裁切到画布、帧数对齐 17k+5 网格 → `vae.encode()` 得 `[1,24,T,h/16,w/16]`；源原声 → 重采样到 audio_vae 采样率、裁/补到 `round(dur*40)` 行 → `audio_vae.encode()` 得 `[1,32,2,Ta]`。两者装进 `NestedTensor` 作为一采初始化 latent：视频行允许重绘（mask=1），音频行锁死（mask=0），所以替换后对白/环境声/口型与原视频逐帧对齐，**不需要另接 lip_audio**。
+**链路**：源片段 → ffmpeg 精确 seek（`-ss` 在 `-i` 之后）抽 24fps、等比放大 + 居中裁切到画布、帧数对齐 17k+5 网格 → `vae.encode()` 得 `[1,24,T,h/16,w/16]`；源原声 → 重采样到 audio_vae 采样率、裁/补到 `round(dur*40)` 行 → `audio_vae.encode()` 得 `[1,32,2,Ta]`。两者装进 `NestedTensor` 作为一采初始化 latent：视频行按**人物掩码**放行重绘，音频行锁死（mask=0），所以替换后对白/环境声/口型与原视频逐帧对齐，**不需要另接 lip_audio**。
+
+**人物掩码（v14.337，为什么必须有）**：早期版本视频 mask 全 1，等于整幅画面都允许重绘，denoise 0.65 下夜景街景被换成室内、衣服也沿用了源片 —— 实测出片正是这么坏的。现在逐帧向本机 NPU 服务取：`POST /detect_pose`（YOLO11-pose 人体框）+ `POST /segment_foreground`（RMBG-1.4 alpha，**JSON `{"image": <base64>}`，返回 `data:image/png;base64` 前缀需剥掉**），**GrabCut（框内初值）∪ RMBG alpha 后限制在人体框内**，去碎块 → 闭运算补洞 → 外扩 13px → 羽化 10px，按 17 帧步长取 22 行 `INTER_AREA` 下采样到 latent 网格。掩码语义见 `comfy/model_base.py::process_timestep` —— `denoise_mask * timestep → patchify`，0 表示该 token 不做去噪（保持源 latent）。掩码失败（NPU 掉线）才退回全 1 并告警。相关环境变量：`BSAI_H3_RECAST_SUBJECT_MASK=0` 关闭、`BSAI_H3_RECAST_MASK_DILATE`、`BSAI_H3_RECAST_MASK_FEATHER`、`BSAI_H3_RECAST_MASK_PORT`。
 
 **分段（15s 契约）**：`n = ceil(源时长 / 15s)`（对齐 MiniMax H3 Recast 单镜头 ≤15s），每段时长 = 源时长 / n 并对齐帧网格。45s 源视频 → 3 段 × ≈15s，分镜不足自动补 CLIP（`id` 后缀 `_recast_k`，`context_enabled=False`），分镜多于所需则把多余段 `render_enabled=False` 跳过并打印说明。
 

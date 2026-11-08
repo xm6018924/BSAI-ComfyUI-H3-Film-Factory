@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.335-video-recast"
+BUILD = "minimax-h3-extender-v14.337-recast-subject-mask"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -633,14 +633,26 @@ _RECAST_VIDEO_TAG_RE = re.compile(r"<\s*Video\s*([0-9]+)\s*>", re.IGNORECASE)
 _RECAST_SEG_SECONDS = 15.0          # H3 Recast 单镜头上限 15s（官方/社区一致）
 _RECAST_MIN_SEG_SECONDS = 1.0
 _RECAST_MAX_CLIPS = 120
+# v14.337 人物区域掩码（只重绘人、背景锁死源像素）；可用环境变量关掉退回旧行为
+_RECAST_MASK_ON = str(os.environ.get("BSAI_H3_RECAST_SUBJECT_MASK", "1")).strip().lower() \
+    not in ("0", "false", "off", "no")
+_RECAST_MASK_DILATE = max(0, int(os.environ.get("BSAI_H3_RECAST_MASK_DILATE", "13") or 13))
+_RECAST_MASK_FEATHER = max(0, int(os.environ.get("BSAI_H3_RECAST_MASK_FEATHER", "10") or 10))
+_RECAST_MASK_TIMEOUT = float(os.environ.get("BSAI_H3_RECAST_MASK_TIMEOUT", "120") or 120)
 _RECAST_DISCIPLINE = (
-    "【视频人物替换纪律】本段执行“视频人物替换（Recast）”：输入视频是本段唯一的画面与运动来源。"
-    "严格保持原视频的镜头运动、机位、剪辑点、景别、构图、人物走位轨迹、背景、道具、光线、色彩、"
-    "帧率与节奏完全不变；只替换人物身份——按本段提示词给出的对应关系，把原视频中的人物换成对应参考图里的人物"
-    "（提示词未指明对应关系时：<Picture 1> 对应画面中第一位/最主要的人物，<Picture 2> 依次对应第二位，以此类推）。"
-    "被替换人物的脸型、五官、发型、体型、肤色、服装按参考图；其位置、动作幅度、手势、视线、表情与口型"
-    "必须逐帧跟随原视频，不得重新表演、不得改变动作轨迹、不得换机位或新增剪辑点。"
-    "未被指定替换的人物、背景与物体保持不变；画面内不得出现参考图本身、分屏、色卡、拼图、文字、水印或额外分身。"
+    "【视频人物替换纪律】本段执行“视频人物替换（Recast）”：输入视频是本段唯一的画面、场景与运动来源。"
+    "把原视频中的人物换成参考图里的人物，除此之外画面的一切都不许动。"
+    "① 场景纪律：人物之外的每一处像素——背景、室外街景/室内环境、建筑与墙面、天空、地面、家具、陈设、"
+    "招牌与文字、光源位置与色温、明暗与噪点——必须与原视频完全一致，不得改换场地、不得从室外变成室内，"
+    "也不得新增或删除任何背景物体。"
+    "② 人物纪律：被替换人物的脸型、五官、神情、肤色、发型（发色/发长/刘海/发饰）、体型，"
+    "以及整套服装、鞋、袜、帽、手套、项链等配饰，必须与参考图完全一致（颜色、款式、材质、长度都要一致）；"
+    "原视频人物身上的服装与配饰一律不得保留、不得残留残片或改色沿用。"
+    "③ 参考图为多视角角色设定图时，取其中最清晰的正视图/半身近景决定脸与服装，"
+    "不得把多个视角、多个分身或设定图本身拼进画面。"
+    "④ 动作纪律：位置、动作幅度、手势、视线、表情与口型必须逐帧跟随原视频，不得重新表演、"
+    "不得改变动作轨迹、不得换机位或新增剪辑点。"
+    "⑤ 未被指定替换的人物、背景与物体保持不变；画面内不得出现参考图本身、分屏、色卡、拼图、文字、水印或额外分身。"
 )
 
 
@@ -808,6 +820,185 @@ def _recast_read_segment_audio(path, start_sec, dur_sec, sample_rate, total_samp
     return wav.contiguous()
 
 
+def _recast_npu_base_url() -> str:
+    """本机 NPU 服务（挂在 ComfyUI 路由上）：优先读 PromptServer 端口，退回 8181。"""
+    port = os.environ.get("BSAI_H3_RECAST_MASK_PORT") or ""
+    if port:
+        return "http://127.0.0.1:%s" % str(port).strip()
+    try:
+        import server as _srv_seg
+        _ps_seg = getattr(_srv_seg.PromptServer, "instance", None)
+        _p = int(getattr(_ps_seg, "port", 8181) or 8181)
+    except Exception:
+        _p = 8181
+    return "http://127.0.0.1:%d" % _p
+
+
+def _recast_npu_post(url: str, payload: dict, timeout=None):
+    """POST JSON（NPU 服务只认 {"image": <base64>} 这种 JSON body）。"""
+    import json as _json_seg
+    import urllib.request as _ureq
+    body = _json_seg.dumps(payload).encode("utf-8")
+    req = _ureq.Request(url, data=body, headers={"Content-Type": "application/json"})
+    with _ureq.urlopen(req, timeout=timeout or _RECAST_MASK_TIMEOUT) as _r:
+        return _json_seg.loads(_r.read().decode("utf-8", "ignore"))
+
+
+def _recast_decode_alpha_b64(s, height, width):
+    """NPU 返回的 alpha 是 "data:image/png;base64,..." 的 8bit 灰度 PNG。"""
+    import base64 as _b64_seg
+    import io as _io_seg
+    from PIL import Image as _PILSeg
+    if not s:
+        return None
+    if s.startswith("data:"):
+        s = s.split(",", 1)[1]
+    s += "=" * (-len(s) % 4)
+    _img = _PILSeg.open(_io_seg.BytesIO(_b64_seg.b64decode(s))).convert("L")
+    _arr = np.asarray(_img, dtype=np.float32) / 255.0
+    if _arr.shape[:2] != (height, width):
+        import cv2 as _cv2s
+        _arr = _cv2s.resize(_arr, (width, height), interpolation=_cv2s.INTER_LINEAR)
+    return _arr
+
+
+def _recast_frame_person_mask(rgb_u8, base_url):
+    """单帧人像掩码 0..1（=1 允许重绘，=0 保持源像素）。
+
+    RMBG-1.4 在夜景/虚化背景上会漏出大片背景亮斑，GrabCut 在特写（人物占满画面）时
+    又会吃掉一部分人物；两者取并集并把结果限制在 YOLO 人体框内，既不会漏掉人物的
+    衣服鞋帽（否则会出现"旧衣服残片"），也不会把整幅背景放开重绘。
+    返回 None 表示这一帧分割失败。
+    """
+    import base64 as _b64f
+    import io as _iof
+    import cv2 as _cv2f
+    from PIL import Image as _PILf
+
+    h, w = int(rgb_u8.shape[0]), int(rgb_u8.shape[1])
+    try:
+        _pil = _PILf.fromarray(rgb_u8)
+        _buf = _iof.BytesIO()
+        _pil.save(_buf, format="JPEG", quality=95)
+        _b64 = _b64f.b64encode(_buf.getvalue()).decode()
+    except Exception:
+        return None
+
+    poses = []
+    try:
+        _pose = _recast_npu_post(base_url + "/detect_pose", {"image": _b64})
+        poses = [p for p in (_pose.get("poses") or [])
+                 if float(p.get("score", 0) or 0) > 0.3]
+    except Exception:
+        poses = []
+    try:
+        _seg = _recast_npu_post(base_url + "/segment_foreground", {"image": _b64})
+        alpha = _recast_decode_alpha_b64(_seg.get("alpha", ""), h, w)
+    except Exception:
+        alpha = None
+    if not poses and alpha is None:
+        return None
+
+    bgr = _cv2f.cvtColor(np.ascontiguousarray(rgb_u8), _cv2f.COLOR_RGB2BGR)
+    mask = np.zeros((h, w), np.uint8)
+    box = np.ones((h, w), np.uint8)
+    if poses:
+        x1, y1, x2, y2 = [int(round(float(v))) for v in poses[0]["bbox"][:4]]
+        x1, y1 = max(0, min(w - 1, x1)), max(0, min(h - 1, y1))
+        x2, y2 = max(x1 + 1, min(w, x2)), max(y1 + 1, min(h, y2))
+        sx, sy = int((x2 - x1) * 0.04), int((y2 - y1) * 0.04)
+        rx1, ry1 = x1 + sx, y1 + sy
+        rx2, ry2 = x2 - sx, y2 - sy
+        if rx2 - rx1 > 8 and ry2 - ry1 > 8:
+            try:
+                gc = np.zeros((h, w), np.uint8)
+                _bgd = np.zeros((1, 65), np.float64)
+                _fgd = np.zeros((1, 65), np.float64)
+                _cv2f.grabCut(bgr, gc, (rx1, ry1, rx2 - rx1, ry2 - ry1),
+                              _bgd, _fgd, 5, _cv2f.GC_INIT_WITH_RECT)
+                _mgc = np.where((gc == _cv2f.GC_FGD) | (gc == _cv2f.GC_PR_FGD), 1, 0)
+                mask = np.maximum(mask, _mgc.astype(np.uint8))
+            except Exception:
+                pass
+        box = np.zeros((h, w), np.uint8)
+        ex, ey = int((x2 - x1) * 0.07), int((y2 - y1) * 0.06)
+        box[max(0, y1 - ey):min(h, y2 + ey), max(0, x1 - ex):min(w, x2 + ex)] = 1
+    if alpha is not None:
+        mask = np.maximum(mask, (alpha > 0.5).astype(np.uint8))
+    mask = mask * box
+
+    # 去掉碎块（分镜里第二个人/误检），保留主要人像
+    n_lab, lab, stats, _ = _cv2f.connectedComponentsWithStats(mask, 8)
+    keep = np.zeros_like(mask)
+    for k in range(1, n_lab):
+        if int(stats[k][4]) > (h * w) * 0.015:
+            keep = np.maximum(keep, (lab == k).astype(np.uint8))
+    if int(keep.sum()) < (h * w) * 0.02:
+        return None
+    keep = _cv2f.morphologyEx(keep, _cv2f.MORPH_CLOSE,
+                              np.ones((21, 21), np.uint8))
+    keep = _cv2f.morphologyEx(keep, _cv2f.MORPH_OPEN,
+                              np.ones((5, 5), np.uint8))
+    if _RECAST_MASK_DILATE > 0:
+        keep = _cv2f.dilate(
+            keep, _cv2f.getStructuringElement(
+                _cv2f.MORPH_ELLIPSE, (_RECAST_MASK_DILATE, _RECAST_MASK_DILATE)))
+    soft = keep.astype(np.float32)
+    if _RECAST_MASK_FEATHER > 0:
+        soft = _cv2f.GaussianBlur(soft, (0, 0), float(_RECAST_MASK_FEATHER))
+    return np.clip(soft, 0.0, 1.0)
+
+
+def _recast_subject_mask(frames, t_lat, h_lat, w_lat, log=print):
+    """把抽出来的源帧做成人像掩码，并采样到 latent 网格 [1,1,T,h,w]。
+
+    latent 一行对应源视频约 17 帧（H3 的 17k+5 网格），所以按 stride≈17 取代表帧即可；
+    结果里 1=允许重绘（人物），0=锁死源像素（背景）。全部分割失败返回 None（退回旧的全 1 行为）。
+    """
+    if not _RECAST_MASK_ON:
+        return None
+    try:
+        n = int(frames.shape[0])
+        h, w = int(frames.shape[1]), int(frames.shape[2])
+        if n < 1 or t_lat < 1 or h < 8 or w < 8:
+            return None
+        base_url = _recast_npu_base_url()
+        stride = max(1, int(round(n / float(t_lat))))
+        rows = []
+        ok = 0
+        for j in range(int(t_lat)):
+            fidx = min(n - 1, j * stride)
+            _rgb = np.clip(frames[fidx], 0.0, 1.0) * 255.0
+            _m = _recast_frame_person_mask(_rgb.astype(np.uint8), base_url)
+            if _m is None:
+                rows.append(np.zeros((h, w), np.float32))
+                continue
+            rows.append(_m)
+            ok += 1
+        if ok == 0:
+            log("[H3 Recast] ⚠️ 人物掩码一帧都没成功（NPU 服务不可用？）——退回全画幅重绘")
+            return None
+        stack = np.stack(rows, 0)  # [T,H,W]
+        # 没分割出来的行用相邻有效行补齐，避免"这一 latent 行整帧锁死 → 人物闪烁"
+        valid = [i for i in range(int(t_lat)) if rows[i].max() > 0.05]
+        for i in range(int(t_lat)):
+            if rows[i].max() <= 0.05 and valid:
+                stack[i] = stack[min(valid, key=lambda v: abs(v - i))]
+        import cv2 as _cv2d
+        small = np.stack([
+            _cv2d.resize(stack[j], (int(w_lat), int(h_lat)),
+                         interpolation=_cv2d.INTER_AREA)
+            for j in range(stack.shape[0])
+        ], 0)
+        m_t = torch.from_numpy(small).float().unsqueeze(0).unsqueeze(0)
+        log(f"[H3 Recast] 人物掩码已生成：{ok}/{int(t_lat)} 帧分割成功，"
+            f"人区占画面 {float(small.mean()):.1%}（背景锁定源像素，只重绘人物）")
+        return m_t
+    except Exception as exc:
+        log(f"[H3 Recast] ⚠️ 人物掩码生成失败（{exc}）——退回全画幅重绘")
+        return None
+
+
 def _recast_build_av_latent(vae, audio_vae, path, start_sec, dur_sec,
                            width, height, frame_count, ffmpeg=None):
     """源片段 → (video_latent, audio_latent_or_None, info)。失败抛异常由调用方回退。"""
@@ -842,7 +1033,11 @@ def _recast_build_av_latent(vae, audio_vae, path, start_sec, dur_sec,
     info = (f"src={os.path.basename(str(path))} [{start_sec:.2f}s, +{dur_sec:.2f}s) "
             f"{frames.shape[0]}f {width}x{height} "
             f"vz={tuple(video_z.shape)} az={tuple(audio_z.shape) if audio_z is not None else None}")
-    return video_z, audio_z, info
+    # v14.337: 人物区域掩码（人区=1 重绘 / 背景=0 锁死源像素），失败返回 None
+    # video_z 到这里恒为 5 维 [B,C,T,h,w]
+    subject_mask = _recast_subject_mask(
+        frames, int(video_z.shape[2]), int(video_z.shape[3]), int(video_z.shape[4]))
+    return video_z, audio_z, info, subject_mask
 
 
 def _recast_build_plan(clips, asset_library, ffmpeg=None, log=print):
@@ -12313,6 +12508,21 @@ class BSAIH3FilmFactory:
         # 实现: lip_voice 非 None 时重赋值 lip_audio → 下方切段/AV latent注入/
         # 提示词净化/音频锁定/输出混音替换全链路自动复用, 无需复制代码。
         _lip_voice = kwargs.get("lip_voice")
+        # ── v14.336 视频替换档: 外部音频驱动口型（lip_audio / lip_voice）与本档
+        #    "锁定源视频原声"互斥，必须在这里（两个变量都已绑定、下方 LipSync
+        #    分镜按时长重排/音频预分割之前）一起剔除。
+        # 实测教训：1 个 15s 分镜 + 225s lip_audio → LipSync 先把分镜扩成
+        # 15.08s + 209.77s 两段，替换档再建计划（时间轴对不上，找不到源画面），
+        # 209.77s 单段 = 5088 帧 → H3 一采 OOM。
+        if _rp_mode == "视频替换 (V2V 人物替换)" and (lip_audio is not None or _lip_voice is not None):
+            print("[H3 Recast] ⚠️ 本档锁定源视频原声，已剔除 "
+                  f"{'lip_audio' if lip_audio is not None else ''}"
+                  f"{'、' if lip_audio is not None and _lip_voice is not None else ''}"
+                  f"{'lip_voice' if _lip_voice is not None else ''} 对口型输入 —— "
+                  "口型随源片逐帧对齐，不再另灌外部音频"
+                  "（外部长音频会强行把分镜拉成 200s 级长段，单段超 15s 必爆显存）")
+            lip_audio = None
+            _lip_voice = None
         # v14.270: lip_audio 最高优先级（全渲染模型/全渲染管道通用，凌驾 01/02/03 档）。
         # 一旦 lip_audio 端口接入有效音源 → 自动屏蔽 ref_audio/lip_voice，
         # 不管这两个端口是否接入音源或处于连接状态，一律忽略。
@@ -12528,8 +12738,19 @@ class BSAIH3FilmFactory:
             try:
                 _recast_plan = _recast_build_plan(clips, asset_library, ffmpeg=_find_ffmpeg())
             except Exception as _rc_plan_err:
-                print(f"[H3 Recast] 替换计划构建失败(回退普通渲染): {_rc_plan_err}")
-                _recast_plan = None
+                raise RuntimeError(
+                    "[H3 Recast] 替换计划构建异常，本档中止（不会退回普通渲染）："
+                    f"{type(_rc_plan_err).__name__}: {_rc_plan_err}") from _rc_plan_err
+            # v14.336: 计划为空 = 没有 @视频N / 资产库里没有该视频 → 本档直接中止。
+            # 以前这里是"print 后回退普通渲染"，实测会带着 lip_audio 把分镜拉成
+            # 200s 级长段再 OOM（渲染几十分钟才炸），静默降级比报错代价大得多。
+            if _recast_plan is None:
+                raise RuntimeError(
+                    "[H3 Recast] 本档（视频替换 V2V 人物替换）无法建立替换计划：\n"
+                    "  1) 分镜提示词里必须出现 @视频N（例：@图1 替换 @视频1 里的主持人）；\n"
+                    "  2) 资产库 Videos 位要上传对应的源视频（文件在 input/bsai_assets/videos/）；\n"
+                    "  3) 参考图放资产库 Images 位，用 @图N 指定「谁换成谁」。\n"
+                    "修正后重新运行即可；本次已中止，不会退回普通渲染（那会把单段撑到 OOM）。")
             if _recast_plan is not None:
                 # 替换档会自动追加 CLIP；clip_ref_plans 按原始 len(clips) 构建，
                 # 不同步扩展会在渲染循环里越界（与 v14.189 对口型自动续段同源问题）。
@@ -13824,7 +14045,7 @@ class BSAIH3FilmFactory:
             # v14.335 视频人物替换: 把本段源画面 + 源原声编码进 AV latent（半重绘初始化）
             if _recast_seg is not None:
                 try:
-                    _rc_vz, _rc_az, _rc_info = _recast_build_av_latent(
+                    _rc_vz, _rc_az, _rc_info, _rc_subject_mask = _recast_build_av_latent(
                         vae,
                         audio_vae,
                         _recast_plan["path"],
@@ -13853,6 +14074,17 @@ class BSAIH3FilmFactory:
                                 dim=2)
                         print(f"[H3 Recast] clip[{i+1}] 源 latent 时间行 {_rc_t_have} -> "
                               f"{_rc_t_tgt}（与本次 frame_count 对齐）")
+                    # 人物掩码的时间行跟着一起对齐，否则 noise_mask 形状对不上
+                    if _rc_subject_mask is not None:
+                        _rc_m_t = int(_rc_subject_mask.shape[2])
+                        if _rc_m_t != _rc_t_tgt:
+                            if _rc_m_t > _rc_t_tgt:
+                                _rc_subject_mask = _rc_subject_mask[:, :, :_rc_t_tgt]
+                            else:
+                                _rc_subject_mask = torch.cat(
+                                    [_rc_subject_mask,
+                                     _rc_subject_mask[:, :, -1:].repeat(
+                                         1, 1, _rc_t_tgt - _rc_m_t, 1, 1)], dim=2)
                     _rc_hw_tgt = (int(_rc_vt.shape[3]), int(_rc_vt.shape[4]))
                     if (int(_rc_v.shape[3]), int(_rc_v.shape[4])) != _rc_hw_tgt:
                         raise RuntimeError(
@@ -13868,31 +14100,51 @@ class BSAIH3FilmFactory:
                                     _rc_a, (0, _rc_a_tgt - int(_rc_a.shape[-1])))
                             latent["samples"] = comfy.nested_tensor.NestedTensor(
                                 (_rc_v, _rc_a))
-                            # 视频全 1 = 允许半重绘；音频全 0 = 锁定源原声，采样器不得改写
-                            _rc_vmask = torch.ones_like(_rc_v)
+                            # 视频：有人像掩码 → 只放开人物区（1）重绘，背景锁 0 保持源像素；
+                            #       掩码失败 → 旧行为全 1。音频全 0 = 锁定源原声。
+                            if _rc_subject_mask is not None:
+                                _rc_vmask = _rc_subject_mask.expand_as(_rc_v).to(
+                                    device=_rc_v.device, dtype=_rc_v.dtype).contiguous()
+                            else:
+                                _rc_vmask = torch.ones_like(_rc_v)
                             _rc_amask = torch.zeros_like(_rc_a)
                         else:
                             # 源视频无音轨 / 未接 audio_vae：音频区交还模型重生成
                             latent["samples"] = comfy.nested_tensor.NestedTensor(
                                 (_rc_v, _rc_at))
-                            _rc_vmask = torch.ones_like(_rc_v)
+                            if _rc_subject_mask is not None:
+                                _rc_vmask = _rc_subject_mask.expand_as(_rc_v).to(
+                                    device=_rc_v.device, dtype=_rc_v.dtype).contiguous()
+                            else:
+                                _rc_vmask = torch.ones_like(_rc_v)
                             _rc_amask = torch.ones_like(_rc_at)
                             print(f"[H3 Recast] clip[{i+1}] ⚠️ 源视频无可用音轨或未接 "
                                   "audio_vae —— 音频改由模型重新生成（口型不再跟随源片）")
                     else:
                         latent["samples"] = _rc_v
-                        _rc_vmask = torch.ones_like(_rc_v)
+                        if _rc_subject_mask is not None:
+                            _rc_vmask = _rc_subject_mask.expand_as(_rc_v).to(
+                                device=_rc_v.device, dtype=_rc_v.dtype).contiguous()
+                        else:
+                            _rc_vmask = torch.ones_like(_rc_v)
                         _rc_amask = None
                     if _rc_amask is not None:
                         latent["noise_mask"] = comfy.nested_tensor.NestedTensor(
                             (_rc_vmask, _rc_amask))
                     else:
                         latent["noise_mask"] = _rc_vmask
+                    _rc_area = (float(_rc_vmask.mean()) if _rc_subject_mask is not None else 1.0)
                     print(f"[H3 Recast] clip[{i+1}] 源画面/原声已灌入 AV latent: {_rc_info}; "
                           f"半重绘 denoise={float(denoise):.2f}; "
+                          f"重绘区={'人物掩码 %.1f%%' % (_rc_area * 100) if _rc_subject_mask is not None else '全画幅'}; "
                           f"源原声{'已锁定' if _rc_az is not None else '未锁定'}")
                 except Exception as _rc_err:
-                    print(f"[H3 Recast] clip[{i+1}] 源片段编码失败，本段回退普通渲染: {_rc_err}")
+                    # v14.336: 本段替换不了就别渲 —— 静默当普通分镜渲出来的是"没替换的片子"，
+                    # 用户要等十几分钟到出片才发现，代价比直接报错大得多。
+                    raise RuntimeError(
+                        f"[H3 Recast] clip[{i+1}] 源片段编码/注入失败，本档中止"
+                        "（不退回普通渲染）："
+                        f"{type(_rc_err).__name__}: {_rc_err}") from _rc_err
 
             # v2.119: lip_audio 注入 AV latent 音频区 + zero-denoise 锁定
             # 参考 VRGDG Audio Drive: 把歌曲编码后直接塞进 latent 音频区,
