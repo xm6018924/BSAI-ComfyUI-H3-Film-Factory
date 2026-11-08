@@ -3716,6 +3716,12 @@ except Exception as _e_cond:
     _FF_COND_UPSCALE_FN = None
 
 
+_RP_LEGACY_LABELS = {
+    # pre-v14.340 label of the MV dual-pass pipeline
+    "MV Dual-Pass (\u7535\u5f71\u5de5\u5382 v3.2 \u539f\u7248)": "MV Dual-Pass (Film Factory v3.2 original)",
+}
+
+
 def _ff_get_upscaler_models():
     """获取可用的 3D latent upscaler 模型列表; 不可用时返回仅插值选项。"""
     opts = ["(bilinear interpolation, no model)"]
@@ -3765,15 +3771,15 @@ def _ff_resolve_upscaler_model(name):
         _fallback = _opts[0]
     if not _fallback:
         return "(bilinear interpolation, no model)", (
-            f"3D upscaler 权重 '{name}' 与加载器架构不匹配, 且目录里没有可用权重, "
-            f"已退回 bilinear 插值")
+            f"3D upscaler weights '{name}' do not match the loader architecture and no "
+            f"compatible weights are installed; fell back to bilinear interpolation")
     try:
         _desc = _FF_UPSCALER_MOD.describe_model(name)
     except Exception:
-        _desc = "未知架构"
+        _desc = "unknown architecture"
     return _fallback, (
-        f"3D upscaler 权重 '{name}' 与加载器架构不匹配({_desc}), "
-        f"已自动改用 '{_fallback}'")
+        f"3D upscaler weights '{name}' do not match the loader architecture ({_desc}); "
+        f"switched to '{_fallback}' automatically")
 
 
 def _ff_is_nested(samples):
@@ -5487,15 +5493,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                           f"见 v1.47 显存预算)")
                     _send_extender_warning(
                         owner_id,
-                        f"二采倍率被显存预算降级 x{_orig_f}→x{_chosen2}，"
-                        f"本段成片像素低于声明值（细节会明显变软）",
+                        f"Refine scale downgraded by the VRAM budget x{_orig_f}->x{_chosen2}: "
+                        f"this clip renders below the declared size (detail gets visibly softer)",
                         clip_index=clip_index,
                     )
                 elif _auto_tiled:
                     _send_extender_warning(
                         owner_id,
-                        f"显存不足，已自动启用分块二采保住 x{_orig_f} 倍率"
-                        f"（速度略降，画质不缩水）",
+                        f"VRAM is tight: tiled refine enabled automatically to keep the "
+                        f"x{_orig_f} scale (slightly slower, same picture quality)",
                         clip_index=clip_index,
                     )
                 elif _chosen2 is None:
@@ -5552,8 +5558,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if _FF_UPSCALER_FELL_BACK["hit"]:
                     _send_extender_warning(
                         owner_id,
-                        f"3D 语义放大失败，已回退 bislerp 插值"
-                        f"（{_FF_UPSCALER_FELL_BACK['reason']}）",
+                        f"3D semantic upscale failed; fell back to bislerp interpolation "
+                        f"({_FF_UPSCALER_FELL_BACK['reason']})",
                         clip_index=clip_index,
                     )
                 if tuple(_up_video.shape[-2:]) != tuple(_members[0].shape[-2:]):
@@ -7083,9 +7089,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                               f"已自动回退一采 latent {_pre_hw[1]}x{_pre_hw[0]}")
                         _send_extender_warning(
                             owner_id,
-                            f"二采结果塌陷成灰片(通道内std={_cdisp:.3f})，"
-                            f"已自动回退一采 latent；建议降低 refine_denoise / "
-                            f"refine_steps，或关闭二采",
+                            f"Refine collapsed into a grey frame (in-channel std={_cdisp:.3f}); "
+                            f"rolled back to the first-pass latent. Lower refine_denoise / "
+                            f"refine_steps, or turn refine off",
                             clip_index=clip_index,
                         )
                     else:
@@ -8722,7 +8728,8 @@ def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
         ctl["event"].clear()
     _send_extender_progress(
         node_id, clip_index, total, "paused",
-        f"Clip {clip_index + 1} 已生成完成，渲染已暂停 — 可点「继续 / 仅当前 / 中止」，无干预 {int(timeout)}s 后自动继续",
+        f"Clip {clip_index + 1} finished — rendering paused. Use Resume / This clip only / "
+        f"Abort; continues automatically after {int(timeout)}s with no input",
     )
     decided = ctl["event"].wait(timeout)
     with _render_ctl_lock:
@@ -8731,25 +8738,26 @@ def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
     if not decided:
         _send_extender_progress(
             node_id, clip_index, total, "resumed",
-            f"暂停超时无干预 → 自动继续渲染 Clip {clip_index + 2}",
+            f"Pause timed out with no input -> resuming Clip {clip_index + 2}",
         )
         return True
     if state == "resume":
         _send_extender_progress(
             node_id, clip_index, total, "resumed",
-            f"用户点击「继续」→ 渲染 Clip {clip_index + 2}",
+            f"Resume pressed -> rendering Clip {clip_index + 2}",
         )
         return True
     if state == "stop_after":
         _send_extender_progress(
             node_id, clip_index, total, "stopped",
-            "已停止后续渲染：仅保留已生成的 CLIP（可点「合并输出」合成视频）",
+            "Rendering stopped: only the clips already generated are kept "
+            "(use Merge Output to build the video)",
         )
         return False
     if state == "abort":
         _send_extender_progress(
             node_id, clip_index, total, "aborted",
-            "渲染已中止",
+            "Rendering aborted",
         )
         return False
     return True
@@ -9932,7 +9940,7 @@ class BSAIH3FilmFactory:
                 },
             )
         # v14.101: 回退 18:35(v14.84) — tts_model_TTS模型 在 optional 末尾（v2.7.json 一致）
-        optional["tts_model_TTS模型"] = (
+        optional["tts_model"] = (
             "INDEX_TTS_MODEL",
             {"forceInput": True, "tooltip": "IndexTTS-2.5 model (connect to the tts_model output of BSAI_IndexTTS2_5Loader). Required in speech mode."},
         )
@@ -9942,7 +9950,7 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)"],
+            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
                 "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi 大凯AI) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default. (32) Video Recast (H3 V2V character swap, v14.335) = 视频人物替换: the asset-library video @视频N becomes the V2V source (picture AND soundtrack) while @图N reference pictures define the new identity; the backend auto-splits the source into <=15s segments (the MiniMax H3 Recast per-shot contract: a 45s video becomes 3 clips), encodes each segment into the H3 AV latent (video = source frames, audio = source soundtrack locked with noise_mask 0), and runs an 8-step euler/simple first pass at denoise 0.65 so the original camera/motion/composition survive and only the person is swapped; refine skipped, motion context chaining disabled between recast clips; mount minimax_h3_角色替换character_swap_v1.5 in the LoRA stack at 0.6-0.8 for the strongest identity transfer.",
@@ -10439,6 +10447,12 @@ class BSAIH3FilmFactory:
         refine_steps = kwargs.get("refine_steps", 2)
         refine_upscale_factor = kwargs.get("refine_upscale_factor", 2.0)
         refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear interpolation, no model)")
+        # The VALIDATE_INPUTS overload above disables ComfyUI's own combo check,
+        # so the value is validated against the offered list here.
+        if refine_upscaler_model and refine_upscaler_model not in _ff_get_upscaler_models():
+            print(f"[H3 Extender] refine_upscaler_model {refine_upscaler_model!r} is not one of "
+                  f"the offered models; using bilinear interpolation")
+            refine_upscaler_model = "(bilinear interpolation, no model)"
         refine_align_to = int(kwargs.get("refine_align_to", 40))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
         # v14.238 MiniMaxH3 Director 极速双采移植参数:
@@ -10616,6 +10630,13 @@ class BSAIH3FilmFactory:
         _sb_adapter_raw = kwargs.get("semantic_bridge_adapter", "")
         # v14.152: 老工作流可能存 False/None/空串 → 一律视为关闭（最低档）
         _sb_adapter = "" if _sb_adapter_raw in (False, None, "") else str(_sb_adapter_raw)
+        # Only a name the adapter combo actually offers may be used: a value
+        # arriving from a shared workflow must not point the node at an
+        # arbitrary file on the host.
+        if _sb_adapter and _sb_adapter not in _bsai_list_semantic_bridge_adapters():
+            print(f"[H3 Extender] semantic_bridge_adapter {_sb_adapter!r} is not one of the "
+                  f"known adapters; semantic bridge disabled for this run")
+            _sb_adapter = ""
         # v14.152: 老工作流可能存空串 → 取默认 0.15（最低档）
         _sb_alpha = _safe_float(kwargs.get("semantic_bridge_alpha"), 0.15)
         _sb_mag = bool(kwargs.get("semantic_bridge_magnitude_match", True))
@@ -10638,6 +10659,9 @@ class BSAIH3FilmFactory:
         # speed_preset 仅剩 7 项基础档。旧工作流遗留的配方档值(速度档里)仍由下方
         # speed_preset 兼容分支按值生效, 两源互斥不叠加。
         _rp_mode = str(kwargs.get("render_pipeline", "") or "")
+        # Labels are English-only from v14.340; workflows saved before that use
+        # the retired Chinese-containing label, mapped forward here.
+        _rp_mode = _RP_LEGACY_LABELS.get(_rp_mode, _rp_mode)
         # v14.259: 英文标签归一回旧中文内部值(与上方 _render_pipeline 同源)
         _rp_mode = _RENDER_PIPELINE_EN2ZH.get(_rp_mode, _rp_mode)
         # v14.220 直播带货配音模式 01/02/03：识别模式键，并把三个新模式别名到
@@ -10673,7 +10697,7 @@ class BSAIH3FilmFactory:
                     print(f"[H3 Extender] v14.210 默认管道 Sol-H3 Self-Lift 双采: refine_enable=False -> True (双采管道理应开二采)")
                 else:
                     print(f"[H3 Extender] v14.210 默认管道 Sol-H3 Self-Lift 双采: refine_enable 已 True")
-            elif _rp_mode == "MV Dual-Pass (电影工厂 v3.2 原版)":
+            elif _rp_mode == "MV Dual-Pass (Film Factory v3.2 original)":
                 # v14.280 (2026-11-02): MV 双采档 —— 参数完整照搬 BSAI_H3_Film_Factory
                 # 电影工厂128分钟大电影版-示例工作流 v3.2-MV.json（v2.115 旧版插件
                 # 保存的 45 键工作流, node 250 widgets_values 逐条反译确认）。
@@ -11982,9 +12006,10 @@ class BSAIH3FilmFactory:
                         _os_tpl_name = str(_os_tpl.get("name") or "")
                     else:
                         _os_tpl_prompt = (
-                            "镜头持续跟随主体运动，不切场、不转场、一镜到底，"
-                            "主体在画面中连续完成动作，空间与时间连续，"
-                            "音乐情绪与画面节奏同步。"
+                            "The camera keeps following the subject with no cuts and no "
+                            "transitions, one continuous take; the subject performs its action "
+                            "in one uninterrupted flow, space and time stay continuous, and the "
+                            "music mood tracks the visual rhythm."
                         )
                     # 每段时长: 前 target-1 段 = 目标时长, 最后一段 = 歌曲剩余
                     _os_seg_dur = [_os_dur] * _os_target
@@ -12717,7 +12742,7 @@ class BSAIH3FilmFactory:
                     print(f"[H3 LipSync] v14.252 音频驱动 clip 切分已生效 (全管道通用, 按音频实际时长切分, 不拉长不缩短)")
         else:
             _lip_voice_dummy = None
-        _tts_model = kwargs.get("tts_model_TTS模型")
+        _tts_model = kwargs.get("tts_model", kwargs.get("tts_model_TTS模型"))
         # v14.280: 自动多人对话声音克隆 —— 当 tts_model + 资产库音频参考都在，
         # 且没有外部 lip_audio/lip_voice 驱动时，从分镜脚本提取对话台词，
         # 自动调用 BSAIDialogueVoiceClone 合成完整多说话人对话音频，
@@ -14731,7 +14756,7 @@ class BSAIH3FilmFactory:
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
                     owner, i, len(clips), "aborted",
-                    "用户终止：渲染已中止（已保留已生成 CLIP）",
+                    "Interrupted by the user: rendering aborted (generated clips are kept)",
                 )
                 print("[H3 Extender] 用户终止渲染，停止后续 CLIP")
                 break
@@ -15592,17 +15617,11 @@ if getattr(PromptServer, "instance", None) is not None:
                             })
                         except Exception:
                             pass
+            # No file-manager window is opened for an HTTP caller: any client
+            # that can reach this route would otherwise be able to pop a window
+            # on the host desktop. The folder path is returned, and the UI
+            # offers a copy-to-clipboard button.
             opened = False
-            try:
-                if os.name == "nt":
-                    os.startfile(str(d))
-                    opened = True
-                else:
-                    import subprocess
-                    subprocess.Popen(["xdg-open", str(d)])
-                    opened = True
-            except Exception:
-                opened = False
             return web.json_response({
                 "ok": True,
                 "kind": kind,

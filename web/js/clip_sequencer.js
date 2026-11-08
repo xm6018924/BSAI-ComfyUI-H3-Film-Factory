@@ -553,14 +553,14 @@ function addClipCard(node, cardsWrapper, clipData) {
     // Prompt
     var promptLbl = document.createElement("div");
     promptLbl.className = "bsai-clip-lbl";
-    promptLbl.innerHTML = 'Prompt <span class="bsai-clip-lbl-hint">【旁白】/【对白】 · @img1 @vid1 @aud1</span>';
+    promptLbl.innerHTML = 'Prompt <span class="bsai-clip-lbl-hint">[voiceover]/[dialogue] · @img1 @vid1 @aud1</span>';
     rightPanel.appendChild(promptLbl);
 
     var promptInput = document.createElement("textarea");
     promptInput.className = "bsai-clip-prompt";
     promptInput.rows = 2;
     promptInput.value = data.prompt || "";
-    promptInput.placeholder = "Enter generation prompt...\nUse 【旁白】/【对白】 for narration and dialogue\nUse @img1 @vid1 @aud1 to reference assets";
+    promptInput.placeholder = "Enter generation prompt...\nUse [voiceover]/[dialogue] for narration and dialogue\nUse @img1 @vid1 @aud1 to reference assets";
     promptInput.addEventListener("input", function () { serializeClips(node, cardsWrapper); });
     rightPanel.appendChild(promptInput);
 

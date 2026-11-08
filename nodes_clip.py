@@ -107,7 +107,7 @@ class BSAI_ClipComposer:
     RETURN_TYPES = ("CLIP_INFO",)
     RETURN_NAMES = ("clip_info",)
     FUNCTION = "compose_clip"
-    DESCRIPTION = "Define a clip: prompt, subtitle (narration/dialogue), audio mode, duration, asset refs (@imgN/@vidN/@audN; legacy @图N/@视频N/@音频N also accepted)."
+    DESCRIPTION = "Define a clip: prompt, subtitle (narration/dialogue), audio mode, duration, asset refs (@imgN/@vidN/@audN; legacy Chinese tags also accepted)."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -182,7 +182,7 @@ class BSAI_ClipSequencer:
     RETURN_TYPES = ("CLIP_SEQUENCE",)
     RETURN_NAMES = ("clip_sequence",)
     FUNCTION = "sequence_clips"
-    DESCRIPTION = "Storyboard sequencer: vertical CLIP cards, asset-library references (@imgN/@vidN/@audN; legacy @图N/@视频N/@音频N also accepted), manual add/remove clips."
+    DESCRIPTION = "Storyboard sequencer: vertical CLIP cards, asset-library references (@imgN/@vidN/@audN; legacy Chinese tags also accepted), manual add/remove clips."
 
     MAX_EXT_CLIPS = 4
 

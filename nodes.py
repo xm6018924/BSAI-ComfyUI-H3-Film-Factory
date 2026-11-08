@@ -7,6 +7,16 @@ from PIL import Image
 import folder_paths
 
 
+def _unsafe_subdir_text(value):
+    """True when a caller-supplied folder name must be refused before I/O."""
+    text = str(value or "").strip()
+    if text[0:2] in ("\\\\", "//") or "://" in text:
+        return True
+    if os.path.isabs(text):
+        return True
+    return ".." in [p for p in text.replace("\\", "/").split("/")]
+
+
 class BSAI_ContextualSeriesExtract:
     """
     Extract reference frames from a previously generated video to maintain
@@ -182,6 +192,10 @@ class BSAI_ContextualSeriesExtract:
     def _safe_output_dir(output_dir, subdir):
         """Resolve subdir strictly inside the ComfyUI output directory.
         Reject absolute paths and any '..' traversal that escapes output_dir."""
+        if _unsafe_subdir_text(subdir):
+            raise ValueError(
+                f"BSAI H3 Film Factory: output_subdir must be a plain folder name: {subdir!r}"
+            )
         base = os.path.realpath(output_dir)
         candidate = os.path.realpath(os.path.join(base, subdir or ""))
         if os.path.commonpath([base, candidate]) != base:

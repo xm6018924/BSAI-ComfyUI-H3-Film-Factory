@@ -258,18 +258,18 @@ class BSAIDialogueVoiceClone:
                 "dialogue_script": ("STRING", {
                     "multiline": True,
                     "default": (
-                        "小明: 大家好，欢迎来到我们的直播间！\n"
-                        "小红: 是的，今天给大家带来了很多超值好物~\n"
-                        "小明: 首先是这款面膜，补水效果超级棒！\n"
-                        "小红: 没错，我自己也在用，价格也非常优惠。"
+                        "Host: Welcome to our live stream, everyone!\n"
+                        "Co-host: Right, and today we brought plenty of great deals for you.\n"
+                        "Host: First up, this face mask - the hydration is superb!\n"
+                        "Co-host: Absolutely, I use it myself, and the price is a steal."
                     ),
                     "tooltip": (
                         "Multi-speaker dialogue script.\n"
                         "Supported formats:\n"
-                        "  角色名: 台词内容\n"
-                        "  【角色名】台词内容\n"
-                        "  @图1: 台词内容  ← asset reference\n"
-                        "  @音频2: 台词内容"
+                        "  Speaker: line text\n"
+                        "  [Speaker] line text\n"
+                        "  @img1: line text  <- asset reference\n"
+                        "  @aud2: line text"
                     ),
                 }),
             },
@@ -287,8 +287,8 @@ class BSAIDialogueVoiceClone:
                     "default": "",
                     "tooltip": (
                         "Role-to-reference mapping (optional).\n"
-                        "Format: 角色名=ref_index,角色名=ref_index\n"
-                        "Example: 小明=1,小红=2,主播=1\n"
+                        "Format: speaker=ref_index,speaker=ref_index\n"
+                        "Example: Host=1,Co-host=2,Narrator=1\n"
                         "If left empty, auto-mapping is used."
                     ),
                 }),

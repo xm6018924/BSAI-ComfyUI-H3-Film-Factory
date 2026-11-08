@@ -5145,6 +5145,12 @@ class MiniMaxH3MotionContextDiskFinalDecode:
         # are rejected (fall back to the default output dir).
         out_dir = default_out
         custom_out = str(output_directory or "").strip()
+        if custom_out and (custom_out[0:2] in ("\\\\", "//") or "://" in custom_out
+                           or ".." in [p for p in custom_out.replace("\\", "/").split("/")]):
+            _LOG.warning(
+                "H3 Final Decode: output_directory %r is a network share, URL or "
+                "traversal path; falling back to %s", custom_out, default_out)
+            custom_out = ""
         if custom_out:
             cand = Path(custom_out).expanduser().resolve()
             try:

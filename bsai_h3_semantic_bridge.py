@@ -85,11 +85,18 @@ def list_adapters() -> list:
 
 
 def _resolve(name: str) -> str | None:
+    """Resolve an adapter name that the combo widget actually offers.
+
+    Only names returned by list_adapters() are accepted and every lookup goes
+    through folder_paths: a value arriving from a shared workflow must not be
+    able to load an arbitrary file from the host (an absolute path or a
+    network share would otherwise be used as adapter weights).
+    """
     n = str(name or "").strip()
     if not n or n.startswith("("):
         return None
-    if os.path.isabs(n) and os.path.isfile(n):
-        return n
+    if n not in list_adapters():
+        return None
     try:
         import folder_paths
         _folder()
@@ -97,12 +104,7 @@ def _resolve(name: str) -> str | None:
         if p and os.path.isfile(p):
             return p
     except Exception:
-        pass
-    root = _folder()
-    if root:
-        cand = os.path.join(root, n)
-        if os.path.isfile(cand):
-            return cand
+        return None
     return None
 
 

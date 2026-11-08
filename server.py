@@ -39,6 +39,25 @@ _VID_EXTS = ('.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv')
 _AUD_EXTS = ('.wav', '.mp3', '.flac', '.ogg', '.aac', '.m4a')
 # Security: only these asset types may be addressed by name from HTTP handlers.
 _ASSET_TYPE_WHITELIST = ('images', 'videos', 'audios', 'audio')
+_ASSET_EXTS = _IMG_EXTS + _VID_EXTS + _AUD_EXTS
+
+
+def _asset_ext_allowed(filename):
+    """Only media extensions may be stored or served from the asset routes."""
+    return os.path.splitext(str(filename or ''))[1].lower() in _ASSET_EXTS
+
+
+def _unsafe_path_text(value):
+    """True when a caller-supplied path string must be refused before I/O.
+
+    On Windows, resolving a network-share (UNC) value makes the machine
+    connect to that host and authenticate with the signed-in account, so
+    such values are rejected as text before any realpath/isdir call.
+    """
+    text = str(value or '').strip()
+    if text[0:2] in ('\\\\', '//') or '://' in text:
+        return True
+    return '..' in [p for p in text.replace('\\', '/').split('/')]
 
 
 def _get_asset_base():
@@ -116,6 +135,10 @@ if _HAS_SERVER:
         async for field in reader:
             if field.name == 'file':
                 filename = os.path.basename(field.filename or 'unnamed')
+                if not _asset_ext_allowed(filename):
+                    return web.json_response(
+                        {"error": "Unsupported file type: upload image, video or audio only"},
+                        status=400)
 
                 base, ext = os.path.splitext(filename)
                 counter = 1
@@ -150,7 +173,14 @@ if _HAS_SERVER:
         filepath = _confine_path(target_dir, filename)
         if not filepath or not os.path.exists(filepath):
             return web.json_response({"error": "File not found"}, status=404)
-        return web.FileResponse(filepath)
+        if not _asset_ext_allowed(filename):
+            # An uploaded HTML or SVG file would otherwise open as a page on
+            # the ComfyUI origin; only media extensions are served here.
+            return web.json_response({"error": "File type not served"}, status=404)
+        return web.FileResponse(
+            filepath,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
 
     @PromptServer.instance.routes.get("/bsai/video_frame")
     async def serve_video_frame(request):
@@ -193,6 +223,10 @@ if _HAS_SERVER:
         async for field in reader:
             if field.name == 'file':
                 filename = os.path.basename(field.filename or 'unnamed')
+                if not _asset_ext_allowed(filename):
+                    return web.json_response(
+                        {"error": "Unsupported file type: upload image, video or audio only"},
+                        status=400)
 
                 base, ext = os.path.splitext(filename)
                 counter = 1
@@ -410,11 +444,17 @@ if _HAS_SERVER:
             if not path:
                 return None
             p = path.strip().strip('"').strip("'")
+            if _unsafe_path_text(p):
+                return None
             if _HAS_FOLDER_PATHS:
                 # Security: only allow paths inside the ComfyUI input/output dirs.
                 allowed_bases = [os.path.realpath(folder_paths.get_input_directory()),
                                  os.path.realpath(folder_paths.get_output_directory())]
                 if os.path.isabs(p):
+                    bases_text = [os.path.normcase(os.path.normpath(b)) for b in allowed_bases]
+                    p_text = os.path.normcase(os.path.normpath(p))
+                    if not any(p_text == b or p_text.startswith(b + os.sep) for b in bases_text):
+                        return None
                     real = os.path.realpath(p)
                     if any(os.path.commonpath([b, real]) == b for b in allowed_bases) and os.path.isdir(real):
                         return real

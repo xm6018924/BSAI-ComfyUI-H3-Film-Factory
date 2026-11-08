@@ -46,6 +46,14 @@ MAX_REF_VIDEOS = 3
 MAX_REF_AUDIOS = 3
 
 
+def _unsafe_asset_name(value):
+    """Reject network-share, URL and traversal text before any filesystem call."""
+    text = str(value or "").strip()
+    if text[0:2] in ("\\\\", "//") or "://" in text:
+        return True
+    return ".." in [p for p in text.replace("\\", "/").split("/")]
+
+
 def _find_asset_file(type_dir, fname, input_dir):
     """Resolve an asset filename under its type subfolder, falling back to the
     input root (files uploaded via LoadAudio/UploadImage land there). Rejects
@@ -54,6 +62,9 @@ def _find_asset_file(type_dir, fname, input_dir):
     reference never silently drops the voice binding (that silent drop is what
     made the multi-speaker workflow fall back to H3's default male voice)."""
     name = str(fname or "")
+    if _unsafe_asset_name(name):
+        print(f"[BSAI AssetLibrary] asset name refused: {name}")
+        return None
     base = os.path.realpath(type_dir)
     candidate = os.path.realpath(os.path.join(base, name))
     if os.path.commonpath([base, candidate]) == base and os.path.exists(candidate):
@@ -69,6 +80,8 @@ def _find_asset_file(type_dir, fname, input_dir):
 
 def _resolve_directory(path):
     if not path:
+        return None
+    if _unsafe_asset_name(path):
         return None
     if os.path.isabs(path) and os.path.isdir(path):
         return path
@@ -166,7 +179,7 @@ class BSAI_AssetLibraryInput:
     RETURN_TYPES = ("ASSET_LIBRARY",)
     RETURN_NAMES = ("asset_library",)
     FUNCTION = "load_assets"
-    DESCRIPTION = "Upload images/videos/audio via the node UI. Assets are indexed by tag: @img1, @img2,... (images) / @vid1,... (videos) / @aud1,... (audio). Legacy tags @图N/@视频N/@音频N are also accepted."
+    DESCRIPTION = "Upload images/videos/audio via the node UI. Assets are indexed by tag: @img1, @img2,... (images) / @vid1,... (videos) / @aud1,... (audio). Legacy Chinese tags are also accepted."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -266,7 +279,7 @@ class BSAI_AssetRefSelector:
         "formatted_prompt",
     )
     FUNCTION = "select_assets"
-    DESCRIPTION = "Parse @imgN/@vidN/@audN tokens in the prompt (legacy @图N/@视频N/@音频N also accepted), load the referenced assets, and output for MiniMaxH3ReferenceToVideo."
+    DESCRIPTION = "Parse @imgN/@vidN/@audN tokens in the prompt (legacy Chinese tags also accepted), load the referenced assets, and output for MiniMaxH3ReferenceToVideo."
 
     @classmethod
     def INPUT_TYPES(cls):
