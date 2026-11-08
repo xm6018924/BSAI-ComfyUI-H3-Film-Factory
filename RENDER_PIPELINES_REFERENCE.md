@@ -1,6 +1,6 @@
 # BSAI-H3-Film-Factory 渲染管道 / 模式 / LoRA 搭配速查表
 
-> 基于 `extender.py` v14.337 源码整理（2026-11-08；v14.322 起整理，新增第 33 档「视频替换」，v14.337 起该档改为人物区域掩码重绘）。
+> 基于 `extender.py` v14.339 源码整理（2026-11-08；v14.322 起整理，新增第 33 档「视频替换」，v14.337 起该档改为人物区域掩码重绘；v14.339 新增第 34 档 HyperFlow H3 Flash 14B）。
 > LoRA 一律挂在 H3 Loader 的标准 LoRA 槽，强度按各档推荐。
 
 ---
@@ -37,7 +37,7 @@
 
 ---
 
-## 三、渲染管道（render_pipeline）全 33 档
+## 三、渲染管道（render_pipeline）全 34 档
 
 ### A. 默认/通用
 
@@ -104,7 +104,7 @@
 
 **链路**：源片段 → ffmpeg 精确 seek（`-ss` 在 `-i` 之后）抽 24fps、等比放大 + 居中裁切到画布、帧数对齐 17k+5 网格 → `vae.encode()` 得 `[1,24,T,h/16,w/16]`；源原声 → 重采样到 audio_vae 采样率、裁/补到 `round(dur*40)` 行 → `audio_vae.encode()` 得 `[1,32,2,Ta]`。两者装进 `NestedTensor` 作为一采初始化 latent：视频行按**人物掩码**放行重绘，音频行锁死（mask=0），所以替换后对白/环境声/口型与原视频逐帧对齐，**不需要另接 lip_audio**。
 
-**人物掩码（v14.337，为什么必须有）**：早期版本视频 mask 全 1，等于整幅画面都允许重绘，denoise 0.65 下夜景街景被换成室内、衣服也沿用了源片 —— 实测出片正是这么坏的。现在逐帧向本机 NPU 服务取：`POST /detect_pose`（YOLO11-pose 人体框）+ `POST /segment_foreground`（RMBG-1.4 alpha，**JSON `{"image": <base64>}`，返回 `data:image/png;base64` 前缀需剥掉**），**GrabCut（框内初值）∪ RMBG alpha 后限制在人体框内**，去碎块 → 闭运算补洞 → 外扩 13px → 羽化 10px，按 17 帧步长取 22 行 `INTER_AREA` 下采样到 latent 网格。掩码语义见 `comfy/model_base.py::process_timestep` —— `denoise_mask * timestep → patchify`，0 表示该 token 不做去噪（保持源 latent）。掩码失败（NPU 掉线）才退回全 1 并告警。相关环境变量：`BSAI_H3_RECAST_SUBJECT_MASK=0` 关闭、`BSAI_H3_RECAST_MASK_DILATE`、`BSAI_H3_RECAST_MASK_FEATHER`、`BSAI_H3_RECAST_MASK_PORT`。
+**人物掩码（v14.337，为什么必须有）**：早期版本视频 mask 全 1，等于整幅画面都允许重绘，denoise 0.65 下夜景街景被换成室内、衣服也沿用了源片 —— 实测出片正是这么坏的。现在逐帧向本机 NPU 服务取：`POST /detect_pose`（YOLO11-pose 人体框）+ `POST /segment_foreground`（RMBG-1.4 alpha，**JSON `{"image": <base64>}`，返回 `data:image/png;base64` 前缀需剥掉**），**GrabCut（框内初值）∪ RMBG alpha 后限制在人体框内**，去碎块 → 闭运算补洞 → 外扩 13px → 羽化 10px，按 17 帧步长取代表帧 `INTER_AREA` 下采样到 latent 网格（v14.338 起代表帧改由 `_RECAST_MASK_SAMPLES` 封顶默认 24 个，因实测 `vae.encode` 对 362 帧给出 **107** 个 latent 行，逐行打 NPU 太慢；每行取最近的已采样帧）。掩码语义见 `comfy/model_base.py::process_timestep` —— `denoise_mask * timestep → patchify`，0 表示该 token 不做去噪（保持源 latent）。掩码失败（NPU 掉线）才退回全 1 并告警。相关环境变量：`BSAI_H3_RECAST_SUBJECT_MASK=0` 关闭、`BSAI_H3_RECAST_MASK_DILATE`、`BSAI_H3_RECAST_MASK_FEATHER`、`BSAI_H3_RECAST_MASK_SAMPLES`、`BSAI_H3_RECAST_MASK_PORT`。
 
 **分段（15s 契约）**：`n = ceil(源时长 / 15s)`（对齐 MiniMax H3 Recast 单镜头 ≤15s），每段时长 = 源时长 / n 并对齐帧网格。45s 源视频 → 3 段 × ≈15s，分镜不足自动补 CLIP（`id` 后缀 `_recast_k`，`context_enabled=False`），分镜多于所需则把多余段 `render_enabled=False` 跳过并打印说明。
 
@@ -113,6 +113,19 @@
 - 不做段间 motion context 续链：每段必须各自被源视频对应片段驱动，否则会把"上段生成出来的画面"当上下文，越链越偏；
 - 提示词里的 `<Video N>` 会被替换成"原视频"字样：源视频已经作为 V2V latent 进入采样，保留标签会让 H3 把它再当 ref2v 参考视频二次注入，动作被重演一遍；
 - 忽略 `lip_audio_segments`：另灌一套音频行会与"锁定源原声"冲突。
+
+### G. HyperFlow H3 Flash 14B（v14.339，Bilibili BV13oWJ6uEQZ）
+
+| # | 管道 | 一采+二采 | 关键参数 | 配套 | 适用 |
+|---|---|---|---|---|---|
+| 34 | **HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)**<br>`HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)` | 4/6/8 步单采（**refine 强制关**） | euler + `hyperflow_manual` 固定 sigma（官方 4/6/8 曲线，flow shift 12 已烘焙，**不再注入 dual-track shift**）；CFG 1.0 单前向；denoise 1.0；无负面提示词；TST 关闭；跳过 H3 底座音频 12 步提步保护 | 权重 `minimax_h3_fl2va_hyperflow_flash_14b-Q4_K_M.gguf`(9.1GB) / `minimax_h3_ref2va_hyperflow_flash_14b-Q4_K_M.gguf`(9.2GB) → `models/diffusion_models/`；必须用 **HyperFlow GGUF Loader**（节点包 ComfyUI-GGUF + ComfyUI-HyperFlow-Flash）；全量 H3 的加速 LoRA **不兼容** | 低显存 24GB 级快速出片；官方默认 1344x768 / 124帧(5.2s) / 24fps / 32kHz 立体声；16GB 未实测 |
+
+**官方固定 sigma（已乘 flow shift 12，取自 ComfyUI-HyperFlow-Flash/integrations/README.md，与 loader_nodes.py 的 RAW_SIGMAS 一致）**：
+- 4 步：`1.0, 0.962575793, 0.755781889, 0.312497854, 0.0`
+- 6 步：`1.0, 0.982655942, 0.914642572, 0.674755692, 0.385223746, 0.159055322, 0.0`
+- 8 步：`1.0, 0.993909776, 0.9842875, 0.966063738, 0.923076928, 0.8349424, 0.696852028, 0.468753308, 0.0`
+
+**权重选择**：纯文生/首帧/首尾帧 → `fl2va_gguf/`；参考图 Ref2VA（电影工厂 `@图N` 链路）→ `ref2va_gguf/`。二采在官方四套模板中均不存在，本档保持单采。
 
 ---
 

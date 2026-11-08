@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.337-recast-subject-mask"
+BUILD = "minimax-h3-extender-v14.339-hyperflow-h3-flash-recast-cut-guard"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -639,6 +639,9 @@ _RECAST_MASK_ON = str(os.environ.get("BSAI_H3_RECAST_SUBJECT_MASK", "1")).strip(
 _RECAST_MASK_DILATE = max(0, int(os.environ.get("BSAI_H3_RECAST_MASK_DILATE", "13") or 13))
 _RECAST_MASK_FEATHER = max(0, int(os.environ.get("BSAI_H3_RECAST_MASK_FEATHER", "10") or 10))
 _RECAST_MASK_TIMEOUT = float(os.environ.get("BSAI_H3_RECAST_MASK_TIMEOUT", "120") or 120)
+# 代表帧上限：H3 VAE 的 latent 行数远多于 17k+5 直觉（362 帧 → 107 行），逐行打 NPU 太慢；
+# 15s 内 24 个采样点（≈0.6s/点）足够跟上人物位移，其余行取最近的采样帧。
+_RECAST_MASK_SAMPLES = max(1, int(os.environ.get("BSAI_H3_RECAST_MASK_SAMPLES", "24") or 24))
 _RECAST_DISCIPLINE = (
     "【视频人物替换纪律】本段执行“视频人物替换（Recast）”：输入视频是本段唯一的画面、场景与运动来源。"
     "把原视频中的人物换成参考图里的人物，除此之外画面的一切都不许动。"
@@ -902,10 +905,13 @@ def _recast_frame_person_mask(rgb_u8, base_url):
     bgr = _cv2f.cvtColor(np.ascontiguousarray(rgb_u8), _cv2f.COLOR_RGB2BGR)
     mask = np.zeros((h, w), np.uint8)
     box = np.ones((h, w), np.uint8)
+    gc_fg = np.zeros((h, w), np.uint8)
+    bw = bh = 0
     if poses:
         x1, y1, x2, y2 = [int(round(float(v))) for v in poses[0]["bbox"][:4]]
         x1, y1 = max(0, min(w - 1, x1)), max(0, min(h - 1, y1))
         x2, y2 = max(x1 + 1, min(w, x2)), max(y1 + 1, min(h, y2))
+        bw, bh = x2 - x1, y2 - y1
         sx, sy = int((x2 - x1) * 0.04), int((y2 - y1) * 0.04)
         rx1, ry1 = x1 + sx, y1 + sy
         rx2, ry2 = x2 - sx, y2 - sy
@@ -917,14 +923,25 @@ def _recast_frame_person_mask(rgb_u8, base_url):
                 _cv2f.grabCut(bgr, gc, (rx1, ry1, rx2 - rx1, ry2 - ry1),
                               _bgd, _fgd, 5, _cv2f.GC_INIT_WITH_RECT)
                 _mgc = np.where((gc == _cv2f.GC_FGD) | (gc == _cv2f.GC_PR_FGD), 1, 0)
-                mask = np.maximum(mask, _mgc.astype(np.uint8))
+                gc_fg = _mgc.astype(np.uint8)
+                mask = np.maximum(mask, gc_fg)
             except Exception:
-                pass
+                gc_fg = np.zeros((h, w), np.uint8)
         box = np.zeros((h, w), np.uint8)
         ex, ey = int((x2 - x1) * 0.07), int((y2 - y1) * 0.06)
         box[max(0, y1 - ey):min(h, y2 + ey), max(0, x1 - ex):min(w, x2 + ex)] = 1
     if alpha is not None:
-        mask = np.maximum(mask, (alpha > 0.5).astype(np.uint8))
+        a_bin = (alpha > 0.5).astype(np.uint8)
+        # v14.338: RMBG 在夜景/虚化背景上会把大块亮区当"前景"（本机实测人区一度达 62%，
+        # 等于人框内的街道也放开重绘）。所以把 alpha 限制在 GrabCut 人体区的邻域带内：
+        # 衣服/鞋帽/手套紧贴人体，一定落在带内；离人很远的亮斑则被剔除。
+        if poses and int(gc_fg.sum()) > (h * w) * 0.005:
+            rad = int(round(0.10 * max(bw, bh)))
+            rad = max(9, min(61, rad if rad % 2 == 1 else rad + 1))
+            band = _cv2f.dilate(
+                gc_fg, _cv2f.getStructuringElement(_cv2f.MORPH_ELLIPSE, (rad, rad)))
+            a_bin = np.logical_and(a_bin, band).astype(np.uint8)
+        mask = np.maximum(mask, a_bin)
     mask = mask * box
 
     # 去掉碎块（分镜里第二个人/误检），保留主要人像
@@ -952,32 +969,52 @@ def _recast_frame_person_mask(rgb_u8, base_url):
 def _recast_subject_mask(frames, t_lat, h_lat, w_lat, log=print):
     """把抽出来的源帧做成人像掩码，并采样到 latent 网格 [1,1,T,h,w]。
 
-    latent 一行对应源视频约 17 帧（H3 的 17k+5 网格），所以按 stride≈17 取代表帧即可；
+    frames 是 _recast_read_segment_frames 的返回值，即 **torch 张量** [T,H,W,C] 0..1（v14.338
+    起显式转 numpy，v14.337 直接按 numpy 用会在 np.clip 后被 torch 的 __array_priority__
+    接管、.astype() 不存在而整段退回全画幅）。
+    代表帧数量被 _RECAST_MASK_SAMPLES 封顶（默认 24）：H3 VAE 的 latent 行数远多于 17k+5
+    的直觉（362 帧 → 107 行），逐行打 NPU 会变成两百多次请求、每段多花好几分钟，
+    而人物位置在 0.6s 内几乎不变，按"每行取最近的已采样帧"映射足够。
     结果里 1=允许重绘（人物），0=锁死源像素（背景）。全部分割失败返回 None（退回旧的全 1 行为）。
     """
     if not _RECAST_MASK_ON:
         return None
     try:
-        n = int(frames.shape[0])
-        h, w = int(frames.shape[1]), int(frames.shape[2])
+        if isinstance(frames, torch.Tensor):
+            frames_np = frames.detach().to("cpu", torch.float32).numpy()
+        else:
+            frames_np = np.asarray(frames, dtype=np.float32)
+        n = int(frames_np.shape[0])
+        h, w = int(frames_np.shape[1]), int(frames_np.shape[2])
         if n < 1 or t_lat < 1 or h < 8 or w < 8:
             return None
         base_url = _recast_npu_base_url()
-        stride = max(1, int(round(n / float(t_lat))))
-        rows = []
+        want = max(1, min(int(t_lat), int(_RECAST_MASK_SAMPLES)))
+        if want >= n:
+            s_idx = list(range(n))
+        else:
+            s_idx = sorted({int(round(k * (n - 1) / float(want - 1)) if want > 1 else 0)
+                            for k in range(want)})
+        masks = {}
         ok = 0
-        for j in range(int(t_lat)):
-            fidx = min(n - 1, j * stride)
-            _rgb = np.clip(frames[fidx], 0.0, 1.0) * 255.0
+        for fidx in s_idx:
+            _rgb = np.clip(frames_np[fidx], 0.0, 1.0) * 255.0
             _m = _recast_frame_person_mask(_rgb.astype(np.uint8), base_url)
-            if _m is None:
-                rows.append(np.zeros((h, w), np.float32))
-                continue
-            rows.append(_m)
-            ok += 1
+            masks[fidx] = _m
+            if _m is not None:
+                ok += 1
         if ok == 0:
             log("[H3 Recast] ⚠️ 人物掩码一帧都没成功（NPU 服务不可用？）——退回全画幅重绘")
             return None
+        valid_idx = [i for i in s_idx if masks.get(i) is not None and masks[i].max() > 0.05]
+        rows = []
+        for j in range(int(t_lat)):
+            fpos = (j * (n - 1) / float(int(t_lat) - 1)) if int(t_lat) > 1 else 0.0
+            k = min(s_idx, key=lambda v: abs(v - fpos))
+            if (masks.get(k) is None or masks[k].max() <= 0.05) and valid_idx:
+                k = min(valid_idx, key=lambda v: abs(v - fpos))
+            _mk = masks.get(k)
+            rows.append(np.zeros((h, w), np.float32) if _mk is None else _mk)
         stack = np.stack(rows, 0)  # [T,H,W]
         # 没分割出来的行用相邻有效行补齐，避免"这一 latent 行整帧锁死 → 人物闪烁"
         valid = [i for i in range(int(t_lat)) if rows[i].max() > 0.05]
@@ -991,7 +1028,8 @@ def _recast_subject_mask(frames, t_lat, h_lat, w_lat, log=print):
             for j in range(stack.shape[0])
         ], 0)
         m_t = torch.from_numpy(small).float().unsqueeze(0).unsqueeze(0)
-        log(f"[H3 Recast] 人物掩码已生成：{ok}/{int(t_lat)} 帧分割成功，"
+        log(f"[H3 Recast] 人物掩码已生成：{ok}/{len(s_idx)} 代表帧分割成功"
+            f"（映射到 {int(t_lat)} 个 latent 行），"
             f"人区占画面 {float(small.mean()):.1%}（背景锁定源像素，只重绘人物）")
         return m_t
     except Exception as exc:
@@ -3499,6 +3537,17 @@ def _apply_h3_tst(model, enable, tau):
 # 内置 (video 12 / audio 3 经双轨迹 time_snr_shift)。
 _PIKA_H3_SIGMA_KNOTS = (1000.0, 750.0, 500.0, 250.0, 100.0, 40.0, 0.0)
 
+# v14.339 (2026-11-08): HyperFlow H3 Flash 固定少步 sigma 曲线。
+# 官方 ComfyUI-HyperFlow-Flash/loader_nodes.py 的 RAW_SIGMAS 经 flow shift 12
+# 预乘后的结果 (integrations/README.md 同时给出这组数值, 二者逐位一致)。
+# 注意: 这是"已乘 shift"的最终调度, 不能再经 model_sampling 的 shift 映射一次。
+_HYPERFLOW_H3_SIGMAS = {
+    4: (1.0, 0.962575793, 0.755781889, 0.312497854, 0.0),
+    6: (1.0, 0.982655942, 0.914642572, 0.674755692, 0.385223746, 0.159055322, 0.0),
+    8: (1.0, 0.993909776, 0.9842875, 0.966063738, 0.923076928, 0.8349424, 0.696852028, 0.468753308, 0.0),
+}
+
+
 def _sigmas(model, scheduler: str, steps: int, denoise: float):
     steps = max(1, int(steps))
     denoise = float(denoise)
@@ -3507,6 +3556,9 @@ def _sigmas(model, scheduler: str, steps: int, denoise: float):
     ms = model.get_model_object("model_sampling")
     if str(scheduler) == "pika_manual":
         return ms.sigma(torch.tensor(_PIKA_H3_SIGMA_KNOTS, dtype=torch.float32)).cpu()
+    if str(scheduler) == "hyperflow_manual":
+        _hf_steps = steps if steps in _HYPERFLOW_H3_SIGMAS else 6
+        return torch.tensor(_HYPERFLOW_H3_SIGMAS[_hf_steps], dtype=torch.float32).cpu()
     total_steps = steps
     if denoise < 1.0:
         total_steps = max(steps, int(steps / denoise))
@@ -4618,6 +4670,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                dual_track_shift=True, shift_video=12.0, shift_audio=3.0,
                tst_enable=True, tst_tau=0.2, omni_8step_mode=False,
                honor_manual_steps=False,
+               # v14.339 HyperFlow H3 Flash: 4/6/8-step 固定调度 + cfg 1.0,
+               # 不适用 H3 底座"音频至少 12 步"的自动提步保护。
+               hyperflow_mode=False,
                # v14.238 MiniMaxH3 Director 极速双采移植:
                #   refine_sampler: 二采采样器独立选择(参考插件一采 res_multistep、
                #     二采 euler); None/"inherit (跟随一采)" 时跟随一采采样器。
@@ -4713,7 +4768,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     # <12(官方音频可用下限)会把配音生成出恒定低频轰鸣/含混吞音(实测 8 步
     # 档样本: 100-200Hz 占 59.5%, 全程无静音)。lip 锁定模式一采音频不采样
     # (mask=0), 步数不影响音频, 不提升(保持档位速度与画质)。
-    if _has_audio and not _lip_locked and _audio_quality_on and int(steps) < 12:
+    if _has_audio and not _lip_locked and _audio_quality_on and int(steps) < 12 and not hyperflow_mode:
         if honor_manual_steps:
             print(f"[H3 Extender] v14.205 custom 手动步数优先: 一采 {int(steps)} 步 < 音频 12 步下限, "
                   f"按用户设置执行(配音质量可能下降; 要干净配音请接 lip_voice 或设 12 步)")
@@ -4730,6 +4785,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     if omni_8step_mode:
         guider.cfg_scale = 1.0
         print("[H3 Extender] v14.169 Omni 8步单采: 一采 guidance 1.0 (官方蒸馏契约, 单前向)")
+    elif hyperflow_mode:
+        # v14.339: HyperFlow H3 Flash 官方契约 = CFG 1.0 无分类器引导 (单前向)。
+        # 4/6/8 步音视频是蒸馏目标, 不能套用 H3 底座"音频至少 12 步"的提步保护。
+        guider.cfg = 1.0
+        print(f"[H3 Extender] v14.339 HyperFlow H3 Flash: 一采 {int(steps)} 步 euler + "
+              "HyperFlow 固定调度, CFG 1.0 单前向 (官方契约); 音频 12 步保护已跳过")
     guider.set_conds(conditioning)
     sampler = comfy.samplers.sampler_object(str(sampler_name))
     sigmas = _sigmas(model, scheduler, steps, denoise)
@@ -5125,6 +5186,21 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         _cut_lthr = float(os.environ.get("BSAI_H3_CUT_LF_THR", "1.8"))
     except Exception:
         _cut_retries, _cut_pthr, _cut_lthr = 2, 1.6, 1.8
+    # v14.338: 视频替换档（带人物掩码的半重绘）里，latent 的"硬切"多半是**源片自身的镜头
+    # 切换或循环接缝**——画面来源就是源视频，换 seed 也改不掉（实机实测：45s 源片由 12.59s
+    # 循环拼成，row=82≈成片帧 279≈11.6s 正是循环缝，重采样 2 次仍是同样的 2 处），
+    # 却每次都多花一整轮采样（≈11 分钟/段）。所以掩码型重绘不重采样，只如实记录。
+    _cut_has_subject_mask = False
+    try:
+        _cm = noise_mask
+        if isinstance(_cm, comfy.nested_tensor.NestedTensor):
+            _cm = _cm.tensors[0]
+        if _cm is not None:
+            _cut_has_subject_mask = float(_cm.float().mean()) < 0.9
+    except Exception:
+        _cut_has_subject_mask = False
+    if _cut_has_subject_mask:
+        _cut_retries = 0
     if _cut_guard_on:
         _cut_hits = _ff_detect_latent_hard_cut(samples, _cut_pthr, _cut_lthr, one_shot_trim_frames)
         if _cut_hits:
@@ -5180,8 +5256,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     break
             samples = _cut_best
             if _cut_best_hits:
-                print(f"[H3 Extender] v14.317 硬切拦截: 重采样次数用尽, 仍剩 "
-                      f"{len(_cut_best_hits)} 处硬切(保留最优的一次)", flush=True)
+                if _cut_retries <= 0:
+                    print(f"[H3 Extender] v14.338 硬切拦截(人物掩码重绘): 检出 "
+                          f"{len(_cut_best_hits)} 处硬切 row="
+                          f"{[h['row'] for h in _cut_best_hits][:4]} —— 源片自身切镜/循环接缝, "
+                          f"源画面即画面来源; 不做换 seed 重采样(省一整轮采样), 直接采用",
+                          flush=True)
+                else:
+                    print(f"[H3 Extender] v14.317 硬切拦截: 重采样次数用尽, 仍剩 "
+                          f"{len(_cut_best_hits)} 处硬切(保留最优的一次)", flush=True)
 
     # v1.31: 二采升级为 Sol-H3 Self-Lift 双采（一采 + 二采直出高清）
     # 技术流程（对齐 BSAI-ComfyUI-Sol-H3 LatentUpscaleAlign 极速版）：
@@ -9405,6 +9488,10 @@ _RENDER_PIPELINE_EN2ZH = {
     # v14.335 (2026-11-08): 视频人物替换档 —— 资产库 @视频N 作 V2V 源画面+原声，
     # @图N 作人物身份参考，按 H3 Recast 单镜 15s 上限自动分 clip 逐段替换。
     "Video Recast (H3 V2V character swap)": "视频替换 (V2V 人物替换)",
+    # v14.339 (2026-11-08): Video Rebirth HyperFlow H3 Flash 14B —— 官方 4/6/8 步
+    # 固定调度 + CFG 1.0 单采; 权重为 GGUF, 必须用 HyperFlow GGUF Loader 加载,
+    # 全量 H3 的加速 LoRA 与其低秩分解层不兼容, 不要叠。
+    "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)": "HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)",
 }
 _SPEED_PRESET_EN2ZH = {
     "Turbo": "极速",
@@ -9855,7 +9942,7 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)"],
+            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
                 "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi 大凯AI) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default. (32) Video Recast (H3 V2V character swap, v14.335) = 视频人物替换: the asset-library video @视频N becomes the V2V source (picture AND soundtrack) while @图N reference pictures define the new identity; the backend auto-splits the source into <=15s segments (the MiniMax H3 Recast per-shot contract: a 45s video becomes 3 clips), encodes each segment into the H3 AV latent (video = source frames, audio = source soundtrack locked with noise_mask 0), and runs an 8-step euler/simple first pass at denoise 0.65 so the original camera/motion/composition survive and only the person is swapped; refine skipped, motion context chaining disabled between recast clips; mount minimax_h3_角色替换character_swap_v1.5 in the LoRA stack at 0.6-0.8 for the strongest identity transfer.",
@@ -10569,6 +10656,9 @@ class BSAIH3FilmFactory:
         # v14.281: 档位级"禁用自动时间分块"标志。MV 双采档按原版
         # temporal_chunk_tokens=0 整段一次二采, 由该标志传给 _sample_h3。
         _rp_no_temp_chunk = False
+        # v14.339: HyperFlow H3 Flash 档位标志 —— 固定 4/6/8 步 + CFG 1.0 单前向,
+        # 传给 _sample_h3 以跳过 H3 底座的音频 12 步自动提步。
+        _rp_hyperflow = False
         # v14.210: 默认管道 "Sol-H3 Self-Lift 双采 (默认)" 名字里就是 "双采",
         # 理应自动 enable refine_enable——之前被行 6686 显式排除(作为"无管道"回退),
         # 导致用户选了默认管道但 UI toggle refine_enable=false 时二采被跳过。
@@ -11424,6 +11514,44 @@ class BSAIH3FilmFactory:
                       "资产库 @视频N = 被替换源视频, @图N = 替换成的人物参考图; "
                       "源视频按 15s/段上限自动分 clip 逐段替换(45s → 3 段); "
                       "LoRA 槽建议挂 minimax_h3_角色替换character_swap_v1.5.safetensors (0.6~0.8)")
+            elif _rp_mode == "HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)":
+                # v14.339 (2026-11-08): Video Rebirth HyperFlow H3 Flash 14B (13.7B/13.9B)。
+                # 官方契约(ComfyUI-HyperFlow-Flash v1.0.0):
+                #   步数 4/6/8 (6 = 默认均衡, 4 = 速度, 8 = 质量);
+                #   euler + HyperFlow Sigmas 固定曲线(已乘 flow shift 12);
+                #   CFG 1.0 单前向, 无负面提示词; 音视频同出 32kHz 立体声。
+                # 因此本档:
+                #   ① 单采, 二采关闭 —— 官方四套模板(t2v/i2v/flf2v/ref2v)都是单采;
+                #   ② 不注入 dual-track shift —— shift 12 已烘焙在 HyperFlow 固定曲线里,
+                #      再经模型 shift 映射会二次缩放(官方模板也没有 SigmaShift 节点);
+                #   ③ 关闭 TST —— 官方配方不含 Time State Transport, 保持蒸馏契约纯净;
+                #   ④ 权重为 GGUF, 必须用 HyperFlow GGUF Loader; 全量 H3 的加速 LoRA 不兼容。
+                try:
+                    _hf_user_steps = int(kwargs.get("steps", 6) or 6)
+                except (TypeError, ValueError):
+                    _hf_user_steps = 6
+                # 6 是官方推荐默认; 用户把 steps 设为 4/8 时切换到速度/质量档,
+                # 其余值一律回落到 6(模型只发布了 4/6/8 三组 sigma)。
+                steps = _hf_user_steps if _hf_user_steps in (4, 6, 8) else 6
+                refine_enable = False
+                refine_steps = 2
+                refine_denoise = 0.0
+                refine_upscale_factor = 1.0
+                tiled_refine = False
+                refine_audio_denoise = 0.0
+                denoise = 1.0
+                shift_video, shift_audio = 12.0, 3.0
+                dual_track_shift = False
+                selflift_tst_enable = False
+                omni_8step_mode = False
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                scheduler = "hyperflow_manual"
+                _rp_hyperflow = True
+                print("[H3 Extender] v14.339 HyperFlow H3 Flash 14B 档: "
+                      f"单采 {steps} 步 euler + HyperFlow 固定 sigma (flow shift 12 已烘焙), "
+                      "CFG 1.0 单前向, 无负面提示词, 二采关闭; "
+                      "权重须用 HyperFlow GGUF Loader 加载, 全量 H3 加速 LoRA 不兼容")
             else:
                 _rp_handled = False
             if _rp_handled:
@@ -14594,6 +14722,7 @@ class BSAIH3FilmFactory:
                     refine_no_temp_chunk=bool(_rp_no_temp_chunk),
                     one_shot_trim_frames=int(trim_frames or 0),
                     omni_8step_mode=omni_8step_mode,
+                    hyperflow_mode=bool(_rp_hyperflow),
                     honor_manual_steps=(str(speed_preset) == "custom"),
                     # v14.238 MiniMaxH3 Director 极速双采移植参数
                     refine_sampler=refine_sampler,

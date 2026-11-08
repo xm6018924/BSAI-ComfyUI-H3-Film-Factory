@@ -2,6 +2,59 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.339 (2026-11-08) — 新增第 34 档 HyperFlow H3 Flash 14B + 替换档不再为源片接缝重采样 / New tier 34 HyperFlow H3 Flash 14B; recast no longer reseeds on source seams
+
+**新增第 34 档「HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)」**（Video Rebirth，Bilibili BV13oWJ6uEQZ）：
+
+- 后端新增固定调度 `scheduler = "hyperflow_manual"`：`_HYPERFLOW_H3_SIGMAS` 直接给官方 4/6/8 步 sigma，**已预乘 flow shift 12**，所以这一档不再注入 dual-track shift（再乘一次就偏了）。数值取自 `ComfyUI-HyperFlow-Flash/integrations/README.md`，与 `loader_nodes.py` 的 `RAW_SIGMAS` 逐位一致。
+- `_sample_h3` 新增 `hyperflow_mode`：强设 CFG 1.0（蒸馏契约，单前向），并**跳过 H3 底座「音频至少 12 步」的自动提步保护**（4/6/8 步本来就是音的蒸馏目标，提步等于破坏契约）。
+- 档位命令体：denoise 1.0、refine 强制关、TST 关、无负面提示词；权重必须用 HyperFlow GGUF Loader 加载 `minimax_h3_fl2va_hyperflow_flash_14b-Q4_K_M.gguf` / `minimax_h3_ref2va_hyperflow_flash_14b-Q4_K_M.gguf`，全量 H3 的加速 LoRA 与该模型层名不兼容、不要叠。
+- 前端四张硬编码表同步到 34 档（`cycle` / `cycleAliases` / `cycleLabels` / `tints`）+ 后端枚举 + 遗留兼容层，`tools/check_quickbar_enum_sync.py` 34/34/34/34 全绿。
+
+**替换档（第 33 档）不再为源片接缝重采样**：
+
+- 实机日志（v14.338 掩码首跑）里 `v14.317 硬切拦截` 报 `row=82 (≈成片帧 279) 帧间差 1.80x中位 低频差 3.10x中位 共2处`，换 seed 重采样 2 次后**仍是同样的 2 处**。原因是画面来源是源视频本身：本机 45s 源片由 12.59s 循环拼成，11.6s 处正是循环接缝，换种子改不动它，却每次都多烧一整轮采样（≈11 分钟/段 × 2 次）。
+- 现在只要 `noise_mask` 是人物掩码型（均值 < 0.9，即半重绘），`_cut_retries` 直接置 0，日志改为 `v14.338 硬切拦截(人物掩码重绘): … 源画面即画面来源; 不做换 seed 重采样(省一整轮采样), 直接采用`。普通全画幅档位行为不变（仍按 `BSAI_H3_CUT_RETRIES` 默认 2 重采样）。
+- 交叉验证：`tools/check_quickbar_enum_sync.py`、`tools/check_recast_pipeline.py`（22 断言）、`ast.parse` 均通过。
+
+**未验证**：HyperFlow 档需要 GGUF 权重 + HyperFlow GGUF Loader 才能真正跑，本机尚未实跑该档出片；替换档的采样式改动只做了静态验证，实跑需重启 ComfyUI 后重跑。
+
+**英文**：Added tier 34 "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)": a `hyperflow_manual` scheduler carrying the official 4/6/8-step sigma tables verbatim (flow shift 12 already baked in, so the tier must not apply dual-track shift again), plus `hyperflow_mode` in `_sample_h3` to force CFG 1.0 and bypass the H3 audio >=12-step guard. Frontend tables synced to 34 tiers and the enum/legacy-compat check is fully green. Also: tier 33 no longer reseeds on latent "hard cuts" when the noise mask is a person mask — live logs showed the detected cut at row 82 (≈frame 279 of a 45s source built by looping a 12.59s clip) surviving two full 11-minute reseeds because it is the source's own loop seam, so the retry is skipped there and only logged.
+
+### v14.338 (2026-11-08) — 修 v14.337 掩码「静默失效」：torch 帧喂给 numpy 代码，整段退回全画幅 / Fix the v14.337 mask silently degrading to full-frame
+
+**现象（实机日志，第一次带掩码跑片）**：
+
+```
+[H3 Recast] ⚠️ 人物掩码生成失败（'Tensor' object has no attribute 'astype'）——退回全画幅重绘
+[H3 Recast] clip[1] … 重绘区=全画幅; 源原声已锁定
+```
+
+即 v14.337 的掩码一次都没打 NPU 就整段退回，出片仍是"全画幅重绘"的旧行为。
+
+**根因**：`_recast_read_segment_frames` 的返回值是 **torch 张量**（`torch.from_numpy(arr).float()/255`，见该函数末尾），而 `_recast_subject_mask` 里按 numpy 写：`np.clip(frames[fidx], 0, 1) * 255 → .astype(np.uint8)`。torch 张量参与 numpy ufunc 时会因 `__array_priority__` 保持 Tensor 类型，`np.clip` 返回的仍是 Tensor，于是 `.astype()` 抛 AttributeError，被外层 `except` 捕获 → `return None` → 调用方走 `torch.ones_like(_rc_v)`。离线自检当时是我手工构造的 numpy 输入，所以没暴露。
+
+**同时发现的两个量级问题**：
+- H3 VAE 的 latent 行数不是"362 帧 → 22 行"的直觉，实测 `vae.encode(362f 896x672)` → `vz=(1,24,107,42,56)`，即 **107 个时间行**。按 v14.337 的"逐行取代表帧"会打 107×2=214 次 NPU 请求、每段多花 4~5 分钟。
+- 只做 GrabCut ∪ RMBG 时，人区占画面 **62%**（RMBG 把这个夜景的大片亮区都算成前景），人框内的街道也会被放开重绘。
+
+**改动（全部在 `_recast_subject_mask` / `_recast_frame_person_mask`）**：
+1. 入口先把帧统一成 numpy：`frames.detach().to("cpu", torch.float32).numpy()`（numpy 输入原样 `np.asarray`），torch / numpy 两条路径都测过。
+2. 代表帧封顶 `_RECAST_MASK_SAMPLES`（默认 **24**，可用 `BSAI_H3_RECAST_MASK_SAMPLES` 改）：按等间距取 24 帧做分割，再用"每个 latent 行取最近的已采样帧"映射满 107 行（15s 内 ≈0.6s 一个采样点，人物位移跟不上才需要加密）。空帧仍用最近有效采样帧补齐。
+3. RMBG alpha 限制在 **GrabCut 人体区的邻域带**内（带半径 = 0.10×人体框长边，夹在 9~61px 椭圆核内扩）：衣服/鞋帽/手套紧贴人体一定在带内，离人远的亮斑被剔除；无 pose 或 GrabCut 全为空时退回"alpha 直接用"。
+4. `BUILD = minimax-h3-extender-v14.338-recast-subject-mask`。
+
+**验证（本机实时 NPU + 真实源片 `bsai_recast_source_45s_BV1xc4x6QE26.mp4`，15.08s / 362 帧 / 896×672）**：
+- `_recast_read_segment_frames` → `(362, 672, 896, 3)` torch.float32；
+- `_recast_subject_mask(frames, 107, 42, 56)` → **24/24 代表帧分割成功**、映射 107 latent 行、人区 **45.3%**（v14.337 同条件为 62.0%）、`(1,1,107,42,56)`、四角 **0.0**、`expand_as(1,24,107,42,56)` OK；耗时 **134s/段**（24 帧 × 2 次 NPU 请求 + GrabCut）；
+- numpy 输入路径同样出掩码（对外兼容）；
+- 抽 3 个 latent 行（0 / 53 / 106）叠红色描边目视：开头中景咬住人+外套、快切特写咬住脸+颈肩、尾段咬住脸+手，背景留白处为 0。
+- `ast.parse` 通过。
+
+**未验证**：真实权重下的最终出片效果（待实机重跑验收）。
+
+**英文**：The v14.337 mask never reached the NPU at all — `_recast_read_segment_frames` returns a **torch tensor**, but the mask helper used numpy idioms, and `np.clip(tensor)` returns a Tensor under torch's `__array_priority__`, so `.astype()` raised and the whole clip fell back to an all-ones `noise_mask` (full-frame repaint). Fixed by coercing frames to numpy at entry. Also corrected two magnitude errors found at the same time: H3's VAE produces **107 latent rows** for 362 frames (not 22), so the per-row NPU sweep is now capped by `_RECAST_MASK_SAMPLES` (24, evenly spaced, each latent row takes the nearest sampled frame); and the RMBG alpha is now clipped to a dilated neighbourhood of the GrabCut person region, which brought the redraw area from 62.0% down to 45.3% and keeps far-away bright background locked. Verified live: 24/24 frames segmented, corners 0, `expand_as` compatible, 134s per 15s clip; visual overlay confirms the mask hugs the person including the jacket.
+
 ### v14.337 (2026-11-08) — 第 33 档改成「只重绘人物、场景锁死源像素」/ Tier 33 now redraws the person only, scene pinned to source pixels
 
 **问题（实机出片取证）**：`h3_clip_250_1_1794129045.mp4` 人物确实换了，但两个硬伤：①人物穿的还是源片的黄绿运动外套，不是 `@图1` 的白裙白手套；②背景从夜晚霓虹街景整片换成室内玻璃砖墙走廊。根因：`_rc_vmask = torch.ones_like(_rc_v)` 把视频 `noise_mask` 全置 1，等于**全画幅允许重绘**，denoise 0.65 下场景与服装一起被模型重画；而参考图是"白底 5 视图设定图"，背景大面积纯白，对全局的扰动强于对人物身份的约束。

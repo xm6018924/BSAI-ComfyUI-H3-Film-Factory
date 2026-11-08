@@ -154,7 +154,7 @@
 
 **场景锁定（v14.337 / region-locked redraw）**：视频 `noise_mask` 不再是全 1。后端逐帧调本机 NPU 服务（`POST /detect_pose` + `POST /segment_foreground`，YOLO 人体框 + GrabCut + RMBG-1.4），把「人物区域」做成掩码：**人区 = 1（允许重绘），其余 = 0（直接锁定源像素）**，再按 H3 的 17 帧步长采样到 latent 网格。于是背景、街景、道具、光源是源片本身的像素，模型没有机会把夜景换成室内；人物区连同衣服一起放开重绘，配合提示词纪律块（"原视频服装与配饰一律不得保留"）拿到参考图那套服装。日志会打印 `人物掩码已生成：N/M 帧分割成功，人区占画面 xx%` 与每段 `重绘区=人物掩码 xx%`。掩码失败（NPU 服务掉线）时退回全画幅重绘并告警 —— 此时场景会漂，先查 `GET /health`。
 
-> 环境变量微调：`BSAI_H3_RECAST_SUBJECT_MASK=0` 关掉掩码；`BSAI_H3_RECAST_MASK_DILATE`（默认 13 像素，人区外扩）、`BSAI_H3_RECAST_MASK_FEATHER`（默认 10，边缘羽化）、`BSAI_H3_RECAST_MASK_PORT`（默认取 ComfyUI 端口）。
+> 环境变量微调：`BSAI_H3_RECAST_SUBJECT_MASK=0` 关掉掩码；`BSAI_H3_RECAST_MASK_DILATE`（默认 13 像素，人区外扩）、`BSAI_H3_RECAST_MASK_FEATHER`（默认 10，边缘羽化）、`BSAI_H3_RECAST_MASK_SAMPLES`（默认 24，每段取多少个代表帧去做分割；15s 一段时约 0.6s 一个点）、`BSAI_H3_RECAST_MASK_PORT`（默认取 ComfyUI 端口）。掩码生成约耗时 2 分钟/段（24 帧 × 2 次 NPU 请求 + GrabCut），这段耗时出现在正式采样之前。
 
 
 **注意 / Notes**：
