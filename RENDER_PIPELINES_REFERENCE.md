@@ -1,6 +1,6 @@
 # BSAI-H3-Film-Factory 渲染管道 / 模式 / LoRA 搭配速查表
 
-> 基于 `extender.py` v14.322 源码整理（2026-11-05）。
+> 基于 `extender.py` v14.335 源码整理（2026-11-08；v14.322 起整理，新增第 33 档「视频替换」）。
 > LoRA 一律挂在 H3 Loader 的标准 LoRA 槽，强度按各档推荐。
 
 ---
@@ -37,7 +37,7 @@
 
 ---
 
-## 三、渲染管道（render_pipeline）全 32 档
+## 三、渲染管道（render_pipeline）全 33 档
 
 ### A. 默认/通用
 
@@ -79,7 +79,7 @@
 |---|---|---|---|---|---|
 | 9 | **4K Direct Secret Sauce** | 4K | 6步低采+x2 boost + 3步细节+DLSS5像素超分 | `minimax_h3_turbo_v4_step600`(0.5~0.8)+`MysticXXX_MMH3-V4`(0.3~0.5) | 4K成片，修高光过曝 |
 | 11 | **Dual-Pass 2K (HyperVAE 2x)** | 2K | 8+4，latent factor 1.0（refine快4x） | VAE: `models/vae/hyper*2x*.safetensors` | 2K快速出片 |
-| 19 | **4K Regenerate OpenH3Regenerate2K** | 2560x1440 | 768P草稿(1344x768)→3步重生成 | 合并LoRA: OpenH3 Refiner 5000步(0.7)+fl2v turbo(1.0)+lms sharp(1.0)；**许可不含EU/UK/KR/US** | 4K重生成 |
+| 19 | **4K Regenerate OpenH3Regenerate2K** | 2560x1440 | 768P草稿(1344x768, 4步)→latent x1.9(aligned 32)→3步重生成，**二采 sigmas 固定注入官方 [0.909375, 0.857143, 0.666667, 0]**，euler，CFG off | 合并LoRA: OpenH3 Refiner 5000步(0.7)+fl2v turbo(1.0)+lms sharp(1.0)；**许可不含EU/UK/KR/US** | 768P 草稿直出 2K |
 | 24 | **Director Turbo Dual-Pass** | 1920x1088 | 8步低采(0.4MP=864x480)+4步refine(latent x2.0, denoise 0.45) | refine_sampler=euler；二采跟随 Director 控制视频而非 ref2va | 导演分镜控制 |
 | 25 | **Dual-Pass 2K (official condition upscale)** | 2K | 8+4，denoise 0.45，euler，shift 12/3 | 官方 MiniMaxH3LatentUpscaleCombined，ref2va condition 同步放大 | 官方路径2K |
 
@@ -95,6 +95,22 @@
 | 21 | **Transparent Video Single-Pass Keying** | 10步单采，refine跳过 | 纯色背景(绿/蓝/黑)；配 BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo | 抠像/透明视频 |
 | 22 | **4-in-1 Ultimate Speedup** | 6+2，latent x2.0 | DMAD 4步LoRA + SegAttention 2.2.0 + 半分辨率参考输入 + SelfLift 双采 | 极限加速 |
 | 23 | **SolarRenderer Structure Control** | 4+4=8NFE，ref_image_size强制max | 控制LoRA(逐帧读3D灰盒/法线/姿态/深度) + 4步LoRA(强度~0.8)；基模 FastH3-Omni/Singularity V2 | 结构控制 |
+
+### F. 视频人物替换 / Video Recast (V2V character swap · v14.335)
+
+| # | 管道 | 一采+二采 | 关键参数 | 配套 | 适用 |
+|---|---|---|---|---|---|
+| 33 | **视频替换 (V2V 人物替换)**<br>`Video Recast (H3 V2V character swap)` | 8 步单采（**refine 强制关**） | euler + simple，shift 12/3；denoise 0.65（用户显式改过 widget 则用用户值并夹到 0.35~0.95）；`noise_mask` = 视频全 1 / 音频全 0 | 源视频放资产库 → `@视频N`；替换的人物参考图放资产库 → `@图N`；LoRA 槽建议 `minimax_h3_角色替换character_swap_v1.5.safetensors`(0.6~0.8，**该权重名尚未在本机目录核实，不可当既有事实引用**) | V2V 人物替换：保留源片机位/运动/构图/剪辑点/口型，只换人物身份 |
+
+**链路**：源片段 → ffmpeg 精确 seek（`-ss` 在 `-i` 之后）抽 24fps、等比放大 + 居中裁切到画布、帧数对齐 17k+5 网格 → `vae.encode()` 得 `[1,24,T,h/16,w/16]`；源原声 → 重采样到 audio_vae 采样率、裁/补到 `round(dur*40)` 行 → `audio_vae.encode()` 得 `[1,32,2,Ta]`。两者装进 `NestedTensor` 作为一采初始化 latent：视频行允许重绘（mask=1），音频行锁死（mask=0），所以替换后对白/环境声/口型与原视频逐帧对齐，**不需要另接 lip_audio**。
+
+**分段（15s 契约）**：`n = ceil(源时长 / 15s)`（对齐 MiniMax H3 Recast 单镜头 ≤15s），每段时长 = 源时长 / n 并对齐帧网格。45s 源视频 → 3 段 × ≈15s，分镜不足自动补 CLIP（`id` 后缀 `_recast_k`，`context_enabled=False`），分镜多于所需则把多余段 `render_enabled=False` 跳过并打印说明。
+
+**刻意不做的事（都是踩过的坑）**：
+- 不跑二采：latent 放大会抹平源片细节，身份转移在二采会散掉；
+- 不做段间 motion context 续链：每段必须各自被源视频对应片段驱动，否则会把"上段生成出来的画面"当上下文，越链越偏；
+- 提示词里的 `<Video N>` 会被替换成"原视频"字样：源视频已经作为 V2V latent 进入采样，保留标签会让 H3 把它再当 ref2v 参考视频二次注入，动作被重演一遍；
+- 忽略 `lip_audio_segments`：另灌一套音频行会与"锁定源原声"冲突。
 
 ---
 
@@ -146,9 +162,32 @@
 | 8 | 旧值兼容表-白名单 | `extender.js` `H3LegacyCompat.OPTIONS.render_pipeline` | 值不在白名单会被 `norm()` 静默回落默认档 |
 | 9 | 旧值兼容表-别名 | `extender.js` `H3LegacyCompat.ALIAS_CANON.render_pipeline` | 中文旧标签 → 英文规范值 |
 | 10 | DEFAULTS | `extender.js` `H3LegacyCompat.DEFAULTS` 第 65 位 | 仅在改默认档时才动 |
-| 11 | 跑自检 | `node --check web/extender.js`、`py_compile extender.py`、三表逐字比对、重启后 `/object_info/BSAIH3FilmFactory` 计 31 项 | 全通过才算改完 |
+| 11 | 跑自检 | `node --check web/extender.js`、`py_compile extender.py`、三表逐字比对、重启后 `/object_info/BSAIH3FilmFactory` 计 33 项 | 全通过才算改完 |
 
 两条硬约束：任何新 widget 只能追加在 `optional` 最末尾（现役最后一项是 `refine_sigmas`），不得挤占既有 widget index；只改后端不改前端的效果是"UI 里选不到新档 + 含新档的旧工作流加载被打回默认档"。
+
+---
+
+## 七、Regenerate 2K 二采的适用面（BV1Yh4j6gEt3）
+
+教程（《MiniMax H3又被玩出新花样了！潜空间重绘直冲2K！》）与 NVlabs/Sana `Open-H3-Regenerate-2K` 的做法只有四件事：
+
+1. 低清草稿（384P~768P）只负责构图/运动；
+2. 3D 卷积 latent 上采样器**直接放大到目标网格**（不解码再编码）；
+3. 放大后的 latent **重噪到 sigma 0.909375**，3 步 Euler（`[0.909375, 0.857143, 0.666667, 0]`），CFG off；
+4. 合并 LoRA（Refiner rank384 + LightX2V FL2VA Turbo v1.2 rank128 + LMS Sharp rank64）承担"少步 + 重新画细节"。
+
+**结论：这不是一次"全管道升级"，而是一种只在特定档位成立的二采模式。** 是否可挂，按下表判断（`refine_sigmas` 端口本身就接受外部 SIGMAS，无需改代码即可试）：
+
+| 档位 | 可否挂 regenerate 二采 | 原因 |
+|---|---|---|
+| 19 OpenH3Regenerate2K | **已内置** | 本档就是该方案，二采 sigmas 已固定注入 |
+| 9 4K直出秘制酱料 / 11 双采2K HyperVAE / 25 双采2K官方条件放大 / 31 TaoMate 8+4 / 32 Singularity 8+3 / 24 Director / 17 Omni SelfLift / 22 4合1 / 1 默认 Sol-H3 / 4 FastH3-Trim / 5 6 7 8 26 | 可试，需单独验收 | 都有"latent 放大 + 少步二采"结构，起点改成 0.9 会从"抛光"变"重画"，细节更强但人物/道具会出现局部重绘 |
+| 3 / 13 / 14 / 15 / 16 直播带货·对口型 / 29 PIKA 锁脸 | **不要挂** | 高 sigma 重绘会改嘴型、改产品 logo/文字，直接毁掉对口型与货品一致性 |
+| 10 Omni 单采 / 12 QAD-v2 / 18 H25 / 21 透明视频 / 27 PDMD 2步 / 28 PTD | **无二采环节** | 单采档没有第二遍，挂不上 |
+| 一镜到底链式（one_shot_mode=on） | **不要全片挂** | 段间靠 motion context 锚上一段尾 latent，0.9 重绘会让每段各自重画 → 人物漂移、接缝跳变 |
+
+前提条件（缺一不可）：`models/loras` 里要有 Kijai 转换的 `minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors`（或 father558/DrakenZA 的全量合并版），配 LightX2V FL2VA Turbo v1.2 + LMS Sharp 一起挂；latent 上采样器用 `minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors`。**自制转换必须做 SwiGLU 变换，单纯改 key 名会得到发灰/噪点画面。**
 
 ---
 

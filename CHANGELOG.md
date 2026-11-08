@@ -2,6 +2,49 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.335 (2026-11-08) — 新增第 33 档「视频替换 (V2V 人物替换)」/ New tier 33: Video Recast (H3 V2V character swap)
+
+**需求（用户口径）**：资产库上传被替换的源视频 → `@视频N`，上传替换的人物参考图 → `@图N`；在固定分镜脚本里让 `@图N` 替换 `@视频N` 里的人物，可单人/多人、可跨多个 `clipN`；源视频超过 15s（如 45s）时导入 `@视频N` 后按每段 15s 自动切成 3 个 clip 逐段替换。落地方式：在渲染管道（`render_pipeline`）新增一档「视频替换」渲染模式。
+
+**技术路线**：V2V 半重绘（与社区 Recast / H3 Retake 同源，本机以 `ComfyUI-H3-Multishot/h3_retake.py` 核对 VAE 编码签名与 `noise_mask` 语义）。源片段经 `vae.encode()` 灌进 AV latent 作为一采初始化，源原声经 `audio_vae.encode()` 灌入音频行并 `noise_mask=0` 锁定；8 步 euler/simple、denoise 0.65 半重绘 → 保留源片机位/运动/构图/剪辑点，只换人物身份。原声锁定后口型逐帧跟随源片，不需要 lip_audio。
+
+**改动**：
+- `extender.py`：新增 Recast 函数组（`_recast_strip_video_tags` / `_recast_prompt` / `_recast_find_video_asset` / `_recast_probe_duration` / `_recast_read_segment_frames` / `_recast_read_segment_audio` / `_recast_build_av_latent` / `_recast_build_plan`），常量 `_RECAST_SEG_SECONDS=15.0`；`_RENDER_PIPELINE_EN2ZH` 与 `INPUT_TYPES.render_pipeline` 追加第 32 项（列表末位，**不改变 widget index**，`render_pipeline` 仍为 65）；新增 `elif _rp_mode == "视频替换 (V2V 人物替换)"` 分支（8 步 / refine 强制关 / denoise 夹 `[0.35,0.95]` 默认 0.65 / shift 12-3 / euler+simple / 单采）；`loop_end` 之前构建替换计划（自动补齐或跳过 CLIP、同步扩展 `clip_ref_plans`、置空 `lip_audio_segments`）；per-clip 提示词纪律注入 + 每段 AV latent 注入（dtype/device 对齐、时间行截断或末帧补齐、画布不一致抛错回退、无音轨时音频 mask 改全 1 交模型重生成）。`BUILD = minimax-h3-extender-v14.335-video-recast`。
+- `web/extender.js`：`QUICK_DEFS.render_pipeline` 的 `cycle` / `cycleLabels` / `tints` / `cycleAliases` 同步第 33 项；`H3LegacyCompat.OPTIONS.render_pipeline` 白名单追加（值不在白名单会被 `norm()` 静默回落默认档）；`ALIAS_CANON.render_pipeline` 补中文别名 `视频替换 (V2V 人物替换)`；新增快捷条「Video Recast」一键按钮（点击写入整档配方 + 把所有 clip 的 Context 续链关掉并标记待重渲染）。
+- 文档：`README.md` 新增「七、视频人物替换（V2V Recast）」用法章节与速查行；`RENDER_PIPELINES_REFERENCE.md` 新增 F 节第 33 档链路/分段/踩坑说明；档数 32 → 33。
+
+**验证（已做）**：
+- `ast.parse(extender.py)` 通过（15541 行）；`tools/check_quickbar_enum_sync.py` 退出码 0（`render_pipeline` cycle=33 / labels=33 / 后端=33 / 遗留白名单=33 / ALIAS_CANON 30 条一致）。
+- `_tmp_recast_smoke.py`（合成 20s/24fps/带音轨视频，直接 import 插件模块跑核心函数）：时长探测 20.0s；20s → `ceil(20/15)=2` 段、自动补 1 个 CLIP、时间轴 `{0:(0,10.125), 1:(10.125,10.125)}`；抽帧形状 `(243,288,512,3)` 与请求帧数严格一致且值域 [0,1]；抽音形状 `(1,2,405)` = `round(10.125*40)`；无音轨视频抽音返回 `None`（走"交模型重生成"分支）；`<Video 1>` 被替换为"原视频"、`<Picture 1>` 保留。
+
+**未验证（需实机验收）**：
+- 真实源视频 + 真实 H3 权重下 `vae.encode()` / `audio_vae.encode()` 的端到端出片（本机没有可直接用的 45s 素材，也未跑 ComfyUI）；
+- `minimax_h3_角色替换character_swap_v1.5.safetensors` 这个建议 LoRA 名**未在本机 `models/loras` 核实存在**，tooltip/文档里只作为建议；
+- 多人对应关系的提示词效果（`<Picture N>` → 第 N 位主要人物）需要实拍素材反复调 denoise。
+
+**英文**：New tier 33 `Video Recast (H3 V2V character swap)`. The asset-library video behind `@视频N` becomes the V2V source (picture and soundtrack), `@图N` define the replacement identities. The backend probes the source duration, splits it into `ceil(duration/15s)` segments (the MiniMax H3 Recast per-shot contract, so 45s becomes 3 × ~15s), auto-adds or skips CLIPs, encodes each segment with `vae.encode()` / `audio_vae.encode()` into the H3 AV latent (video mask all-1, audio mask all-0 so the original soundtrack and lip movement are locked), and runs an 8-step euler/simple pass at denoise 0.65 with refine disabled and motion-context chaining off between recast clips. Front-end: `QUICK_DEFS` cycle/cycleLabels/tints/cycleAliases, the legacy `OPTIONS` whitelist, `ALIAS_CANON` and a new "Video Recast" one-click button are all synced; `check_quickbar_enum_sync.py` exits 0 with 33 tiers on both sides. Verified with a synthetic 20s clip end to end at the helper level (probe 20.0s, 2 segments, 243 frames exactly, 405 audio rows, silent-source fallback, tag discipline). Not yet verified: a real end-to-end render with H3 weights and a genuine 45s source; the suggested `character_swap_v1.5` LoRA filename has not been confirmed in this machine's `models/loras`.
+
+
+### v14.334 (2026-11-08) — 第 19 档二采改回官方重生成起点 sigma 0.909375 / Tier 19 second pass now starts at the official regenerate sigma
+
+**来源**：B站《MiniMax H3又被玩出新花样了！潜空间重绘直冲2K！》(BV1Yh4j6gEt3) + NVlabs/Sana `Open-H3-Regenerate-2K` 官方说明。
+
+**问题**：第 19 档（4K重生成 OpenH3Regenerate2K）二采写的是 `refine_denoise=1.0`，注释里却写着"初始态 = (1-s0)*latent + s0*noise"。二者互相矛盾：`denoise=1.0` 走内部 beta 调度 = 从 sigma_max 加噪，768P 草稿的构图与运动信息被整条丢弃，等于 2560 网格上从纯噪声画 3 步 —— 这已经不是"重生成"，768P 草稿白跑。
+
+**为什么不能靠改 denoise 修**：内部 `_sigmas()` 在 `steps=3` 时算 `total_steps=max(3, int(3/denoise))`；`denoise` 取 0.909 时 `int(3/0.909)=3`，`total_steps` 回落成 3，返回整条 4 段调度，起点仍是 1.0。少步 + 高起点这个组合在该函数里取不到，只能显式给 sigma 曲线。
+
+**改动**（只动第 19 档分支，不碰其余 31 档）：
+- 未外接 `refine_sigmas` 端口时，注入官方曲线 `[0.909375, 0.857143, 0.666667, 0.0]`；用户外接 SIGMAS 时仍以其为准。
+- `refine_align_to = 32`，让 1344x768 ×1.9 吸附到 2560x1440 的目标网格。
+- 日志改为打印"已注入官方 sigmas"，不再只写"3步精修"。
+
+**结论（写进 `RENDER_PIPELINES_REFERENCE.md` 第七节）**：这套方案**不能全管道升级**。25 个档位有二采，其中单采档（10/12/18/21/27/28）挂不上；对口型与锁脸档（3/13/14/15/16/29）高 sigma 重绘会改嘴型与货品文字；一镜到底链式会把"每段锚上一段尾 latent"改成"每段各自重画"，人物漂移。可试的是 9/11/17/22/24/25/31/32 与 1/4/5/6/7/8/26，且必须逐档实机验收。
+
+**验证**：`py_compile` 通过；`refine_sigmas` 全链路核对（9816 读取 → 10401 注入 → 13846 传入二采 → `_ff_sigmas_override_tensor` 接受 tensor 且校验单调递减）。实机出片仍需单独验收：本机 `models/loras` 尚无 `minimax_h3_open_regenerate_2k_refiner_rank_384_bf16.safetensors`，未挂 Refiner 时只能验证调度与分辨率，画质收益要等权重补齐。
+
+**English**: Tier 19's second pass used `refine_denoise=1.0`, which routes to the internal beta schedule and therefore re-noises from sigma_max — the 768P draft is discarded and the pass is a 3-step generation from pure noise on a 2560 grid, not a regeneration. Raising `denoise` cannot fix it: `_sigmas()` computes `total_steps=max(steps, int(steps/denoise))`, and at `steps=3` any denoise above 0.75 truncates back to 3 steps and returns the full schedule starting at 1.0. The branch now injects the official `[0.909375, 0.857143, 0.666667, 0]` curve when no external SIGMAS is wired, and aligns the refined latent to 32px so 1344x768 ×1.9 lands on 2560x1440. No other tier is touched, because the published verdict is that this recipe does not generalise: single-pass tiers have no second stage, lip-sync/face-lock tiers lose mouth shapes and product text at sigma 0.9, and chained one-shot runs would redraw every clip instead of anchoring on the previous tail latent.
+
+
 ### v14.325 (2026-11-07) — 建筑类场景词补全 + 角色判定只看紧贴标签的名词短语 / Architecture scene cues; role probe narrowed to the adjacent noun phrase
 
 **用户实测（20 段建筑巡游，资产库 22 张图）**：每段标题形如 `S2 雅典帕特农神庙·卫城山门@图4`、`S11 伦敦塔桥·桥头塔楼@图13`，但日志里这些编号全被判成**人物**（`clip[1] 人物=['<Picture 1>', '<Picture 3>', '<Picture 4>']`）。场景锁定纪律因此从不注入，环境一致性全靠正文文字。

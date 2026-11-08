@@ -74,7 +74,7 @@
 - `TaoMate-HD-preview-comfy.safetensors`（3步渐进，strength 1.0）
 - `pika_h3_flex_ref2va_v1_bf16`（6步，strength 1.0，**禁叠第二个加速 LoRA**）
 
-### 四、30 个渲染管道速查 / All 30 Pipelines at a Glance
+### 四、33 个渲染管道速查 / All 33 Pipelines at a Glance
 
 | # | 管道 | NFE | 推荐 LoRA / 基模 | 定位 |
 |---|---|---|---|---|
@@ -109,6 +109,8 @@
 | 29 | **PIKA H3 Flex 6+2** | 6单采 | pika_h3_flex_ref2va_v1(1.0，禁叠加速LoRA) | **直出1080p** |
 | 30 | **TaoMate HD 3-Step Progressive** | 2+1 | TaoMate-HD-preview-comfy(1.0，禁叠加速LoRA) | **1080p性价比王** |
 | 31 | **TaoMate HD 8+4 Progressive** | 8+4 | TaoMate-HD-preview-comfy(1.0，禁叠加速LoRA) | **1080p画质版** |
+| 32 | Singularity V2 + Pika H3 8步 高动态 | 8+3 | Singularity v2 基模 + pika_h3_flex_turbo_8step_hd | 高动态长视频 |
+| 33 | **视频替换 (V2V 人物替换)** | 8单采 | 源视频@视频N + 人物参考图@图N；建议 角色替换 LoRA(0.6~0.8) | **人物替换** |
 
 ### 五、全局开关默认值（出片前核对）/ Global Switches
 
@@ -134,6 +136,27 @@
 | 直播带货成片 | Live Commerce (fully automatic) | off | 无（12+4 一键） |
 | 结构控制短片 | SolarRenderer Structure Control | off | 控制LoRA+4步LoRA |
 | 抠像/透明素材 | Transparent Video Single-Pass | off | 无 |
+| **视频人物替换（换人）** | **视频替换 (V2V 人物替换)** | off | 角色替换 LoRA(0.6~0.8) 可选 |
+
+### 七、视频人物替换（V2V Recast）/ Video Character Replacement (v14.335)
+
+**用途**：把一段视频里的**人**换掉 —— 机位、运镜、剪辑点、走位、口型、原声全部保留，只替换人物身份；支持单人、多人，可跨多个 clip 连续替换。
+
+**四步用法 / Use it in four steps**：
+1. `BSAI_AssetLibraryInput` 上传**被替换的源视频**到资产库视频位，记作 `@视频N`（`@vidN` 同义）；
+2. 同一资产库上传**替换成的人物参考图**到图片位，记作 `@图1` / `@图2`…（一人一张，多人多张）；
+3. 渲染管道下拉选 **「视频替换 (V2V 人物替换)」**（英文规范值 `Video Recast (H3 V2V character swap)`）；快捷条上点 **「Video Recast」** 按钮同样一键到位；
+4. 分镜卡片写替换指令：`@图1 替换 @视频1 里的主持人，其余人不变`；要跨段继续换就下一张卡片接着写 `@图2 替换 @视频1 里的女嘉宾`。
+
+**45s 源视频的例子 / 45-second example**：分镜里写一次 `@视频N` 即可。后端探测源视频 45s → `ceil(45/15)=3` 段，每段 ≈15s（帧数对齐 H3 的 17k+5 网格）；分镜只有 1 张就自动补成 3 张（自动补的卡片 `id` 带 `_recast_k` 后缀），逐段替换后按顺序拼接成片。分镜多于所需时，多出来的段没有源画面可换，会被跳过并打印说明。
+
+**后端强制参数（手改 widget 无效，除 denoise）**：一采 8 步 `euler`+`simple`、shift 12/3、denoise 0.65、二采关闭、段间 motion context 全关、源原声锁定（音频 `noise_mask=0`）。`denoise` 是唯一开放的旋钮：调高（→0.9）= 更听参考图、换得更彻底，但动作/构图更易偏离原片；调低（→0.35）= 更贴原片、换得不够彻底。默认 0.65 是两者折中。
+
+**注意 / Notes**：
+- 源视频按**当前画布分辨率**等比放大 + 居中裁切后再编码，源片比例与画布不一致时会被裁边；
+- 源视频没有音轨（或没接 `audio_vae`）时，音频行改由模型重新生成，日志会告警 —— 此时口型不再跟随源片；
+- 替换档会忽略 `lip_audio` 对口型输入，日志提示一次；
+- 依赖 ffmpeg（整合包自带 / `imageio-ffmpeg` 提供），时长探测走 ffprobe 优先、`ffmpeg -i` 兜底。
 
 > **完整 LoRA 文件名与强度**见 [`RENDER_PIPELINES_REFERENCE.md`](./RENDER_PIPELINES_REFERENCE.md)。
 > Full LoRA filenames & strengths: see [RENDER_PIPELINES_REFERENCE.md](./RENDER_PIPELINES_REFERENCE.md).
@@ -553,6 +576,18 @@ Each CLIP card has per-card controls; left border color shows status. Card butto
 ### 工作流 5：`BSAI_H3_Film_Factory+透明视频单采抠像-Singularityx10Eros-Max-竖版-H3配音5090_072style.json` — 透明视频渲染管道示例（完整链路改造版）/ Transparent Video Pipeline · Full (v14.233)
 
 **配方同工作流 4，由用户《PRISM10步运动强化-Singularityx10Eros-Max-直播带货竖版-H3配音5090_072style》工作流直接改造**：保留原模型加载链路（Singularityx10Eros-Max PRISM / Sol-H3 Loader + H3Accel LoRA 选配 + qwen3vl 32B + 双 VAE），主节点 `render_pipeline` 切换为「透明视频 单采抠像 (H3 Transparent)」（10 步单采直出、跳过二采、euler/simple），分镜/全局脚本改写为绿幕透明素材配方（纯色背景纪律 + @图1 角色），输出链路追加 `BSAI_H3_TransparentKey`（抠像台）→ `BSAI_H3_SaveTransparentVideo`。104 节点，含参考图/素材库/LoRA 堆栈/直播带货旁支（不接线即不生效）。
+
+### 工作流 6：`BSAI_H3_Film_Factory电影工厂-视频替换V2V人物替换-角色替换LoRA-45s自动分3段-v14.335.json` — 视频人物替换（V2V Recast，渲染管道第 33 档）/ Video Character Replacement (tier 33)
+
+**由用户工作流《BSAI_H3_Film_Factory电影工厂-TaoMate8+4(不带案例）》直接改造**：保留原模型链路（`BSAI_SolH3_Loader`（hybrid fl2va/ref2va b25-49 int8）+ TaoMate HD 预览加速 LoRA + qwen3vl 32B CLIP + 视频/音频双 VAE + 资产库 + 最终解码），主节点 `render_pipeline` 切到 **「视频替换 (V2V 人物替换)」**（英文规范值 `Video Recast (H3 V2V character swap)`），并在模型链末端（风格栈之后、主节点之前）插入 `LoraLoaderModelOnly` 挂 **角色替换 LoRA 0.7**：`H3\H3特效\minimax_h3_角色替换character_swap_v1.5.safetensors`。分镜已写好 **3 个 15s 卡片**，正好对应「45s 源视频自动分 3 段」；每张卡片关掉 Context 续链，并内置一个「视频替换 V2V · 使用说明」Note。
+
+**使用步骤 / How to use**：
+1. 拖入本工作流，`BSAI_AssetLibraryInput` **视频位**上传被替换的源视频（45s 或任意时长）→ 分镜里已用 `@视频1` 引用；**图片位**上传替换人物参考图 → `@图1`（第一位人物）/`@图2`（第二位人物）。
+2. 分镜卡片里改 `@图N` 与人的对应关系（默认 3 段：① 换主持人 ② 换女嘉宾 ③ 两人身份延续），可跨多个 clip 连续替换。
+3. 直接运行：后端探测 `@视频1` 时长 → 45s 按 `ceil(45/15)=3` 段逐段替换（分镜不足会自动补 CLIP，多余段会被跳过），段间不续链、源原声锁定（口型随源片）。
+4. 调参只有 `denoise` 一个旋钮（默认 0.65）：换人不够彻底 → 0.8~0.9；动作/脸崩 → 0.5~0.35。角色替换 LoRA 强度同理（0.8 更彻底 / 0.6 更稳）。
+
+> 本档二采关闭、步数 8、euler+simple、shift 12-3 均由后端强制，手改 widget 只对 `denoise` 有效。若本机 `models/loras` 里没有该 LoRA，工作流会显示缺失节点参数（红框），把 `LoraLoaderModelOnly` 的 `lora_name` 改成你实际的权重名，或把该节点静音即可照常跑替换。
 
 ---
 

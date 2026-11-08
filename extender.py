@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.319-light-causality"
+BUILD = "minimax-h3-extender-v14.335-video-recast"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -605,6 +605,354 @@ def _read_frames_from_mp4(path, ffmpeg, total_frames, trim, width, height):
     arr = _np.frombuffer(raw[:actual * one], dtype=_np.uint8).reshape(
         actual, int(height), int(width), 3)
     return torch.from_numpy(arr.copy()).float().div_(255.0)
+
+
+# ===========================================================================
+# v14.335 (2026-11-08) 视频人物替换 —— Video Recast (H3 V2V character swap)
+#
+# 用法（与资产库对齐，用户口径）：
+#   1) 资产库里放"被替换的源视频" → @视频N；放"替换成的人物参考图" → @图N（可多张，多人）；
+#   2) 渲染管道选「视频替换 (V2V 人物替换)」，分镜脚本里写 @视频N + @图N 的替换指令；
+#   3) 电影工厂把源视频按 H3 Recast 的「单镜头 ≤15s」硬约束自动切成 15s/段：
+#      45s 源视频 = 3 段，每段独立执行人物替换，段间绝不做 motion context 续链，
+#      保证每段画面都各自由源视频画面驱动，不出现"从上段生成画面漂移"；
+#   4) 源原声整段锁进 AV latent 的音频行（noise_mask=0），采样器不会改写它 →
+#      替换后人物口型/对白/环境声与原视频逐帧对齐（不需要另接 lip_audio）。
+#
+# 技术链路（与 ComfyUI-H3-Multishot 的 H3 Retake 同源，本机已核对）：
+#   源片段 [start, start+dur) → ffmpeg 抽 24fps、等比放大+居中裁切到画布 W×H、
+#   帧数对齐 H3 的 17k+5 网格 → video_vae.encode() → [1,24,T,h/16,w/16]
+#   源原声 → 重采样到 audio_vae 采样率、裁/补到 round(dur*40) 行 →
+#   audio_vae.encode() → [1,32,2,Ta]
+#   latent = NestedTensor(video, audio)；noise_mask = (全 1 视频 / 全 0 音频)
+#   → 一采 denoise≈0.65 半重绘：保留源片运动/构图/镜头，只把人物身份换成参考图。
+#
+# 只在本档生效（_rp_mode == "视频替换 (V2V 人物替换)"），其它档一律不受影响。
+# ===========================================================================
+_RECAST_VIDEO_TAG_RE = re.compile(r"<\s*Video\s*([0-9]+)\s*>", re.IGNORECASE)
+_RECAST_SEG_SECONDS = 15.0          # H3 Recast 单镜头上限 15s（官方/社区一致）
+_RECAST_MIN_SEG_SECONDS = 1.0
+_RECAST_MAX_CLIPS = 120
+_RECAST_DISCIPLINE = (
+    "【视频人物替换纪律】本段执行“视频人物替换（Recast）”：输入视频是本段唯一的画面与运动来源。"
+    "严格保持原视频的镜头运动、机位、剪辑点、景别、构图、人物走位轨迹、背景、道具、光线、色彩、"
+    "帧率与节奏完全不变；只替换人物身份——按本段提示词给出的对应关系，把原视频中的人物换成对应参考图里的人物"
+    "（提示词未指明对应关系时：<Picture 1> 对应画面中第一位/最主要的人物，<Picture 2> 依次对应第二位，以此类推）。"
+    "被替换人物的脸型、五官、发型、体型、肤色、服装按参考图；其位置、动作幅度、手势、视线、表情与口型"
+    "必须逐帧跟随原视频，不得重新表演、不得改变动作轨迹、不得换机位或新增剪辑点。"
+    "未被指定替换的人物、背景与物体保持不变；画面内不得出现参考图本身、分屏、色卡、拼图、文字、水印或额外分身。"
+)
+
+
+def _recast_strip_video_tags(text: str) -> str:
+    """Recast 档把 <Video N> 从提示词里摘掉。
+
+    视频已作为 V2V latent 源（画面 + 原声）进入采样，保留 <Video N> 会让 H3 再把它
+    当成 ref2v 参考视频二次注入，与 V2V 初始化互相打架（实测会重演一遍源片动作）。
+    """
+    if not text:
+        return text
+    cleaned = _RECAST_VIDEO_TAG_RE.sub("原视频", text)
+    return cleaned
+
+
+def _recast_prompt(text: str) -> str:
+    """本段最终送入 TE 的 Recast 提示词 = 纪律块 + 用户指令（去掉 <Video N>）。"""
+    body = _recast_strip_video_tags(str(text or "")).strip()
+    return _RECAST_DISCIPLINE + "\n" + body if body else _RECAST_DISCIPLINE
+
+
+def _recast_find_video_asset(asset_library, tag_num: int):
+    """按 @视频N 取资产库视频条目（先按 index 匹配，再退回位置）。"""
+    videos = []
+    if isinstance(asset_library, dict):
+        videos = list(asset_library.get("videos") or [])
+    elif isinstance(asset_library, (list, tuple)):
+        videos = list(asset_library)
+    for item in videos:
+        if isinstance(item, dict) and item.get("index") == tag_num:
+            return item
+    idx = int(tag_num) - 1
+    if 0 <= idx < len(videos):
+        return videos[idx]
+    return None
+
+
+def _recast_probe_path(ffmpeg=None) -> str:
+    """ffprobe 与 ffmpeg 同目录（整合包自带），找不到就退回 PATH 里的 ffprobe。"""
+    try:
+        if ffmpeg:
+            cand = os.path.join(os.path.dirname(str(ffmpeg)), "ffprobe.exe")
+            if os.path.isfile(cand):
+                return cand
+            cand = os.path.join(os.path.dirname(str(ffmpeg)), "ffprobe")
+            if os.path.isfile(cand):
+                return cand
+    except Exception:
+        pass
+    return "ffprobe"
+
+
+def _recast_probe_duration(path: str, ffmpeg=None):
+    """源视频总时长（秒）。ffprobe 优先，ffmpeg -i 解析兜底；都失败返回 None。"""
+    import subprocess as _sp
+    try:
+        p = _sp.run(
+            [_recast_probe_path(ffmpeg), "-v", "error", "-show_entries",
+             "format=duration", "-of", "default=nw=1:nk=1", str(path)],
+            stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=60,
+        )
+        if int(p.returncode) == 0:
+            txt = (p.stdout or b"").decode("utf-8", "ignore").strip().splitlines()
+            for line in txt:
+                try:
+                    d = float(line.strip())
+                    if d > 0.05:
+                        return d
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    if ffmpeg:
+        try:
+            p = _sp.run([str(ffmpeg), "-hide_banner", "-i", str(path)],
+                        stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=90)
+            err = (p.stderr or b"").decode("utf-8", "ignore")
+            m = re.search(r"Duration:\s*([0-9]+):([0-9]{2}):([0-9]{2}(?:\.[0-9]+)?)", err)
+            if m:
+                return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        except Exception:
+            pass
+    return None
+
+
+def _recast_read_segment_frames(path, start_sec, dur_sec, width, height, frame_count,
+                                ffmpeg=None, fps=None):
+    """把源视频 [start, start+dur) 抽成恰好 frame_count 帧，等比放大后居中裁切到 W×H。
+
+    返回 [T,H,W,C] float32 (0..1, CPU)；失败返回 None。
+    精确 seek（-ss 放在 -i 之后）保证每段起点严格对齐源视频时间轴，
+    段与段之间不会因为关键帧跳转而重叠/漏帧。
+    """
+    import subprocess as _sp
+    import numpy as _np2
+    if not ffmpeg:
+        return None
+    n = int(frame_count)
+    if n <= 0:
+        return None
+    w, h = int(width), int(height)
+    vf = (f"fps={int(fps or FPS)},"
+          f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+          f"crop={w}:{h},setsar=1")
+    cmd = [str(ffmpeg), "-v", "error", "-i", str(path),
+           "-ss", f"{max(0.0, float(start_sec)):.3f}", "-t", f"{max(0.05, float(dur_sec)):.3f}",
+           "-vf", vf, "-frames:v", str(n), "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"]
+    try:
+        p = _sp.run(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=600)
+    except Exception as exc:
+        print(f"[H3 Recast] 源视频抽帧失败: {exc}")
+        return None
+    raw = p.stdout or b""
+    one = w * h * 3
+    got = len(raw) // one
+    if got <= 0:
+        print(f"[H3 Recast] 源视频抽帧为空 (start={start_sec:.2f}s dur={dur_sec:.2f}s): "
+              f"{(p.stderr or b'')[:200]}")
+        return None
+    arr = _np2.frombuffer(raw[:got * one], dtype=_np2.uint8).reshape(got, h, w, 3)
+    frames = torch.from_numpy(arr.copy()).float().div_(255.0)
+    if got < n:
+        # 该段比预期短（源视频尾部不足 / 抽帧取整）：冻结末帧补满，避免 latent 时间轴错位。
+        pad = frames[-1:].repeat(n - got, 1, 1, 1)
+        frames = torch.cat([frames, pad], dim=0)
+        print(f"[H3 Recast] 源片段只抽到 {got}/{n} 帧，已用末帧冻结补满")
+    elif got > n:
+        frames = frames[:n]
+    return frames.contiguous()
+
+
+def _recast_read_segment_audio(path, start_sec, dur_sec, sample_rate, total_samples,
+                               ffmpeg=None):
+    """抽源片段原声 → [1, 2, total_samples] float32 (CPU)。无音轨/失败返回 None。"""
+    import subprocess as _sp
+    import numpy as _np3
+    if not ffmpeg:
+        return None
+    sr = int(sample_rate or 32000)
+    want = int(total_samples)
+    if want <= 0:
+        return None
+    cmd = [str(ffmpeg), "-v", "error", "-i", str(path),
+           "-ss", f"{max(0.0, float(start_sec)):.3f}", "-t", f"{max(0.05, float(dur_sec)):.3f}",
+           "-vn", "-ac", "2", "-ar", str(sr), "-acodec", "pcm_f32le",
+           "-f", "f32le", "pipe:1"]
+    try:
+        p = _sp.run(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, timeout=600)
+    except Exception as exc:
+        print(f"[H3 Recast] 源视频抽音失败(将改为让模型重生成音频): {exc}")
+        return None
+    raw = p.stdout or b""
+    if len(raw) < 8:
+        print("[H3 Recast] 源视频没有可用音轨(将改为让模型重生成音频)")
+        return None
+    smp = _np3.frombuffer(raw[: (len(raw) // 4) * 4], dtype=_np3.float32)
+    ch = 2
+    frames = smp.reshape(-1, ch).T  # [2, L]
+    wav = torch.from_numpy(frames.copy()).unsqueeze(0)  # [1, 2, L]
+    cur = int(wav.shape[-1])
+    if cur < want:
+        wav = torch.nn.functional.pad(wav, (0, want - cur))
+    elif cur > want:
+        wav = wav[..., :want]
+    return wav.contiguous()
+
+
+def _recast_build_av_latent(vae, audio_vae, path, start_sec, dur_sec,
+                           width, height, frame_count, ffmpeg=None):
+    """源片段 → (video_latent, audio_latent_or_None, info)。失败抛异常由调用方回退。"""
+    frames = _recast_read_segment_frames(
+        path, start_sec, dur_sec, width, height, frame_count, ffmpeg=ffmpeg)
+    if frames is None:
+        raise RuntimeError("源视频抽帧失败")
+    vz = vae.encode(frames)
+    if vz.ndim == 5:
+        video_z = vz
+    elif vz.ndim == 4:
+        video_z = vz.unsqueeze(2)
+    else:
+        raise RuntimeError(f"video_vae.encode 返回异常形状 {tuple(vz.shape)}")
+    audio_z = None
+    if audio_vae is not None:
+        sr = int(getattr(audio_vae, "audio_sample_rate", 32000))
+        ta_want = int(round((frame_count / float(FPS)) * AUDIO_LATENT_FPS))
+        # 音频 latent 每一行对应 1/40 s 的源原声
+        need_samples = int(round(ta_want * (sr / float(AUDIO_LATENT_FPS))))
+        wav = _recast_read_segment_audio(
+            path, start_sec, dur_sec, sr, need_samples, ffmpeg=ffmpeg)
+        if wav is not None:
+            az = audio_vae.encode(wav.movedim(1, -1))
+            if az.ndim == 4:
+                audio_z = az
+                if int(audio_z.shape[-1]) > ta_want:
+                    audio_z = audio_z[..., :ta_want]
+                elif int(audio_z.shape[-1]) < ta_want:
+                    audio_z = torch.nn.functional.pad(
+                        audio_z, (ta_want - int(audio_z.shape[-1]), 0))
+    info = (f"src={os.path.basename(str(path))} [{start_sec:.2f}s, +{dur_sec:.2f}s) "
+            f"{frames.shape[0]}f {width}x{height} "
+            f"vz={tuple(video_z.shape)} az={tuple(audio_z.shape) if audio_z is not None else None}")
+    return video_z, audio_z, info
+
+
+def _recast_build_plan(clips, asset_library, ffmpeg=None, log=print):
+    """在分镜里找 <Video N>，建立"源视频时间轴 → clipN"的替换计划。
+
+    自动分段的硬规则（对齐 MiniMax H3 Recast 单镜头 ≤15s）：
+      n = ceil(源视频时长 / 15s)；分镜里参与替换的分镜数 < n 时**补齐分镜**，
+      每段时长 = 源视频时长 / n（帧数对齐 H3 的 17k+5 网格）。
+      45s 源视频 → 3 段 × 15s，正好对应"每个 clip 15 秒自动分 3 个 clip"。
+    已是足够多分镜时尊重用户自己的时长切分。
+
+    返回值:
+      {"path", "tag", "duration", "segments": {clip_idx: (start_sec, dur_sec)},
+       "auto_added", "disabled", "audio": bool}  或 None（不是替换任务）
+    """
+    start_idx = None
+    tag_num = None
+    for idx, clip in enumerate(clips):
+        m = _RECAST_VIDEO_TAG_RE.search(str(clip.get("prompt") or ""))
+        if m:
+            start_idx = idx
+            tag_num = int(m.group(1))
+            break
+    if start_idx is None:
+        log("[H3 Recast] 未在分镜提示词里找到 <Video N>（@视频N），本档未执行替换；"
+            "请把源视频放进资产库并在分镜里引用 @视频N")
+        return None
+
+    entry = _recast_find_video_asset(asset_library, tag_num)
+    if not isinstance(entry, dict):
+        log(f"[H3 Recast] 资产库里找不到 @视频{tag_num}（视频资产数不足）")
+        return None
+    path = entry.get("path") or entry.get("filename") or ""
+    if not path or not os.path.isfile(str(path)):
+        log(f"[H3 Recast] @视频{tag_num} 指向的文件不存在: {path}")
+        return None
+
+    duration = _recast_probe_duration(path, ffmpeg)
+    fallback_dur = 0.0
+    for clip in clips[start_idx:]:
+        try:
+            fallback_dur += float(clip.get("duration", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+    if duration is None or duration <= 0.05:
+        duration = fallback_dur if fallback_dur > 0 else None
+        if duration is None:
+            log(f"[H3 Recast] 无法探测 @视频{tag_num} 时长，替换中止")
+            return None
+        log(f"[H3 Recast] ⚠️ 探测不到源视频时长，按分镜总时长 {duration:.2f}s 处理")
+
+    seg_cap = float(_RECAST_SEG_SECONDS)
+    n_need = max(1, min(_RECAST_MAX_CLIPS, int(math.ceil((duration - 0.02) / seg_cap))))
+    have = len(clips) - start_idx
+    auto_added = 0
+    template = clips[start_idx]
+    if have < n_need:
+        for _k in range(n_need - have):
+            nc = copy.deepcopy(template)
+            nc["id"] = f"{str(template.get('id', 'clip'))}_recast_{_k + 1}"
+            nc["validated"] = False
+            nc["replace_mode"] = False
+            nc["render_enabled"] = True
+            nc["context_enabled"] = False
+            clips.append(nc)
+            auto_added += 1
+        log(f"[H3 Recast] 源视频 {duration:.2f}s → 按 15s/段上限切成 {n_need} 段，"
+            f"自动补齐 {auto_added} 个 CLIP（原分镜 {have} 个）")
+    elif have > n_need:
+        log(f"[H3 Recast] 源视频 {duration:.2f}s 只需 {n_need} 段，分镜有 {have} 段："
+            f"多出的 {have - n_need} 段没有源画面可替换，已跳过渲染")
+
+    # 每段时长：源视频时长 / 段数，并对齐 H3 的 17k+5 帧网格（保证抽帧数与 latent 行数一致）
+    seg_dur_raw = duration / float(n_need)
+    seg_frames = _duration_to_frames(seg_dur_raw)
+    seg_dur = float(seg_frames) / float(FPS)
+
+    segments = {}
+    cursor = 0.0
+    disabled = 0
+    for j in range(start_idx, len(clips)):
+        rel = j - start_idx
+        if rel >= n_need:
+            clips[j]["render_enabled"] = False
+            disabled += 1
+            continue
+        clips[j]["duration"] = seg_dur
+        clips[j]["context_enabled"] = False
+        clips[j]["validated"] = False
+        clips[j]["render_enabled"] = True
+        segments[j] = (cursor, seg_dur)
+        cursor += seg_dur
+
+    total_planned = cursor
+    if seg_dur > seg_cap + 0.05:
+        log(f"[H3 Recast] 注：17k+5 帧网格对齐后每段 {seg_dur:.2f}s，比 {seg_cap:g}s 上限多 "
+            f"{seg_dur - seg_cap:.2f}s（{seg_frames} 帧）；这是网格硬约束的结果，"
+            "源片尾部不足的部分用末帧冻结补齐")
+    log(f"[H3 Recast] 替换计划: @视频{tag_num} 共 {duration:.2f}s → {n_need} 段 × "
+        f"{seg_dur:.2f}s（{seg_frames} 帧/段，H3 17k+5 网格），覆盖 {total_planned:.2f}s；"
+        f"源原声整段锁定，不做段间 motion context 续链")
+    return {
+        "path": str(path),
+        "tag": tag_num,
+        "duration": float(duration),
+        "segments": segments,
+        "auto_added": int(auto_added),
+        "disabled": int(disabled),
+        "audio": bool(isinstance(asset_library, dict)),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -8859,6 +9207,9 @@ _RENDER_PIPELINE_EN2ZH = {
     "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)": "TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)",
     "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)": "TaoMate HD 8步+4步 渐进放大双采 (8+4 1080p直出)",
     "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)": "SingularityV2+Pika H3 8步 高动态长视频 (导演台双采)",
+    # v14.335 (2026-11-08): 视频人物替换档 —— 资产库 @视频N 作 V2V 源画面+原声，
+    # @图N 作人物身份参考，按 H3 Recast 单镜 15s 上限自动分 clip 逐段替换。
+    "Video Recast (H3 V2V character swap)": "视频替换 (V2V 人物替换)",
 }
 _SPEED_PRESET_EN2ZH = {
     "Turbo": "极速",
@@ -9309,10 +9660,10 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)"],
+            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
-                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi 大凯AI) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default.",
+                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi 大凯AI) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default. (32) Video Recast (H3 V2V character swap, v14.335) = 视频人物替换: the asset-library video @视频N becomes the V2V source (picture AND soundtrack) while @图N reference pictures define the new identity; the backend auto-splits the source into <=15s segments (the MiniMax H3 Recast per-shot contract: a 45s video becomes 3 clips), encodes each segment into the H3 AV latent (video = source frames, audio = source soundtrack locked with noise_mask 0), and runs an 8-step euler/simple first pass at denoise 0.65 so the original camera/motion/composition survive and only the person is swapped; refine skipped, motion context chaining disabled between recast clips; mount minimax_h3_角色替换character_swap_v1.5 in the LoRA stack at 0.6-0.8 for the strongest identity transfer.",
             },
         )
         # v14.185 (2026-10-24): 一镜到底采样档 —— 追加在 render_pipeline 之后（optional
@@ -10380,19 +10731,33 @@ class BSAIH3FilmFactory:
                 # rank 轴拼接, 误差 2.2e-8): OpenH3 Refiner 5000步(0.7) +
                 # LTXRV fl2v turbo 1.2(1.0) + lms sharp rank64(1.0)。
                 # 落地为双采: 一采 4 步 768P 草稿搭骨架 -> 二采 3 步重生成
-                # (denoise 1.0) + latent x1.9 放大(1344->2560) 精修出 2K。
+                # (官方 sigma 起点 0.909375) + latent x1.9 放大(1344->2560) 出 2K。
                 steps, refine_steps, tile_count, refine_denoise = 4, 3, 4, 1.0
                 refine_enable = True
                 refine_upscale_factor = 1.9  # 1344 -> 2560 潜空间放大(官方 3D 卷积上采样器)
+                refine_align_to = 32         # 2560x1440 目标网格 32px 对齐
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
+                # v14.334 (2026-11-08): 二采起点必须落在官方 sigma 0.909375 ——
+                # 补录 B站《MiniMax H3又被玩出新花样了！潜空间重绘直冲2K！》
+                # (BV1Yh4j6gEt3) 与 NVlabs/Sana Open-H3-Regenerate-2K 官方契约:
+                #   sigmas = [0.909375, 0.857143, 0.666667, 0], 3 步 Euler, CFG off。
+                # 旧实现 refine_denoise=1.0 走内部 beta 调度 = 从 sigma_max 纯噪声
+                # 重建, 768P 草稿的构图/运动信息被整条丢弃(等于 3 步从零画 2560),
+                # 与"重生成"语义相反。内部 _sigmas() 也取不到 0.909 起点: steps=3
+                # 时 int(3/0.909)=3, total_steps 回落到 3, 返回整条 4 段调度, 起点
+                # 仍是 1.0 —— 所以这里直接注入官方 SIGMAS(用户外接 supersede)。
+                if refine_sigmas is None:
+                    import torch as _torch_oh3
+                    refine_sigmas = _torch_oh3.FloatTensor(
+                        [0.909375, 0.857143, 0.666667, 0.0])
                 print("[H3 Extender] 🚀 4K重生成 OpenH3Regenerate2K: 768P草稿(1344x768) -> "
-                      "3步精修 -> 2560x1440 2K (BV13uxT66EWq 配方) — "
+                      "3步重生成 -> 2560x1440 2K (BV13uxT66EWq / BV1Yh4j6gEt3 配方) — "
                       "确认 Loader 挂合并LoRA(OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0), "
                       "采样器 CFG 设为 1.0; 3D 卷积 latent 上采样器(BF16) 可挂 refine_upscaler_model; "
-                      "官方 3 步 sigmas [0.909375, 0.857143, 0.666667, 0]")
+                      "二采 sigmas 已注入官方 [0.909375, 0.857143, 0.666667, 0]")
             elif _rp_mode == "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)":
                 # v14.231 (2026-10-27): B站《Singularity v2 × 10Eros-Max 合并模型,
                 # 提升运动效果》(BV1Vino6qE2F, plphy-up) 配方落地。
@@ -10822,6 +11187,48 @@ class BSAIH3FilmFactory:
                       "或 LightX2V 8步 v1.0 768P; 高动态动作 LoRA 三选一"
                       "(Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2), 二采强度降 0.3~0.4; "
                       "长视频开 one_shot_mode=on + motion context")
+            elif _rp_mode == "视频替换 (V2V 人物替换)":
+                # v14.335 (2026-11-08): 视频人物替换 (Video Recast / H3 V2V character swap)
+                #
+                # 与其它档最大的不同: 本档的"画面"不是文生视频生成的, 而是资产库 @视频N
+                # 的源画面经 video_vae.encode() 直接灌进 AV latent(见
+                # _recast_build_av_latent)，采样只做"半重绘":
+                #   denoise≈0.65 → 源片运动/构图/机位/剪辑点保留, 人物身份换成 @图N;
+                #   音频行 noise_mask=0 → 源原声整段锁定, 替换后口型/对白/环境声原样对齐。
+                # 因此:
+                #   ① 只跑一采, 二采关掉 —— 二采 latent 放大后会把源片细节(脸/衣纹)抹平,
+                #      身份转移到二采就散了(社区 Recast 也是单采出片);
+                #   ② 不做段间 motion context 续链 —— 每段独立由源视频对应片段驱动,
+                #      续链会把上一段"生成出来的画面"当上下文, 越链越偏;
+                #   ③ 采样器 euler + simple + shift 12/3, 8 步(单采蒸馏档的安全步数);
+                #   ④ 提示词由 _recast_prompt() 统一加"人物替换纪律"(原地保留用户指令)。
+                steps = 8
+                refine_enable = False
+                refine_steps = 2
+                refine_denoise = 0.0
+                refine_upscale_factor = 1.0
+                tiled_refine = False
+                refine_audio_denoise = 0.0
+                shift_video, shift_audio = 12.0, 3.0
+                # denoise: 用户显式改过(≠1.0)就用用户值并夹在 [0.35, 0.95];
+                # 没改过则用 0.65 —— 既足以换掉五官/发型, 又不至于丢掉源片动作轨迹。
+                try:
+                    _rc_dn_user = float(kwargs.get("denoise", 1.0) or 1.0)
+                except Exception:
+                    _rc_dn_user = 1.0
+                denoise = (min(0.95, max(0.35, _rc_dn_user))
+                           if abs(_rc_dn_user - 1.0) > 1e-6 else 0.65)
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print("[H3 Recast] 采样器强制 euler（源片运动保留的半重绘契约）")
+                scheduler = "simple"
+                one_shot_enabled = False
+                one_shot_single_pass = False
+                print("[H3 Recast] 🎭 视频人物替换档 (Video Recast / H3 V2V character swap): "
+                      f"单采 {steps} 步 euler+simple shift 12/3 denoise {denoise:.2f} + 源原声锁定; "
+                      "资产库 @视频N = 被替换源视频, @图N = 替换成的人物参考图; "
+                      "源视频按 15s/段上限自动分 clip 逐段替换(45s → 3 段); "
+                      "LoRA 槽建议挂 minimax_h3_角色替换character_swap_v1.5.safetensors (0.6~0.8)")
             else:
                 _rp_handled = False
             if _rp_handled:
@@ -12113,6 +12520,34 @@ class BSAIH3FilmFactory:
                       f"本次不会重新渲染对口型。若它们是接入 lip_audio 之前生成的，"
                       f"请取消这些 CLIP 的 ✅ 校验标记后重渲，否则口型与歌曲不匹配。")
 
+        # ── v14.335 视频人物替换 (Video Recast): 建立"源视频 → clipN"替换计划 ──
+        # 必须放在 loop_end = len(clips) 之前：替换档会自动补齐/裁剪 CLIP 数量
+        # (45s 源视频 → 3 × 15s)，loop_end 才能在后面的循环里覆盖到补齐的段。
+        _recast_plan = None
+        if _rp_mode == "视频替换 (V2V 人物替换)":
+            try:
+                _recast_plan = _recast_build_plan(clips, asset_library, ffmpeg=_find_ffmpeg())
+            except Exception as _rc_plan_err:
+                print(f"[H3 Recast] 替换计划构建失败(回退普通渲染): {_rc_plan_err}")
+                _recast_plan = None
+            if _recast_plan is not None:
+                # 替换档会自动追加 CLIP；clip_ref_plans 按原始 len(clips) 构建，
+                # 不同步扩展会在渲染循环里越界（与 v14.189 对口型自动续段同源问题）。
+                if clip_ref_plans is not None:
+                    while len(clip_ref_plans) < len(clips):
+                        clip_ref_plans.append(dict(clip_ref_plans[-1]))
+                    print(f"[H3 Recast] clip_ref_plans 同步扩展: {len(clips)} 条")
+                # 替换档的画面与口型都由源视频提供：lip_audio 会另灌一套音频行，
+                # 与"锁定源原声"互相冲突，这里直接忽略并告知。
+                if lip_audio_segments is not None:
+                    print("[H3 Recast] ⚠️ 已忽略 lip_audio 对口型输入 —— 替换档用源视频原声"
+                          "直接锁进 AV latent，口型随源片逐帧对齐")
+                    lip_audio_segments = None
+                print(f"[H3 Recast] 替换计划就绪: {len(_recast_plan['segments'])} 个 CLIP 将"
+                      f"逐段替换 (源 {_recast_plan['duration']:.2f}s)，"
+                      f"自动补齐 {_recast_plan['auto_added']} 段，"
+                      f"跳过 {_recast_plan['disabled']} 段无源画面的分镜")
+
         disk_join = MiniMaxH3MotionContextDiskJoin()
         motion = MiniMaxH3MotionContextRAM()
 
@@ -13365,6 +13800,14 @@ class BSAIH3FilmFactory:
                 except Exception as _pe_err:
                     print(f"[H3 Extender] v14.162 等待异步编码完成失败(可忽略): {_pe_err}")
 
+            # v14.335 视频人物替换: 本段对应的源视频片段（无则按普通分镜渲染）
+            _recast_seg = (_recast_plan["segments"].get(i)
+                           if (_recast_plan is not None) else None)
+            if _recast_seg is not None:
+                # 纪律块统一注入（保留用户自己写的"谁换成谁"），并摘掉 <Video N>
+                # —— 源视频已作为 V2V latent 进入采样，再当参考视频会双重注入。
+                effective_prompt = _recast_prompt(effective_prompt)
+
             positive, latent = _make_ref2va_conditioning(
                 clip,
                 vae,
@@ -13377,6 +13820,79 @@ class BSAIH3FilmFactory:
                 active_picture_slots,
                 semantic_bridge_pack=sb_pack,
             )
+
+            # v14.335 视频人物替换: 把本段源画面 + 源原声编码进 AV latent（半重绘初始化）
+            if _recast_seg is not None:
+                try:
+                    _rc_vz, _rc_az, _rc_info = _recast_build_av_latent(
+                        vae,
+                        audio_vae,
+                        _recast_plan["path"],
+                        float(_recast_seg[0]),
+                        float(_recast_seg[1]),
+                        resolved_width,
+                        resolved_height,
+                        frame_count,
+                        ffmpeg=_find_ffmpeg(),
+                    )
+                    _rc_samples = latent.get("samples")
+                    if isinstance(_rc_samples, comfy.nested_tensor.NestedTensor):
+                        _rc_vt, _rc_at = _rc_samples.tensors[0], _rc_samples.tensors[1]
+                    else:
+                        _rc_vt, _rc_at = _rc_samples, None
+                    _rc_v = _rc_vz.to(device=_rc_vt.device, dtype=_rc_vt.dtype)
+                    _rc_t_tgt = int(_rc_vt.shape[2])
+                    _rc_t_have = int(_rc_v.shape[2])
+                    if _rc_t_have != _rc_t_tgt:
+                        if _rc_t_have > _rc_t_tgt:
+                            _rc_v = _rc_v[:, :, :_rc_t_tgt]
+                        else:
+                            _rc_v = torch.cat(
+                                [_rc_v,
+                                 _rc_v[:, :, -1:].repeat(1, 1, _rc_t_tgt - _rc_t_have, 1, 1)],
+                                dim=2)
+                        print(f"[H3 Recast] clip[{i+1}] 源 latent 时间行 {_rc_t_have} -> "
+                              f"{_rc_t_tgt}（与本次 frame_count 对齐）")
+                    _rc_hw_tgt = (int(_rc_vt.shape[3]), int(_rc_vt.shape[4]))
+                    if (int(_rc_v.shape[3]), int(_rc_v.shape[4])) != _rc_hw_tgt:
+                        raise RuntimeError(
+                            f"源 latent 画布 {_rc_v.shape[3]}x{_rc_v.shape[4]} 与本次 "
+                            f"{_rc_hw_tgt[0]}x{_rc_hw_tgt[1]} 不一致（画布分辨率被其它档改写？）")
+                    if _rc_at is not None:
+                        if _rc_az is not None:
+                            _rc_a = _rc_az.to(device=_rc_at.device, dtype=_rc_at.dtype)
+                            _rc_a_tgt = int(_rc_at.shape[-1])
+                            _rc_a = _rc_a[..., :_rc_a_tgt]
+                            if int(_rc_a.shape[-1]) < _rc_a_tgt:
+                                _rc_a = torch.nn.functional.pad(
+                                    _rc_a, (0, _rc_a_tgt - int(_rc_a.shape[-1])))
+                            latent["samples"] = comfy.nested_tensor.NestedTensor(
+                                (_rc_v, _rc_a))
+                            # 视频全 1 = 允许半重绘；音频全 0 = 锁定源原声，采样器不得改写
+                            _rc_vmask = torch.ones_like(_rc_v)
+                            _rc_amask = torch.zeros_like(_rc_a)
+                        else:
+                            # 源视频无音轨 / 未接 audio_vae：音频区交还模型重生成
+                            latent["samples"] = comfy.nested_tensor.NestedTensor(
+                                (_rc_v, _rc_at))
+                            _rc_vmask = torch.ones_like(_rc_v)
+                            _rc_amask = torch.ones_like(_rc_at)
+                            print(f"[H3 Recast] clip[{i+1}] ⚠️ 源视频无可用音轨或未接 "
+                                  "audio_vae —— 音频改由模型重新生成（口型不再跟随源片）")
+                    else:
+                        latent["samples"] = _rc_v
+                        _rc_vmask = torch.ones_like(_rc_v)
+                        _rc_amask = None
+                    if _rc_amask is not None:
+                        latent["noise_mask"] = comfy.nested_tensor.NestedTensor(
+                            (_rc_vmask, _rc_amask))
+                    else:
+                        latent["noise_mask"] = _rc_vmask
+                    print(f"[H3 Recast] clip[{i+1}] 源画面/原声已灌入 AV latent: {_rc_info}; "
+                          f"半重绘 denoise={float(denoise):.2f}; "
+                          f"源原声{'已锁定' if _rc_az is not None else '未锁定'}")
+                except Exception as _rc_err:
+                    print(f"[H3 Recast] clip[{i+1}] 源片段编码失败，本段回退普通渲染: {_rc_err}")
 
             # v2.119: lip_audio 注入 AV latent 音频区 + zero-denoise 锁定
             # 参考 VRGDG Audio Drive: 把歌曲编码后直接塞进 latent 音频区,
