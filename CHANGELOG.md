@@ -2,6 +2,38 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.341 (2026-11-09) — 一镜到底换场判定错位一段 / 段内行程串被误删 / 正文全片绝对时间码：三处根因直修（clip2 段内硬切的根治）/ One-take: seam comparison was off by one clip, in-clip route string was being deleted, absolute timecodes left unnormalized
+
+**现象（BSAI第077期 21 段一镜到底 MV「走遍世界」，1920x1088，TaoMate 8+4，24fps）**
+
+- clip1 全程零切镜（ffmpeg `scdet` 最高分仅 1.14，且集中在段首）；clip2 有两处：`2.083s score=14.439`（同片中位 0.30，48 倍）、`5.042s score=0.861`（叠加前几帧 0.524 的连续异常）。
+- 抽帧（46-54 / 116-124）：0–2.04s 仍是**段1 的故宫券门正面跟拍**，2.08s 一帧硬切成**帕特农石阶背面跟拍爬台阶**，5.00s 又跳成正面近景对口型。
+- 把 `clips[1].prompt` 走插件真实清洗链（`_one_shot_demulti_shot` → `_one_shot_flatten_prompt`）dump 出来，开头是 `"：）【本段运镜…` —— 段首那整条场景行程消失了，只剩一对空括号和一个孤零零的冒号；正文里还留着 `0:12–0:13.5 闭口行进（段首1.5秒无唱）`、`人声窗口0:13.5–0:24` 这类按**全片**计的绝对时间码（12 秒片段里出现 0:24，物理上不可能满足）。
+- 日志 `v14.301 一镜到底 clip[2]: 空间规则 = 空间过渡 (S1 故宫 → S2 帕特农)`：段2 的脚本写的是「S2 帕特农@图4 起行 → T2 → 止于 S3 圣家堂@图5」，插件却把**段1**的换场发给了段2；段1 自己一条空间规则都没拿到。
+
+**根因（三处，全在插件代码里；用户脚本本身符合一镜到底写法，不需要改）**
+
+1. **换场判定错位一段**：`_os_prev_scene` 取 `_os_scene_names[i-1]` —— 上一段的**起点**。脚本按链式路线写（段1 `S1→S2`、段2 `S2→S3`…），于是「本段起点 vs 上段起点」永不相等 → 每段都被判成「空间过渡」，而且描述的是**上一段**的那次换场，整体错位一段。段1 没有空间规则 → 十二秒走不出故宫；段2 收到段1 的 `S1→S2` 并被 v14.332 的「换场压入段首」无条件套上，与段首 motion context 关键帧直接冲突 → 模型只能「先拖旧画面约 2 秒、再一帧换掉整幅背景」，即 **2.083s 那一刀**。
+2. **段内行程串被误删**：`_OS_ROUTE_CHAIN_RE` 把带 `@图` 标签的**本段自己的行程**当成「分镜结构」整条删掉 —— 那是「起行哪处空间 / 跨哪个过渡物 / 止于哪处空间」的唯一权威描述，删掉后模型既不知起点也不知过渡物。
+3. **全片绝对时间码未归一**：12 秒片段里出现 `0:24`，与「段首1.5秒」互相打架，强化了「段内某个时刻发生一次新事件」的读法；配合被强行跳到 `@图4` 的**背面爬阶**机位，正文又要求「正面开口唱歌、口型清晰」，背面满足不了口型 → **5.00s 那处机位跳变**（下游连带）。
+
+**修法（纯文本/规则层，零新增采样开销）**
+
+- `_OS_ROUTE_CHAIN_RE` 收紧：只清**纯规划用**的 `S→T→S` 串；带 `@图` / `<Picture` / `（(` 的路线串**整条保留**（段内每节限 24 字符，避免贪吃）。
+- 新增 `_one_shot_scene_route(text, catalog)`：解析**本段自己**的 `start / end / transit`，并与 `[场景档案]` 清单做规范名匹配（该工作流无此小节时，退化为按 `S2 / T2` 标签 + 段首文本取名字）。
+- 新增 `_one_shot_space_decision(routes, i, names)`：判定顺序 = 接缝换场（上段 **end** != 本段 start → `head`）> 本段自跨（start != end → `mid`）> 同场景延续。预扫描改为整链产出 `_os_scene_routes`（缓存命中的段不会让「上一段」错位），日志新增 `v14.341 一镜到底 clip[N]: 行程 = start → (transit) → end（段中换场/单处空间）`。
+- 新增 `_one_shot_transit_mid_rule` / `_one_shot_scene_anchor_mid_rule`：段中换场版空间规则 —— 由主体走到脚本所写的过渡物、画幅被门墙挡住的一两拍完成置换，两侧各挂脚本自己的起行/终止空间。接缝**连续**时回到「段首承接接着上一段末帧」，不再被换场分支顶掉；`i==0` 单独给「段首起幅」（旧的「接着上一段末帧」对段1 是无源指令）。
+- 新增 `_one_shot_normalize_timecodes(text, offset, duration)`：仅当正文时间码**明显超出本段时长**时，按「全片绝对 → 段内相对」平移（offset 由前序 clip 时长累加；平移出负值即判定原本就是相对码，原样返回）。
+- `_one_shot_demulti_shot` 末尾清空括号 + 清段首标点垃圾，条件文本从场景名/运镜小节自然开始。
+- `_OS_SPACE_TRANSIT_RULE`（接缝换场版）去掉写死的「更深的夜色 / 壁灯 / 夜的深处」，改为「朝脚本所写的光线状态推进 / 灯具 / 天光沿同一条连续方向演进」，避免对非夜景脚本造成光影时间线倒流（v14.319 记录过的旧病）。
+- `v14.317` 一采硬切拦截新增**确定性判定**：同一处硬切在换 seed 后「行号 ±1 + 两个量级 ±15% 内复现」= 噪声种子改不掉，根因在条件文本，立即停止重采样并保留原结果（本片实测两次一采在同一 row 给出相同的 1.69x/4.77x，白烧两轮采样）。
+
+**验证**：新增 `tools/check_one_shot_route_rules.py`（30 断言，含链式行程解析、接缝 head/mid 分流、旧格式向后兼容、清洗链段首完整、时间码归一、规则措辞无切镜词、夜色硬编码回归），全绿；`ast.parse` 通过。实测本工作流 21 段全部解析出自己的行程（clip1 `S1→T1→S2`、clip2 `S2→T2→S3`…），clip2 清洗后条件文本以 `S2 雅典帕特农神庙·卫城山门@图4` 开头、保留 `@图5` 与 `T2`、无切镜词、时间码全部落在 `0:00–0:12`。
+
+**未验证**：本机未重启 ComfyUI 重渲 clip1/clip2，因此「2.083s / 5.00s 两处切镜是否消失」尚缺实机 `scdet` 复测证据；`_one_shot_scene_route` 对无 `@图` 标签、无 `T` 标记的自由写法脚本会退化为单段行程（此时行为等同 v14.339）。
+
+**英文**：Root-caused the in-clip hard cuts of clip2 in a 21-clip one-take MV. (1) Seam comparison was off by one clip: `_os_prev_scene` used the previous clip's **start** name, so with chained routes (`S_k→S_{k+1}`) every clip looked like a scene transition and each clip received the *previous* clip's transition — clip1 got no space rule at all, clip2 got clip1's `S1→S2` pushed into its first frames and fought the motion-context keyframe, producing a 2.08s hard cut. (2) `_OS_ROUTE_CHAIN_RE` deleted the clip's own route string (`S2 …@图4 → T2 → S3 …@图5`) as if it were storyboard structure, removing the only authoritative description of start / transit / end. (3) Body timecodes stayed in whole-film absolute form (`0:24` inside a 12s clip). Fixes: route-preserving regex, new `_one_shot_scene_route`, new `_one_shot_space_decision` (seam vs in-clip transit vs continuation), in-clip transit + anchor rules, timecode normalization, empty-paren/leading-punctuation cleanup, night-only lighting wording de-hardcoded, and a deterministic-hard-cut verdict in the v14.317 guard so reseeding stops when the same cut reappears. Verified statically with the new `tools/check_one_shot_route_rules.py` (30 assertions) and offline prompt dumps; a live re-render of clip1/clip2 was **not** performed in this change.
+
 ### v14.339 (2026-11-08) — 新增第 34 档 HyperFlow H3 Flash 14B + 替换档不再为源片接缝重采样 / New tier 34 HyperFlow H3 Flash 14B; recast no longer reseeds on source seams
 
 **新增第 34 档「HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)」**（Video Rebirth，Bilibili BV13oWJ6uEQZ）：

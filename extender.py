@@ -5212,6 +5212,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         if _cut_hits:
             _cut_best = samples
             _cut_best_hits = _cut_hits
+            # v14.341: 记下首次检出的那一处硬切(行号 + 两个量级), 用于判定"换 seed 复现"。
+            _cut_ref = (_cut_hits[0]["row"], _cut_hits[0]["dr"], _cut_hits[0]["lr"])
             for _cut_try in range(_cut_retries):
                 _h = _cut_best_hits[0]
                 print(f"[H3 Extender] v14.317 硬切拦截: 一采 latent 检出硬切 row={_h['row']} "
@@ -5254,6 +5256,27 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _cut_samples, _cut_pthr, _cut_lthr, one_shot_trim_frames)
                 print(f"[H3 Extender] v14.317 硬切拦截: seed={_cut_seed} 重采样完成, "
                       f"剩余硬切 {len(_cut_new)} 处(原 {len(_cut_best_hits)} 处)", flush=True)
+                # v14.341: 同一处硬切在换 seed 后"行号 ±1 + 两个量级 ±15% 内复现" ->
+                # 这是**确定性**硬切(噪声种子改不掉), 根因在条件文本。实测(BSAI第077期
+                # clip2): 两次一采在同一 row 上给出完全相同的 1.69x/4.77x, 说明模型是被
+                # 提示词/规则逼着在那一帧换场景; 继续换 seed 只是再烧一整轮采样。
+                try:
+                    _cut_dup = None
+                    for _hn in _cut_new:
+                        if (abs(_hn["row"] - _cut_ref[0]) <= 1
+                                and 0.85 <= _hn["dr"] / max(_cut_ref[1], 1e-6) <= 1.15
+                                and 0.85 <= _hn["lr"] / max(_cut_ref[2], 1e-6) <= 1.15):
+                            _cut_dup = _hn
+                            break
+                    if _cut_dup is not None:
+                        print("[H3 Extender] v14.341 硬切拦截: 同一处硬切在换 seed 后逐项复现 "
+                              f"(row={_cut_dup['row']}, {_cut_dup['dr']:.2f}x/"
+                              f"{_cut_dup['lr']:.2f}x) —— 确定性硬切, 噪声种子改不掉; "
+                              "根因在条件文本(段首承接/换场位置/行程与 motion context 冲突), "
+                              "停止重采样并保留原结果", flush=True)
+                        break
+                except Exception:
+                    pass
                 if len(_cut_new) < len(_cut_best_hits):
                     _cut_best = _cut_samples
                     _cut_best_hits = _cut_new
@@ -7442,6 +7465,65 @@ _OS_VOICE_TC_AFTER = re.compile(
 _OS_VOICE_TC_TAIL = re.compile(
     r"(?:人声|歌声|音频|音乐|演唱)\s*(?:至|起|到)\s*(?=[，,；;。！？!?\n]|$)")
 
+# v14.341: 正文时间码(M:SS / M:SS.s), 不用 \b —— 中文与数字之间没有词边界。
+_OS_TIMECODE_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?:\.(\d{1,2}))?")
+
+
+def _one_shot_normalize_timecodes(text, offset_sec=0.0, duration_sec=None):
+    """v14.341: 把正文里的**全片绝对时间码**归一成本段相对时间码。
+
+    实测(BSAI第077期 clip2): 段首小节写 "01-12秒:", 正文却写
+    "0:12–0:13.5 闭口行进（段首1.5秒无唱）… 人声窗口0:13.5–0:24" —— 一个 12 秒的
+    片段里出现了 0:24 这种**不可能满足**的时间锚点。H3 有时序感知, 会把它当成
+    "段中某个时刻要发生一次新事件", 与"段首1.5秒"互相打架(实测 5.00s 一次机位跳变)。
+
+    触发条件刻意从严:
+      * 只有本文出现**超过本段时长**的时间码(即显然是按全片计的绝对时间) 才动手;
+      * offset>0 才平移(段1 的绝对时间就是相对时间);
+      * 平移后出现负值 -> 判定原文本来就是相对时间码, 原样返回。
+    """
+    s = str(text or "")
+    if not s or float(offset_sec or 0) <= 0:
+        return s
+    _hits = []
+    for _m in _OS_TIMECODE_RE.finditer(s):
+        _sec = int(_m.group(1)) * 60 + int(_m.group(2))
+        if _m.group(3):
+            _sec += float("0." + _m.group(3))
+        _hits.append((_m, _sec))
+    if not _hits:
+        return s
+    _dur = float(duration_sec) if duration_sec else None
+    if _dur is None:
+        return s
+    if max(_sec for _, _sec in _hits) <= _dur + 0.5:
+        return s
+    _off = float(offset_sec)
+    if min(_sec for _, _sec in _hits) - _off < -0.05:
+        return s
+    _out, _last = [], 0
+    for _m, _sec in _hits:
+        _out.append(s[_last:_m.start()])
+        _new = _sec - _off
+        _mins = int(_new // 60)
+        _rem = _new - _mins * 60
+        if _m.group(3):
+            _dec = len(_m.group(3))
+            _body = f"{_rem:0{3 + _dec}.{_dec}f}"
+            if _body.split(".")[0] == "60":
+                _mins += 1
+                _body = f"{0:0{2 + 1 + _dec}.{_dec}f}"
+            _out.append(f"{_mins}:{_body}")
+        else:
+            _rsec = int(round(_rem))
+            if _rsec >= 60:
+                _mins += 1
+                _rsec -= 60
+            _out.append(f"{_mins}:{_rsec:02d}")
+        _last = _m.end()
+    _out.append(s[_last:])
+    return "".join(_out)
+
 
 def _one_shot_sanitize_cut_words(text):
     """v14.300: 一镜到底条件下文本的最后一层清洗。
@@ -7798,8 +7880,8 @@ _OS_SPACE_TRANSIT_RULE = (
     "与大小连续。跨过之后，本段画面里只有门里这一处空间的地面、墙面、灯具与建筑，"
     "它们在同一次行走里逐帧展开，越往前走越展开，展开之后就一直展开着；左右方位"
     "自始至终保持一致；本段的光线与色调从上一段末帧那一刻的明暗与色温状态起算，"
-    "整段只逐拍向更深的夜色推进一小步，门里新出现的壁灯在原有环境光上由暗到亮"
-    "逐渐显形，天空的亮度与色温随行走连续地向夜的深处演进，步幅与节奏自始至终一致。"
+    "整段只逐拍朝脚本所写的光线状态推进一小步，门里新出现的灯具在原有环境光上由暗到亮"
+    "逐渐显形，天光的亮度与色温随行走沿同一条连续的方向演进，步幅与节奏自始至终一致。"
 )
 
 # v14.319 (2026-11-05): 光影因果化 —— 把"没有画面内原因的整体换色"改写成
@@ -7960,6 +8042,157 @@ def _one_shot_scene_name(text, catalog=None):
     return pre
 
 
+# ── v14.341 (2026-11-09): 本段**自己的**行程(起行空间 → 过渡物 → 终止空间) ─────
+#
+# 根因(用户 21 段一镜到底 MV, BSAI第077期 "走遍世界", 2026-11-09 实机):
+#   * 段2 在 2.083s 与 5.000s 各有一处硬切(像素域 scene 分数 14.439 / 0.861,
+#     同片中位 0.30)。抽帧: 0-2.04s 仍是段1 的故宫券门(正面跟拍), 2.08s 一帧
+#     硬切成帕特农石阶(背面跟拍爬台阶), 5.00s 又硬切成正面近景对口型。
+#   * 日志证据(v14.301 行): "clip[2]: 空间规则 = 空间过渡 (S1 故宫 → S2 帕特农)" ——
+#     段2 的脚本写的是 "由S2 帕特农@图4起行 → T2 → 止于S3 圣家堂@图5", 插件却把
+#     **段1 的换场**(S1→S2)发给了段2; 段1 自己一条空间规则都没拿到。
+#     于是段1 十二秒走不出故宫, 段2 一开头才去补段1 欠下的换场 —— 那一帧就是 2.08s。
+#   * 机制: _os_prev_scene 取的是**上一段的起点场景**(_os_scene_names[i-1]), 而接缝
+#     处真正该对比的是**上一段的终点场景**。脚本按链式路线写(S_k→S_{k+1}), 于是
+#     "本段起点 vs 上段起点" 永远不相等 -> 每段都被判成换场, 而且描述的是上一段的
+#     换场, 整体错位一段; v14.332 的"换场压入段首"又被无条件套上, 与段首 motion
+#     context 关键帧冲突, 结果是"先拖旧画面 2 秒、再一帧换掉整幅背景"。
+#   * 5.00s 那处是同一根因的下游: 段2 被强行跳到 S2 参考图(@图4 帕特农石阶)的构图,
+#     变成背面爬台阶机位, 而正文要求"正面开口唱歌、口型清晰", 背面满足不了口型,
+#     模型只能再切一次到正面近景。
+#
+# 修法:
+#   1) 每段解析**自己**的行程 (start / end / transit), 换场一律用本段的 start→end;
+#   2) 接缝对比用上一段的 **end**。end == 本段 start 时接缝是连续的, 换场发生在
+#      **段中**跨过那个过渡物(T 标记)的时刻, 由门墙遮挡完成(见 _one_shot_transit_mid_rule);
+#   3) 只有接缝本身真换场(上段 end != 本段 start)时, 才沿用 v14.332 的"换场压入段首"。
+_OS_EMPTY_PAREN_RE = re.compile(r"[（(]\s*[）)]")
+_OS_ROUTE_TAG_RE = re.compile(r"([ST])\s?(\d{1,2})")
+_OS_ROUTE_NAME_CUT_RE = re.compile(r"[@<（(\n【\[]")
+
+
+def _one_shot_scene_route(text, catalog=None):
+    """v14.341: 解析本段自己的行程。
+
+    段首行是一镜到底 skill 的写法:
+        "：S2 雅典帕特农神庙·卫城山门@图4-登阶上行 → T2 山门石阶阙口右柱脚（直行绕过·0°）
+         → S3 圣家族大教堂·中殿侧廊@图5（【演唱中】…）【本段运镜…】"
+
+    返回 dict:
+        start    起行的那一处空间(第一个 S 段的名字)
+        end      终止的那一处空间(最后一个 S 段的名字)
+        transit  段中要跨过的过渡物(T 段的名字), 没有则 None
+        cross    start != end —— 本段行程跨了两处空间
+        route    行程原文(日志/审计用)
+    解析失败或单段行程时 end == start、cross False。
+    """
+    _empty = {"start": None, "end": None, "transit": None, "cross": False, "route": ""}
+    s = str(text or "")
+    head = ""
+    for ln in s.splitlines():
+        if ln.strip():
+            head = ln.strip()
+            break
+    if not head:
+        return _empty
+    # 行程只取到第一个方括号小节(【本段运镜… / [镜头运动]…) 之前 —— 那些小节里
+    # 的 "中景起幅→中近景→近景" 也是箭头分隔, 不能被当成场景路线。
+    _cut = len(head)
+    for _mk in ("【", "["):
+        _p = head.find(_mk)
+        if _p > 0:
+            _cut = min(_cut, _p)
+    route = head[:_cut].strip(" \t：:，,、；;")
+    route = re.sub(r"^\[[^\[\]]{0,12}\]\s*[：:]?\s*", "", route)
+    if not route:
+        return _empty
+    segs = [x.strip(" \t：:，,、；;-—") for x in re.split(r"→|->", route)]
+    scenes, transit = [], None
+    for seg in segs:
+        _m = _OS_ROUTE_TAG_RE.match(seg)
+        if not _m:
+            continue
+        _kind = _m.group(1).upper()
+        _label = f"{_kind}{int(_m.group(2))}"
+        _body = _OS_ROUTE_NAME_CUT_RE.split(seg[_m.end():])[0]
+        _body = _body.strip(" \t：:，,、；;-—·")
+        _name = f"{_label} {_body}".strip() if _body else _label
+        for _nm in (catalog or []):
+            if (_nm == _name or _nm.startswith(_name) or _name.startswith(_nm)
+                    or _nm.startswith(_label + " ")):
+                _name = _nm
+                break
+        if _kind == "S":
+            scenes.append(_name)
+        elif _kind == "T" and transit is None:
+            transit = _name
+    start = scenes[0] if scenes else None
+    end = scenes[-1] if scenes else None
+    return {"start": start, "end": end, "transit": transit,
+            "cross": bool(start and end and start != end), "route": route}
+
+
+def _one_shot_transit_mid_rule(start, end, transit=None):
+    """v14.341: 换场落在**段中**(跨过脚本所写的过渡物)时的空间规则。
+
+    与 v14.332 的段首换场版本的区别: 段首继续接着上一段末帧(接缝是连续的),
+    换场由主体走到那个过渡物、画幅被门墙挡住的那一两拍完成。全文正向陈述,
+    不含 cut/转场/叠化 词汇, 不含否定句。
+    """
+    _start = start or "脚本起行的那一处空间"
+    _end = end or "脚本终止的那一处空间"
+    _transit = transit or "脚本所写的那道门洞"
+    return (
+        f"\n[空间过渡] 本段只有一条连续行走：起幅这一路的地面、灯具与两侧建筑是{_start}的，"
+        f"走到{_transit}跟前，画幅被这道过渡物的门墙与门框挡住的那一两拍，墙外的景物换成"
+        "墙内的景物；遮挡前后是同一台摄影机、同一个步频、同一个画幅位置，主体的朝向与在"
+        "画幅中的大小连续。跨过之后，本段画面里只有"
+        f"{_end}的地面、墙面、灯具与建筑，它们在同一次行走里逐帧展开，展开之后就一直展开着；"
+        "左右方位自始至终保持一致；本段的光线与色调从起幅那一刻的明暗与色温状态起算，"
+        "整段只逐拍沿同一条轨迹推进一小步，新出现的灯具在原有环境光上由暗到亮逐渐显形，"
+        "步幅与节奏自始至终一致。"
+    )
+
+
+def _one_shot_scene_anchor_mid_rule(start, end, transit=None):
+    """v14.341: 段中换场段的场景锚定 —— 过渡物两侧各有自己的一处空间。"""
+    _start = start or "脚本起行的那一处空间"
+    _end = end or "脚本终止的那一处空间"
+    _transit = transit or "脚本所写的那道门洞"
+    return (
+        f"\n[场景锚定] 本段起幅到{_transit}之前的画面里，地面材质、灯具与两侧建筑都与"
+        f"{_start}一致；跨过{_transit}之后，画面里的地面材质、灯具与两侧建筑都与{_end}一致，"
+        "并一直保持到本段末帧；本段画面里只有这两处空间按这一次行走的先后顺序出现。"
+    )
+
+
+def _one_shot_space_decision(routes, i, names=None):
+    """v14.341: 空间判定 —— 返回 (本段起行场景, 上段末场景, kind, site)。
+
+    判定顺序(接缝优先):
+      1) 上段末场景 != 本段起行场景 -> "空间过渡"/"head"  接缝本身换场, 换场压段首;
+      2) 本段自己的行程 start != end   -> "空间过渡"/"mid"  换场落在段中跨过渡物处;
+      3) 上段末场景 == 本段起行场景且已知 -> "同场景延续";
+      4) 无任何可用场景信息 -> (None, None, None, None)。
+    names(段首解析出的场景名)只在行程解析失败时兜底: 本段兜 start, 上一段兜 prev。
+    """
+    _rt = (routes[i] if 0 <= i < len(routes) else None) or {}
+    _scene = _rt.get("start") or (names[i] if names and i < len(names) else None)
+    _end = _rt.get("end") or _scene
+    _prev = ((routes[i - 1] if i > 0 else None) or {}).get("end")
+    if not _prev and names and 0 < i < len(names):
+        _prev = names[i - 1]
+    if not _scene:
+        return None, _prev, None, None
+    if _prev and _prev != _scene:
+        return _scene, _prev, "空间过渡", "head"
+    if _end and _end != _scene:
+        return _scene, _prev, "空间过渡", "mid"
+    if _prev:
+        return _scene, _prev, "同场景延续", None
+    return _scene, _prev, None, None
+
+
 def _one_shot_size_anchor_rule(start=None, end=None):
     """v14.292: 取景锚定规则 —— 把脚本自己给的景别写成显式边界。
 
@@ -8064,8 +8297,16 @@ _OS_BRACKET_TITLE_RE = re.compile(r"[\[【]\s*([^\[\]【】\n]{0,30}?)\s*[\]】]
 # 每段开头必须有 [ST]\d{1,2} 编号, 尾巴可选编号。
 # v14.321: 之前只认 S 编号, 用户脚本里夹着 T4 路灯下的老城巷口 → 整条 S4→T4→S5
 # 没被清掉, H3 读到 S5 街口牌坊/后面的 S11 石拱桥 → 在 f31-f32 硬切。
+#
+# v14.341 (2026-11-09): 路线串只在**不带图片标签**时才算分镜结构。带 @图N / <Picture N>
+# 的路线串是**本段自己的行程**(一镜到底 skill 的段首写法):
+#   "：S2 帕特农@图4-登阶上行 → T2 山门石阶阙口右柱脚 → S3 圣家堂@图5"
+# 这个行程是"起行哪一处空间、经哪个过渡物、止于哪一处空间"的唯一权威描述 ——
+# 旧正则把它整条删掉(实测 clip2 提示词开头只剩一个孤零零的"：）"), 模型于是
+# 既不知道起点空间, 也不知道过渡物在哪, 只能自己编: 先拖着上一段的空间走 2 秒,
+# 再一帧硬切过去。现在带图片标签的路线串整条保留, 只清纯规划用的 S→T→S 串。
 _OS_ROUTE_CHAIN_RE = re.compile(
-    r"(?:[ST]\d{1,2}[^→\n]{0,36}→\s*){2,}(?:[ST]\d{1,2}[^；;。\n]{0,36})?"
+    r"(?:[ST]\d{1,2}[^→@<（(\n]{0,24}→\s*){2,}(?:[ST]\d{1,2}[^；;。\n@<（(]{0,24})?"
 )
 
 # 否定式镜头口号 → 正向陈述。
@@ -8165,6 +8406,11 @@ def _one_shot_demulti_shot(text, label=""):
     # 也整块剔除 —— "不唱" 是否定词(CFG=1.0 无负向分支 -> 会张嘴唱), 全片时间码
     # 会给模型错的时序锚点。口型/人声一律由 lip_audio 驱动。
     s = _one_shot_strip_vocal_tags(s)
+    # v14.341: 人声标签被整块剔掉后, 段首常剩一对空括号 + 一个孤零零的冒号
+    # (实测 clip2 的条件文本开头 = "：）【本段运镜…"), 模型因此看不到"起行哪一处空间"。
+    # 这里清掉空括号与段首标点垃圾, 让条件文本从场景名/运镜小节自然开始。
+    s = _OS_EMPTY_PAREN_RE.sub("", s)
+    s = re.sub(r"^[\s：:，,、；;·]+", "", s)
     s = re.sub(r"[ \t]{2,}", " ", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     if len(s) != _orig:
@@ -13512,6 +13758,9 @@ class BSAIH3FilmFactory:
         # 场景名错位(重渲 clip_select 时尤其明显)。
         _os_scene_catalog = _one_shot_scene_catalog(global_prompt) if one_shot_enabled else []
         _os_scene_names = []
+        # v14.341: 每段**自己**的行程(起行空间 → 过渡物 → 终止空间)。换场判定与
+        # 规则注入都用本段的 start/end, 不再拿邻段的起点拼一个错位的换场。
+        _os_scene_routes = []
         if one_shot_enabled:
             for _osc_c in clips:
                 try:
@@ -13527,10 +13776,30 @@ class BSAIH3FilmFactory:
                     _os_scene_names.append(
                         _one_shot_scene_name(_osc_body, _os_scene_catalog)
                     )
+                    try:
+                        _os_scene_routes.append(
+                            _one_shot_scene_route(_osc_body, _os_scene_catalog)
+                        )
+                    except Exception:
+                        _os_scene_routes.append(
+                            {"start": None, "end": None, "transit": None,
+                             "cross": False, "route": ""}
+                        )
                 except Exception:
                     _os_scene_names.append(None)
+                    _os_scene_routes.append(
+                        {"start": None, "end": None, "transit": None,
+                         "cross": False, "route": ""}
+                    )
         if one_shot_enabled and _os_scene_catalog:
             print(f"[H3 Extender] v14.294 一镜到底: 场景清单 = {_os_scene_catalog}")
+        if one_shot_enabled and _os_scene_routes:
+            for _osr_i, _osr in enumerate(_os_scene_routes):
+                if _osr.get("start") or _osr.get("end"):
+                    print(f"[H3 Extender] v14.341 一镜到底 clip[{_osr_i + 1}]: 行程 = "
+                          f"{_osr.get('start')} → ({_osr.get('transit') or '无过渡物'}) → "
+                          f"{_osr.get('end')}"
+                          + ("（段中换场）" if _osr.get("cross") else "（单处空间）"))
         if one_shot_enabled:
             _os_env_continuity = (
                 "\n[环境连续] 环境沿一条连续的物理路线逐步变化，每一处新环境都由"
@@ -13772,6 +14041,20 @@ class BSAIH3FilmFactory:
                                   f"正文景别词已统一改写为全片声明值 '{_os_locked_size}'")
                     except Exception:
                         pass
+                # v14.341: 正文时间码归一 —— 全片绝对时间码(0:12–0:24) → 本段相对(0:00–0:12)。
+                # 只在"时间码明显超出本段时长"时触发, 见函数 docstring。
+                try:
+                    _os_tc_offset = 0.0
+                    for _osc_p in clips[:i]:
+                        _os_tc_offset += float(_osc_p.get("duration") or 0)
+                    _os_tc_norm = _one_shot_normalize_timecodes(
+                        _clip_prompt_for_cond, _os_tc_offset, float(cfg["duration"]))
+                    if _os_tc_norm != _clip_prompt_for_cond:
+                        print(f"[H3 Extender] v14.341 一镜到底 clip[{i+1}]: 正文时间码已按本段"
+                              f"起点(全片 {_os_tc_offset:.2f}s)归一为段内相对时间码")
+                        _clip_prompt_for_cond = _os_tc_norm
+                except Exception:
+                    pass
             # Determine ref_audio for this clip.
             # lip_audio 模式：lip_audio_segment 已注入 AV latent 锁定口型，
             # 不需要再作为 ref_block。全局 ref_audio（音色参考）保留为 ref_block。
@@ -13911,18 +14194,23 @@ class BSAIH3FilmFactory:
                     print(f"[H3 Extender] ⚠️ v14.286 一镜到底 clip[{i+1}]: 本段正文出现"
                           f"景别词'{_os_body_size}', 与全片声明景别'{_os_locked_size}'不一致 —— "
                           f"正文景别词已统一改写为声明值")
-                # v14.301: 场景判定提前 —— [段首承接] 与 [One Continuous Take] 都要
-                # 按"同场/换场"分流, 所以先算出 _os_space_kind。
-                _os_scene_name = (_os_scene_names[i] if i < len(_os_scene_names) else None)
-                _os_prev_scene = (
-                    _os_scene_names[i - 1]
-                    if 0 < i <= len(_os_scene_names) - 1 else None
-                )
-                _os_space_kind = None
-                if (str(os.environ.get("BSAI_H3_SPACE_RULE", "1")).strip() != "0"
-                        and _os_scene_name and _os_prev_scene):
-                    _os_space_kind = ("同场景延续" if _os_scene_name == _os_prev_scene
-                                      else "空间过渡")
+                # v14.301/v14.341: 场景判定提前 —— [段首承接] 与 [One Continuous Take]
+                # 都要按"同场/换场"分流, 所以先算出 _os_space_kind。
+                #
+                # v14.341 (2026-11-09): 改用**本段自己的行程**判定, 接缝对比的是
+                # **上一段的终点场景**。旧代码取 _os_scene_names[i-1](上一段的起点) ->
+                # 链式路线(S_k→S_{k+1})下 "本段起点 vs 上段起点" 永远不等, 每段都被判成
+                # 换场, 描述的却是**上一段**的换场, 整体错位一段: 段1 拿不到空间规则、
+                # 十二秒走不出自己的空间; 段2 收到段1 的换场(S1→S2)并在段首补做,
+                # 实测就是 2.083s 那一帧硬切。
+                _os_route = (_os_scene_routes[i] if i < len(_os_scene_routes) else None) or {}
+                _os_route_end = _os_route.get("end")
+                _os_route_transit = _os_route.get("transit")
+                (_os_scene_name, _os_prev_scene,
+                 _os_space_kind, _os_transit_site) = _one_shot_space_decision(
+                    _os_scene_routes, i, _os_scene_names)
+                if str(os.environ.get("BSAI_H3_SPACE_RULE", "1")).strip() == "0":
+                    _os_space_kind, _os_transit_site = None, None
                 # 空间绑定句: 同场景段**逐字沿用**原文(段1-3 等已渲好的段因此依然有效);
                 # 换场段改说"同一次连续行走", 不把主体钉在同一片空间里。
                 _os_space_clause = (
@@ -13958,11 +14246,23 @@ class BSAIH3FilmFactory:
                 # 措辞纪律: 全为正向陈述; 不出现任何 cut/转场/叠化 词汇; 不出现否定句
                 # (H3 在 CFG=1.0 下没有负向分支); 不写死具体景别数值(景别由脚本决定);
                 # 允许场景随主体行走自然变化(段4 堤道→公路路口), 因此不写"同一片空间"。
-                if _os_space_kind == "空间过渡":
-                    # v14.301: 换场段只承接**运动与姿态**, 不把段首构图钉死在上一段
-                    # 末帧上 —— 否则第一帧就是旧空间, 后面必然要硬切一次。
+                if _os_space_kind == "空间过渡" and _os_transit_site == "head":
+                    # v14.301/v14.332: 只有**接缝本身**换场(上段末场景 != 本段起行场景)时,
+                    # 才把换场压进段首重叠区 —— 此时段首本来就该是新空间。
                     _os_rule += _OS_SPACE_TRANSIT_HEAD_RULE
+                elif i == 0:
+                    # v14.341: 段1 没有"上一段末帧", 旧的"直接接着上一段末帧往下拍"
+                    # 对它是无源指令。
+                    _os_rule += (
+                        "\n[段首起幅] 本段的第一帧就是脚本起幅这一处空间的第一个画面："
+                        "摄影机从脚本给定的取景开始，主体在画幅中的位置与大小从这一帧起"
+                        "连续延续，整段只有同一次行走。"
+                    )
                 else:
+                    # v14.341: 接缝连续(上段末场景 == 本段起行场景)时, 段首**必须**接着
+                    # 上一段末帧, 换场留给段中那个过渡物 —— 旧代码在这里被
+                    # "空间过渡" 分支顶掉, 于是段首被钉成"已经跨过门洞", 与 motion
+                    # context 关键帧冲突, 模型只能先拖旧画面再一帧硬切。
                     _os_rule += (
                         "\n[段首承接] 本段的第一帧直接接着上一段末帧那一帧往下拍："
                         "同一时刻、同一段连续行走，主体在画幅中的位置与大小接着上一段末尾"
@@ -13979,15 +14279,29 @@ class BSAIH3FilmFactory:
                 # 方位/距离/景别/动作仍旧全部交给用户脚本。
                 if _os_space_kind == "同场景延续":
                     _os_rule += _OS_SAME_SPACE_RULE
+                elif _os_space_kind == "空间过渡" and _os_transit_site == "mid":
+                    # v14.341: 段中换场 —— 由主体走到脚本所写的那个过渡物(T 标记)、
+                    # 画幅被门墙挡住的一两拍完成置换; 两侧各是脚本自己的起行/终止空间。
+                    _os_rule += _one_shot_transit_mid_rule(
+                        _os_scene_name, _os_route_end, _os_route_transit)
+                    _os_rule += _one_shot_scene_anchor_mid_rule(
+                        _os_scene_name, _os_route_end, _os_route_transit)
                 elif _os_space_kind == "空间过渡":
                     _os_rule += _OS_SPACE_TRANSIT_RULE
                     _os_rule += _OS_SCENE_ANCHOR_RULE
                 if _os_space_kind:
-                    print(f"[H3 Extender] v14.301 一镜到底 clip[{i+1}]: 空间规则 = "
-                          f"{_os_space_kind} ({_os_prev_scene} → {_os_scene_name})")
-                    if _os_space_kind == "空间过渡":
-                        print("[H3 Extender] v14.332 换场段: 换场已压入段首一瞬"
-                              "(门墙遮挡置换), 段中不再出现第二处空间")
+                    if _os_transit_site == "mid":
+                        print(f"[H3 Extender] v14.341 一镜到底 clip[{i+1}]: 空间规则 = 空间过渡 "
+                              f"({_os_scene_name} → {_os_route_end}), 换场落在段中 "
+                              f"({_os_route_transit or '过渡物'}) 由门墙遮挡完成")
+                    else:
+                        print(f"[H3 Extender] v14.301 一镜到底 clip[{i+1}]: 空间规则 = "
+                              f"{_os_space_kind}"
+                              + (f" ({_os_prev_scene} → {_os_scene_name})"
+                                 if _os_prev_scene else ""))
+                        if _os_space_kind == "空间过渡":
+                            print("[H3 Extender] v14.332 换场段: 接缝换场(上段末场景 != "
+                                  "本段起行场景), 换场落在段首重叠区(门墙遮挡置换)")
                 # v14.292 (2026-11-03): 光影与构图分离 —— 光影描述只改光, 不改构图。
                 #
                 # 实测: clip2 f160 由"中近景(胸像)"硬切到"大远景剪影", 切点正好落在脚本第3拍
@@ -15488,7 +15802,7 @@ NODE_CLASS_MAPPINGS = {
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
 # v14.257: 隐藏启动横幅中的超长版本说明文字（原括号内整段历史配方摘要不再打印）
-print("[BSAI-H3-Film-Factory] v14.239 backend loaded")
+print("[BSAI-H3-Film-Factory] v14.341 backend loaded")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
