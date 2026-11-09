@@ -2,6 +2,33 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.342 (2026-11-09) — 一镜到底段中换场「倒着走」根治：遮挡改由机位贴着过渡物退出完成 / One-take mid-clip transition: occlusion now performed by the camera passing the transit object (no more moonwalking)
+
+**现象（BSAI第077期 clip2 实机新片 `h3_clip_250_2_1794209906.mp4`，960x544 / 24fps / 288 帧）**
+
+- 用户报点：`00:00:13`（24fps 第 13 帧 = 0.542s）起主体**倒着走**——正面朝镜头、脚步向后倒退，一路退进帕特农山门阙口，约到 5.5–6.0s 画幅才被门框吃掉、切到圣家堂中殿侧廊，6s 之后才恢复正面前行。
+- `ffmpeg scdet=threshold=0` 复测：峰值 `6.81 @0.58s`（切镜已消失，但仍有一次构图急跳，正是"转身倒行"的起手），其后 1.13 / 1.07，其余 ≤0.85。
+- 抽帧 0.30 / 0.55 / 1.50 / 3.00 / 6.00 / 9.00s 确认：0.3s 站定、0.55s 起后移、3.0s 已退进门洞、6.0s 门内换成圣家堂、9.0s 正常迎面走来。
+
+**根因（插件规则层自相矛盾，不是提示词问题）**
+
+- v14.341 的 `_one_shot_transit_mid_rule` 写的是「**主体**走到{transit}跟前，画幅被这道过渡物的门墙与门框挡住的那一两拍」；同时 `[取景连续]` 要求「主体正面对镜头、机位与他同速同行、同距同高」、`[主体步态]` 要求「身体朝向与行进方向始终一致」。
+- 过渡物（山门石阶阙口右柱脚）在**主体身后**。要"走到"它跟前，就必须朝远离镜头的方向移动；同时又要正面朝镜头——物理上只剩一个解：**倒着走**。模型给出的正是这个解，且退出 5 秒才够到门框，换场被拖到 5.5s 之后。
+- 结论：这条规则把"遮挡的承担者"错放在主体身上。正面机位下"人穿门"必然导致背身或倒行，两者都违背用户的一镜到底硬原则。
+
+**修法（纯文本/规则层，零新增采样开销）**
+
+- `_one_shot_transit_mid_rule` 重写：遮挡改由**机位**承担 —— 主体全程正对镜头、朝镜头方向迈步（每一步朝面前那道镜头落下，机位与他同距同高、沿同一条弧线平稳后退，他在画幅中的位置与大小自始至终稳定）；脚本里写的登阶/绕过/走入/穿过某处，统一由**机位贴着{transit}退出这一步**完成；走到{transit}旁那一两拍，机位沿同一条弧线横移半步，过渡物的柱身与门框从画面一侧滑进来、占满整幅画面一两拍，滑过去之后机位落到另一侧、画面里只剩终止空间。
+- `_one_shot_scene_anchor_mid_rule` 同步改写：置换点从「人跨过过渡物」改为「过渡物滑过镜头」，锚定句与机位退出写法对齐。
+- 日志改为 `v14.342 一镜到底 clip[N]: 空间规则 = 空间过渡 (Sx → Sy), 换场落在段中 (Tx) 由柱身/门框滑过镜头完成(主体全程迎面朝镜头正向迈步)`；启动横幅同步 `v14.342 backend loaded`。
+- 这样 `[主体步态]`（身体朝向=行进方向）与 `[取景连续]`（正面对镜头）不再打架：行进方向就是朝镜头，倒行没有解空间。
+
+**验证**：`ast.parse` 通过（16295 行）；`tools/check_one_shot_route_rules.py` 32 PASS / 0 FAIL（含"段中换场规则含两侧空间与过渡物""不含切镜词""场景锚定不含切镜词"）；`tools/check_recast_pipeline.py` OK；离线 dump 新规则文本确认无切镜词、无否定词（H3 CFG=1.0 会把否定词当画面内容渲染）、两侧空间与过渡物齐全；clip2 清洗后正文与 v14.341 一致（脚本未改）。
+
+**未验证**：本机未重渲 clip2 验证「倒着走是否消失」；需实机出片 + `scdet` 复测 + 抽帧确认。
+
+**英文**：Root-caused the "moonwalking" subject in clip2's new render (`h3_clip_250_2_1794209906.mp4`): from frame 13 (0.542s) the singer faced the camera while stepping **backwards** into the Parthenon gate, and the world only swapped at 5.5–6.0s. Cause is a contradicted rule set, not the user prompt: v14.341's mid-clip transit rule asked the **subject** to "walk up to the transit object" while the framing rule pinned her front-on to the lens at a constant distance/height and the gait rule required body orientation to match travel direction. With the transit object behind her, the only physically possible solution was walking backwards, and it took five seconds to reach the gate. Fix (v14.342): the occlusion is now performed by the **camera** — the subject keeps walking towards the lens (camera retreats on the same arc at the same distance/height), and the script's "ascend / pass / walk into" verbs are executed by the camera retiring past the transit object; at that beat the camera slides half a step along the arc, the pillar/door frame sweeps across the full frame for one or two beats, and the backdrop is the end space after it clears. Static checks: `ast.parse` OK, `check_one_shot_route_rules.py` 32 PASS / 0 FAIL, `check_recast_pipeline.py` OK, offline dumps show no cut words and no negations. Live re-render of clip2 not yet performed.
+
 ### v14.341 (2026-11-09) — 一镜到底换场判定错位一段 / 段内行程串被误删 / 正文全片绝对时间码：三处根因直修（clip2 段内硬切的根治）/ One-take: seam comparison was off by one clip, in-clip route string was being deleted, absolute timecodes left unnormalized
 
 **现象（BSAI第077期 21 段一镜到底 MV「走遍世界」，1920x1088，TaoMate 8+4，24fps）**

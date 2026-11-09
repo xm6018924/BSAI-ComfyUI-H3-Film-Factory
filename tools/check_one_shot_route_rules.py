@@ -96,6 +96,9 @@ CLIP3 = (
     "01-12秒：沿侧廊直行。"
 )
 CUT_WORDS = ("切镜", "转场", "叠化", "硬切", "切换", "淡入", "淡出")
+# v14.342: H3 CFG=1.0 没有负向分支, 规则里的否定词会被当成画面内容渲染 —— 注入文本必须是
+# 纯正向陈述。这里只查规则模板本身(不含用户正文)。
+NEG_WORDS = ("不", "没有", "禁止", "别", "勿", "无从", "无法")
 
 
 def main():
@@ -197,6 +200,23 @@ def main():
            and "壁灯" not in m._OS_SPACE_TRANSIT_RULE
            and "夜的深处" not in m._OS_SPACE_TRANSIT_RULE),
           "夜色" in m._OS_SPACE_TRANSIT_RULE)
+
+    # ── 7) v14.342 段中换场: 遮挡由机位承担, 主体不许倒行 ─────────────────
+    # 旧版把"走到{transit}跟前"压在主体身上, 而主体被 [取景连续] 钉成正面朝镜头、
+    # 同距同高 —— 过渡物在身后时只剩"倒着走"一个解(clip2 实测 0.54s 起倒行 5 秒)。
+    check("段中换场: 主体迎面朝镜头正向迈步(消除倒行解)",
+          "朝镜头方向迈步" in mid and "每一步都朝面前那道镜头落下" in mid, mid[:60])
+    check("段中换场: 遮挡由机位贴着过渡物退出完成",
+          "机位贴着" in mid and "退出这一步完成" in mid
+          and "柱身与门框从画面一侧滑进来" in mid, mid[:60])
+    check("段中换场: 不再要求主体走到过渡物跟前(旧致倒行写法已移除)",
+          "走到{t}跟前".format(t=r2["transit"]) not in mid
+          and "走到{}跟前".format(r2["transit"]) not in mid, "old phrasing present")
+    check("段中换场规则不含否定词(CFG=1.0 会把否定词当画面内容)",
+          all(w not in mid for w in NEG_WORDS),
+          [w for w in NEG_WORDS if w in mid])
+    check("场景锚定: 置换点改挂在过渡物滑过镜头",
+          "滑过镜头之前" in anchor and "滑过镜头之后" in anchor, anchor[:60])
 
     print()
     if ok:

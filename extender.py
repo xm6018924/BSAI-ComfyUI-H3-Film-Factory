@@ -8133,36 +8133,52 @@ def _one_shot_scene_route(text, catalog=None):
 
 
 def _one_shot_transit_mid_rule(start, end, transit=None):
-    """v14.341: 换场落在**段中**(跨过脚本所写的过渡物)时的空间规则。
+    """v14.342: 换场落在**段中**(跨过脚本所写的过渡物)时的空间规则。
 
-    与 v14.332 的段首换场版本的区别: 段首继续接着上一段末帧(接缝是连续的),
-    换场由主体走到那个过渡物、画幅被门墙挡住的那一两拍完成。全文正向陈述,
-    不含 cut/转场/叠化 词汇, 不含否定句。
+    v14.341 实测缺陷(clip2 新片): 规则写的是「主体走到{transit}跟前，画幅被这道
+    过渡物的门墙与门框挡住」，而 [取景连续] 同时要求主体全程正面朝镜头、机位与他
+    同速同行同距同高。过渡物在主体身后，主体面朝镜头却要"走到"它跟前 —— 模型只能
+    正面朝镜头倒着迈步后移(用户报的"00:00:13 起倒着走")，5 秒后画幅才被门框吃掉。
+
+    根因是**遮挡的主体搞错了**: 让"人去穿门"在正面机位下必须背身或倒行。改成遮挡由
+    **机位**完成 —— 主体始终迎面朝镜头正向迈步, 机位贴着过渡物沿弧线退出, 过渡物的
+    柱身/门框滑过镜头、占满画幅一两拍完成置换。这样 [主体步态] 的"身体朝向与行进
+    方向始终一致"与 [取景连续] 的"正面对镜头"不再互相打架, 脚本里写的登阶/绕过/
+    走入/穿过某处改由机位贴着该处退出完成。
+
+    全文正向陈述, 不含 cut/转场/叠化 词汇, 不含否定句。
     """
     _start = start or "脚本起行的那一处空间"
     _end = end or "脚本终止的那一处空间"
     _transit = transit or "脚本所写的那道门洞"
     return (
         f"\n[空间过渡] 本段只有一条连续行走：起幅这一路的地面、灯具与两侧建筑是{_start}的，"
-        f"走到{_transit}跟前，画幅被这道过渡物的门墙与门框挡住的那一两拍，墙外的景物换成"
-        "墙内的景物；遮挡前后是同一台摄影机、同一个步频、同一个画幅位置，主体的朝向与在"
-        "画幅中的大小连续。跨过之后，本段画面里只有"
-        f"{_end}的地面、墙面、灯具与建筑，它们在同一次行走里逐帧展开，展开之后就一直展开着；"
-        "左右方位自始至终保持一致；本段的光线与色调从起幅那一刻的明暗与色温状态起算，"
-        "整段只逐拍沿同一条轨迹推进一小步，新出现的灯具在原有环境光上由暗到亮逐渐显形，"
-        "步幅与节奏自始至终一致。"
+        "主体全程正对着镜头、朝镜头方向迈步，每一步都朝面前那道镜头落下，机位与他同距同高、"
+        "沿同一条弧线平稳后退，他在画幅中的位置与大小自始至终稳定；"
+        f"脚本里写的登阶、绕过、走入、穿过某处，本段统一由机位贴着{_transit}退出这一步完成。"
+        f"走到{_transit}旁边的那一两拍，机位贴着{_transit}沿同一条弧线横移半步，"
+        f"{_transit}的柱身与门框从画面一侧滑进来、占满整幅画面一两拍，滑过去之后机位已经"
+        f"落到另一侧，画面里只有{_end}的地面、墙面、灯具与建筑，它们在同一次行走里逐帧"
+        "展开，展开之后就一直展开着；左右方位自始至终保持一致；本段的光线与色调从起幅那一"
+        "刻的明暗与色温状态起算，整段只逐拍沿同一条轨迹推进一小步，新出现的灯具在原有环境"
+        "光上由暗到亮逐渐显形，步幅与节奏自始至终一致。"
     )
 
 
 def _one_shot_scene_anchor_mid_rule(start, end, transit=None):
-    """v14.341: 段中换场段的场景锚定 —— 过渡物两侧各有自己的一处空间。"""
+    """v14.342: 段中换场段的场景锚定 —— 过渡物两侧各有自己的一处空间。
+
+    与 v14.341 的区别只在于遮挡的先后: 置换发生在**过渡物滑过镜头**那一两拍, 而不是
+    「人跨过过渡物」, 与 _one_shot_transit_mid_rule 的机位退出写法对齐。
+    """
     _start = start or "脚本起行的那一处空间"
     _end = end or "脚本终止的那一处空间"
     _transit = transit or "脚本所写的那道门洞"
     return (
-        f"\n[场景锚定] 本段起幅到{_transit}之前的画面里，地面材质、灯具与两侧建筑都与"
-        f"{_start}一致；跨过{_transit}之后，画面里的地面材质、灯具与两侧建筑都与{_end}一致，"
-        "并一直保持到本段末帧；本段画面里只有这两处空间按这一次行走的先后顺序出现。"
+        f"\n[场景锚定] 本段起幅到{_transit}滑过镜头之前，主体身后的地面材质、灯具与两侧"
+        f"建筑都与{_start}一致；{_transit}的柱身与门框滑过镜头之后，主体身后的地面材质、"
+        f"灯具与两侧建筑都与{_end}一致，并一直保持到本段末帧；本段画面里只有这两处空间按"
+        "这一次行走的先后顺序出现。"
     )
 
 
@@ -9736,6 +9752,7 @@ _RENDER_PIPELINE_EN2ZH = {
     "PDMD 2-step Turbo Draft (single-pass)": "PDMD 2步 极速试稿 (单采)",
     "PTD 4-step Ref2VA Single-Pass (reference accel)": "PTD 4步 Ref2VA 单采 (参考图加速)",
     "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)": "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)",
+    "PIKA H3 Flex 8+4 SelfLift Dual-Pass (Ref2VA face-lock)": "PIKA H3 Flex 8+4 双采 (Ref2VA 锁脸)",
     "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)": "TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)",
     "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)": "TaoMate HD 8步+4步 渐进放大双采 (8+4 1080p直出)",
     "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)": "SingularityV2+Pika H3 8步 高动态长视频 (导演台双采)",
@@ -10196,7 +10213,7 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)"],
+            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+4 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
                 "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default. (32) Video Recast (H3 V2V character swap, v14.335) = video character swap: the asset-library video (@vidN) becomes the V2V source (picture AND soundtrack) while @imgN reference pictures define the new identity; the backend auto-splits the source into <=15s segments (the MiniMax H3 Recast per-shot contract: a 45s video becomes 3 clips), encodes each segment into the H3 AV latent (video = source frames, audio = source soundtrack locked with noise_mask 0), and runs an 8-step euler/simple first pass at denoise 0.65 so the original camera/motion/composition survive and only the person is swapped; refine skipped, motion context chaining disabled between recast clips; mount minimax_h3_角色替换character_swap_v1.5.safetensors in the LoRA stack at 0.6-0.8 for the strongest identity transfer.",
@@ -11547,7 +11564,8 @@ class BSAIH3FilmFactory:
                       "作者 H20 实测 1344×768/243帧/4 NFE 端到端) = 参考图->音视频 4 步单采; "
                       "需要 Ref2VA 底模(未剪枝 ~140GB, 或社区 ComfyUI-PTD-Compact int8 版), "
                       "无对应底模时不要选此档; ref_image_size 保持用户值不强制")
-            elif _rp_mode == "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)":
+            elif _rp_mode in ("PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)",
+                              "PIKA H3 Flex 8+4 双采 (Ref2VA 锁脸)"):
                 # v14.310 (2026-11-04): Pika H3 Flex 配方 (B站教程 BV1Dy4u67EJo,
                 # 官方模板 video_pika_h3_flex_ref2va / docs.comfy.org Pika H3 Flex)。
                 # Pika 把 H3 蒸馏成 6 步生成器, 以两个 LoRA 适配器发布
@@ -11558,24 +11576,29 @@ class BSAIH3FilmFactory:
                 # 1000/750/500/250/100/40 (+0), 不是 ComfyUI 的 simple 等间距
                 # (1000/833/667/500/333/167/0) —— 用 simple 等于让蒸馏适配器跑
                 # 没训练过的调度, 画质/稳定性都会掉。见 _PIKA_H3_SIGMA_KNOTS。
-                # 实测修正 (h3_clip_250_2 耗时 >30min): 二采 SelfLift latent x2.0
-                # 每步 287s, 10s clip tokens=587k 是教程 5s clip 的 4x; 关闭 refine,
-                # 仅一采 6 步直出 960x544 latent → VAE decode 到 1920x1088
-                # (H3 VAE 天然 x16 放大)。
-                # 底模保留 hybrid b25-49 (分段链路 FL2VA 末帧接力, 勿切纯 ref2va);
-                # 加速栈 SegAttention + Sol-Attn + Sol VAE。
-                steps, refine_steps, tile_count, refine_denoise = 6, 0, 4, 0.5
-                refine_enable = False
+                # v14.324 (2026-11-09): 用户要求真双采 —— 打开 refine。
+                # v14.340 (2026-11-09): 新增 8+4 质量档 —— 同 LoRA 契约, 一采 8 步
+                # + 二采 4 步 (denoise 0.5), 适合长 clip / 高动态场景; 6+2 保持
+                # 快速档。注意: 8 步超出 Pika 6 步蒸馏的原生调度, 若出现画质掉
+                # 请换 pika_h3_flex_turbo_8step LoRA (Singularity V2 档用的那个)。
+                is_8p4 = (_rp_mode == "PIKA H3 Flex 8+4 双采 (Ref2VA 锁脸)")
+                if is_8p4:
+                    steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.5
+                    _ver = "v14.340"
+                else:
+                    steps, refine_steps, tile_count, refine_denoise = 6, 2, 4, 0.5
+                    _ver = "v14.324"
+                refine_enable = True
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
                 if str(sampler_name) != "lcm":
                     sampler_name = "lcm"
-                    print("[H3 Extender] v14.310 PIKA H3 Flex(渲染管道): 采样器强制 lcm (Pika 6步蒸馏官方契约)")
+                    print(f"[H3 Extender] {_ver} PIKA H3 Flex(渲染管道): 采样器强制 lcm (Pika 蒸馏官方契约)")
                 scheduler = "pika_manual"
-                print("[H3 Extender] 🎬 v14.310 PIKA H3 Flex 6 步单采 (Ref2VA 锁脸): "
-                      "Pika H3 Flex 蒸馏适配器 (Pika-Labs/Pika-H3-Flex, 50步->6步) —— "
+                print(f"[H3 Extender] 🎬 {_ver} PIKA H3 Flex {'8+4' if is_8p4 else '6+2'} 双采 (Ref2VA 锁脸): "
+                      "Pika H3 Flex 蒸馏适配器 (Pika-Labs/Pika-H3-Flex) —— "
                       "lcm + ManualSigmas 固定结 1000/750/500/250/100/40 (官方契约, 非 simple 等间距), "
-                      "shift 12/3, 跳过二采 SelfLift; "
+                      f"shift 12/3, 一采 {steps} 步 + 二采 {refine_steps} 步 (denoise 0.5, x2.0 提升由一镜到底接管); "
                       "LoRA 槽挂 pika_h3_flex_ref2va_v1_bf16.safetensors (strength 1.0, 禁叠第二个加速 LoRA), "
                       "底模留 hybrid b25-49 (分段链路 FL2VA 接力, 勿切纯 ref2va)")
             elif _rp_mode in ("TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)",
@@ -14291,9 +14314,10 @@ class BSAIH3FilmFactory:
                     _os_rule += _OS_SCENE_ANCHOR_RULE
                 if _os_space_kind:
                     if _os_transit_site == "mid":
-                        print(f"[H3 Extender] v14.341 一镜到底 clip[{i+1}]: 空间规则 = 空间过渡 "
+                        print(f"[H3 Extender] v14.342 一镜到底 clip[{i+1}]: 空间规则 = 空间过渡 "
                               f"({_os_scene_name} → {_os_route_end}), 换场落在段中 "
-                              f"({_os_route_transit or '过渡物'}) 由门墙遮挡完成")
+                              f"({_os_route_transit or '过渡物'}) 由柱身/门框滑过镜头完成"
+                              f"(主体全程迎面朝镜头正向迈步)")
                     else:
                         print(f"[H3 Extender] v14.301 一镜到底 clip[{i+1}]: 空间规则 = "
                               f"{_os_space_kind}"
@@ -15802,7 +15826,7 @@ NODE_CLASS_MAPPINGS = {
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
 # v14.257: 隐藏启动横幅中的超长版本说明文字（原括号内整段历史配方摘要不再打印）
-print("[BSAI-H3-Film-Factory] v14.341 backend loaded")
+print("[BSAI-H3-Film-Factory] v14.342 backend loaded")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
