@@ -11585,19 +11585,30 @@ class BSAIH3FilmFactory:
                 if is_8p4:
                     steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.5
                     _ver = "v14.340"
+                    # 8+4 质量档: pika_manual 的 sigma 结硬编码 7 个值=6 步,
+                    # 不能用于 8 步 —— 改 euler+simple 让 steps=8 真正出 8 个 sigma。
+                    # 注意: 这偏离了 Pika 6 步蒸馏的官方调度; 若画质掉请换
+                    # pika_h3_flex_turbo_8step_hd_ref2va LoRA (Singularity V2 档用的那个)。
+                    if str(sampler_name) != "euler":
+                        sampler_name = "euler"
+                        print(f"[H3 Extender] {_ver} PIKA H3 Flex 8+4(渲染管道): 采样器切 euler+simple (8步不走 pika_manual 6步蒸馏调度)")
+                    scheduler = "simple"
                 else:
                     steps, refine_steps, tile_count, refine_denoise = 6, 2, 4, 0.5
                     _ver = "v14.324"
+                    if str(sampler_name) != "lcm":
+                        sampler_name = "lcm"
+                        print(f"[H3 Extender] {_ver} PIKA H3 Flex(渲染管道): 采样器强制 lcm (Pika 6步蒸馏官方契约)")
+                    scheduler = "pika_manual"
                 refine_enable = True
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
-                if str(sampler_name) != "lcm":
-                    sampler_name = "lcm"
-                    print(f"[H3 Extender] {_ver} PIKA H3 Flex(渲染管道): 采样器强制 lcm (Pika 蒸馏官方契约)")
-                scheduler = "pika_manual"
+                _sched_desc = ("lcm + ManualSigmas 固定结 1000/750/500/250/100/40 (官方 6步蒸馏契约)"
+                               if not is_8p4 else
+                               "euler + simple 等间距 (8步质量档, 非 pika 6步蒸馏调度)")
                 print(f"[H3 Extender] 🎬 {_ver} PIKA H3 Flex {'8+4' if is_8p4 else '6+2'} 双采 (Ref2VA 锁脸): "
-                      "Pika H3 Flex 蒸馏适配器 (Pika-Labs/Pika-H3-Flex) —— "
-                      "lcm + ManualSigmas 固定结 1000/750/500/250/100/40 (官方契约, 非 simple 等间距), "
+                      "Pika H3 Flex 蒸馏适配器 —— "
+                      f"{_sched_desc}, "
                       f"shift 12/3, 一采 {steps} 步 + 二采 {refine_steps} 步 (denoise 0.5, x2.0 提升由一镜到底接管); "
                       "LoRA 槽挂 pika_h3_flex_ref2va_v1_bf16.safetensors (strength 1.0, 禁叠第二个加速 LoRA), "
                       "底模留 hybrid b25-49 (分段链路 FL2VA 接力, 勿切纯 ref2va)")
