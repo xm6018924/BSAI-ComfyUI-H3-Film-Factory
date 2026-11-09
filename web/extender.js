@@ -6956,7 +6956,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     vrSub.textContent = "Video Recast";
     vrSub.style.cssText = "font-size:7px;color:#fdba74;opacity:.65;white-space:nowrap;";
     videoRecastBtn.append(vrLab, vrSub);
-    videoRecastBtn.title = "One-click video character replacement (H3 V2V Recast): 8-step euler/simple single pass at denoise 0.65, refine off, shift 12-3, context chaining off for every clip.\nAsset library: @vidN = the source video whose people get replaced, @imgN = the replacement reference pictures (one per person).\nThe backend splits the source into <=15s segments automatically (a 45s video becomes 3 clips), locks the source soundtrack and re-dresses only the people.\nMount minimax_h3_character_swap_v1.5.safetensors in the LoRA stack at 0.6-0.8 for the strongest identity transfer.";
+    videoRecastBtn.title = "One-click video character replacement (H3 V2V Recast): 8-step euler/simple single pass at denoise 0.65, refine off, shift 12-3, context chaining off for every clip.\nAsset library: @vidN = the source video whose people get replaced, @imgN = the replacement reference pictures (one per person).\nThe backend splits the source into <=15s segments automatically (a 45s video becomes 3 clips), locks the source soundtrack and re-dresses only the people.\nMount minimax_h3_角色替换character_swap_v1.5.safetensors in the LoRA stack at 0.6-0.8 for the strongest identity transfer.";
     const refreshVideoRecast = () => {
         const rpw = node.widgets.find((x) => x && x.name === "render_pipeline");
         const _rpv = rpw && rpw.value || "";
