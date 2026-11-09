@@ -1,4 +1,5 @@
 ﻿import os
+import ntpath
 import re
 import torch
 import numpy as np
@@ -7,14 +8,49 @@ from PIL import Image
 import folder_paths
 
 
-def _unsafe_subdir_text(value):
-    """True when a caller-supplied folder name must be refused before I/O."""
+def _windows_rooted_text(value):
+    """True when Windows treats the text as rooted or as a network share.
+
+    ``\\\\host\\share`` (UNC), ``\\host\\share``, ``C:\\x`` and the
+    drive-relative ``C:x`` all count as rooted for Windows even where a POSIX
+    check would call them relative. Detecting this on the text keeps such a
+    value away from realpath()/isdir()/exists(), which is what makes Windows
+    connect to the host and authenticate with the signed-in account.
+    """
+    text = str(value or "").strip().replace("/", "\\")
+    if not text:
+        return False
+    drive, _tail = ntpath.splitdrive(text)
+    return bool(drive) or text.startswith("\\")
+
+
+def _unsafe_share_text(value):
+    """Network-share / URL / traversal checks only (rooted text excluded)."""
     text = str(value or "").strip()
-    if text[0:2] in ("\\\\", "//") or "://" in text:
+    if not text:
+        return False
+    if text[0:2] in ("\\\\", "//"):
         return True
-    if os.path.isabs(text):
+    if "://" in text:
         return True
     return ".." in [p for p in text.replace("\\", "/").split("/")]
+
+
+def _unsafe_subdir_text(value):
+    """True when a caller-supplied folder name must be refused before I/O.
+
+    On Windows, resolving a network-share (UNC) value makes the machine
+    connect to that host and authenticate with the signed-in account, so such
+    values have to be rejected as text, before any realpath/isdir/exists call.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if _unsafe_share_text(text):
+        return True
+    if _windows_rooted_text(text):
+        return True
+    return os.path.isabs(text)
 
 
 class BSAI_ContextualSeriesExtract:
@@ -243,25 +279,43 @@ class BSAI_ContextualSeriesLoad:
 
         Returns the realpath when it lives inside either root, otherwise None:
         a directory string coming from a shared workflow must not be able to read
-        frames from anywhere else on disk.
+        frames from anywhere else on disk. Every check below runs on the raw
+        text before the first isdir()/realpath() call, because on Windows
+        resolving a network-share value makes the machine connect to that host
+        with the signed-in account's credentials.
         """
         directory = str(directory or "").strip()
         if not directory:
             return None
         bases = [folder_paths.get_output_directory(), folder_paths.get_input_directory()]
-        candidates = [directory] if os.path.isabs(directory) else []
-        candidates.extend(os.path.join(b, directory) for b in bases)
-        for c in candidates:
-            if not os.path.isdir(c):
-                continue
-            real = os.path.realpath(c)
-            for b in bases:
-                base = os.path.realpath(b)
+        bases_real = [os.path.realpath(b) for b in bases]
+        bases_text = [os.path.normcase(os.path.normpath(b)) for b in bases_real]
+        # Share / URL / '..' text never reaches the filesystem.
+        if _unsafe_share_text(directory):
+            return None
+        if _windows_rooted_text(directory):
+            # Absolute (or drive-relative) text: accept only when the text
+            # itself already sits under one of the allowed roots.
+            text_dir = os.path.normcase(os.path.normpath(directory))
+            if not any(text_dir == b or text_dir.startswith(b + os.sep) for b in bases_text):
+                return None
+            real = os.path.realpath(directory)
+            if not os.path.isdir(real):
+                return None
+            for base in bases_real:
                 try:
                     if os.path.commonpath([base, real]) == base:
                         return real
                 except ValueError:
                     continue
+            return None
+        for b in bases_real:
+            real = os.path.realpath(os.path.join(b, directory))
+            try:
+                if os.path.commonpath([b, real]) == b and os.path.isdir(real):
+                    return real
+            except ValueError:
+                continue
         return None
 
     @classmethod

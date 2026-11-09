@@ -7,6 +7,7 @@ BSAI Asset Library System
 
 import os
 import re
+import ntpath
 import torch
 import numpy as np
 from PIL import Image
@@ -46,10 +47,27 @@ MAX_REF_VIDEOS = 3
 MAX_REF_AUDIOS = 3
 
 
+def _windows_rooted_text(value):
+    """True when Windows treats the text as rooted or as a network share.
+
+    ``\\\\host\\share``, ``\\host\\share``, ``C:\\x`` and ``C:x`` are all rooted
+    for Windows; refusing them as text keeps the value from reaching
+    realpath()/exists(), which is what makes Windows connect to the share and
+    authenticate with the signed-in account.
+    """
+    text = str(value or "").strip().replace("/", "\\")
+    if not text:
+        return False
+    drive, _tail = ntpath.splitdrive(text)
+    return bool(drive) or text.startswith("\\")
+
+
 def _unsafe_asset_name(value):
     """Reject network-share, URL and traversal text before any filesystem call."""
     text = str(value or "").strip()
     if text[0:2] in ("\\\\", "//") or "://" in text:
+        return True
+    if _windows_rooted_text(text):
         return True
     return ".." in [p for p in text.replace("\\", "/").split("/")]
 

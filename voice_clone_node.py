@@ -275,7 +275,7 @@ class BSAIDialogueVoiceClone:
             },
             "optional": {
                 # --- 多参考音频输入（AutoGrow 风格：用可选端口覆盖最大 6 人） ---
-                "ref_audio_1": ("AUDIO", {"tooltip": "Reference audio for speaker 1 (matches role @图1 / first unmapped role)"}),
+                "ref_audio_1": ("AUDIO", {"tooltip": "Reference audio for speaker 1 (matches role @img1 / first unmapped role)"}),
                 "ref_audio_2": ("AUDIO", {"tooltip": "Reference audio for speaker 2"}),
                 "ref_audio_3": ("AUDIO", {"tooltip": "Reference audio for speaker 3"}),
                 "ref_audio_4": ("AUDIO", {"tooltip": "Reference audio for speaker 4"}),
@@ -311,7 +311,7 @@ class BSAIDialogueVoiceClone:
     DESCRIPTION = (
         "Multi-speaker dialogue voice cloning: input a full conversation script "
         "+ reference voices for each speaker → outputs a single concatenated audio track. "
-        "Supports @图N / @音频N asset reference tags and auto-role-to-voice mapping. "
+        "Supports @imgN / @audN asset reference tags and auto-role-to-voice mapping. "
         "Connect output to Film Factory lip_audio for multi-character lip-sync."
     )
 
