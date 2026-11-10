@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.339-hyperflow-h3-flash-recast-cut-guard"
+BUILD = "minimax-h3-extender-v14.367-pika-flex-8+2-real-dual-pass"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -693,6 +693,62 @@ def _recast_find_video_asset(asset_library, tag_num: int):
     return None
 
 
+_IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
+_VID_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv")
+_AUD_EXTS = (".wav", ".mp3", ".flac", ".ogg", ".aac", ".m4a")
+
+
+def _rebuild_asset_library_from_disk():
+    """节点清单 widget 为空时的磁盘兜底：回读 input/bsai_assets/asset_order.json，
+    清单缺项再扫目录，按 images/videos/audios 顺序重建资产库 dict。
+
+    背景：BSAI_AssetLibraryInput 只把界面勾选的文件名写进三个 widget；工作流另存、
+    跨机分发或清单被清空后，运行时资产库是 0 图 0 视频，@图N/@视频N 全部解析失败，
+    参考图（脸/服装/鞋帽）与源视频都进不了 ref2va / V2V 链路，成片人物自然与参考图
+    完全不同。这里在后端补一层，保证磁盘上已落盘的资产仍能被命中。
+    """
+    try:
+        input_dir = folder_paths.get_input_directory()
+        base = os.path.join(input_dir, "bsai_assets")
+        manifest_path = os.path.join(base, "asset_order.json")
+        manifest = {"images": [], "videos": [], "audios": []}
+        if os.path.isfile(manifest_path):
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    manifest.update(json.load(f) or {})
+            except Exception:
+                manifest = {"images": [], "videos": [], "audios": []}
+
+        def _entries(sec, exts):
+            d = os.path.join(base, sec)
+            if not os.path.isdir(d):
+                return []
+            on_disk = {x.lower(): x for x in os.listdir(d)
+                       if os.path.isfile(os.path.join(d, x)) and x.lower().endswith(exts)}
+            ordered = list(manifest.get(sec) or [])
+            # 严格按清单重建：清单缺记录的类型留空，不把目录里的历史素材
+            # （旧视频/旧音频）一并扫进本次替换任务。
+            names = [on_disk[x.lower()] for x in ordered if x.lower() in on_disk]
+            return [{"path": os.path.join(d, n), "name": n, "index": i + 1}
+                    for i, n in enumerate(names)]
+
+        return {
+            "images": _entries("images", _IMG_EXTS),
+            "videos": _entries("videos", _VID_EXTS),
+            "audios": _entries("audios", _AUD_EXTS),
+        }
+    except Exception as exc:
+        print(f"[BSAI AssetLibrary] 磁盘兜底重建失败: {exc}")
+        return None
+
+
+def _asset_library_is_empty(asset_library):
+    if not isinstance(asset_library, dict):
+        return True
+    return not (asset_library.get("images") or asset_library.get("videos")
+                or asset_library.get("audios"))
+
+
 def _recast_probe_path(ffmpeg=None) -> str:
     """ffprobe 与 ffmpeg 同目录（整合包自带），找不到就退回 PATH 里的 ffprobe。"""
     try:
@@ -1038,8 +1094,15 @@ def _recast_subject_mask(frames, t_lat, h_lat, w_lat, log=print):
 
 
 def _recast_build_av_latent(vae, audio_vae, path, start_sec, dur_sec,
-                           width, height, frame_count, ffmpeg=None):
-    """源片段 → (video_latent, audio_latent_or_None, info)。失败抛异常由调用方回退。"""
+                           width, height, frame_count, ffmpeg=None,
+                           subject_mask=True, with_audio=True):
+    """源片段 → (video_latent, audio_latent_or_None, info, subject_mask)。
+
+    v14.341/342: 第 35 档「视频角色替换+动作迁移」复用本函数，掩码由调用方按模式给：
+      subject_mask=True （人物替换）→ 人物掩码，人区 1 重绘 / 背景 0 锁源像素；
+      subject_mask=False（动作迁移）→ 返回 None，调用方落成全 1 掩码（背景可重绘）；
+      with_audio=False → 不读源音轨，音频行交还模型重生成（教程"不送原声"模式）。
+    失败抛异常由调用方处理。"""
     frames = _recast_read_segment_frames(
         path, start_sec, dur_sec, width, height, frame_count, ffmpeg=ffmpeg)
     if frames is None:
@@ -1052,7 +1115,7 @@ def _recast_build_av_latent(vae, audio_vae, path, start_sec, dur_sec,
     else:
         raise RuntimeError(f"video_vae.encode 返回异常形状 {tuple(vz.shape)}")
     audio_z = None
-    if audio_vae is not None:
+    if with_audio and audio_vae is not None:
         sr = int(getattr(audio_vae, "audio_sample_rate", 32000))
         ta_want = int(round((frame_count / float(FPS)) * AUDIO_LATENT_FPS))
         # 音频 latent 每一行对应 1/40 s 的源原声
@@ -1073,9 +1136,12 @@ def _recast_build_av_latent(vae, audio_vae, path, start_sec, dur_sec,
             f"vz={tuple(video_z.shape)} az={tuple(audio_z.shape) if audio_z is not None else None}")
     # v14.337: 人物区域掩码（人区=1 重绘 / 背景=0 锁死源像素），失败返回 None
     # video_z 到这里恒为 5 维 [B,C,T,h,w]
-    subject_mask = _recast_subject_mask(
-        frames, int(video_z.shape[2]), int(video_z.shape[3]), int(video_z.shape[4]))
-    return video_z, audio_z, info, subject_mask
+    if subject_mask:
+        subject_mask_t = _recast_subject_mask(
+            frames, int(video_z.shape[2]), int(video_z.shape[3]), int(video_z.shape[4]))
+    else:
+        subject_mask_t = None
+    return video_z, audio_z, info, subject_mask_t
 
 
 def _recast_build_plan(clips, asset_library, ffmpeg=None, log=print):
@@ -1186,6 +1252,330 @@ def _recast_build_plan(clips, asset_library, ffmpeg=None, log=print):
         "disabled": int(disabled),
         "audio": bool(isinstance(asset_library, dict)),
     }
+
+
+# ===========================================================================
+# v14.341 (2026-11-09) 视频角色替换 + 动作迁移 —— Video Remix (no-LoRA)
+#
+# 来源: Bilibili BV1HBWJ6HEkg《MiniMax H3 最强人物替换&动作迁移、一张图整段视频
+#       换主角、不用lora、长视频自动分段续接、附提示词》（小肥猴）
+#
+# 与第 33 档「视频替换 (V2V 人物替换)」不是超集，而是另一条契约:
+#   第 33 档 = 单段 ≤15s 硬切、段间绝不续链、只重绘人物区、8 步单采、要求 swap LoRA;
+#   本档     = 226 帧/段 (5+17k, 24fps ≈9.42s, 教程默认档位)、段间 22 帧重叠锁定续接、
+#              人物替换走人物掩码锁源背景 / 提示词写"新场景"才全画幅(动作迁移)、
+#              一采 8 步(默认; 教程原口径 4 步, 实测 4 步欠噪) + 二采 5 步(二采先放大
+#              1.5x 再补细节, 等价教程"高噪 4 步 + 低噪 5 步")、不要求任何
+#              swap/角色替换 LoRA(教程实测会带出欧美脸、颜色融不进原片色调)。
+#
+# 教程口径落地要点:
+#   ① 一张人物图 = 身份(脸/发型/体型/服装/鞋帽)，姿势构图动作一律以源视频为准;
+#   ② 人物替换 vs 动作迁移**只由提示词决定**: 背景按源片写 = 换人保场景;
+#      背景只写新场景 = 动作迁移到新场景;
+#   ③ 只挂加速 LoRA(加速 LoRA 不参与身份语义)，不挂 swap/角色替换 LoRA;
+#   ④ 源原声默认锁进 AV latent 音频行(noise_mask=0)，口型/对白/环境声与源片逐帧
+#      对齐(教程"默认不送原声"只为省显存; 本机 5090 上锁音频收益远大于开销);
+#      BSAI_H3_REMIX_LOCK_AUDIO=0 可退回"视频只做动作参考、音频由模型重生成";
+#   ⑤ 长视频自动分段: 226 帧/段, 第 k 段(0 起)源时间轴起点 = 204*k/24s,
+#      段头 22 帧 = 上一段段尾 22 帧(重叠锁定)，解码按 trim 裁掉 → 动作/光线连续;
+#   ⑥ 断点续跑沿用既有 per-clip validated 机制(不改参数/素材重跑即续)。
+# ===========================================================================
+_REMIX_SEG_FRAMES = 226        # 5 + 17*13，教程默认每段帧数（24fps ≈ 9.42s）
+_REMIX_OVERLAP_FRAMES = 22     # 段间重叠锁定帧数（教程固定 22）
+_REMIX_MIN_TAIL_FRAMES = 73    # 5 + 17*4，尾段最短档（再短就没有可用动作了）
+_REMIX_MAX_CLIPS = 120
+
+_REMIX_DISCIPLINE = (
+    "【视频角色替换+动作迁移纪律】本段以“原视频”为唯一的动作、机位、构图与节奏来源："
+    "① 身份纪律：参考图只决定身份——脸型、五官、肤色、发型（发色/发长/刘海/发饰）、体型、"
+    "整套服装、鞋、袜、帽、手套、项链等配饰必须与参考图完全一致（颜色、款式、材质、长度一致）；"
+    "原视频人物身上的旧服装与配饰不得保留、不得残留残片，也不得改色沿用。"
+    "② 动作纪律：站位、手势、步态、视线、表情、口型与动作节奏逐帧跟随原视频，"
+    "不得重新表演、不得改变动作轨迹、不得换机位，也不得新增或删除剪辑点。"
+    "③ 背景只写一种：提示词写原视频的背景（场地、陈设、光线、天气、光源色温与原片一致），"
+    "人物以外的像素保持源片原样 = 人物替换；提示词只写一个全新场景 = 动作迁移（原片背景不得出现）。"
+    "两种背景不得混写，也不得让原场景与新场景同时出现。"
+    "④ 多人同框时用“位置+外观+动作”指明要替换的那一位（例：画面右侧穿红色上衣正在挥手的短发女人），"
+    "未被指名的其他人物保持原样。"
+    "⑤ 参考图为多视角设定图时，取其中最清晰的正视图/半身近景决定脸与服装，"
+    "不得把多个视角、多个分身或设定图本身拼进画面。"
+    "⑥ 画面内不得出现参考图本身、分屏、灰底、色卡、拼图、文字、水印或额外分身。"
+)
+
+
+def _remix_lock_audio() -> bool:
+    """本档是否把源原声锁进音频行（默认锁；=0 退回教程的"不送原声"省显存模式）。"""
+    try:
+        v = str(os.environ.get("BSAI_H3_REMIX_LOCK_AUDIO", "1")).strip().lower()
+    except Exception:
+        return True
+    return v not in ("0", "false", "off", "no", "none", "")
+
+
+def _remix_prompt(text: str) -> str:
+    """本段最终送入 TE 的 Remix 提示词 = 纪律块 + 用户指令（去掉 <Video N>）。"""
+    body = _recast_strip_video_tags(str(text or "")).strip()
+    return _REMIX_DISCIPLINE + "\n" + body if body else _REMIX_DISCIPLINE
+
+
+# v14.342: 本档"背景保不保"必须由模式决定，不能一律全画幅。
+# 实跑证据(2026-11-09 14:25, 源片 896x540 夜景街头): 全画幅 noise_mask + denoise 0.65
+# 实际从 σ≈0.96 起跑(= 整帧重生), 出片背景被重画成室内、人物只换了半张脸,
+# 因为源片背景像素没有任何锁定区可保。人物替换必须退回人物掩码(背景 mask=0 锁源像素);
+# 只有"动作迁移"(提示词明确要一个新场景)才该全画幅重绘。
+_REMIX_NEW_SCENE_WORDS = (
+    "换场景", "换个场景", "换成场景", "换一个新的场景", "另一个场景",
+    "背景换成", "背景改成", "背景改为", "背景重画", "重建背景", "生成新背景",
+    "全新的场景", "全新的背景",
+)
+
+
+_REMIX_DISCIPLINE_MARKS = ("【视频角色替换+动作迁移纪律】", "【参考图纪律】")
+
+
+def _remix_user_text(prompt_text: str) -> str:
+    """只留用户自己写的分镜正文：去掉纪律块（含标题与其正文）与所有 【…】 块。
+
+    实跑事故(2026-11-09 15:13): 背景判定拿到的 effective_prompt 里已经拼进了纪律块，
+    而纪律块第 ③ 条自己写着"提示词只写一个全新场景 = 动作迁移" —— "全新场景"命中
+    "新场景"关键词，于是每一段都被判成动作迁移，人物掩码从来没生效过。
+    """
+    t = str(prompt_text or "")
+    for mark in _REMIX_DISCIPLINE_MARKS:
+        while mark in t:
+            a = t.index(mark)
+            b = t.find("\n", a)
+            t = (t[:a] + (t[b + 1:] if b >= 0 else "")).strip()
+    return t
+
+
+def _remix_keep_background(prompt_text: str) -> bool:
+    """本段是否锁定源片背景（人物掩码，背景 0 不重绘）。
+
+    优先级: 环境变量 BSAI_H3_REMIX_KEEP_BG (0/1) > 用户正文里的"新场景"关键词 > 默认保背景。
+    prompt_text 必须传**用户自己的分镜提示词**（未拼纪律块），否则纪律块正文会误触发。
+    """
+    try:
+        v = str(os.environ.get("BSAI_H3_REMIX_KEEP_BG", "")).strip().lower()
+    except Exception:
+        v = ""
+    if v not in ("", "auto"):
+        return v not in ("0", "false", "off", "no", "none")
+    t = _remix_user_text(prompt_text)
+    return not any(w in t for w in _REMIX_NEW_SCENE_WORDS)
+
+
+def _remix_build_plan(clips, asset_library, ffmpeg=None, log=print,
+                      seg_frames=None, overlap_frames=None, pipeline="remix"):
+    """建立"源视频时间轴 → clipN"的角色替换+动作迁移计划（226 帧/段 + 22 帧重叠）。
+
+    分段规则（教程实测口径）:
+      seg_frames = 226 (5+17k 网格), overlap = 22;
+      第 0 段覆盖源帧 [0, 226)，第 k 段覆盖 [204*k, 204*k+226)；
+      即每段净推进 204 帧，段头 22 帧与上一段段尾重合 → 动作/光线在接缝处连续。
+      n = 1 + ceil((源帧数 - 226) / 204)，分镜不足时自动补齐 CLIP。
+
+    v14.345: seg_frames / overlap_frames / pipeline 参数化 —— 第 36 档
+    「Viggle Remake 视频改写」复用同一套源视频切片计划，但每段 226 帧、
+    **0 重叠**（源片本身作为 cond video 逐段进入条件，不需要段头重叠续接）。
+    """
+    seg_frames = int(seg_frames) if seg_frames else int(_REMIX_SEG_FRAMES)
+    if seg_frames % 17 != 5:
+        seg_frames = _align_frame_count(seg_frames)
+    overlap = max(0, min(int(_REMIX_OVERLAP_FRAMES if overlap_frames is None
+                             else overlap_frames), seg_frames - 5))
+    net_frames = max(5, seg_frames - overlap)
+    seg_sec = float(seg_frames) / float(FPS)
+    net_sec = float(net_frames) / float(FPS)
+
+    start_idx = None
+    tag_num = None
+    for idx, clip in enumerate(clips):
+        m = _RECAST_VIDEO_TAG_RE.search(str(clip.get("prompt") or ""))
+        if m:
+            start_idx = idx
+            tag_num = int(m.group(1))
+            break
+    if start_idx is None:
+        # v14.348: 分镜里漏写 @视频N 时不再硬中止 —— 资产库里有视频就按 index 1
+        # 兜底，并把 <Video 1> 前缀补到第一个分镜上重试（用户实测最常见的就是
+        # 提示词全写在全局、分镜正文只剩场景描述）。
+        _vg_fb_video = 0
+        try:
+            _vg_fb_list = (asset_library or {}).get("videos") or []
+            _vg_fb_video = len(_vg_fb_list)
+        except Exception:
+            _vg_fb_video = 0
+        if _vg_fb_video > 0:
+            tag_num = 1
+            start_idx = 0
+            _fb_prompt = str(clips[0].get("prompt") or "")
+            if "<Video" not in _fb_prompt:
+                clips[0]["prompt"] = f"<Video 1>\n" + _fb_prompt
+            log("[H3 Remix] v14.348 分镜里没有 <Video N>，已按资产库第 1 个视频兜底，"
+                "并把 <Video 1> 前缀补到第一个分镜")
+        else:
+            log("[H3 Remix] 未在分镜提示词里找到 <Video N>（@视频N），资产库也没有视频，本档未执行替换；"
+                "请把源视频放进资产库并在分镜里引用 @视频N")
+            return None
+
+    entry = _recast_find_video_asset(asset_library, tag_num)
+    if not isinstance(entry, dict):
+        log(f"[H3 Remix] 资产库里找不到 @视频{tag_num}（视频资产数不足）")
+        return None
+    path = entry.get("path") or entry.get("filename") or ""
+    if not path or not os.path.isfile(str(path)):
+        log(f"[H3 Remix] @视频{tag_num} 指向的文件不存在: {path}")
+        return None
+
+    duration = _recast_probe_duration(path, ffmpeg)
+    fallback_dur = 0.0
+    for clip in clips[start_idx:]:
+        try:
+            fallback_dur += float(clip.get("duration", 0) or 0)
+        except (TypeError, ValueError):
+            pass
+    if duration is None or duration <= 0.05:
+        duration = fallback_dur if fallback_dur > 0 else None
+        if duration is None:
+            log(f"[H3 Remix] 无法探测 @视频{tag_num} 时长，本档中止")
+            return None
+        log(f"[H3 Remix] ⚠️ 探测不到源视频时长，按分镜总时长 {duration:.2f}s 处理")
+
+    dur_frames = int(round(float(duration) * FPS))
+    if dur_frames <= seg_frames:
+        n_need = 1
+    else:
+        n_need = 1 + int(math.ceil((dur_frames - seg_frames) / float(net_frames)))
+    n_need = max(1, min(_REMIX_MAX_CLIPS, n_need))
+
+    have = len(clips) - start_idx
+    auto_added = 0
+    template = clips[start_idx]
+    if have < n_need:
+        for _k in range(n_need - have):
+            nc = copy.deepcopy(template)
+            nc["id"] = f"{str(template.get('id', 'clip'))}_{pipeline}_{_k + 1}"
+            nc["validated"] = False
+            nc["replace_mode"] = False
+            nc["render_enabled"] = True
+            nc["context_enabled"] = True
+            clips.append(nc)
+            auto_added += 1
+        log(f"[H3 Remix] 源视频 {duration:.2f}s → 按 {seg_sec:.2f}s/段切成 {n_need} 段"
+            f"（段间重叠 {overlap} 帧续接），自动补齐 {auto_added} 个 CLIP"
+            f"（原分镜 {have} 个）")
+    elif have > n_need:
+        log(f"[H3 Remix] 源视频 {duration:.2f}s 只需 {n_need} 段，分镜有 {have} 段："
+            f"多出的 {have - n_need} 段没有源画面可用，已跳过渲染")
+
+    segments = {}
+    frames_by_clip = {}
+    disabled = 0
+    net_total = 0
+    for j in range(start_idx, len(clips)):
+        rel = j - start_idx
+        if rel >= n_need:
+            clips[j]["render_enabled"] = False
+            disabled += 1
+            continue
+        # v14.341: 尾段按"源片实际剩余帧数"取 17k+5 网格档 —— 固定 226 帧会让
+        # 源片末尾之后的部分靠末帧冻结补齐（20s 源视频会多出 6.4s 静帧）。
+        start_frame = rel * net_frames
+        avail = max(5, dur_frames - start_frame)
+        if avail >= seg_frames:
+            frames = seg_frames
+        else:
+            frames = _align_frame_count(max(_align_frame_count(avail),
+                                            _REMIX_MIN_TAIL_FRAMES))
+        net_out = frames if rel == 0 else frames - overlap
+        frames_by_clip[j] = int(frames)
+        # 时长按"净输出"填（第 2 段起扣掉段头重叠帧），UI 上的时间轴才与成片一致；
+        # 实际渲染帧数走 frames_by_clip，不受这个字段影响。
+        clips[j]["duration"] = float(net_out) / float(FPS)
+        # 第 2 段起开段间续接：段头 22 帧 = 上一段段尾（教程的"重叠帧锁定"）
+        # v14.345: overlap=0 的 Viggle 档不得开续接（否则段头会被当上下文裁掉）。
+        clips[j]["context_enabled"] = bool(overlap > 0 and rel > 0)
+        clips[j]["validated"] = False
+        clips[j]["render_enabled"] = True
+        segments[j] = (float(start_frame) / float(FPS), float(frames) / float(FPS))
+        net_total += net_out
+
+    log(f"[H3 Remix] 计划: @视频{tag_num} 共 {duration:.2f}s → {n_need} 段 × "
+        f"{seg_frames} 帧（{seg_sec:.2f}s/段，段间重叠 {overlap} 帧锁定续接），"
+        f"尾段按剩余帧数收窄，成片净 {net_total} 帧 ≈ {net_total / float(FPS):.2f}s；"
+        f"源原声{'锁定' if _remix_lock_audio() else '不锁(模型重生成)'}，"
+        "人物替换默认用人物掩码锁住源背景（提示词写新场景才全画幅做动作迁移）")
+    return {
+        "path": str(path),
+        "tag": tag_num,
+        "duration": float(duration),
+        "segments": segments,
+        "frames_by_clip": frames_by_clip,
+        "auto_added": int(auto_added),
+        "disabled": int(disabled),
+        "audio": bool(isinstance(asset_library, dict)),
+        "pipeline": str(pipeline),
+        "seg_frames": int(seg_frames),
+        "overlap_frames": int(overlap),
+    }
+
+
+# ---------------------------------------------------------------------------
+# v14.345 (2026-11-09) 第 36 档「Viggle Remake 视频改写」—— 官方 MiniMax H3
+# 编辑 LoRA 契约 (https://huggingface.co/Viggle/Viggle-Remake)。
+#
+# 与第 33/35 档（Recast/Remix）的本质区别:
+#   33/35 = 源片编码成 AV latent 作**初始化**, denoise 0.62/0.65 半重绘;
+#   36    = 源片整段作为 **cond video**（minimax_refs 的 video block）进入条件,
+#           目标 latent 是**全噪**(video mask=1), 源原声仍锁 clean(mask=0),
+#           6 步固定 sigma(swap/edit 两组官方 knots), cfg 1.0, 无二采。
+#   LoRA 必须挂 viggle_remake_swap/edit（rank256 alpha256, 只认 FL2VA 基座）,
+#   且只能走 LoraLoaderBypassModelOnly / bypass 槽，不能用普通 LoraLoaderModelOnly。
+# ---------------------------------------------------------------------------
+_VIGGLE_SEG_FRAMES = 226       # 5 + 17*13, 与教程 226 帧/段一致(24fps ≈ 9.42s)
+_VIGGLE_MIN_FRAMES = 90        # 官方下限 90 帧(5+17*5)
+_VIGGLE_MAX_FRAMES = 345       # 官方上限 345 帧
+
+_VIGGLE_DISCIPLINE = (
+    "【Viggle Remake 视频改写纪律】本段以“原视频”为唯一的时间轴、机位、构图、"
+    "动作节奏与背景来源：原片的人物站位、手势、步态、视线、镜头运动、剪辑点、"
+    "场景陈设、光线与色温逐帧保持，不得换机位、不得重新表演、不得改变动作轨迹。"
+    "只在用户明确指定的范围内改写：身份替换时脸型/五官/肤色/发型/体型/服装/配饰"
+    "必须与 @图N 参考图完全一致，原人物旧服装不得残留；元素增删改时只增删改被点名的"
+    "道具/服装/场景元素，其余像素仍按原片生成。口型与发声严格跟随原片音轨，"
+    "不得改台词、不得改语速。画面内不得出现参考图本身、分屏、灰底、色卡、拼图、"
+    "文字或水印，也不得出现额外分身。"
+)
+
+
+def _viggle_task() -> str:
+    """本档任务类型: swap(人物/主体替换, 默认) 或 edit(元素增删改)。"""
+    try:
+        v = str(os.environ.get("BSAI_H3_VIGGLE_TASK", "swap")).strip().lower()
+    except Exception:
+        return "swap"
+    return "edit" if v in ("edit", "modify", "inpaint", "增删改", "编辑") else "swap"
+
+
+def _viggle_prompt(text: str) -> str:
+    """最终送入 TE 的提示词 = Viggle 纪律块 + 用户指令（去掉 <Video N>）。"""
+    body = _recast_strip_video_tags(str(text or "")).strip()
+    return _VIGGLE_DISCIPLINE + "\n" + body if body else _VIGGLE_DISCIPLINE
+
+
+def _viggle_build_plan(clips, asset_library, ffmpeg=None, log=print):
+    """源视频 → clipN 的 Viggle Remake 计划: 每段 226 帧、0 重叠、逐段独立改写。"""
+    _log = (lambda m: log(str(m).replace("[H3 Remix]", "[H3 Viggle]")))
+    plan = _remix_build_plan(
+        clips, asset_library, ffmpeg=ffmpeg, log=_log,
+        seg_frames=_VIGGLE_SEG_FRAMES, overlap_frames=0, pipeline="viggle",
+    )
+    if plan is not None:
+        _log(f"[H3 Viggle] 任务类型={_viggle_task()}（swap=主体替换 / edit=元素增删改，"
+             "用 BSAI_H3_VIGGLE_TASK 切换）；每段 226 帧、0 重叠，源片整段作 cond video，"
+             "目标 latent 全噪 6 步重绘；LoRA 必须挂 viggle_remake_swap/edit")
+    return plan
 
 
 # ---------------------------------------------------------------------------
@@ -2687,99 +3077,97 @@ def _load_reference_tensor(ref):
     return torch.from_numpy(np.ascontiguousarray(array)).unsqueeze(0)
 
 
-def _single_subject_ref_crop(img):
-    """v14.269: 把"多视图角色设定拼版"裁成单人立绘，从参考源头断掉第二个可复制的人形。
+def _split_sheet_subjects(img):
+    """把已判定为"多视图角色设定拼版"的 img 裁成单人参考张量列表。
 
-    实测 clip2 首帧并列两个一模一样的主播: @图1 是 5 视图设定板(左 1 张胸像 + 4 张
-    全身立绘), 分镜正文写"身后陈列第二瓶同款产品@图3镜像对称排列", Ref2VA 就把设定板
-    里现成的第二具立绘当成"第二个人"贴进画面 —— 文字纪律压不住图像里的现成人形。
+    返回 list[Tensor]:
+      - 无独立大胸像: [最左单人立绘];
+      - 左胸像 + 多具全身立绘: [左侧大胸像(锁脸/发型/配饰), 正面全身立绘(锁服装/鞋帽)]。
 
-    只在三个条件同时成立时才裁: 横幅(宽高比 ≥1.25)、浅色背景、≥3 条窄而立满高度的
-    前景条带且其中至少 3 条宽度相近。双人/多人实拍参考图、场景图、产品图都会原样返回。
-
-    裁给编码器的必须是"框内只有一个人的身体": 设定板若有明显更大的单人胸像(宽度 ≥ 同宽
-    立绘中位宽的 1.3 倍), 裁胸像; 否则裁最左那具立绘(设定板按正面/侧面/背面从左往右排)。
+    v14.340: 胸像与全身是同一角色的两个视角, 纪律块已声明为同一人的多视图,
+    不会被当成第二个人; 胸像右缘以背景间隙为硬边界, 不卷入立绘残肢。
     """
-    try:
-        if img is None or getattr(img, "ndim", 0) != 4:
-            return None
-        h, w = int(img.shape[1]), int(img.shape[2])
-        if w / float(max(1, h)) < 1.25:
-            return None
-        ys = max(1, h // 320)
-        xs = max(1, w // 480)
-        small = img[0, ::ys, ::xs, :].detach().float().cpu().numpy()
-        sh, sw = int(small.shape[0]), int(small.shape[1])
-        if sh < 32 or sw < 64:
-            return None
-        border = np.concatenate([small[0], small[-1], small[:, 0], small[:, -1]], axis=0)
-        bg = np.median(border, axis=0)
-        fg = np.abs(small - bg).max(axis=2) > 0.12
-        col = fg.mean(axis=0)
-        gap = max(1, int(round(sw * 0.02)))
-        bands = []
-        start = None
-        last_on = -1
-        for x in range(sw):
-            if col[x] > 0.22:
-                if start is None:
-                    start = x
-                last_on = x
-            elif start is not None and x - last_on > gap:
-                bands.append((start, last_on + 1))
-                start = None
-        if start is not None:
+    h, w = int(img.shape[1]), int(img.shape[2])
+    ys = max(1, h // 320)
+    xs = max(1, w // 480)
+    small = img[0, ::ys, ::xs, :].detach().float().cpu().numpy()
+    sh, sw = int(small.shape[0]), int(small.shape[1])
+    if sh < 32 or sw < 64:
+        return None
+    border = np.concatenate([small[0], small[-1], small[:, 0], small[:, -1]], axis=0)
+    bg = np.median(border, axis=0)
+    fg = np.abs(small - bg).max(axis=2) > 0.12
+    col = fg.mean(axis=0)
+    gap = max(1, int(round(sw * 0.02)))
+    bands = []
+    start = None
+    last_on = -1
+    for x in range(sw):
+        if col[x] > 0.22:
+            if start is None:
+                start = x
+            last_on = x
+        elif start is not None and x - last_on > gap:
             bands.append((start, last_on + 1))
+            start = None
+    if start is not None:
+        bands.append((start, last_on + 1))
 
-        ok = []
-        for x0, x1 in bands:
-            wf = (x1 - x0) / float(sw)
-            if wf < 0.05 or wf > 0.35:
-                continue
-            rows = np.where(fg[:, x0:x1].any(axis=1))[0]
-            if rows.size < 2:
-                continue
-            cov = (rows[-1] - rows[0] + 1) / float(sh)
-            if cov < 0.5:
-                continue
-            ok.append((x0, x1, float(cov), float(wf)))
-        if len(ok) < 3:
-            return None
-        # 至少 3 条同宽条带才确认是多视图设定拼版(双人/多人实拍参考图凑不出 3 条)
-        figs = [b for b in ok if sum(
-            1 for o in ok if max(o[3], b[3]) / min(o[3], b[3]) <= 1.8) >= 3]
-        if not figs:
-            return None
-        fig_w = sorted(b[3] for b in figs)
-        hero = max(ok, key=lambda b: b[3])
-        # v14.269 实测: 设定板左侧那张大胸像(宽 0.244)是立绘中位宽(0.121)的两倍,
-        # 且胸像的肩部白色与背景同色, 只有裁它才能保证裁切框里全是一个人的身体 ——
-        # 裁立绘会把胸像的白色肩袖带进画面角落, 那正是模型复制成第二个人/悬浮白袖的诱因。
-        # 仅当它确实是最左那条时才允许向左铺开(否则会把中间的立绘全卷进来)。
-        dominant = (hero[3] >= 1.3 * fig_w[len(fig_w) // 2]
-                    and hero[0] <= min(b[0] for b in ok))
-        best = hero if dominant else min(figs, key=lambda b: b[0])
-        x0, x1 = best[0], best[1]
+    ok = []
+    for x0, x1 in bands:
+        wf = (x1 - x0) / float(sw)
+        if wf < 0.05 or wf > 0.35:
+            continue
+        rows = np.where(fg[:, x0:x1].any(axis=1))[0]
+        if rows.size < 2:
+            continue
+        cov = (rows[-1] - rows[0] + 1) / float(sh)
+        if cov < 0.5:
+            continue
+        ok.append((x0, x1, float(cov), float(wf)))
+    if len(ok) < 3:
+        return None
+    figs = [b for b in ok if sum(
+        1 for o in ok if max(o[3], b[3]) / min(o[3], b[3]) <= 1.8) >= 3]
+    if not figs:
+        return None
+    fig_w = sorted(b[3] for b in figs)
+    hero = max(ok, key=lambda b: b[3])
+    dominant = (hero[3] >= 1.3 * fig_w[len(fig_w) // 2]
+                and hero[0] <= min(b[0] for b in ok))
+    sx, sy = w / float(sw), h / float(sh)
+    clean = np.abs(small - bg).max(axis=2).max(axis=0) < 0.5
+
+    def _box(b, bust=False, left_bound=None):
+        x0, x1 = b[0], b[1]
         rows = np.where(fg[:, x0:x1].any(axis=1))[0]
         y0, y1 = int(rows[0]), int(rows[-1]) + 1
-        sx, sy = w / float(sw), h / float(sh)
-        # 外扩边距必须止于与相邻内容之间的空白: 边界吸附到最近的整列背景。
-        clean = np.abs(small - bg).max(axis=2).max(axis=0) < 0.5
         mx = int(round((x1 - x0) * 0.12))
         my = int(round((y1 - y0) * 0.05))
         cl = max(0, x0 - mx)
-        nxt = [b[0] for b in bands if b[0] >= x1]
+        nxt = [bb[0] for bb in bands if bb[0] >= x1]
         cap_r = min(nxt) if nxt else sw
-        if dominant:
-            # 主视角常被设定板自身裁掉左边(本例胸像紧贴画幅左缘), 向左吸附到 0 为止
+        if bust:
             while cl > 0 and not clean[cl]:
                 cl -= 1
             cr = min(cap_r, x1 + mx)
             while cr < cap_r and not clean[cr - 1]:
                 cr += 1
         else:
-            while cl < x0 + (x1 - x0) // 4 and not clean[cl]:
-                cl += 1
+            # 全身立绘左边距: 取条带内前景第一列(立绘自身身体), 排除间隙/条带左缘
+            # 斜跨过来的左邻胸像肩袖残肢; 再与左邻背景间隙硬边界取大值。
+            seg_col = fg[:, x0:x1].mean(axis=0)
+            fg_cols = np.where(seg_col > 0.06)[0]
+            inner_x0 = x0 + int(fg_cols[0]) if fg_cols.size else x0
+            # 底部行段(腿/鞋)前景起点更靠右: 残肢只露在底部角落, 用它进一步收紧左缘。
+            seg_rows = fg[int(sh * 0.75):, x0:x1]
+            bot_col = seg_rows.mean(axis=0)
+            bot_cols = np.where(bot_col > 0.15)[0]
+            if bot_cols.size:
+                inner_x0 = max(inner_x0, x0 + int(bot_cols[0]))
+            cl = max(cl, inner_x0)
+            if left_bound is not None:
+                cl = max(cl, left_bound)
             cr = min(sw, x1 + mx)
             while cr > x1 - (x1 - x0) // 4 and not clean[cr - 1]:
                 cr -= 1
@@ -2789,7 +3177,131 @@ def _single_subject_ref_crop(img):
         cy1 = min(h, int(round((y1 + my) * sy)))
         if (cx1 - cx0) < 48 or (cy1 - cy0) < 96:
             return None
-        return img[:, cy0:cy1, cx0:cx1, :], len(ok)
+        return (cx0, cy0, cx1, cy1)
+
+    def _crop_tensor(b, bust=False, left_bound=None):
+        box = _box(b, bust=bust, left_bound=left_bound)
+        if box is None:
+            return None
+        cx0, cy0, cx1, cy1 = box
+        crop = img[:, cy0:cy1, cx0:cx1, :]
+        # 全身立绘: 剔除被相邻胸像/立绘带进角落的零散残肢。
+        if not bust:
+            try:
+                ca = crop[0].detach().float().cpu().numpy()
+                ch, cw = int(ca.shape[0]), int(ca.shape[1])
+                cbg = np.median(np.concatenate(
+                    [ca[0], ca[-1], ca[:, 0], ca[:, -1]], axis=0), axis=0)
+                cfg = np.abs(ca - cbg).max(axis=2) > 0.12
+
+                # 主体列在 ≥2 个行段出现; 残肢列仅 1 段。
+                bands = 4
+                col_hits = np.zeros(cw, dtype=np.int32)
+                for bi in range(bands):
+                    r0, r1 = bi * ch // bands, (bi + 1) * ch // bands
+                    seg = cfg[r0:r1]
+                    scol = seg.mean(axis=0)
+                    col_hits[scol > 0.06] += 1
+                core = np.where(col_hits >= 2)[0]
+                if core.size >= 2:
+                    l0, l1 = int(core[0]), int(core[-1]) + 1
+                    if (l1 - l0) >= 0.7 * cw:
+                        crop = crop[:, :, l0:l1, :]
+
+                ca = crop[0].detach().float().cpu().numpy()
+                ch, cw = int(ca.shape[0]), int(ca.shape[1])
+                cfg = np.abs(ca - cbg).max(axis=2) > 0.12
+                rcol = cfg.mean(axis=1)
+                rrows = np.where(rcol > 0.06)[0]
+                if rrows.size >= 2:
+                    ry0, ry1 = int(rrows[0]), int(rrows[-1]) + 1
+                    if (ry1 - ry0) >= 0.7 * ch:
+                        crop = crop[:, ry0:ry1, :, :]
+            except Exception:
+                pass
+            # 角落残肢清理: 相邻胸像/立绘斜跨进裁切框的肩袖/手臂小块, 在前景掩码上
+            # 与主体是断开的独立连通域。只剔除"贴侧边 + 顶部落在 70% 高度以下 +
+            # 面积 < 30% 最大组件"的角落小块; 主体躯干/双腿/鞋都向上延伸到 70% 以上,
+            # 不会被误删。填回背景色, 而不是按列裁掉(按列会把同列的腿/鞋一并切掉)。
+            try:
+                import cv2 as _cv2cc
+                ca = crop[0].detach().float().cpu().numpy()
+                ch, cw = int(ca.shape[0]), int(ca.shape[1])
+                cbg2 = np.median(np.concatenate(
+                    [ca[0], ca[-1], ca[:, 0], ca[:, -1]], axis=0), axis=0)
+                cfg2 = (np.abs(ca - cbg2).max(axis=2) > 0.12).astype(np.uint8)
+                _ncc, _lab, _st, _ = _cv2cc.connectedComponentsWithStats(cfg2, 8)
+                if _ncc > 1:
+                    _areas = _st[1:, _cv2cc.CC_STAT_AREA]
+                    _maxa = int(_areas.max())
+                    for _k in range(1, _ncc):
+                        _x, _y, _cw2, _ch2, _ar = _st[_k]
+                        _side = (_x == 0) or (_x + _cw2 == cw)
+                        if _side and (_y / float(ch)) > 0.70 and _ar < 0.30 * _maxa:
+                            ca[_lab == _k] = cbg2
+                    crop = torch.from_numpy(np.ascontiguousarray(ca)).unsqueeze(0)
+            except Exception:
+                pass
+        return crop
+
+    if dominant:
+        others = [b for b in ok if b is not hero]
+        front = min(others, key=lambda b: b[0]) if others else None
+        out = []
+        # v14.340: 左侧大胸像作为"锁脸"参考单独裁出(脸部/发型/配饰近景);
+        # 正面全身立绘作为"锁服装鞋帽"参考。两张同角色, 纪律块已声明为同一人的多视图,
+        # 不会被当成第二个人。胸像右缘以背景间隙为硬边界, 不卷入立绘残肢。
+        bust_t = _crop_tensor(hero, bust=True)
+        if bust_t is not None:
+            out.append(bust_t)
+        if front is not None:
+            # 找胸像条带右侧最近的背景间隙列: 胸像右缘常越出条带边界,
+            # 以背景间隙为硬边界, 立绘裁切框不纳入胸像边缘/肩带残肢。
+            hx1 = hero[1]
+            lb = hx1
+            for x in range(hx1, front[0]):
+                if clean[x] and col[x] < 0.05:
+                    lb = x
+                    break
+            full_t = _crop_tensor(front, bust=False, left_bound=lb)
+            if full_t is not None:
+                out.append(full_t)
+        return out or None
+
+    best = min(figs, key=lambda b: b[0])
+    t = _crop_tensor(best, bust=False)
+    return [t] if t is not None else None
+
+
+def _single_subject_ref_crop(img):
+    """v14.269: 把"多视图角色设定拼版"裁成单人参考张量列表，断掉第二个可复制的人形。
+
+    实测 clip2 首帧并列两个一模一样的主播: @图1 是 5 视图设定板(左 1 张胸像 + 4 张
+    全身立绘), 分镜正文写"身后陈列第二瓶同款产品@图3镜像对称排列", Ref2VA 就把设定板
+    里现成的第二具立绘当成"第二个人"贴进画面 —— 文字纪律压不住图像里的现成人形。
+
+    只在三个条件同时成立时才裁: 横幅(宽高比 ≥1.25)、浅色背景、≥3 条窄而立满高度的
+    前景条带且其中至少 3 条宽度相近。双人/多人实拍参考图、场景图、产品图都会原样返回。
+
+    v14.336: 取正面全身立绘作为参考, 脸部身份 + 服装/鞋帽全要素都在这一张里;
+    避免胸像肩袖残肢被带进裁切框。
+    v14.340: 在全身立绘之外, 额外把左侧大胸像作为锁脸参考一并返回(两张同角色)。
+
+    返回 None 表示不是设定板、原样使用; 否则返回 (Tensor 或 list[Tensor], 立绘条数)。
+    """
+    try:
+        if img is None or getattr(img, "ndim", 0) != 4:
+            return None
+        h, w = int(img.shape[1]), int(img.shape[2])
+        if w / float(max(1, h)) < 1.25:
+            return None
+        split = _split_sheet_subjects(img)
+        if not split:
+            return None
+        n_views = len(split)
+        if len(split) == 1:
+            return split[0], n_views
+        return split, n_views
     except Exception:
         return None
 
@@ -2968,14 +3480,8 @@ def _prepare_shared_refs(
     ref_items = []
     ref_blocks = []
     active_picture_slots = []
-    for slot, ref in active:
-        img = _load_reference_tensor(ref) if isinstance(ref, dict) else ref
-        # v14.269: 多视图设定拼版只保留主视角立绘(否则模型会把第二具立绘当第二个人)。
-        _crop = _single_subject_ref_crop(img)
-        if _crop is not None:
-            img, _n_views = _crop
-            print(f"[H3 Extender] v14.269 参考图 {slot} 是多视图设定拼版({_n_views} 具立绘) "
-                  f"-> 只取单人立绘 {int(img.shape[2])}x{int(img.shape[1])} 编码")
+
+    def _encode_one(img, slot):
         h, w = int(img.shape[1]), int(img.shape[2])
         if ref_image_size == "match":
             scale = min(1.0, math.sqrt((int(width) * int(height)) / float(w * h)))
@@ -3008,6 +3514,35 @@ def _prepare_shared_refs(
                 "latent": z,
             }
         )
+
+    for slot, ref in active:
+        img = _load_reference_tensor(ref) if isinstance(ref, dict) else ref
+        # v14.269: 多视图设定拼版只保留单人立绘(否则模型会把第二具立绘当第二个人)。
+        # v14.336: 取正面全身立绘作为参考, 脸部身份 + 服装/鞋帽全要素都在这一张里;
+        # 不再只裁左侧大胸像, 避免下装/袜子/鞋在参考源头缺失。
+        _crop = _single_subject_ref_crop(img)
+        if _crop is not None:
+            cropped, _n_views = _crop
+            if isinstance(cropped, list):
+                parts = cropped
+            else:
+                parts = [cropped]
+            print(f"[H3 Extender] v14.269 参考图 {slot} 是多视图设定拼版({_n_views} 具视图) "
+                  f"-> 拆成 {len(parts)} 张单人参考编码")
+            # v14.347: 丢掉"窄条"裁片 —— 拼版切分有时会切出一条 192x768 这类
+            # 宽高比 <0.35 的碎片, 它给不出身份(脸/服装都不完整), 反而稀释参考
+            # 权重。至少留一张, 全被丢掉时保持原样。
+            if len(parts) > 1:
+                _kept = [p for p in parts
+                         if (float(p.shape[2]) / max(1.0, float(p.shape[1]))) >= 0.35]
+                if _kept and len(_kept) != len(parts):
+                    print(f"[H3 Extender] v14.347 丢弃 {len(parts) - len(_kept)} 张过窄裁片"
+                          f"(宽高比 <0.35, 身份信息不足); 保留 {len(_kept)} 张")
+                    parts = _kept
+            for part in parts:
+                _encode_one(part, slot)
+        else:
+            _encode_one(img, slot)
 
     # Official Ref2VA presentation order is images first, then standalone audio.
     # The tokenizer assigns the standalone input the prompt label <Audio 1>.
@@ -3057,8 +3592,9 @@ def _ref2va_cache_key(vae, width, height, ref_image_size, refs, cache_bias=""):
     # v1.27: cache_bias 携带 @图N 资产图片路径签名——资产库更换后 key 变化，
     # 否则张量 refs 的 _refs_signature 恒定，ref2va 命中旧资产 VAE 编码。
     # v14.269: "|s1" = 多视图设定拼版裁单人立绘(见 _single_subject_ref_crop)。
-    # 旧 key 的缓存是未裁剪的整张拼版, 必须失效, 否则裁图逻辑等于没生效。
-    raw = f"r2v|s1|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}|b{cache_bias}".encode("utf-8")
+    # v14.340: "|s2" = 胸像(锁脸)+全身(锁服装鞋帽)双参考; 旧 s1 缓存必须失效。
+    # 旧 key 的缓存是未裁剪/单立绘版本, 必须失效, 否则裁图逻辑等于没生效。
+    raw = f"r2v|s2|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}|b{cache_bias}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:40]
 
 
@@ -3548,17 +4084,186 @@ _HYPERFLOW_H3_SIGMAS = {
 }
 
 
+# v14.345 (2026-11-09): 第 36 档「Viggle Remake 视频改写」官方 6 步固定 sigma。
+# 来源: Viggle/Viggle-Remake README —— 两组 timesteps(knots) 归一为 σ=t/1000,
+# 与 simple/linspace 完全无关，必须原样喂入，否则 6 步蒸馏契约不成立。
+_VIGGLE_REMAKE_SIGMAS = {
+    "swap": (1.0, 0.990476, 0.965243, 0.923077, 0.8, 0.631579, 0.0),
+    "edit": (1.0, 0.983607, 0.96, 0.923077, 0.857143, 0.705882, 0.0),
+}
+
+
+# v14.352/v14.353: 运行时标记（采样函数与硬切拦截要用）
+_VIGGLE_ACTIVE = False          # 当前这一段是不是 Viggle 档
+_VIGGLE_RELEASE_POS = None      # 只含参考图的 positive（σ 早停释放源片 cond 用）
+_VIGGLE_RELEASE_UNTIL = 0.9     # σ 低于该值就释放源片 cond video block
+
+
+def _viggle_resample_sigmas(knots, want_steps):
+    """v14.354: 把官方 6 步固定 knots 重采样成 want_steps 步。
+
+    官方 σ 表长度决定采样步数，前端 steps 在 viggle 档原本完全失效（恒 6 步）。
+    want == 6 原样返回；< 6 只取原始 knots 的子集（不引入模型没见过的 σ）；
+    > 6 在相邻 knots 间对 σ 做分段线性插值、首尾钉死、强制严格单调递减。
+    """
+    import torch as _t
+    k = [float(x) for x in knots]
+    seg = len(k) - 1
+    want = max(2, int(want_steps or seg))
+    if want == seg:
+        return _t.tensor([float(x) for x in knots], dtype=_t.float32).cpu()
+    if want < seg:
+        out = [k[round(i * seg / want)] for i in range(want + 1)]
+    else:
+        out = []
+        for i in range(want + 1):
+            t = i / float(want)
+            pos = t * seg
+            lo = int(min(seg - 1, max(0, int(pos))))
+            w = pos - lo
+            out.append(k[lo] * (1.0 - w) + k[lo + 1] * w)
+    out[0] = k[0]
+    out[-1] = 0.0
+    for i in range(1, len(out)):
+        if out[i] > out[i - 1]:
+            out[i] = out[i - 1]
+        elif out[i] == out[i - 1] and i < len(out) - 1:
+            out[i] = max(0.0, out[i - 1] - 1e-6)
+    return _t.tensor(out, dtype=_t.float32).cpu()
+
+
+def _viggle_faceswap_clip(in_path, model="128", ref_path=None, tag=""):
+    """v14.354/v14.355: 出片后逐帧换脸（子进程跑 tools/viggle_faceswap.py）。
+
+    渲染进程与换脸进程隔离，换脸崩了不影响已经渲好的视频：失败一律回退原片。
+    """
+    import subprocess
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        script = os.path.join(here, "tools", "viggle_faceswap.py")
+        if not os.path.isfile(script):
+            print(f"[H3 Viggle] v14.355 换脸脚本缺失: {script}")
+            return str(in_path)
+        out_path = str(in_path)[:-4] + "_faceswap.mp4"
+        cmd = [sys.executable, script, str(in_path), out_path, "--model", str(model)]
+        if ref_path:
+            cmd += ["--ref", str(ref_path)]
+        print(f"[H3 Viggle] v14.355 换脸工序开始 {tag}: model={model} -> {os.path.basename(out_path)}", flush=True)
+        _t0 = __import__("time").time()
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        if r.returncode != 0 or not os.path.isfile(out_path):
+            tail = (r.stderr or r.stdout or "")[-400:]
+            print(f"[H3 Viggle] v14.355 换脸失败(保留原片): rc={r.returncode} {tail}", flush=True)
+            return str(in_path)
+        print(f"[H3 Viggle] v14.355 换脸工序完成 {tag}: {os.path.basename(out_path)} "
+              f"{round(os.path.getsize(out_path) / 1048576, 2)}MB "
+              f"{(__import__('time').time() - _t0) / 60:.1f}min", flush=True)
+        return out_path
+    except Exception as e:
+        print(f"[H3 Viggle] v14.355 换脸异常(保留原片): {type(e).__name__}: {e}", flush=True)
+        return str(in_path)
+
+
+def knots_symbol(k):
+    """σ 表首点（1.0），保留给 _viggle_resample_sigmas 做符号锚定。"""
+    return k[0] if k else 1.0
+
+
+# v14.347: 第 35 档专用 —— "名义 denoise = 真实起点 σ" 的 sigma 切片开关。
+# 为什么必须分开: `_sigmas()` 用的是"拉长 total_steps 再取末 N 步"的老 img2img 近似,
+# 只有在 sigma 随 t 近似线性时才对得上 denoise。H3 (shift 12) 的 σ(t) 高端极平,
+# 实测 steps=4/denoise=0.65 → σ0=0.9601, 等于"几乎整帧重生": 名义 0.62 的半重绘
+# 实际从 ~0.93 起跑, 8 步根本去不干净 → 出片糊、身份被源片像素按住换不掉。
+# 这里改为: 在密集 sigma 表上找到 σ ≈ denoise·σmax 的那个下标, 再从那里到 0
+# 均匀取 steps 个点。只影响显式打开的档位(第 35 档), 不动其它档既有手感。
+_SIGMAS_EXACT = False
+
+
+def _sigmas_exact(model, scheduler: str, steps: int, denoise: float, tag: str = ""):
+    """从 σ = denoise·σmax 起步、按给定步数走到 0 的 sigma 表（denoise 为真实噪声比例）。"""
+    steps = max(1, int(steps))
+    denoise = float(denoise)
+    ms = model.get_model_object("model_sampling")
+    dense_n = max(256, steps * 32)
+    _dense = comfy.samplers.calculate_sigmas(ms, str(scheduler), dense_n).cpu()
+    # 方向保险: 正常 schedule 是 σmax → 0 降序; 若拿到升序(某些自定义 model_sampling
+    # 的 sigma 表方向相反), 直接翻转, 否则"找到第一个 ≤ target"会落在错误的一端。
+    if float(_dense[0]) < float(_dense[-1]):
+        _dense = torch.flip(_dense, dims=[0])
+    _smax = float(_dense[0])
+    _target = _smax * denoise
+    _idx = None
+    for _i in range(int(_dense.shape[0])):
+        if float(_dense[_i]) <= _target:
+            _idx = _i
+            break
+    if _idx is None:
+        _idx = 0
+    _tail = _dense[_idx:]
+    _n = steps + 1
+    if int(_tail.shape[0]) >= _n:
+        _pos = torch.linspace(0, int(_tail.shape[0]) - 1, _n)
+        _lo = _pos.floor().long()
+        _hi = torch.clamp(_lo + 1, max=int(_tail.shape[0]) - 1)
+        _w = (_pos - _lo.float())
+        _sig = _tail[_lo] * (1.0 - _w) + _tail[_hi] * _w
+    else:
+        _sig = torch.cat([_tail, torch.zeros(_n - int(_tail.shape[0]))])
+    # 首尾钉死: σ0 必须是真实起点(denoise·σmax)附近, 末尾必须 0
+    _sig[-1] = 0.0
+    _sig[0] = float(_dense[_idx])
+    # 单调不增(取整可能产生重复点, 重复点会让采样器空转)
+    for _i in range(1, int(_sig.shape[0])):
+        if float(_sig[_i]) > float(_sig[_i - 1]):
+            _sig[_i] = float(_sig[_i - 1])
+        elif float(_sig[_i]) == float(_sig[_i - 1]) and _i < int(_sig.shape[0]) - 1:
+            _sig[_i] = max(0.0, float(_sig[_i - 1]) - 1e-6)
+    print(f"[H3 SigmaExact]{(' ' + tag) if tag else ''} denoise={denoise:.2f} steps={steps} "
+          f"→ σ0={float(_sig[0]):.4f} (旧算法会从 σ≈{float(_dense[-(steps + 1)]):.4f} 起跑) "
+          f"σ表={[round(float(v), 4) for v in _sig.tolist()]}", flush=True)
+    return _sig
+
+
 def _sigmas(model, scheduler: str, steps: int, denoise: float):
     steps = max(1, int(steps))
     denoise = float(denoise)
     if denoise <= 0.0:
         return torch.FloatTensor([])
     ms = model.get_model_object("model_sampling")
+    if str(scheduler) in ("viggle_remake_swap_manual", "viggle_remake_edit_manual"):
+        _vg_task = "edit" if "edit" in str(scheduler) else "swap"
+        # v14.354: 前端 steps 在 viggle 档原本失效（σ 表长度决定步数，恒 6）。
+        # 这里按目标步数重采样 σ 表；BSAI_H3_VIGGLE_STEPS 优先于前端。
+        try:
+            _vg_want = int(os.environ.get("BSAI_H3_VIGGLE_STEPS", "") or steps)
+        except (TypeError, ValueError):
+            _vg_want = 6
+        _vg_sig = _viggle_resample_sigmas(_VIGGLE_REMAKE_SIGMAS[_vg_task], _vg_want)
+        print(f"[H3 Extender] v14.354 sigma 曲线重采样: {_vg_task} 步数={len(_vg_sig) - 1} "
+              f"σ={[round(float(v), 4) for v in _vg_sig.tolist()]}", flush=True)
+        return _vg_sig
     if str(scheduler) == "pika_manual":
-        return ms.sigma(torch.tensor(_PIKA_H3_SIGMA_KNOTS, dtype=torch.float32)).cpu()
+        # v14.366: 原实现直接返回 6 结固定 σ 表 —— 长度决定步数，前端 steps
+        # 在该调度上完全失效（与 v14.354 之前的 viggle 档同病）。这里按目标
+        # 步数重采样：6 步原样返回（保持官方契约不变），>6 步对 6 步轨迹做
+        # 分段线性插值细分（首尾钉死 + 强制严格单调递减），<6 步只取子集。
+        # **不要**换成 simple 等间距：那是蒸馏适配器没训练过的调度。
+        _pk_sig = ms.sigma(torch.tensor(_PIKA_H3_SIGMA_KNOTS, dtype=torch.float32)).cpu()
+        _pk_want = max(2, int(steps))
+        if _pk_want != int(_pk_sig.shape[0]) - 1:
+            _pk_sig = _viggle_resample_sigmas(_pk_sig, _pk_want)
+            print(f"[H3 Extender] v14.366 PIKA sigma 重采样: 步数={_pk_want} "
+                  f"σ={[round(float(v), 4) for v in _pk_sig.tolist()]}", flush=True)
+        return _pk_sig
     if str(scheduler) == "hyperflow_manual":
         _hf_steps = steps if steps in _HYPERFLOW_H3_SIGMAS else 6
         return torch.tensor(_HYPERFLOW_H3_SIGMAS[_hf_steps], dtype=torch.float32).cpu()
+    # v14.347: 第 35 档打开 exact 模式 —— denoise 就是真实起点噪声比例
+    if _SIGMAS_EXACT and denoise < 1.0:
+        try:
+            return _sigmas_exact(model, str(scheduler), steps, denoise, tag=f"scheduler={scheduler}")
+        except Exception as _sxe:
+            print(f"[H3 SigmaExact] ⚠️ exact 失败, 回退旧算法: {_sxe}")
     total_steps = steps
     if denoise < 1.0:
         total_steps = max(steps, int(steps / denoise))
@@ -3722,12 +4427,6 @@ _RP_LEGACY_LABELS = {
 }
 
 
-# ============================================================
-# v14.345: 3D upscaler 权重架构探针
-# 本机 Comfyui_Minimax_h3_latent_Upscaler(2026-08-29 版) 的 scan_models() 只按扩展名
-# 把目录里的**全部**权重都列出来, 并且**没有** is_supported_model / describe_model
-# (那是上游新版的 API)。于是 v14.273 的"提前校正"在这台机器上是空转:
-# TypeError / AttributeError 被 except 吞掉, 工作流里存着的
 # h3_clean_latent_upscaler_film_epoch200(base.low_blocks/refine_blocks/to_delta
 # 因子化注意力架构) 会被直接塞进 pure-3D conv 加载器, strict load 必然失败,
 # 静默退成 bislerp 插值 —— 画质明显变软却看不出原因。
@@ -4116,11 +4815,6 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
     new_h = _ff_snap_to_multiple(round(h_lat * scale), latent_mult)
     new_w = _ff_snap_to_multiple(round(w_lat * scale), latent_mult)
     if new_h == h_lat and new_w == w_lat:
-        # v14.346: 以前这里是「静默 return」, 日志只显示 upscale=x1.02 却不知道
-        # 放大器一次都没跑(本次坏片就是这样被误判成"换权重导致糊")。改为显式播报。
-        print(f"[H3 Extender] ⚠️ v14.346 latent 放大为空操作: 请求 x{float(scale):.2f} 但 "
-              f"{h_lat}x{w_lat} -> {new_h}x{new_w} (align={int(align_to_px)}px 取整后几何未变), "
-              f"3D 放大器未执行, 返回一采 latent")
         return video
 
     orig_dtype = video.dtype
@@ -4148,13 +4842,10 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
                   f"model={upscaler_model}")
             return out
         except Exception as e:
-            print(f"[H3 Extender] Refine 3D upscaler 失败({e}), fallback {method} "
-                  f"(model={upscaler_model})")
+            print(f"[H3 Extender] Refine 3D upscaler 失败({e}), fallback {method}")
             # v14.157: 记录回退原因, 调用处会推送前端显式警告
-            # v14.345: 原因里带上具体权重文件名 —— 不知道是谁失败, 就只能猜
             _FF_UPSCALER_FELL_BACK["hit"] = True
-            _FF_UPSCALER_FELL_BACK["reason"] = (
-                "model=" + str(upscaler_model) + " :: " + str(e)[:160])
+            _FF_UPSCALER_FELL_BACK["reason"] = str(e)[:180]
 
     # fp16/bf16 插值会量化新网格, 二采出现斑点; 统一 fp32 放大后转回原精度
     samples = video.float() if video.dtype in (torch.float16, torch.bfloat16) else video
@@ -5250,6 +5941,35 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _ff_probe198["t1"] = time.time()
             print(f"[H3 Extender] v14.198 首步拆分: 采样开始→首次前向 "
                   f"{_ff_probe198['t1'] - _ff_probe198['t0']:.1f}s (process_conds/编码)", flush=True)
+        if not _ff_probe198["done"]:
+            # v14.340: 模型侧掩码探针 —— 采样器收到的 mask 与模型收到的 denoise_mask
+            # 是两条独立通路(前者在 KSamplerX0Inpaint 里做 x/out 混合, 后者经
+            # extra_conds 进 _forward 做逐 token timestep 重标定 + out*mask)。
+            # 这里打印模型这条通路实际看到的 mask, 以及 x 是否真是噪声。
+            try:
+                _dm = kwargs.get("denoise_mask")
+                _pl = kwargs.get("minimax_payload") or {}
+                _ts = float(timestep.flatten()[0]) if hasattr(timestep, "flatten") else float(timestep)
+                _xv = x[0] if isinstance(x, (list, tuple)) else x
+                print(f"[H3 Recast Probe-2] model-side: timestep={_ts:.1f} "
+                      f"denoise_mask={'None' if _dm is None else tuple(_dm.shape)} "
+                      f"x0={tuple(_xv.shape)} |x0|={float(_xv.float().abs().mean()):.3f} "
+                      f"payload_keys={sorted(_pl.keys())}", flush=True)
+                if _dm is not None:
+                    _d = _dm.to(torch.float32)
+                    if _d.dim() == 5:
+                        _pool = _d[0, 0].reshape(_d.shape[2], _d.shape[3] // 2, 2,
+                                                 _d.shape[4] // 2, 2).amax(dim=(2, 4))
+                        _frac = float((_pool >= 0.5).float().mean())
+                        print(f"[H3 Recast Probe-2] model-side token grid: "
+                              f"mean={float(_d.mean()):.4f} min={float(_d.min()):.3f} "
+                              f"max={float(_d.max()):.3f} 生成token占比={_frac * 100:.1f}%",
+                              flush=True)
+                    else:
+                        print(f"[H3 Recast Probe-2] model-side mask(dim={_d.dim()}): "
+                              f"mean={float(_d.mean()):.4f} max={float(_d.max()):.3f}", flush=True)
+            except Exception as _p2e:
+                print(f"[H3 Recast Probe-2] 探针失败(忽略): {_p2e}", flush=True)
         out = executor(x, timestep, context, transformer_options, **kwargs)
         if not _ff_probe198["done"]:
             _ff_probe198["done"] = True
@@ -5263,6 +5983,79 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                    "bsai_first_step_probe", _ff_first_forward_probe198)
     except Exception as _e198:
         print(f"[H3 Extender] v14.198 首步探针安装失败(忽略): {_e198}")
+
+    # v14.340 一次性诊断: 视频替换(半重绘)掩码探针。BSAI_H3_RECAST_PROBE=0 可关。
+    # 目的: 确认送达采样器的 noise_mask 与 sigmas[0] 是否与代码预期一致
+    # (1=重绘人物 / 0=锁源画面, σ0=1.0)。重绘画(keep)区起点 x 若与源 latent 高度相关,
+    # 说明该区没进噪声、人物不会被替换。
+    if str(os.environ.get("BSAI_H3_RECAST_PROBE", "1")).strip().lower() not in ("0", "false", "off"):
+        try:
+            _rpb_mem = _ff_extract_members(latent_image)[0]
+            _rpb_nm = _ff_extract_members(noise_mask)[0] if noise_mask is not None else []
+            _rpb_no = _ff_extract_members(noise)[0]
+            _rpb_ms = model.get_model_object("model_sampling")
+            print(f"[H3 Recast Probe] σ0={float(sigmas[0]):.4f} steps={len(sigmas) - 1} "
+                  f"latent_members={[tuple(t.shape) for t in _rpb_mem]} "
+                  f"mask_members={[tuple(t.shape) for t in _rpb_nm]}", flush=True)
+            for _rpi, _rpl in enumerate(_rpb_mem):
+                if _rpi >= len(_rpb_nm):
+                    print(f"[H3 Recast Probe]  m{_rpi} 无 mask", flush=True)
+                    continue
+                _rpm = _rpb_nm[_rpi].to(dtype=torch.float32)
+                _rpline = (f"[H3 Recast Probe]  m{_rpi} mean={float(_rpm.mean()):.4f} "
+                           f"min={float(_rpm.min()):.3f} max={float(_rpm.max()):.3f} "
+                           f"全1行={int((_rpm.flatten(2) >= 0.999).all(dim=2).sum())}")
+                try:
+                    _rpx = _rpb_ms.noise_scaling(sigmas[0], _rpb_no[_rpi], _rpl)
+                    _rpv, _rpr = _rpx.flatten(), _rpl.flatten()
+                    _rpw = _rpm.expand_as(_rpx).flatten()
+                    for _tag, _sel in (("重绘画", _rpw > 0.5), ("锁keep", _rpw <= 0.5)):
+                        if int(_sel.sum()) > 0:
+                            _rpc = float(torch.nn.functional.cosine_similarity(
+                                _rpv[_sel], _rpr[_sel], dim=0))
+                            _rpline += (f" {_tag}: corr(x,源)={_rpc:+.3f} "
+                                        f"|x|={float(_rpv[_sel].abs().mean()):.3f} "
+                                        f"|源|={float(_rpr[_sel].abs().mean()):.3f}")
+                except Exception as _rpe:
+                    _rpline += f" 相关性计算失败: {type(_rpe).__name__}: {_rpe}"
+                print(_rpline, flush=True)
+        except Exception as _rperr:
+            print(f"[H3 Recast Probe] 探针失败(忽略): {_rperr}", flush=True)
+
+    # v14.352: 源片 cond 早停释放 —— σ 降到阈值以下后，把 minimax_refs 里的源片
+    # video block 摘掉，只留参考图（后半程让身份主导，而不是被源片像素按住）。
+    _vg_cb = callback
+    try:
+        _vrp = globals().get("_VIGGLE_RELEASE_POS", None)
+        if _vrp is not None:
+            _vru = float(globals().get("_VIGGLE_RELEASE_UNTIL", 0.9) or 0.9)
+            _vrs = {"done": False}
+
+            def _vg_release_cb(_step, _x0, _x, _total):
+                try:
+                    if not _vrs["done"]:
+                        _s = float(sigmas[min(int(_step), len(sigmas) - 1)])
+                        if _s < _vru:
+                            # guider.conds 里存的是已编码的 dict，直接塞 conditioning
+                            # 列表会在 calc_cond_batch 崩；必须走 inner_set_conds 重建。
+                            _cond_rel = dict(conditioning)
+                            _cond_rel["positive"] = _vrp
+                            guider.inner_set_conds(_cond_rel)
+                            _vrs["done"] = True
+                            print(f"[H3 Extender] v14.352 源片 cond 早停释放: "
+                                  f"step={_step} σ={_s:.4f} < {_vru} → cond 只留参考图",
+                                  flush=True)
+                except Exception as _vre:
+                    print(f"[H3 Extender] v14.352 cond 释放失败(忽略): {_vre}", flush=True)
+                    _vrs["done"] = True
+                if callback is not None:
+                    return callback(_step, _x0, _x, _total)
+                return True
+
+            _vg_cb = _vg_release_cb
+    except Exception as _vge:
+        print(f"[H3 Extender] v14.352 cond 释放挂载失败(忽略): {_vge}", flush=True)
+
     try:
         samples = guider.sample(
             noise,
@@ -5270,7 +6063,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             sampler,
             sigmas,
             denoise_mask=noise_mask,
-            callback=callback,
+            callback=_vg_cb,
             disable_pbar=disable_pbar,
             seed=int(seed),
         )
@@ -5323,13 +6116,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         _cut_has_subject_mask = False
     if _cut_has_subject_mask:
         _cut_retries = 0
+    # v14.353: Viggle 档同样跳过"换 seed 重采样" —— 硬切来自源片自身的剪辑点，
+    # 换 seed 改不掉，每段只白跑一整轮采样（实测 62–73s/步 × 6 步）。
+    if bool(globals().get("_VIGGLE_ACTIVE", False)):
+        _cut_retries = 0
     if _cut_guard_on:
         _cut_hits = _ff_detect_latent_hard_cut(samples, _cut_pthr, _cut_lthr, one_shot_trim_frames)
         if _cut_hits:
             _cut_best = samples
             _cut_best_hits = _cut_hits
-            # v14.341: 记下首次检出的那一处硬切(行号 + 两个量级), 用于判定"换 seed 复现"。
-            _cut_ref = (_cut_hits[0]["row"], _cut_hits[0]["dr"], _cut_hits[0]["lr"])
             for _cut_try in range(_cut_retries):
                 _h = _cut_best_hits[0]
                 print(f"[H3 Extender] v14.317 硬切拦截: 一采 latent 检出硬切 row={_h['row']} "
@@ -5372,27 +6167,6 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _cut_samples, _cut_pthr, _cut_lthr, one_shot_trim_frames)
                 print(f"[H3 Extender] v14.317 硬切拦截: seed={_cut_seed} 重采样完成, "
                       f"剩余硬切 {len(_cut_new)} 处(原 {len(_cut_best_hits)} 处)", flush=True)
-                # v14.341: 同一处硬切在换 seed 后"行号 ±1 + 两个量级 ±15% 内复现" ->
-                # 这是**确定性**硬切(噪声种子改不掉), 根因在条件文本。实测(BSAI第077期
-                # clip2): 两次一采在同一 row 上给出完全相同的 1.69x/4.77x, 说明模型是被
-                # 提示词/规则逼着在那一帧换场景; 继续换 seed 只是再烧一整轮采样。
-                try:
-                    _cut_dup = None
-                    for _hn in _cut_new:
-                        if (abs(_hn["row"] - _cut_ref[0]) <= 1
-                                and 0.85 <= _hn["dr"] / max(_cut_ref[1], 1e-6) <= 1.15
-                                and 0.85 <= _hn["lr"] / max(_cut_ref[2], 1e-6) <= 1.15):
-                            _cut_dup = _hn
-                            break
-                    if _cut_dup is not None:
-                        print("[H3 Extender] v14.341 硬切拦截: 同一处硬切在换 seed 后逐项复现 "
-                              f"(row={_cut_dup['row']}, {_cut_dup['dr']:.2f}x/"
-                              f"{_cut_dup['lr']:.2f}x) —— 确定性硬切, 噪声种子改不掉; "
-                              "根因在条件文本(段首承接/换场位置/行程与 motion context 冲突), "
-                              "停止重采样并保留原结果", flush=True)
-                        break
-                except Exception:
-                    pass
                 if len(_cut_new) < len(_cut_best_hits):
                     _cut_best = _cut_samples
                     _cut_best_hits = _cut_new
@@ -5458,7 +6232,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _has_upscaler = (refine_upscaler_model
                              and not str(refine_upscaler_model).startswith("(")
                              and _FF_UPSCALER_MOD is not None)
-            if _has_upscaler and _r_factor <= 1.0 and not refine_single_pass:
+            if _has_upscaler and _r_factor <= 1.0:
                 print(f"[H3 Extender] Refine: 选了 3D upscaler 但 factor={_r_factor}, "
                       f"自动提升到 1.5 以启用语义放大")
                 _r_factor = 1.5
@@ -5632,15 +6406,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                           f"见 v1.47 显存预算)")
                     _send_extender_warning(
                         owner_id,
-                        f"Refine scale downgraded by the VRAM budget x{_orig_f}->x{_chosen2}: "
-                        f"this clip renders below the declared size (detail gets visibly softer)",
+                        f"二采倍率被显存预算降级 x{_orig_f}→x{_chosen2}，"
+                        f"本段成片像素低于声明值（细节会明显变软）",
                         clip_index=clip_index,
                     )
                 elif _auto_tiled:
                     _send_extender_warning(
                         owner_id,
-                        f"VRAM is tight: tiled refine enabled automatically to keep the "
-                        f"x{_orig_f} scale (slightly slower, same picture quality)",
+                        f"显存不足，已自动启用分块二采保住 x{_orig_f} 倍率"
+                        f"（速度略降，画质不缩水）",
                         clip_index=clip_index,
                     )
                 elif _chosen2 is None:
@@ -5697,8 +6471,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if _FF_UPSCALER_FELL_BACK["hit"]:
                     _send_extender_warning(
                         owner_id,
-                        f"3D semantic upscale failed; fell back to bislerp interpolation "
-                        f"({_FF_UPSCALER_FELL_BACK['reason']})",
+                        f"3D 语义放大失败，已回退 bislerp 插值"
+                        f"（{_FF_UPSCALER_FELL_BACK['reason']}）",
                         clip_index=clip_index,
                     )
                 if tuple(_up_video.shape[-2:]) != tuple(_members[0].shape[-2:]):
@@ -5946,6 +6720,46 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                 print(f"[H3 Extender] v14.240 非分块二采段头锁 keep: 段头 {_hrows_os} 行锁定为一采延续画面(接缝零二次重绘)")
                     except Exception as _rlock_err:
                         print(f"[H3 Extender] v14.240 二采段头锁失败(可忽略): {_rlock_err}")
+                # v14.347: 第 35 档人物替换 —— 把一采的人物掩码带进二采。
+                # 二采默认 noise_mask 全 1(全帧重绘): 一采刚用掩码锁住的源背景, 会在
+                # 1.5x 放大后被二采整体"洗"一遍 → 背景漂移 + 全画面糊(第三轮机位实测)。
+                # 这里把一采 mask(人区 1 / 背景 0)最近邻重采样到二采 latent 尺寸继续沿用,
+                # 段头锁行强制 0。任何一步出错就退回旧行为, 不允许因此打崩渲染。
+                if _SIGMAS_EXACT and noise_mask is not None:
+                    try:
+                        _pcm, _ = _ff_extract_members(noise_mask)
+                        _pcv = _pcm[0] if _pcm else None
+                        if _pcv is not None and _pcv.dim() == 5 and float(_pcv.mean()) < 0.5:
+                            _rlc, _rln = _ff_extract_members(_r_latent["samples"])
+                            _rvc = _rlc[0]
+                            _pcv = _pcv.float()
+                            if (int(_pcv.shape[-2]), int(_pcv.shape[-1])) != (
+                                    int(_rvc.shape[-2]), int(_rvc.shape[-1])):
+                                _pcv = torch.nn.functional.interpolate(
+                                    _pcv, size=(int(_rvc.shape[-2]), int(_rvc.shape[-1]),
+                                                int(_rvc.shape[2])), mode="nearest")
+                            else:
+                                _t_h, _t_t = int(_pcv.shape[2]), int(_rvc.shape[2])
+                                if _t_h > _t_t:
+                                    _pcv = _pcv[:, :, :_t_t]
+                                elif _t_h < _t_t:
+                                    _pcv = torch.cat(
+                                        [_pcv, _pcv[:, :, -1:].repeat(1, 1, _t_t - _t_h, 1, 1)], dim=2)
+                            _pcv = _pcv.to(dtype=_rvc.dtype, device=_rvc.device).expand_as(_rvc).contiguous()
+                            _hr_c = min(int(_os_head_rows), int(_pcv.shape[2]))
+                            if _hr_c >= 1:
+                                _pcv[:, :, :_hr_c] = 0.0
+                            _rac = _rlc[1]
+                            _amc = (torch.ones((1, 1, 1, int(_rac.shape[-1])),
+                                               dtype=_rvc.dtype, device=_rvc.device)
+                                    if float(_r_audio) >= 0.5 else
+                                    torch.zeros((1, 1, 1, int(_rac.shape[-1])),
+                                                dtype=_rvc.dtype, device=_rvc.device))
+                            _r_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_pcv, _amc))
+                            print(f"[H3 Remix] v14.347 二采沿用人物掩码: 重绘区 "
+                                  f"{float(_pcv.mean()) * 100:.1f}% (背景继续锁一采源像素)")
+                    except Exception as _rm2e:
+                        print(f"[H3 Remix] v14.347 二采掩码沿用失败(退回全帧二采): {_rm2e}")
             else:
                 _r_noise = None
                 _r_latent = None
@@ -7228,9 +8042,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                               f"已自动回退一采 latent {_pre_hw[1]}x{_pre_hw[0]}")
                         _send_extender_warning(
                             owner_id,
-                            f"Refine collapsed into a grey frame (in-channel std={_cdisp:.3f}); "
-                            f"rolled back to the first-pass latent. Lower refine_denoise / "
-                            f"refine_steps, or turn refine off",
+                            f"二采结果塌陷成灰片(通道内std={_cdisp:.3f})，"
+                            f"已自动回退一采 latent；建议降低 refine_denoise / "
+                            f"refine_steps，或关闭二采",
                             clip_index=clip_index,
                         )
                     else:
@@ -7580,65 +8394,6 @@ _OS_VOICE_TC_AFTER = re.compile(
     r"((?:人声|歌声|音频|音乐|演唱)\s*(?:至|起|到)?\s*)(\d{1,3}:\d{2}(?:\.\d+)?)")
 _OS_VOICE_TC_TAIL = re.compile(
     r"(?:人声|歌声|音频|音乐|演唱)\s*(?:至|起|到)\s*(?=[，,；;。！？!?\n]|$)")
-
-# v14.341: 正文时间码(M:SS / M:SS.s), 不用 \b —— 中文与数字之间没有词边界。
-_OS_TIMECODE_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?:\.(\d{1,2}))?")
-
-
-def _one_shot_normalize_timecodes(text, offset_sec=0.0, duration_sec=None):
-    """v14.341: 把正文里的**全片绝对时间码**归一成本段相对时间码。
-
-    实测(BSAI第077期 clip2): 段首小节写 "01-12秒:", 正文却写
-    "0:12–0:13.5 闭口行进（段首1.5秒无唱）… 人声窗口0:13.5–0:24" —— 一个 12 秒的
-    片段里出现了 0:24 这种**不可能满足**的时间锚点。H3 有时序感知, 会把它当成
-    "段中某个时刻要发生一次新事件", 与"段首1.5秒"互相打架(实测 5.00s 一次机位跳变)。
-
-    触发条件刻意从严:
-      * 只有本文出现**超过本段时长**的时间码(即显然是按全片计的绝对时间) 才动手;
-      * offset>0 才平移(段1 的绝对时间就是相对时间);
-      * 平移后出现负值 -> 判定原文本来就是相对时间码, 原样返回。
-    """
-    s = str(text or "")
-    if not s or float(offset_sec or 0) <= 0:
-        return s
-    _hits = []
-    for _m in _OS_TIMECODE_RE.finditer(s):
-        _sec = int(_m.group(1)) * 60 + int(_m.group(2))
-        if _m.group(3):
-            _sec += float("0." + _m.group(3))
-        _hits.append((_m, _sec))
-    if not _hits:
-        return s
-    _dur = float(duration_sec) if duration_sec else None
-    if _dur is None:
-        return s
-    if max(_sec for _, _sec in _hits) <= _dur + 0.5:
-        return s
-    _off = float(offset_sec)
-    if min(_sec for _, _sec in _hits) - _off < -0.05:
-        return s
-    _out, _last = [], 0
-    for _m, _sec in _hits:
-        _out.append(s[_last:_m.start()])
-        _new = _sec - _off
-        _mins = int(_new // 60)
-        _rem = _new - _mins * 60
-        if _m.group(3):
-            _dec = len(_m.group(3))
-            _body = f"{_rem:0{3 + _dec}.{_dec}f}"
-            if _body.split(".")[0] == "60":
-                _mins += 1
-                _body = f"{0:0{2 + 1 + _dec}.{_dec}f}"
-            _out.append(f"{_mins}:{_body}")
-        else:
-            _rsec = int(round(_rem))
-            if _rsec >= 60:
-                _mins += 1
-                _rsec -= 60
-            _out.append(f"{_mins}:{_rsec:02d}")
-        _last = _m.end()
-    _out.append(s[_last:])
-    return "".join(_out)
 
 
 def _one_shot_sanitize_cut_words(text):
@@ -7996,8 +8751,8 @@ _OS_SPACE_TRANSIT_RULE = (
     "与大小连续。跨过之后，本段画面里只有门里这一处空间的地面、墙面、灯具与建筑，"
     "它们在同一次行走里逐帧展开，越往前走越展开，展开之后就一直展开着；左右方位"
     "自始至终保持一致；本段的光线与色调从上一段末帧那一刻的明暗与色温状态起算，"
-    "整段只逐拍朝脚本所写的光线状态推进一小步，门里新出现的灯具在原有环境光上由暗到亮"
-    "逐渐显形，天光的亮度与色温随行走沿同一条连续的方向演进，步幅与节奏自始至终一致。"
+    "整段只逐拍向更深的夜色推进一小步，门里新出现的壁灯在原有环境光上由暗到亮"
+    "逐渐显形，天空的亮度与色温随行走连续地向夜的深处演进，步幅与节奏自始至终一致。"
 )
 
 # v14.319 (2026-11-05): 光影因果化 —— 把"没有画面内原因的整体换色"改写成
@@ -8158,30 +8913,73 @@ def _one_shot_scene_name(text, catalog=None):
     return pre
 
 
-# ── v14.341 (2026-11-09): 本段**自己的**行程(起行空间 → 过渡物 → 终止空间) ─────
-#
-# 根因(用户 21 段一镜到底 MV, BSAI第077期 "走遍世界", 2026-11-09 实机):
-#   * 段2 在 2.083s 与 5.000s 各有一处硬切(像素域 scene 分数 14.439 / 0.861,
-#     同片中位 0.30)。抽帧: 0-2.04s 仍是段1 的故宫券门(正面跟拍), 2.08s 一帧
-#     硬切成帕特农石阶(背面跟拍爬台阶), 5.00s 又硬切成正面近景对口型。
-#   * 日志证据(v14.301 行): "clip[2]: 空间规则 = 空间过渡 (S1 故宫 → S2 帕特农)" ——
-#     段2 的脚本写的是 "由S2 帕特农@图4起行 → T2 → 止于S3 圣家堂@图5", 插件却把
-#     **段1 的换场**(S1→S2)发给了段2; 段1 自己一条空间规则都没拿到。
-#     于是段1 十二秒走不出故宫, 段2 一开头才去补段1 欠下的换场 —— 那一帧就是 2.08s。
-#   * 机制: _os_prev_scene 取的是**上一段的起点场景**(_os_scene_names[i-1]), 而接缝
-#     处真正该对比的是**上一段的终点场景**。脚本按链式路线写(S_k→S_{k+1}), 于是
-#     "本段起点 vs 上段起点" 永远不相等 -> 每段都被判成换场, 而且描述的是上一段的
-#     换场, 整体错位一段; v14.332 的"换场压入段首"又被无条件套上, 与段首 motion
-#     context 关键帧冲突, 结果是"先拖旧画面 2 秒、再一帧换掉整幅背景"。
-#   * 5.00s 那处是同一根因的下游: 段2 被强行跳到 S2 参考图(@图4 帕特农石阶)的构图,
-#     变成背面爬台阶机位, 而正文要求"正面开口唱歌、口型清晰", 背面满足不了口型,
-#     模型只能再切一次到正面近景。
-#
-# 修法:
-#   1) 每段解析**自己**的行程 (start / end / transit), 换场一律用本段的 start→end;
-#   2) 接缝对比用上一段的 **end**。end == 本段 start 时接缝是连续的, 换场发生在
-#      **段中**跨过那个过渡物(T 标记)的时刻, 由门墙遮挡完成(见 _one_shot_transit_mid_rule);
-#   3) 只有接缝本身真换场(上段 end != 本段 start)时, 才沿用 v14.332 的"换场压入段首"。
+# ============================================================
+# v14.362 增量合并: 自 v14.339(17:15 那份) 原样搬入的两套实现 ——
+#   ① v14.341 正文时间码「平移归一」(与现役 v14.300「直接剥离」互斥, 二选一)
+#   ② v14.341 一镜到底「本段自己的行程」解析 + 段中换场规则
+# 当前均未接入主流程, 无任何调用点 -> 运行行为零变化。
+# 用途: 离线对照 A/B 两套输出后再决定接入哪一套。
+# ============================================================
+# v14.341: 正文时间码(M:SS / M:SS.s), 不用 \b —— 中文与数字之间没有词边界。
+_OS_TIMECODE_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?:\.(\d{1,2}))?")
+
+
+def _one_shot_normalize_timecodes(text, offset_sec=0.0, duration_sec=None):
+    """v14.341: 把正文里的**全片绝对时间码**归一成本段相对时间码。
+
+    实测(BSAI第077期 clip2): 段首小节写 "01-12秒:", 正文却写
+    "0:12–0:13.5 闭口行进（段首1.5秒无唱）… 人声窗口0:13.5–0:24" —— 一个 12 秒的
+    片段里出现了 0:24 这种**不可能满足**的时间锚点。H3 有时序感知, 会把它当成
+    "段中某个时刻要发生一次新事件", 与"段首1.5秒"互相打架(实测 5.00s 一次机位跳变)。
+
+    触发条件刻意从严:
+      * 只有本文出现**超过本段时长**的时间码(即显然是按全片计的绝对时间) 才动手;
+      * offset>0 才平移(段1 的绝对时间就是相对时间);
+      * 平移后出现负值 -> 判定原文本来就是相对时间码, 原样返回。
+    """
+    s = str(text or "")
+    if not s or float(offset_sec or 0) <= 0:
+        return s
+    _hits = []
+    for _m in _OS_TIMECODE_RE.finditer(s):
+        _sec = int(_m.group(1)) * 60 + int(_m.group(2))
+        if _m.group(3):
+            _sec += float("0." + _m.group(3))
+        _hits.append((_m, _sec))
+    if not _hits:
+        return s
+    _dur = float(duration_sec) if duration_sec else None
+    if _dur is None:
+        return s
+    if max(_sec for _, _sec in _hits) <= _dur + 0.5:
+        return s
+    _off = float(offset_sec)
+    if min(_sec for _, _sec in _hits) - _off < -0.05:
+        return s
+    _out, _last = [], 0
+    for _m, _sec in _hits:
+        _out.append(s[_last:_m.start()])
+        _new = _sec - _off
+        _mins = int(_new // 60)
+        _rem = _new - _mins * 60
+        if _m.group(3):
+            _dec = len(_m.group(3))
+            _body = f"{_rem:0{3 + _dec}.{_dec}f}"
+            if _body.split(".")[0] == "60":
+                _mins += 1
+                _body = f"{0:0{2 + 1 + _dec}.{_dec}f}"
+            _out.append(f"{_mins}:{_body}")
+        else:
+            _rsec = int(round(_rem))
+            if _rsec >= 60:
+                _mins += 1
+                _rsec -= 60
+            _out.append(f"{_mins}:{_rsec:02d}")
+        _last = _m.end()
+    _out.append(s[_last:])
+    return "".join(_out)
+
+
 _OS_EMPTY_PAREN_RE = re.compile(r"[（(]\s*[）)]")
 _OS_ROUTE_TAG_RE = re.compile(r"([ST])\s?(\d{1,2})")
 _OS_ROUTE_NAME_CUT_RE = re.compile(r"[@<（(\n【\[]")
@@ -8481,16 +9279,8 @@ _OS_BRACKET_TITLE_RE = re.compile(r"[\[【]\s*([^\[\]【】\n]{0,30}?)\s*[\]】]
 # 每段开头必须有 [ST]\d{1,2} 编号, 尾巴可选编号。
 # v14.321: 之前只认 S 编号, 用户脚本里夹着 T4 路灯下的老城巷口 → 整条 S4→T4→S5
 # 没被清掉, H3 读到 S5 街口牌坊/后面的 S11 石拱桥 → 在 f31-f32 硬切。
-#
-# v14.341 (2026-11-09): 路线串只在**不带图片标签**时才算分镜结构。带 @图N / <Picture N>
-# 的路线串是**本段自己的行程**(一镜到底 skill 的段首写法):
-#   "：S2 帕特农@图4-登阶上行 → T2 山门石阶阙口右柱脚 → S3 圣家堂@图5"
-# 这个行程是"起行哪一处空间、经哪个过渡物、止于哪一处空间"的唯一权威描述 ——
-# 旧正则把它整条删掉(实测 clip2 提示词开头只剩一个孤零零的"：）"), 模型于是
-# 既不知道起点空间, 也不知道过渡物在哪, 只能自己编: 先拖着上一段的空间走 2 秒,
-# 再一帧硬切过去。现在带图片标签的路线串整条保留, 只清纯规划用的 S→T→S 串。
 _OS_ROUTE_CHAIN_RE = re.compile(
-    r"(?:[ST]\d{1,2}[^→@<（(\n]{0,24}→\s*){2,}(?:[ST]\d{1,2}[^；;。\n@<（(]{0,24})?"
+    r"(?:[ST]\d{1,2}[^→\n]{0,36}→\s*){2,}(?:[ST]\d{1,2}[^；;。\n]{0,36})?"
 )
 
 # 否定式镜头口号 → 正向陈述。
@@ -8590,11 +9380,6 @@ def _one_shot_demulti_shot(text, label=""):
     # 也整块剔除 —— "不唱" 是否定词(CFG=1.0 无负向分支 -> 会张嘴唱), 全片时间码
     # 会给模型错的时序锚点。口型/人声一律由 lip_audio 驱动。
     s = _one_shot_strip_vocal_tags(s)
-    # v14.341: 人声标签被整块剔掉后, 段首常剩一对空括号 + 一个孤零零的冒号
-    # (实测 clip2 的条件文本开头 = "：）【本段运镜…"), 模型因此看不到"起行哪一处空间"。
-    # 这里清掉空括号与段首标点垃圾, 让条件文本从场景名/运镜小节自然开始。
-    s = _OS_EMPTY_PAREN_RE.sub("", s)
-    s = re.sub(r"^[\s：:，,、；;·]+", "", s)
     s = re.sub(r"[ \t]{2,}", " ", s)
     s = re.sub(r"\n{3,}", "\n\n", s).strip()
     if len(s) != _orig:
@@ -9158,8 +9943,7 @@ def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
         ctl["event"].clear()
     _send_extender_progress(
         node_id, clip_index, total, "paused",
-        f"Clip {clip_index + 1} finished — rendering paused. Use Resume / This clip only / "
-        f"Abort; continues automatically after {int(timeout)}s with no input",
+        f"Clip {clip_index + 1} 已生成完成，渲染已暂停 — 可点「继续 / 仅当前 / 中止」，无干预 {int(timeout)}s 后自动继续",
     )
     decided = ctl["event"].wait(timeout)
     with _render_ctl_lock:
@@ -9168,26 +9952,25 @@ def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
     if not decided:
         _send_extender_progress(
             node_id, clip_index, total, "resumed",
-            f"Pause timed out with no input -> resuming Clip {clip_index + 2}",
+            f"暂停超时无干预 → 自动继续渲染 Clip {clip_index + 2}",
         )
         return True
     if state == "resume":
         _send_extender_progress(
             node_id, clip_index, total, "resumed",
-            f"Resume pressed -> rendering Clip {clip_index + 2}",
+            f"用户点击「继续」→ 渲染 Clip {clip_index + 2}",
         )
         return True
     if state == "stop_after":
         _send_extender_progress(
             node_id, clip_index, total, "stopped",
-            "Rendering stopped: only the clips already generated are kept "
-            "(use Merge Output to build the video)",
+            "已停止后续渲染：仅保留已生成的 CLIP（可点「合并输出」合成视频）",
         )
         return False
     if state == "abort":
         _send_extender_progress(
             node_id, clip_index, total, "aborted",
-            "Rendering aborted",
+            "渲染已中止",
         )
         return False
     return True
@@ -9889,6 +10672,198 @@ def _ff_run_segment_face_refine(frames, model, clip, vae, audio_vae):
         return frames
 
 
+# ---------------------------------------------------------------------------
+# v14.340 音频引导人脸/嘴型修复（TaoMate-FVSR 后处理档）
+#
+# 来源：淘宝直播团队 2026-11-02 开源的 TaoMate-FVSR（arXiv 2611.03393），
+# 教程视频 BV1WrxS6UEDm。它和「超分/小脸修复」的关键差别是用音频引导嘴部重建：
+#   · 原声模式：在保留画面结构的同时重建不可信的牙齿/嘴唇细节（LPIPS/DISTS 最低）
+#   · 配音模式：给一段新语音，重建的嘴型直接对齐新语音（Sync-C 明显高于
+#     "超分后再跑单独 dubbing 模型"的所有基线）
+# 官方 ComfyUI 分支把链路拆成 5 个节点：Load Model → Prepare Video →
+# GPEN Reference (CPU) → Restore Face Video → Save/Paste Back Video。整段视频
+# 用 YOLO 裁脸、修复、直方图匹配 + 羽化贴回，场景/身体不动，输出保持原尺寸。
+#
+# 本档是「出片前逐分镜后处理」：直接串官方节点类，不重复实现模型代码。
+# 所有参数走环境变量，避免往节点 widget 列表里加新控件（会错位老工作流布局）。
+# ---------------------------------------------------------------------------
+_FVRS_ENGINE = None
+_FVRS_ENGINE_ERR = None
+
+
+def _fvrs_env(name, default, cast=float):
+    try:
+        return cast(os.environ.get(name, default))
+    except Exception:
+        return default
+
+
+def _fvrs_cfg():
+    """从环境变量读修复参数；默认值即官方教程/README 的推荐值。"""
+    return {
+        "steps": _fvrs_env("BSAI_FVRS_STEPS", 10, int),
+        "noise": _fvrs_env("BSAI_FVRS_NOISE", 0.8),
+        "shift": _fvrs_env("BSAI_FVRS_SHIFT", 5.0),
+        "audio_cfg": _fvrs_env("BSAI_FVRS_AUDIO_CFG", 4.0),
+        "ref_cfg": _fvrs_env("BSAI_FVRS_REF_CFG", 1.7),
+        "budget_gib": _fvrs_env("BSAI_FVRS_BUDGET", 15.0),
+        "crop_scale": _fvrs_env("BSAI_FVRS_CROP_SCALE", 0.8),
+        "seed": _fvrs_env("BSAI_FVRS_SEED", 42, int),
+    }
+
+
+def _load_fvrs_engine():
+    """按文件路径加载官方 ComfyUI-TaoMate-FVSR 节点模块（延迟，未装不报错到启动阶段）。"""
+    global _FVRS_ENGINE, _FVRS_ENGINE_ERR
+    if _FVRS_ENGINE is not None:
+        return _FVRS_ENGINE
+    if _FVRS_ENGINE_ERR is not None:
+        raise _FVRS_ENGINE_ERR
+    import importlib.util as _ilu
+    _base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _dir = os.path.join(_base, "ComfyUI-TaoMate-FVSR")
+    _path = os.path.join(_dir, "nodes.py")
+    if not os.path.isfile(_path):
+        _FVRS_ENGINE_ERR = FileNotFoundError(
+            "TaoMate-FVSR 插件未安装（custom_nodes/ComfyUI-TaoMate-FVSR），已跳过音频引导修复。"
+        )
+        raise _FVRS_ENGINE_ERR
+    try:
+        # 官方节点用的是相对导入（from .node_io import ...），且目录名带连字符不能直接
+        # import，因此按「包规格 + 搜索路径」加载，并在 sys.modules 里先注册包名。
+        import importlib.util as _ilu
+        _spec = _ilu.spec_from_file_location("bsai_fvrs_pkg", _path, submodule_search_locations=[_dir])
+        if _spec is None or _spec.loader is None:
+            raise ImportError(f"无法加载 TaoMate-FVSR 包规格: {_path}")
+        _mod = _ilu.module_from_spec(_spec)
+        import sys as _sys
+        _sys.modules["bsai_fvrs_pkg"] = _mod
+        _spec.loader.exec_module(_mod)
+        _FVRS_ENGINE = _mod
+    except Exception as _e:
+        _FVRS_ENGINE_ERR = _e
+        raise _FVRS_ENGINE_ERR
+    return _FVRS_ENGINE
+
+
+def _fvrs_gpen_repo():
+    """GPEN 源码目录（不是权重目录）。缺失时退化为「首帧裁剪原图」当参考。"""
+    cand = os.environ.get("BSAI_FVRS_GPEN_REPO", "").strip()
+    if cand and os.path.isdir(cand):
+        return cand
+    try:
+        import folder_paths as _fp
+        _models = Path(_fp.models_dir)
+    except Exception:
+        _models = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))).parent / "models"
+    for _c in (Path(_models) / "TaoMate-GPEN-source",
+               Path(_models) / "TaoMate-FVSR" / "GPEN",
+               Path(_models) / "GPEN"):
+        if _c.is_dir():
+            return str(_c)
+    return ""
+
+
+def _fvrs_detector_path():
+    cand = os.environ.get("BSAI_FVRS_DETECTOR", "").strip()
+    if cand and os.path.isfile(cand):
+        return cand
+    try:
+        import folder_paths as _fp
+        _models = Path(_fp.models_dir)
+    except Exception:
+        return ""
+    for _c in (Path(_models) / "TaoMate-FVSR" / "face_yolov8n.pt",
+               Path(_models) / "ultralytics" / "face_yolov8n.pt",
+               Path(_models) / "ultralytics" / "face_yolov8m.pt"):
+        if _c.is_file():
+            return str(_c)
+    return ""
+
+
+def _ff_fvrs_retime(path, fps=24.0):
+    """官方链路一律按 25fps 解码/编码；回到出片帧率，避免拼接/音画时长漂移。"""
+    try:
+        fps = float(fps)
+    except Exception:
+        fps = 24.0
+    if abs(fps - 25.0) < 0.05:
+        return path
+    try:
+        ff = _find_ffmpeg()
+    except Exception:
+        ff = None
+    if not ff:
+        return path
+    out = str(path).replace(".mp4", f"_r{int(round(fps))}.mp4")
+    cmd = [ff, "-y", "-i", str(path), "-vf", f"fps={fps:g}", "-c:v", "libx264",
+           "-preset", "fast", "-crf", "17", "-pix_fmt", "yuv420p",
+           "-c:a", "copy", "-movflags", "+faststart", out]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=900)
+        return out
+    except Exception as _e:
+        print("[H3 Extender] ⚠️ FVSR 输出回转 %.0ffps 失败，沿用 25fps 结果: %s" % (fps, _e))
+        return path
+
+
+def _ff_fvrs_restore_clip(clip_path, fps=24.0, log=print):
+    """对单个分镜 mp4 跑一次「音频引导人脸/嘴型修复」，返回修复后的 mp4 路径。
+
+    官方约束：单人单镜、单帧人脸 512 推理、25fps 解码。这里对分镜逐个处理，
+    正好落在「一镜一段」的边界上；任何异常都原样返回原片段，绝不阻断出片。
+    """
+    if not clip_path or not os.path.isfile(str(clip_path)):
+        return clip_path
+    try:
+        nodes = _load_fvrs_engine()
+        cfg = _fvrs_cfg()
+        local_dir = os.environ.get("BSAI_FVRS_LOCAL_DIR", "").strip()
+        model_dir = nodes.resolve_model_dir("(root)", local_dir)
+        # 直接把解析出的目录作为 local_directory 传入，避免 selection 名再被拼一次子目录
+        handle = nodes.TaoMateModelLoader().load("(root)", str(model_dir), cfg["budget_gib"])[0]
+        video_path = str(clip_path)
+        prep, first_crop = nodes.TaoMatePrepareVideo().prepare(
+            video_path, "", "yolo_face", 0, 0, 512, 0,
+            detector_path=_fvrs_detector_path(), crop_scale=cfg["crop_scale"],
+        )
+        gpen = _fvrs_gpen_repo()
+        if gpen:
+            reference = nodes.TaoMateGPENReference().enhance(first_crop, handle, gpen, cfg["seed"])[0]
+        else:
+            # 没有 GPEN 源码时用首帧裁剪原图当参考（官方 cropped-face 协议），
+            # 细节增益弱于默认 GPEN 参考，但不会阻断出片。
+            reference = first_crop
+            log("[H3 Extender] TaoMate-FVSR: 未找到 GPEN 源码，改用首帧裁剪原图作参考（弱化模式）")
+        result = nodes.TaoMateRestore().restore(
+            handle, prep, reference, cfg["seed"], cfg["steps"], cfg["noise"],
+            cfg["shift"], cfg["audio_cfg"], cfg["ref_cfg"],
+        )[0]
+        stem = os.path.splitext(os.path.basename(video_path))[0][:40]
+        saved = nodes.TaoMateSaveVideo().save(result, "taomate_fvrs/" + stem)["result"][0]
+        saved = _ff_fvrs_retime(saved, fps)
+        log("[H3 Extender] 🎙️ TaoMate-FVSR 修复完成: %s (%d 帧, %d 步, audio_cfg=%.1f, ref_cfg=%.1f)"
+            % (os.path.basename(str(saved)), len(prep.crops), cfg["steps"], cfg["audio_cfg"], cfg["ref_cfg"]))
+        return saved
+    except Exception as _e:
+        print("[H3 Extender] ⚠️ TaoMate-FVSR 跳过（不影响出片）: %s" % _e)
+        return clip_path
+
+
+def _ff_fvrs_apply_clips(clip_paths, fps, cache=None, log=print):
+    """逐段跑 FVSR；同一分镜只跑一次（per-clip 输出与 merged 输出复用结果）。"""
+    if not clip_paths:
+        return clip_paths
+    cache = cache if cache is not None else {}
+    out = []
+    for _i, _cp in enumerate(clip_paths):
+        _key = str(_cp)
+        if _key not in cache:
+            cache[_key] = _ff_fvrs_restore_clip(_cp, fps, log=log)
+        out.append(cache[_key])
+    return out
+
+
 # v14.259: 下拉标签全面英文化(ComfyUI-Manager 上架复审要求: 列表只放英文)。
 # 老工作流里序列化的中文值经 VALIDATE_INPUTS 放行后, 在 extend() 入口用下列
 # 映射归一回旧中文内部值, 下游所有判断分支(渲染管道 elif 链/速度档/双采档)零改动;
@@ -9920,18 +10895,34 @@ _RENDER_PIPELINE_EN2ZH = {
     "PDMD 2-step Turbo Draft (single-pass)": "PDMD 2步 极速试稿 (单采)",
     "PTD 4-step Ref2VA Single-Pass (reference accel)": "PTD 4步 Ref2VA 单采 (参考图加速)",
     "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)": "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)",
-    "PIKA H3 Flex 8+4 SelfLift Dual-Pass (Ref2VA face-lock)": "PIKA H3 Flex 8+4 双采 (Ref2VA 锁脸)",
+    # v14.366 (2026-11-10): PIKA 真双采档（一采 8 步 + 二采 4 步）。
+    "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)": "PIKA H3 Flex 8步+2步 双采 (Ref2VA 锁脸)",
     "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)": "TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)",
     "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)": "TaoMate HD 8步+4步 渐进放大双采 (8+4 1080p直出)",
     "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)": "SingularityV2+Pika H3 8步 高动态长视频 (导演台双采)",
     # v14.335 (2026-11-08): 视频人物替换档 —— 资产库 @视频N 作 V2V 源画面+原声，
     # @图N 作人物身份参考，按 H3 Recast 单镜 15s 上限自动分 clip 逐段替换。
     "Video Recast (H3 V2V character swap)": "视频替换 (V2V 人物替换)",
+    # v14.341 (2026-11-09): 视频角色替换+动作迁移 —— 教程 BV1HBWJ6HEkg 口径,
+    # 226 帧/段 + 段间 22 帧重叠锁定续接 + 一采 8 步/二采 5 步(1.5x),
+    # 不要求任何 swap/角色替换 LoRA（只可挂加速 LoRA）。
+    "Video Remix (no-LoRA character swap + motion transfer)": "视频角色替换+动作迁移",
+    # v14.345 (2026-11-09): 第 36 档 Viggle Remake 视频改写 —— 官方两个编辑 LoRA
+    # (swap=主体替换 / edit=元素增删改)，6 步固定 sigma，源片整段作 cond video。
+    "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)": "Viggle Remake 视频改写 (6步 换人/增删改)",
+    # v14.360 (2026-11-10): 换脸档 —— 与上一档共用全部 Viggle 采样配方，唯一差别是
+    # 每段出片后追加 tools/viggle_faceswap.py 逐帧换脸(模型 128)。
+    "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)": "Viggle Remake 视频改写+逐帧换脸 (6步 换人)",
     # v14.339 (2026-11-08): Video Rebirth HyperFlow H3 Flash 14B —— 官方 4/6/8 步
     # 固定调度 + CFG 1.0 单采; 权重为 GGUF, 必须用 HyperFlow GGUF Loader 加载,
     # 全量 H3 的加速 LoRA 与其低秩分解层不兼容, 不要叠。
     "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)": "HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)",
 }
+_VIGGLE_RP_LABEL = "Viggle Remake 视频改写 (6步 换人/增删改)"
+_VIGGLE_RP_FS_LABEL = "Viggle Remake 视频改写+逐帧换脸 (6步 换人)"
+_VIGGLE_RP_LABELS = (_VIGGLE_RP_LABEL, _VIGGLE_RP_FS_LABEL)
+
+
 _SPEED_PRESET_EN2ZH = {
     "Turbo": "极速",
     "Balanced": "均衡",
@@ -9988,7 +10979,10 @@ class BSAIH3FilmFactory:
                 "STRING",
                 {
                     "default": _state_json([_default_clip(0)]),
-                    "multiline": True,
+                    # v14.372: 超长 JSON 在 multiline textarea 里会撑成超高文本框,
+                    # 把后面几行参数推出节点可视区。改单行渲染: 类型仍是 STRING,
+                    # widget 位置/数量/序列化格式全部不变, 旧工作流不受影响。
+                    "multiline": False,
                     "tooltip": "Internal state: CLIP script JSON (hidden from the UI, not rendered or edited). v14.103: changed from hidden back to STRING. The ComfyUI 1.55 frontend does not create widgets of type hidden, which made buildUi miss clips_json and caused the CLIP area/UI to disappear plus a widgets-array/save-array misalignment (NaN); as a STRING the widget is created normally and extender.js v2.105 hides it.",
                 },
             ),
@@ -10015,7 +11009,7 @@ class BSAIH3FilmFactory:
                 "STRING",
                 {
                     "default": _refs_json(_empty_refs()),
-                    "multiline": True,
+                    "multiline": False,
                     "tooltip": "Internal state: reference image JSON (hidden from the UI, not rendered or edited). v14.103: changed from hidden back to STRING for the same reason as clips_json (the 1.55 frontend does not create hidden widgets).",
                 },
             ),
@@ -10293,9 +11287,10 @@ class BSAIH3FilmFactory:
             #   off   = 关闭(默认，不额外处理)
             #   auto  = 常规保脸锁定(依靠 @img2.N 脸部特写参考注入 ref2v conditioning 维持五官一致)
             #   refine= 小脸修复(出片前对每个分镜做 H3 FaceRefine 局部人脸重绘，专治远景小脸崩坏)
+            #   fvrs  = 音频引导修复(v14.340, TaoMate-FVSR 逐分镜重建嘴部/牙齿细节并对齐音轨)
             "face_lock_mode": (
-                ["off", "auto (face-lock)", "refine (small-face inpaint)"],
-                {"default": "off", "tooltip": "Face-lock / small-face repair mode: off = disabled (default, no extra processing); auto = standard face-lock (injects the @img2.N close-up face reference into ref2v conditioning to keep facial features consistent); refine = small-face repair via H3 local inpaint (before output, detects faces in every shot, repaints the face region with H3 and blends it back; fixes small-face degradation in distant shots; requires the BSAI-ComfyUI-FaceRefine plugin, heavy; enable only when you actually see small-face artifacts)."},
+                ["off", "auto (face-lock)", "refine (small-face inpaint)", "fvrs (audio-guided restore)"],
+                {"default": "off", "tooltip": "Face-lock / small-face repair mode: off = disabled (default, no extra processing); auto = standard face-lock (injects the @img2.N close-up face reference into ref2v conditioning to keep facial features consistent); refine = small-face repair via H3 local inpaint (before output, detects faces in every shot, repaints the face region with H3 and blends it back; fixes small-face degradation in distant shots; requires the BSAI-ComfyUI-FaceRefine plugin, heavy; enable only when you actually see small-face artifacts); fvrs = audio-guided restoration via TaoMate-FVSR (per-shot: YOLO crop -> 512 face reconstruction guided by the clip's own audio -> paste back, fixes blurry faces AND lip/teeth detail drift; requires the official ComfyUI-TaoMate-FVSR plugin + ~15GB weights, ~745s for a 15s clip on H20; tune with BSAI_FVRS_* env vars)."},
             ),
             # v14.153 修正: refine_mem_mode 移出 required —— 它在 widget 序列中必须
             # 排在 optional 的 prompt_pack 之后（即所有 widget 的最末尾），否则会让
@@ -10371,7 +11366,7 @@ class BSAIH3FilmFactory:
                 },
             )
         # v14.101: 回退 18:35(v14.84) — tts_model_TTS模型 在 optional 末尾（v2.7.json 一致）
-        optional["tts_model"] = (
+        optional["tts_model_TTS模型"] = (
             "INDEX_TTS_MODEL",
             {"forceInput": True, "tooltip": "IndexTTS-2.5 model (connect to the tts_model output of BSAI_IndexTTS2_5Loader). Required in speech mode."},
         )
@@ -10381,10 +11376,10 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+4 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)"],
+            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Video Remix (no-LoRA character swap + motion transfer)", "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
-                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default. (32) Video Recast (H3 V2V character swap, v14.335) = video character swap: the asset-library video (@vidN) becomes the V2V source (picture AND soundtrack) while @imgN reference pictures define the new identity; the backend auto-splits the source into <=15s segments (the MiniMax H3 Recast per-shot contract: a 45s video becomes 3 clips), encodes each segment into the H3 AV latent (video = source frames, audio = source soundtrack locked with noise_mask 0), and runs an 8-step euler/simple first pass at denoise 0.65 so the original camera/motion/composition survive and only the person is swapped; refine skipped, motion context chaining disabled between recast clips; mount minimax_h3_角色替换character_swap_v1.5.safetensors in the LoRA stack at 0.6-0.8 for the strongest identity transfer.",
+                "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 4+2 (forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default. (32) Video Recast (H3 V2V character swap, v14.335) = 视频人物替换: the asset-library video @视频N becomes the V2V source (picture AND soundtrack) while @图N reference pictures define the new identity; the backend auto-splits the source into <=15s segments (the MiniMax H3 Recast per-shot contract: a 45s video becomes 3 clips), encodes each segment into the H3 AV latent (video = source frames, audio = source soundtrack locked with noise_mask 0), and runs an 8-step euler/simple first pass at denoise 0.65 so the original camera/motion/composition survive and only the person is swapped; refine skipped, motion context chaining disabled between recast clips; mount minimax_h3_角色替换character_swap_v1.5 in the LoRA stack at 0.6-0.8 for the strongest identity transfer. (34) Video Remix (no-LoRA character swap + motion transfer, v14.341, Bilibili BV1HBWJ6HEkg) = 视频角色替换+动作迁移: the asset-library @视频N source video supplies the action, camera and soundtrack while @图N reference pictures supply the identity; NO swap LoRA (community test: it pulls the face toward a western look and breaks colour match), only an acceleration LoRA may stay mounted. The backend splits the source into 226-frame (5+17k, ~9.42s) segments with a locked 22-frame overlap (segment k starts at 204*k/24 s, so its head IS the previous segment tail -> continuous action and light), runs a 4-step high-noise first pass plus a 5-step low-noise refine pass on a 1.5x latent (9 NFE total, euler/simple, shift 12/3, denoise 0.62); the whole frame stays redrawable so the prompt decides 人物替换 (background written from the source shot) versus 动作迁移 (one brand-new scene only), and the source soundtrack is locked into the audio rows (BSAI_H3_REMIX_LOCK_AUDIO=0 lets the model regenerate audio).",
             },
         )
         # v14.185 (2026-10-24): 一镜到底采样档 —— 追加在 render_pipeline 之后（optional
@@ -10430,6 +11425,11 @@ class BSAIH3FilmFactory:
                 "tooltip": "v14.238 Director port: external SIGMAS input (mirrors the reference plugin's Refine node behavior). When connected to BasicScheduler/ManualSigmas, the refine pass follows the external sigma curve exactly; when unconnected, the internal beta schedule (refine_steps/refine_denoise) is used.",
             },
         )
+        # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
+        # 让旧版工作流(71 项)载入时尾部错位/NaN。改为"档位化"：
+        #   下拉「Viggle Remake 视频改写 (6步 换人/增删改)」     = 纯 Viggle 出片，不换脸(默认)
+        #   下拉「Viggle Remake 视频改写+逐帧换脸 (6步 换人)」 = 每段出片后跑 tools/viggle_faceswap.py
+        # 前 71 项 widget 的位置/类型与 v14.339 及更早版本逐一对齐，旧工作流零影响。
         # v14.193: 视觉锚点改为全自动（自动记录 + 自动注入）—— 手动输入 widget
         # visual_anchor_notes（v14.186 曾置于 optional 最末尾 index 67）已移除：
         # 锚点状态自动从各分镜正文提取全部可见视觉元素（_extract_visual_state，
@@ -10825,6 +11825,10 @@ class BSAIH3FilmFactory:
         return {"waveform": _full.cpu(), "sample_rate": _clip_sr}, _clip_durations
 
     def extend(self, model, clip, vae, **kwargs):
+        # v14.347: exact sigma 开关只属于第 35 档, 每次进入 extend 先复位,
+        # 免得上一轮跑了第 35 档之后, 别的档位偷偷继承"真实 denoise"手感。
+        global _SIGMAS_EXACT
+        _SIGMAS_EXACT = False
         # v1.21: keys are pure English now, direct kwargs.get()
         run_mode = kwargs.get("run_mode")
         width = kwargs.get("width")
@@ -10861,6 +11865,14 @@ class BSAIH3FilmFactory:
         filename_prefix = kwargs.get("filename_prefix", "H3_Extender")
         prompt_pack = kwargs.get("prompt_pack", None)
         asset_library = kwargs.get("asset_library", None)
+        # 清单 widget 被清空/另存丢失时, 回读磁盘资产库兜底, 避免 @图N/@视频N 静默断链。
+        if _asset_library_is_empty(asset_library):
+            _disk_lib = _rebuild_asset_library_from_disk()
+            if _disk_lib and not _asset_library_is_empty(_disk_lib):
+                print(f"[BSAI AssetLibrary] 节点清单为空, 已从磁盘兜底加载: "
+                      f"{len(_disk_lib['images'])} 图 / {len(_disk_lib['videos'])} 视频 / "
+                      f"{len(_disk_lib['audios'])} 音频")
+                asset_library = _disk_lib
         prompt_source = kwargs.get("prompt_source", None)
         output_image_audio = kwargs.get("output_image_audio", True)
         block_cache = kwargs.get("block_cache", False)
@@ -10878,12 +11890,6 @@ class BSAIH3FilmFactory:
         refine_steps = kwargs.get("refine_steps", 2)
         refine_upscale_factor = kwargs.get("refine_upscale_factor", 2.0)
         refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear interpolation, no model)")
-        # The VALIDATE_INPUTS overload above disables ComfyUI's own combo check,
-        # so the value is validated against the offered list here.
-        if refine_upscaler_model and refine_upscaler_model not in _ff_get_upscaler_models():
-            print(f"[H3 Extender] refine_upscaler_model {refine_upscaler_model!r} is not one of "
-                  f"the offered models; using bilinear interpolation")
-            refine_upscaler_model = "(bilinear interpolation, no model)"
         refine_align_to = int(kwargs.get("refine_align_to", 40))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
         # v14.238 MiniMaxH3 Director 极速双采移植参数:
@@ -10900,6 +11906,18 @@ class BSAIH3FilmFactory:
             _dff_target_mp = float(kwargs.get("director_fast_target_mp", 2.0) or 2.0)
         except (TypeError, ValueError):
             _dff_target_mp = 2.0
+        # v14.364 修复: _rp_mode 必须先解析再判定。v14.360 把「档位决定换脸」的判定
+        # 写在本段参数解析区(此处), 而 _rp_mode 的赋值原本在 12087 行**之后**, 于是这一行
+        # 读到的是函数内尚未赋值的局部变量, 每次调用必抛:
+        #   UnboundLocalError: cannot access local variable '_rp_mode'
+        # 离线函数级验证碰不到它, 只有真跑节点才会炸。这里补一次同源预解析(与
+        # 12087-12089 完全一致的归一口径); 12087 处会再赋一次相同的值, 无副作用。
+        _rp_mode = str(kwargs.get("render_pipeline", "") or "")
+        _rp_mode = _RENDER_PIPELINE_EN2ZH.get(_rp_mode, _rp_mode)
+        # v14.360: 换脸工序由**档位**决定，不占 widget、不改参数位置、不读环境变量。
+        # 选「Viggle Remake + 逐帧换脸」档 → 每段出片后换脸；选普通 Viggle 档 → 绝不换脸。
+        _viggle_faceswap_on = (_rp_mode == _VIGGLE_RP_FS_LABEL)
+        _viggle_faceswap_model = "128"   # inswapper_128: clip1 全段相似度 0.792, 实测最优
         # v14.83 对口型×二采组合预设（优先于 refine_audio_denoise 原始值）
         refine_lipsync_mode = str(kwargs.get("refine_lipsync_mode", "Lock lip-sync (recommended)"))
         if refine_lipsync_mode in ("Audio redraw 0.7", "音频参与重绘0.7"):
@@ -10947,6 +11965,14 @@ class BSAIH3FilmFactory:
         face_refine_enabled = face_lock_mode.startswith("refine")
         if face_refine_enabled:
             print("[H3 Extender] 🎭 保脸-小脸修复模式开启：出片前对每个分镜运行 H3 FaceRefine 局部重绘")
+        # v14.340: 音频引导人脸/嘴型修复（TaoMate-FVSR）。后处理在分镜 mp4 上做，
+        # 用片段自带音轨（lip_audio/lip_voice 驱动时就是那句台词）重建嘴部细节。
+        face_fvrs_enabled = face_lock_mode.startswith("fvrs")
+        if face_fvrs_enabled:
+            _fvrs_c = _fvrs_cfg()
+            print("[H3 Extender] 🎙️ TaoMate-FVSR 音频引导修复开启：逐分镜 512 人脸重建 "
+                  "(steps=%d, audio_cfg=%.1f, ref_cfg=%.1f, %.0f GiB 预算)"
+                  % (_fvrs_c["steps"], _fvrs_c["audio_cfg"], _fvrs_c["ref_cfg"], _fvrs_c["budget_gib"]))
         # v14.158 (2026-10-21): BSAI 一镜到底旁支模式。off 时零影响（默认）；
         # on 时：①强制段间 motion context（Add Guide 等效锚点引导）
         #       ②每段提示词自动注入一镜到底镜头指令
@@ -11061,13 +12087,6 @@ class BSAIH3FilmFactory:
         _sb_adapter_raw = kwargs.get("semantic_bridge_adapter", "")
         # v14.152: 老工作流可能存 False/None/空串 → 一律视为关闭（最低档）
         _sb_adapter = "" if _sb_adapter_raw in (False, None, "") else str(_sb_adapter_raw)
-        # Only a name the adapter combo actually offers may be used: a value
-        # arriving from a shared workflow must not point the node at an
-        # arbitrary file on the host.
-        if _sb_adapter and _sb_adapter not in _bsai_list_semantic_bridge_adapters():
-            print(f"[H3 Extender] semantic_bridge_adapter {_sb_adapter!r} is not one of the "
-                  f"known adapters; semantic bridge disabled for this run")
-            _sb_adapter = ""
         # v14.152: 老工作流可能存空串 → 取默认 0.15（最低档）
         _sb_alpha = _safe_float(kwargs.get("semantic_bridge_alpha"), 0.15)
         _sb_mag = bool(kwargs.get("semantic_bridge_magnitude_match", True))
@@ -11090,9 +12109,6 @@ class BSAIH3FilmFactory:
         # speed_preset 仅剩 7 项基础档。旧工作流遗留的配方档值(速度档里)仍由下方
         # speed_preset 兼容分支按值生效, 两源互斥不叠加。
         _rp_mode = str(kwargs.get("render_pipeline", "") or "")
-        # Labels are English-only from v14.340; workflows saved before that use
-        # the retired Chinese-containing label, mapped forward here.
-        _rp_mode = _RP_LEGACY_LABELS.get(_rp_mode, _rp_mode)
         # v14.259: 英文标签归一回旧中文内部值(与上方 _render_pipeline 同源)
         _rp_mode = _RENDER_PIPELINE_EN2ZH.get(_rp_mode, _rp_mode)
         # v14.220 直播带货配音模式 01/02/03：识别模式键，并把三个新模式别名到
@@ -11128,7 +12144,7 @@ class BSAIH3FilmFactory:
                     print(f"[H3 Extender] v14.210 默认管道 Sol-H3 Self-Lift 双采: refine_enable=False -> True (双采管道理应开二采)")
                 else:
                     print(f"[H3 Extender] v14.210 默认管道 Sol-H3 Self-Lift 双采: refine_enable 已 True")
-            elif _rp_mode == "MV Dual-Pass (Film Factory v3.2 original)":
+            elif _rp_mode == "MV Dual-Pass (电影工厂 v3.2 原版)":
                 # v14.280 (2026-11-02): MV 双采档 —— 参数完整照搬 BSAI_H3_Film_Factory
                 # 电影工厂128分钟大电影版-示例工作流 v3.2-MV.json（v2.115 旧版插件
                 # 保存的 45 键工作流, node 250 widgets_values 逐条反译确认）。
@@ -11732,8 +12748,7 @@ class BSAIH3FilmFactory:
                       "作者 H20 实测 1344×768/243帧/4 NFE 端到端) = 参考图->音视频 4 步单采; "
                       "需要 Ref2VA 底模(未剪枝 ~140GB, 或社区 ComfyUI-PTD-Compact int8 版), "
                       "无对应底模时不要选此档; ref_image_size 保持用户值不强制")
-            elif _rp_mode in ("PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)",
-                              "PIKA H3 Flex 8+4 双采 (Ref2VA 锁脸)"):
+            elif _rp_mode == "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)":
                 # v14.310 (2026-11-04): Pika H3 Flex 配方 (B站教程 BV1Dy4u67EJo,
                 # 官方模板 video_pika_h3_flex_ref2va / docs.comfy.org Pika H3 Flex)。
                 # Pika 把 H3 蒸馏成 6 步生成器, 以两个 LoRA 适配器发布
@@ -11744,42 +12759,75 @@ class BSAIH3FilmFactory:
                 # 1000/750/500/250/100/40 (+0), 不是 ComfyUI 的 simple 等间距
                 # (1000/833/667/500/333/167/0) —— 用 simple 等于让蒸馏适配器跑
                 # 没训练过的调度, 画质/稳定性都会掉。见 _PIKA_H3_SIGMA_KNOTS。
-                # v14.324 (2026-11-09): 用户要求真双采 —— 打开 refine。
-                # v14.340 (2026-11-09): 新增 8+4 质量档 —— 同 LoRA 契约, 一采 8 步
-                # + 二采 4 步 (denoise 0.5), 适合长 clip / 高动态场景; 6+2 保持
-                # 快速档。注意: 8 步超出 Pika 6 步蒸馏的原生调度, 若出现画质掉
-                # 请换 pika_h3_flex_turbo_8step LoRA (Singularity V2 档用的那个)。
-                is_8p4 = (_rp_mode == "PIKA H3 Flex 8+4 双采 (Ref2VA 锁脸)")
-                if is_8p4:
-                    steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.5
-                    _ver = "v14.340"
-                    # 8+4 质量档: pika_manual 的 sigma 结硬编码 7 个值=6 步,
-                    # 不能用于 8 步 —— 改 euler+simple 让 steps=8 真正出 8 个 sigma。
-                    # 注意: 这偏离了 Pika 6 步蒸馏的官方调度; 若画质掉请换
-                    # pika_h3_flex_turbo_8step_hd_ref2va LoRA (Singularity V2 档用的那个)。
-                    if str(sampler_name) != "euler":
-                        sampler_name = "euler"
-                        print(f"[H3 Extender] {_ver} PIKA H3 Flex 8+4(渲染管道): 采样器切 euler+simple (8步不走 pika_manual 6步蒸馏调度)")
-                    scheduler = "simple"
-                else:
-                    steps, refine_steps, tile_count, refine_denoise = 6, 2, 4, 0.5
-                    _ver = "v14.324"
-                    if str(sampler_name) != "lcm":
-                        sampler_name = "lcm"
-                        print(f"[H3 Extender] {_ver} PIKA H3 Flex(渲染管道): 采样器强制 lcm (Pika 6步蒸馏官方契约)")
-                    scheduler = "pika_manual"
-                refine_enable = True
+                # 实测修正 (h3_clip_250_2 耗时 >30min): 二采 SelfLift latent x2.0
+                # 每步 287s, 10s clip tokens=587k 是教程 5s clip 的 4x; 关闭 refine,
+                # 仅一采 6 步直出 960x544 latent → VAE decode 到 1920x1088
+                # (H3 VAE 天然 x16 放大)。
+                # 底模保留 hybrid b25-49 (分段链路 FL2VA 末帧接力, 勿切纯 ref2va);
+                # 加速栈 SegAttention + Sol-Attn + Sol VAE。
+                steps, refine_steps, tile_count, refine_denoise = 6, 0, 4, 0.5
+                refine_enable = False
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
-                _sched_desc = ("lcm + ManualSigmas 固定结 1000/750/500/250/100/40 (官方 6步蒸馏契约)"
-                               if not is_8p4 else
-                               "euler + simple 等间距 (8步质量档, 非 pika 6步蒸馏调度)")
-                print(f"[H3 Extender] 🎬 {_ver} PIKA H3 Flex {'8+4' if is_8p4 else '6+2'} 双采 (Ref2VA 锁脸): "
-                      "Pika H3 Flex 蒸馏适配器 —— "
-                      f"{_sched_desc}, "
-                      f"shift 12/3, 一采 {steps} 步 + 二采 {refine_steps} 步 (denoise 0.5, x2.0 提升由一镜到底接管); "
+                if str(sampler_name) != "lcm":
+                    sampler_name = "lcm"
+                    print("[H3 Extender] v14.310 PIKA H3 Flex(渲染管道): 采样器强制 lcm (Pika 6步蒸馏官方契约)")
+                scheduler = "pika_manual"
+                print("[H3 Extender] 🎬 v14.310 PIKA H3 Flex 6 步单采 (Ref2VA 锁脸): "
+                      "Pika H3 Flex 蒸馏适配器 (Pika-Labs/Pika-H3-Flex, 50步->6步) —— "
+                      "lcm + ManualSigmas 固定结 1000/750/500/250/100/40 (官方契约, 非 simple 等间距), "
+                      "shift 12/3, 跳过二采 SelfLift; "
                       "LoRA 槽挂 pika_h3_flex_ref2va_v1_bf16.safetensors (strength 1.0, 禁叠第二个加速 LoRA), "
                       "底模留 hybrid b25-49 (分段链路 FL2VA 接力, 勿切纯 ref2va)")
+            elif _rp_mode == "PIKA H3 Flex 8步+2步 双采 (Ref2VA 锁脸)":
+                # v14.366 (2026-11-10): 用户要求把 PIKA 做成**真实的**双采档。
+                # v14.310 的 6+2 实际是 6 步单采 —— 二采 SelfLift x2.0 每步 287s，
+                # 10s clip 587k tokens 是教程 5s clip 的 4x，太慢被关掉。
+                # v14.367 (2026-11-10): 按用户要求定为 **8+2**（一采 8 步 + 二采 2 步）。
+                # 原 8+4 的二采要 4 x 287s ≈ 19 分钟，单段近 30 分钟；2 步降到 ≈ 9.5 分钟，
+                # 单段约 18 分钟。denoise 保持 0.45：2 步只做轻度收尾，不改写构图。
+                # 一采 σ: Pika 官方只有 6 结 1000/750/500/250/100/40(+0)，8 步没有
+                # 官方表，故对 6 步轨迹做分段线性插值细分（见 _sigmas 的 pika_manual
+                # 分支）；**不换 simple 等间距** —— 那是蒸馏适配器没见过的调度。
+                # 底模仍留 hybrid b25-49（分段链路 FL2VA 末帧接力，勿切纯 ref2va）；
+                # LoRA 槽挂 pika_h3_flex_ref2va_v1_bf16 (strength 1.0, 禁叠第二个加速 LoRA)。
+                steps, refine_steps = 8, 2
+                tile_count, refine_denoise = 16, 0.45
+                refine_enable = True
+                refine_upscale_factor = 2.0
+                refine_align_to = 32
+                tiled_refine = True
+                tile_overlap = 128
+                _rp_no_temp_chunk = True
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                if str(sampler_name) != "lcm":
+                    sampler_name = "lcm"
+                    print("[H3 Extender] v14.367 PIKA H3 Flex 8+2(渲染管道): 一采强制 lcm (Pika 蒸馏契约)")
+                scheduler = "pika_manual"
+                # 二采不跟随 lcm: beta + 4 步 + denoise 0.45 是通用精修配方，
+                # lcm 在非 Pika 的 sigma 轨迹上收益不明，二采改 euler。
+                refine_sampler = "euler"
+                _pk8_pick = None
+                try:
+                    for _nm in _ff_get_upscaler_models():
+                        if "minimax_h3_latent_upscaler_3d_fp16" in str(_nm).lower():
+                            _pk8_pick = _nm
+                            break
+                    if _pk8_pick is None:
+                        for _nm in _ff_get_upscaler_models():
+                            if "latent_upscaler_3d" in str(_nm).lower():
+                                _pk8_pick = _nm
+                                break
+                except Exception:
+                    _pk8_pick = None
+                refine_upscaler_model = _pk8_pick or ""
+                print("[H3 Extender] 🎬 v14.367 PIKA H3 Flex 8步+2步 双采 (Ref2VA 锁脸): "
+                      f"一采 {steps} 步 lcm + Pika 6 步轨迹细分 σ (非 simple 等间距), "
+                      f"二采 {refine_steps} 步 euler + beta + denoise 0.45 + SelfLift x2.0 渐进放大 "
+                      f"({tile_count} 块 / overlap {tile_overlap}); "
+                      "LoRA 槽挂 pika_h3_flex_ref2va_v1_bf16.safetensors "
+                      "(strength 1.0, 禁叠第二个加速 LoRA), 底模留 hybrid b25-49")
             elif _rp_mode in ("TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)",
                               "TaoMate HD 8步+4步 渐进放大双采 (8+4 1080p直出)"):
                 # v14.323 (2026-11-06): 同分支挂两档 —— 沿用 (2+1) 的全部配方
@@ -12024,6 +13072,94 @@ class BSAIH3FilmFactory:
                       f"单采 {steps} 步 euler + HyperFlow 固定 sigma (flow shift 12 已烘焙), "
                       "CFG 1.0 单前向, 无负面提示词, 二采关闭; "
                       "权重须用 HyperFlow GGUF Loader 加载, 全量 H3 加速 LoRA 不兼容")
+            elif _rp_mode == "视频角色替换+动作迁移":
+                # v14.341 (2026-11-09): 视频角色替换 + 动作迁移 (Video Remix, 无 LoRA)
+                # 教程 BV1HBWJ6HEkg 的采样参数在此落地:
+                #   一采 8 步（默认；教程原口径 4 步，可把 widget steps 改回 4）—
+                #     v14.344 实测: 4 步 + denoise 0.62 时 sigmas 起点 σ≈0.96（近乎整帧重生），
+                #     4 步根本去不干净 → 脸糊、身份像"混合体"，故默认抬到 8 步；
+                #   二采 5 步（先把 latent 放大 1.5x 再补细节）；
+                #   euler + simple + shift 12/3（H3 默认双轨偏移）;
+                #   不加 swap/角色替换 LoRA —— 身份完全由 @图N 参考图与提示词纪律承担,
+                #   只允许用户自己挂加速 LoRA（加速 LoRA 不参与身份语义）。
+                # 与第 33 档的区别: 段间 motion context 续接**必须开着**(22 帧重叠锁定),
+                # 且掩码按模式: 人物替换=人物掩码锁背景 / 动作迁移=全画幅, 音频默认锁源原声。
+                # 一采步数: 默认 8; widget 里显式填过(4~16)就尊重用户 —— 想回到教程原
+                # 口径 4 步，把 steps 改成 4 即可（欠噪风险自负）。
+                try:
+                    _rm_steps_user = int(kwargs.get("steps", 8) or 8)
+                except Exception:
+                    _rm_steps_user = 8
+                steps = max(4, min(16, _rm_steps_user))
+                # v14.347: 打开 exact sigma —— "denoise 0.62" 从此就是真实起点 σ=0.62,
+                # 不再是 H3 平顶曲线造成的 σ≈0.93 整帧重生(那是出片糊的根因)。
+                _SIGMAS_EXACT = True
+                refine_enable = True
+                refine_steps = 5
+                # v14.347: 二采 denoise 0.50 → 0.30(且现在也是真实 0.30)。
+                # 旧值在伪 denoise 下实际≈0.9, 等于二采把一采画面整帧洗一遍 → 糊。
+                refine_denoise = 0.30
+                refine_upscale_factor = 1.5
+                refine_upscaler_model = "(bilinear interpolation, no model)"
+                refine_audio_denoise = 0.0   # 二采音频行锁定(不重绘), 口型/原声不变
+                tiled_refine = False
+                shift_video, shift_audio = 12.0, 3.0
+                # 段间重叠 22 帧锁定续接（教程固定 22 帧；context 档里 22 即该档位）
+                context_length = "22"
+                one_shot_enabled = False
+                one_shot_single_pass = False
+                # denoise: 用户显式改过(≠1.0)就夹在 [0.35, 0.95]; 没改过用 0.62。
+                # 低于 0.5 换不动身份, 高于 0.8 会漂掉源片动作轨迹。
+                try:
+                    _rm_dn_user = float(kwargs.get("denoise", 1.0) or 1.0)
+                except Exception:
+                    _rm_dn_user = 1.0
+                denoise = (min(0.95, max(0.35, _rm_dn_user))
+                           if abs(_rm_dn_user - 1.0) > 1e-6 else 0.62)
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print("[H3 Remix] 采样器强制 euler（源片动作保留的半重绘契约）")
+                scheduler = "simple"
+                print("[H3 Remix] 🎭 视频角色替换+动作迁移档 (Video Remix, no-LoRA): "
+                      f"一采 {steps} 步 + 二采 {refine_steps} 步(放大 1.5x, denoise 0.30), "
+                      f"euler+simple shift 12/3, 半重绘 denoise {denoise:.2f}(v14.347 起为真实 σ 起点); "
+                      "段间 22 帧重叠锁定续接; 人物替换默认用人物掩码锁住源背景"
+                      "（提示词写'新场景'才切全画幅做动作迁移, 或用 BSAI_H3_REMIX_KEEP_BG 强制）；"
+                      "资产库 @视频N = 源视频(动作/机位/原声), @图N = 替换成的角色; "
+                      "本档不挂 swap/角色替换 LoRA（只可挂加速 LoRA）")
+            elif _rp_mode in _VIGGLE_RP_LABELS:
+                # v14.345 (2026-11-09): 第 36 档 —— 官方 Viggle Remake 两个 LoRA
+                # (swap / edit) 的 6 步蒸馏契约。教程口径 (BV19xWx69Eu6):
+                #   6 步采样, 固定 timesteps 曲线(swap 与 edit 两组 knots, 不是 simple),
+                #   cfg 1.0 / euler, 无二采, denoise 1.0(全噪重绘);
+                #   源片整段作 cond video, 源原声锁 clean, 参考图 @图N 决定替换目标;
+                #   LoRA 只认 FL2VA 基座, 且必须挂在 bypass 槽。
+                steps = 6
+                refine_enable = False
+                refine_steps = 0
+                refine_denoise = 0.0
+                refine_upscale_factor = 1.0
+                refine_audio_denoise = 0.0
+                tiled_refine = False
+                denoise = 1.0
+                shift_video, shift_audio = 12.0, 3.0
+                selflift_tst_enable = False
+                omni_8step_mode = False
+                context_length = "0"
+                one_shot_enabled = False
+                one_shot_single_pass = True
+                _vg_task = _viggle_task()
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                # v14.345: 6 步是官方蒸馏契约（sigma knots 长度即步数），widget 里填别的值
+                # 不参与采样；这里同步成 6 让日志/存盘与官方口径一致，避免误读。
+                steps = 6
+                scheduler = ("viggle_remake_edit_manual" if _vg_task == "edit"
+                             else "viggle_remake_swap_manual")
+                print("[H3 Viggle] 🎬 Viggle Remake 视频改写档: "
+                      f"任务={_vg_task}, 6 步 euler + 官方固定 sigma 曲线, cfg 1.0 单采, "
+                      "源片整段作 cond video + 源原声锁 clean + 目标 latent 全噪; "
+                      "LoRA 必须挂 viggle_remake_swap/edit（只认 FL2VA 基座, 走 bypass 槽）")
             else:
                 _rp_handled = False
             if _rp_handled:
@@ -12454,10 +13590,9 @@ class BSAIH3FilmFactory:
                         _os_tpl_name = str(_os_tpl.get("name") or "")
                     else:
                         _os_tpl_prompt = (
-                            "The camera keeps following the subject with no cuts and no "
-                            "transitions, one continuous take; the subject performs its action "
-                            "in one uninterrupted flow, space and time stay continuous, and the "
-                            "music mood tracks the visual rhythm."
+                            "镜头持续跟随主体运动，不切场、不转场、一镜到底，"
+                            "主体在画面中连续完成动作，空间与时间连续，"
+                            "音乐情绪与画面节奏同步。"
                         )
                     # 每段时长: 前 target-1 段 = 目标时长, 最后一段 = 歌曲剩余
                     _os_seg_dur = [_os_dur] * _os_target
@@ -12705,6 +13840,13 @@ class BSAIH3FilmFactory:
                 clip_ref_plans = []
                 for _ci, _clip in enumerate(clips):
                     _clip_nums = _collect_pic_nums(_clip.get("prompt", ""))
+                    # v14.351: Viggle 档最常踩的坑 —— 用户把 @图1 写在**全局提示词**里，
+                    # strict per-clip 隔离把它排除，日志出现 "0 assets / no ref_blocks"，
+                    # 参考图根本没进 conditioning（换脸不彻底的真凶之一）。
+                    if (not _clip_nums) and _gp_nums and _rp_mode in _VIGGLE_RP_LABELS:
+                        _clip_nums = list(_gp_nums)
+                        print(f"[H3 Extender] clip[{_ci}] v14.351 分镜无 @图N，"
+                              f"继承全局参考图 {_clip_nums}", flush=True)
                     _ordered = _clip_nums[:MAX_IMAGE_REFS]
                     _o2n = {_old: _idx + 1 for _idx, _old in enumerate(_ordered)}
                     _slot_refs = [None] * MAX_IMAGE_REFS
@@ -12863,9 +14005,6 @@ class BSAIH3FilmFactory:
         # 接缝、无分块噪声, 960x544 一采约 x1.39 -> latent 46x82 = 1312x736。
         # 预算只与倍率平方相关(T·H_lat·W_lat), 这里按最长 clip 的 latent T 估算。
         _os2k_decl_px = None
-        # v14.346: 本次二采是否"没有任何几何放大"(倍率被预算压成 x1.0x 的假倍率)。
-        # 为 True 时二采整段跳过 —— 详见下方预算分支里的说明。
-        _os2k_skip_refine = False
         if one_shot_dual_2k:
             try:
                 # v14.278: 350k 预算把二采推到 1312x736 / 328,164 tokens(健康上限 130k 的
@@ -12895,34 +14034,6 @@ class BSAIH3FilmFactory:
                       f"({_os2k_t}x{_os2k_nh}x{_os2k_nw}={_os2k_t * _os2k_nh * _os2k_nw:,} tokens <= 预算 "
                       f"{_os2k_budget:,}), 整段一次采样(不分块, 无接缝/无碎纹)")
                 _os2k_decl_px = (int(_os2k_nw * 16), int(_os2k_nh * 16))
-                # v14.346 (2026-11-10 fix): 假倍率必须视为「没有二采」。
-                # 预算 180,000 在 12s 一镜到底(87 latent 帧)下只允许 x1.02, 而
-                # align=40px 取整后 latent 仍是 34x60 —— 与一采完全相同。这条"二采"
-                # 于是不含任何放大, 只是把一采 latent 重新加噪到 0.35 再用 **4 步**
-                # 去噪一遍。两个后果都是掉画质:
-                #   ① 底模是 8 步蒸馏(turbo_8step), 4 步是离轨采样, 出来的是
-                #      单元级(16px)花纹而不是细节;
-                #   ② 本插件 tooltip 已写明 denoise<=0.45 的重绘"基本只是把画面抹平"
-                #      —— 一采 8 步的锐度被这条 4 步重绘抹掉。
-                # 实机产物 h3_clip_250_1_1794296265.mp4(960x544) 全片 16px 网格,
-                # 3.79-5.46s Laplacian 方差 0.00057~0.00066(中位 0.00088, 掉 35-50%),
-                # 就是这条无效二采留下的; 它还白烧 6.4 分钟/段(47.7->200.1s/步)。
-                # 处理: 几何未变就不跑二采, 直接输出一采 8 步画面; 并把原因播报出去,
-                # 不再让"2K双采"这个名字骗人(实际输出=一采尺寸)。
-                _os2k_base_hw = (max(1, int(resolved_height) // 16),
-                                 max(1, int(resolved_width) // 16))
-                if (int(_os2k_nh), int(_os2k_nw)) == _os2k_base_hw:
-                    _os2k_skip_refine = True
-                    print(f"[H3 Extender] ⚠️ v14.346 一镜到底·2K双采: 预算把二采倍率压到 "
-                          f"x{float(refine_upscale_factor):.2f}, 按 align={int(refine_align_to)}px 取整后几何与一采"
-                          f"完全相同(latent {_os2k_base_hw[1]}x{_os2k_base_hw[0]} = "
-                          f"{resolved_width}x{resolved_height}) —— 本次二采没有任何放大, 只会在同分辨率上"
-                          f"用 {int(refine_steps)} 步 denoise {float(refine_denoise):.2f} 重绘一遍(抹平一采锐度), "
-                          f"已整段跳过二采, 输出 = 一采 {int(steps)} 步画面")
-                    print(f"[H3 Extender] ℹ️ v14.346 要真正的 2K: ①开 upscale_final(realesr 像素超分, "
-                          f"当前工作流是关的); ②或把每段时长压到 8s 以内(87->57 latent 帧, tokens 177,480->"
-                          f"116,340)后再开 latent 放大; ③12s 段 + latent x2.0 = 709,920 tokens, 24GB 卡必换页"
-                          f"且满屏碎纹(CHANGELOG v14.276/v14.278 已实测)")
             except Exception as _os2k_err:
                 print(f"[H3 Extender] v14.276 一镜到底·2K双采: 倍率换算失败, 回退 x1.5 ({_os2k_err})")
                 refine_upscale_factor = 1.5
@@ -13146,8 +14257,11 @@ class BSAIH3FilmFactory:
         # 实测教训：1 个 15s 分镜 + 225s lip_audio → LipSync 先把分镜扩成
         # 15.08s + 209.77s 两段，替换档再建计划（时间轴对不上，找不到源画面），
         # 209.77s 单段 = 5088 帧 → H3 一采 OOM。
-        if _rp_mode == "视频替换 (V2V 人物替换)" and (lip_audio is not None or _lip_voice is not None):
-            print("[H3 Recast] ⚠️ 本档锁定源视频原声，已剔除 "
+        if ((_rp_mode == "视频替换 (V2V 人物替换)"
+             or (_rp_mode == "视频角色替换+动作迁移" and _remix_lock_audio()))
+                and (lip_audio is not None or _lip_voice is not None)):
+            print(f"[{'H3 Remix' if _rp_mode != '视频替换 (V2V 人物替换)' else 'H3 Recast'}] "
+                  "⚠️ 本档锁定源视频原声，已剔除 "
                   f"{'lip_audio' if lip_audio is not None else ''}"
                   f"{'、' if lip_audio is not None and _lip_voice is not None else ''}"
                   f"{'lip_voice' if _lip_voice is not None else ''} 对口型输入 —— "
@@ -13221,7 +14335,7 @@ class BSAIH3FilmFactory:
                     print(f"[H3 LipSync] v14.252 音频驱动 clip 切分已生效 (全管道通用, 按音频实际时长切分, 不拉长不缩短)")
         else:
             _lip_voice_dummy = None
-        _tts_model = kwargs.get("tts_model", kwargs.get("tts_model_TTS模型"))
+        _tts_model = kwargs.get("tts_model_TTS模型")
         # v14.280: 自动多人对话声音克隆 —— 当 tts_model + 资产库音频参考都在，
         # 且没有外部 lip_audio/lip_voice 驱动时，从分镜脚本提取对话台词，
         # 自动调用 BSAIDialogueVoiceClone 合成完整多说话人对话音频，
@@ -13363,22 +14477,54 @@ class BSAIH3FilmFactory:
                       f"请取消这些 CLIP 的 ✅ 校验标记后重渲，否则口型与歌曲不匹配。")
 
         # ── v14.335 视频人物替换 (Video Recast): 建立"源视频 → clipN"替换计划 ──
+        # ── v14.341 视频角色替换+动作迁移 (Video Remix): 同一条链路，换 226/22 分段器 ──
         # 必须放在 loop_end = len(clips) 之前：替换档会自动补齐/裁剪 CLIP 数量
-        # (45s 源视频 → 3 × 15s)，loop_end 才能在后面的循环里覆盖到补齐的段。
+        # (45s 源视频 → 3 × 15s / remix → 每段净 204 帧)，loop_end 才能在后面的
+        # 循环里覆盖到补齐的段。
         _recast_plan = None
-        if _rp_mode == "视频替换 (V2V 人物替换)":
+        _remix_mode = (_rp_mode == "视频角色替换+动作迁移")
+        _viggle_mode = (_rp_mode in _VIGGLE_RP_LABELS)
+        _rp_tag = ("H3 Viggle" if _viggle_mode
+                   else ("H3 Remix" if _remix_mode else "H3 Recast"))
+        if _viggle_mode:
+            # v14.355: 面板开关状态明确打一行 —— 关的时候出片后一律不跑换脸，
+            # 免得误以为"关了还在跑 12 分钟 CPU"。
+            print(f"[H3 Viggle] v14.355 换脸开关: "
+                  f"{'开 (model=' + _viggle_faceswap_model + ')' if _viggle_faceswap_on else '关（面板未勾选，出片后不换脸）'}",
+                  flush=True)
+        if (_rp_mode == "视频替换 (V2V 人物替换)" or _remix_mode or _viggle_mode):
             try:
-                _recast_plan = _recast_build_plan(clips, asset_library, ffmpeg=_find_ffmpeg())
+                if _viggle_mode:
+                    # v14.349: 段间 motion context 在 Viggle 档必崩 —— 上一段 context
+                    # 长度与这一段 17n+5 网格对不上时报 "previous latent/context length
+                    # phase mismatch"，第 2 段直接死。这里强制所有 CLIP 关上下文，
+                    # 与 _viggle_build_plan 的 overlap=0 双保险。
+                    try:
+                        _vg_ctx_reset = sum(1 for _c in clips if _c.get("context_enabled"))
+                        for _c in clips:
+                            _c["context_enabled"] = False
+                        print(f"[H3 Extender] v14.349 Viggle 档硬跳 motion context: "
+                              f"{_vg_ctx_reset} 个 CLIP 已关闭上下文续接", flush=True)
+                    except Exception as _vg_ctx_err:
+                        print(f"[H3 Extender] v14.349 关闭 context 失败(忽略): {_vg_ctx_err}")
+                    _recast_plan = _viggle_build_plan(
+                        clips, asset_library, ffmpeg=_find_ffmpeg())
+                else:
+                    _recast_plan = (
+                        _remix_build_plan(clips, asset_library, ffmpeg=_find_ffmpeg())
+                        if _remix_mode
+                        else _recast_build_plan(clips, asset_library, ffmpeg=_find_ffmpeg())
+                    )
             except Exception as _rc_plan_err:
                 raise RuntimeError(
-                    "[H3 Recast] 替换计划构建异常，本档中止（不会退回普通渲染）："
+                    f"[{_rp_tag}] 替换计划构建异常，本档中止（不会退回普通渲染）："
                     f"{type(_rc_plan_err).__name__}: {_rc_plan_err}") from _rc_plan_err
             # v14.336: 计划为空 = 没有 @视频N / 资产库里没有该视频 → 本档直接中止。
             # 以前这里是"print 后回退普通渲染"，实测会带着 lip_audio 把分镜拉成
             # 200s 级长段再 OOM（渲染几十分钟才炸），静默降级比报错代价大得多。
             if _recast_plan is None:
                 raise RuntimeError(
-                    "[H3 Recast] 本档（视频替换 V2V 人物替换）无法建立替换计划：\n"
+                    f"[{_rp_tag}] 本档（{_rp_mode}）无法建立替换计划：\n"
                     "  1) 分镜提示词里必须出现 @视频N（例：@图1 替换 @视频1 里的主持人）；\n"
                     "  2) 资产库 Videos 位要上传对应的源视频（文件在 input/bsai_assets/videos/）；\n"
                     "  3) 参考图放资产库 Images 位，用 @图N 指定「谁换成谁」。\n"
@@ -13389,14 +14535,14 @@ class BSAIH3FilmFactory:
                 if clip_ref_plans is not None:
                     while len(clip_ref_plans) < len(clips):
                         clip_ref_plans.append(dict(clip_ref_plans[-1]))
-                    print(f"[H3 Recast] clip_ref_plans 同步扩展: {len(clips)} 条")
+                    print(f"[{_rp_tag}] clip_ref_plans 同步扩展: {len(clips)} 条")
                 # 替换档的画面与口型都由源视频提供：lip_audio 会另灌一套音频行，
                 # 与"锁定源原声"互相冲突，这里直接忽略并告知。
                 if lip_audio_segments is not None:
-                    print("[H3 Recast] ⚠️ 已忽略 lip_audio 对口型输入 —— 替换档用源视频原声"
+                    print(f"[{_rp_tag}] ⚠️ 已忽略 lip_audio 对口型输入 —— 本档用源视频原声"
                           "直接锁进 AV latent，口型随源片逐帧对齐")
                     lip_audio_segments = None
-                print(f"[H3 Recast] 替换计划就绪: {len(_recast_plan['segments'])} 个 CLIP 将"
+                print(f"[{_rp_tag}] 替换计划就绪: {len(_recast_plan['segments'])} 个 CLIP 将"
                       f"逐段替换 (源 {_recast_plan['duration']:.2f}s)，"
                       f"自动补齐 {_recast_plan['auto_added']} 段，"
                       f"跳过 {_recast_plan['disabled']} 段无源画面的分镜")
@@ -13529,6 +14675,8 @@ class BSAIH3FilmFactory:
 
                 want_per_clip = str(output_mode) in ("per_clip", "both")
                 want_merged = True  # merge_output always produces merged video
+                # v14.340: FVSR 逐分镜修复结果复用表（si -> 修复后 mp4），避免 per-clip 与 merged 重复跑模型
+                _fvrs_cache = {}
 
                 if want_per_clip:
                     for si, seg in enumerate(segments_out):
@@ -13544,6 +14692,15 @@ class BSAIH3FilmFactory:
                                                        upscale_model, upscale_fp16,
                                                        upscale_tile, upscale_batch,
                                                        upscale_face_restore)
+                            # v14.340: 音频引导人脸/嘴型修复（TaoMate-FVSR）
+                            if face_fvrs_enabled:
+                                _src_fv = _ff_fvrs_restore_clip(clip_path, float(FPS))
+                                _fvrs_cache[si] = str(_src_fv)
+                                if _src_fv and str(_src_fv) != str(clip_path) and os.path.isfile(str(_src_fv)):
+                                    try:
+                                        shutil.copy2(_src_fv, clip_path)
+                                    except Exception as _e_fv:
+                                        print(f"[H3 Extender] FVSR per-clip 回写失败: {_e_fv}")
                             item = _comfy_media_item(clip_path, float(FPS), "output")
                             output_ui_videos.append(item)
                             print(f"[H3 Extender] saved per-clip video: {clip_path}")
@@ -13561,6 +14718,16 @@ class BSAIH3FilmFactory:
                         cp = temp_root / f"_mergeclip_{owner}_{si}_{uuid.uuid4().hex[:8]}.mp4"
                         try:
                             _copy_blob_to_file(data_path, blob, cp)
+                            # v14.340: 复用 per-clip 已修复结果；否则对临时合并片段现场修复
+                            if face_fvrs_enabled:
+                                _src_fv = _fvrs_cache.get(si)
+                                if not (_src_fv and os.path.isfile(str(_src_fv))):
+                                    _src_fv = _ff_fvrs_restore_clip(cp, float(FPS))
+                                if _src_fv and str(_src_fv) != str(cp) and os.path.isfile(str(_src_fv)):
+                                    try:
+                                        shutil.copy2(_src_fv, cp)
+                                    except Exception as _e_fv:
+                                        print(f"[H3 Extender] FVSR merge-clip 复用失败: {_e_fv}")
                             clip_paths.append(cp)
                         except Exception:
                             pass
@@ -13826,6 +14993,35 @@ class BSAIH3FilmFactory:
 
         # Build the accelerated sampling model once for the whole pass.
         sampling_model = model
+        # v14.342 诊断: 采样前打印当前 ModelPatcher 上已挂载的 LoRA/补丁数量,
+        # 用于核对角色替换 LoRA 是否真的到达采样模型。只统计、不改动模型。
+        if True:
+            try:
+                _pm = getattr(sampling_model, "patches", None)
+                if _pm is None:
+                    print("[H3 Extender][DEBUG-PATCHES] model 无 patches 属性 (非 ModelPatcher?)")
+                else:
+                    _mods = len(_pm)
+                    _entries = 0
+                    _lora = 0
+                    _strengths = []
+                    _samp = []
+                    for _k, _v in _pm.items():
+                        _entries += len(_v)
+                        for _e in _v:
+                            _ad = _e[1] if isinstance(_e, tuple) and len(_e) > 1 else None
+                            _cls = type(_ad).__name__
+                            if "lora" in _cls.lower():
+                                _lora += 1
+                            if len(_strengths) < 8 and isinstance(_e, tuple) and len(_e) > 2:
+                                _strengths.append((round(float(_e[2]), 3), _cls))
+                        if len(_samp) < 6:
+                            _samp.append(str(_k))
+                    print(f"[H3 Extender][DEBUG-PATCHES] patched_modules={_mods} "
+                          f"adapter_entries={_entries} lora_adapters={_lora} "
+                          f"sample_keys={_samp} sample_strengths={_strengths}")
+            except Exception as _ex:
+                print(f"[H3 Extender][DEBUG-PATCHES] 统计失败: {type(_ex).__name__}: {_ex}")
         # v1.44: 恢复 ff_chunks=2, attn_head_chunks=4 (对齐 Sol-H3 双采极速版).
         # v1.42 降到 chunks=1/head_chunks=2 是因为 unload_all_models() 导致
         # full lowvram 重载, CPU↔GPU 搬运越多 peak 越高. v1.43 已移除
@@ -13991,8 +15187,7 @@ class BSAIH3FilmFactory:
         # 场景名错位(重渲 clip_select 时尤其明显)。
         _os_scene_catalog = _one_shot_scene_catalog(global_prompt) if one_shot_enabled else []
         _os_scene_names = []
-        # v14.341: 每段**自己**的行程(起行空间 → 过渡物 → 终止空间)。换场判定与
-        # 规则注入都用本段的 start/end, 不再拿邻段的起点拼一个错位的换场。
+        # v14.363: 同时预扫每一段自己的行程(起行空间 → 过渡物 → 终止空间)
         _os_scene_routes = []
         if one_shot_enabled:
             for _osc_c in clips:
@@ -14026,10 +15221,10 @@ class BSAIH3FilmFactory:
                     )
         if one_shot_enabled and _os_scene_catalog:
             print(f"[H3 Extender] v14.294 一镜到底: 场景清单 = {_os_scene_catalog}")
-        if one_shot_enabled and _os_scene_routes:
+        if one_shot_enabled:
             for _osr_i, _osr in enumerate(_os_scene_routes):
                 if _osr.get("start") or _osr.get("end"):
-                    print(f"[H3 Extender] v14.341 一镜到底 clip[{_osr_i + 1}]: 行程 = "
+                    print(f"[H3 Extender] v14.363 一镜到底 clip[{_osr_i + 1}]: 行程 = "
                           f"{_osr.get('start')} → ({_osr.get('transit') or '无过渡物'}) → "
                           f"{_osr.get('end')}"
                           + ("（段中换场）" if _osr.get("cross") else "（单处空间）"))
@@ -14114,14 +15309,9 @@ class BSAIH3FilmFactory:
                         if _os_steps != 8 or int(refine_steps) != 4:
                             print(f"[H3 Extender] ⚠️ v14.272 一镜到底·2K双采: 当前一采 {_os_steps} 步 / 二采 {int(refine_steps)} 步, "
                                   f"该档配方为 8+4 (脚本已按配方改写, 若日志仍如此请反馈)")
-                        if _os2k_skip_refine:
-                            print(f"[H3 Extender] ⚠️ v14.346 一镜到底·2K双采: 一采 {int(steps)} 步, "
-                                  f"二采已跳过(倍率=假倍率 x{float(refine_upscale_factor):.2f}, 几何未变), "
-                                  f"输出 {resolved_width}x{resolved_height}")
-                        else:
-                            print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采: 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
-                                  f"(denoise {float(refine_denoise):.2f}), 二采倍率按单次采样 token 预算(<=350k)取, "
-                                  f"整段一次采样不分块(v14.276 干净优先)")
+                        print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采: 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
+                              f"(denoise {float(refine_denoise):.2f}), 二采倍率按单次采样 token 预算(<=350k)取, "
+                              f"整段一次采样不分块(v14.276 干净优先)")
                         if _os_sched != "beta":
                             print(f"[H3 Extender] ℹ️ v14.272 一镜到底·2K双采: 当前调度器={_os_sched}, "
                                   f"参考工作流标准为 beta(仅提示, 不强制)")
@@ -14279,20 +15469,6 @@ class BSAIH3FilmFactory:
                                   f"正文景别词已统一改写为全片声明值 '{_os_locked_size}'")
                     except Exception:
                         pass
-                # v14.341: 正文时间码归一 —— 全片绝对时间码(0:12–0:24) → 本段相对(0:00–0:12)。
-                # 只在"时间码明显超出本段时长"时触发, 见函数 docstring。
-                try:
-                    _os_tc_offset = 0.0
-                    for _osc_p in clips[:i]:
-                        _os_tc_offset += float(_osc_p.get("duration") or 0)
-                    _os_tc_norm = _one_shot_normalize_timecodes(
-                        _clip_prompt_for_cond, _os_tc_offset, float(cfg["duration"]))
-                    if _os_tc_norm != _clip_prompt_for_cond:
-                        print(f"[H3 Extender] v14.341 一镜到底 clip[{i+1}]: 正文时间码已按本段"
-                              f"起点(全片 {_os_tc_offset:.2f}s)归一为段内相对时间码")
-                        _clip_prompt_for_cond = _os_tc_norm
-                except Exception:
-                    pass
             # Determine ref_audio for this clip.
             # lip_audio 模式：lip_audio_segment 已注入 AV latent 锁定口型，
             # 不需要再作为 ref_block。全局 ref_audio（音色参考）保留为 ref_block。
@@ -14325,6 +15501,38 @@ class BSAIH3FilmFactory:
                       f"{len(ref_blocks)} ref_blocks, active_picture_slots={active_picture_slots}")
 
             frame_count = _duration_to_frames(cfg["duration"])
+            # v14.341 视频角色替换+动作迁移: 每段固定 226 帧（5+17k 网格，教程默认档位），
+            # 段头 22 帧是上一段段尾（重叠锁定续接），解码按 trim_frames 裁掉 →
+            # 净推进 204 帧/段。这里必须显式覆盖上面的时长推导与 v14.177 的
+            # "目标+context" 推导：22 帧重叠不是 17 的倍数，两者相加后再对齐会落到
+            # 243/260 帧，成片每段会比计划长出 4~40 帧，接缝错位。
+            _remix_seg = (
+                _recast_plan["segments"].get(i)
+                if (_recast_plan is not None and _recast_plan.get("pipeline") == "remix")
+                else None
+            )
+            # v14.345: Viggle Remake 档 —— 每段固定 226 帧、0 重叠，源片逐段作 cond video
+            _viggle_seg = (
+                _recast_plan["segments"].get(i)
+                if (_recast_plan is not None and _recast_plan.get("pipeline") == "viggle")
+                else None
+            )
+            if _viggle_seg is not None:
+                _vg_frames = int(
+                    (_recast_plan.get("frames_by_clip") or {}).get(i)
+                    or _VIGGLE_SEG_FRAMES)
+                print(f"[H3 Viggle] clip[{i+1}] 帧数锁定 {frame_count} -> {_vg_frames} 帧 "
+                      f"(17n+5 网格，0 重叠，源片整段作 cond video)")
+                frame_count = _vg_frames
+            if _remix_seg is not None:
+                _remix_frames = int(
+                    (_recast_plan.get("frames_by_clip") or {}).get(i)
+                    or _recast_plan.get("seg_frames") or _REMIX_SEG_FRAMES)
+                _remix_overlap = int(_recast_plan.get("overlap_frames") or _REMIX_OVERLAP_FRAMES)
+                print(f"[H3 Remix] clip[{i+1}] 帧数锁定 {frame_count} -> {_remix_frames} 帧 "
+                      f"(含段头 {_remix_overlap} 帧重叠，净输出 "
+                      f"{_remix_frames - (_remix_overlap if i > 0 else 0)} 帧)")
+                frame_count = _remix_frames
             # v14.177 (fix): 段间衔接断裂根治 —— 渲染帧数必须包含 motion context 帧。
             # 机制: 本段将应用 motion context 时 (i>0 且 context_enabled 且前段有缓存),
             # 模型输出开头的 context 帧是上一段尾画面的延续 (join 解码时按 trim_frames
@@ -14432,15 +15640,13 @@ class BSAIH3FilmFactory:
                     print(f"[H3 Extender] ⚠️ v14.286 一镜到底 clip[{i+1}]: 本段正文出现"
                           f"景别词'{_os_body_size}', 与全片声明景别'{_os_locked_size}'不一致 —— "
                           f"正文景别词已统一改写为声明值")
-                # v14.301/v14.341: 场景判定提前 —— [段首承接] 与 [One Continuous Take]
-                # 都要按"同场/换场"分流, 所以先算出 _os_space_kind。
-                #
-                # v14.341 (2026-11-09): 改用**本段自己的行程**判定, 接缝对比的是
-                # **上一段的终点场景**。旧代码取 _os_scene_names[i-1](上一段的起点) ->
-                # 链式路线(S_k→S_{k+1})下 "本段起点 vs 上段起点" 永远不等, 每段都被判成
-                # 换场, 描述的却是**上一段**的换场, 整体错位一段: 段1 拿不到空间规则、
-                # 十二秒走不出自己的空间; 段2 收到段1 的换场(S1→S2)并在段首补做,
-                # 实测就是 2.083s 那一帧硬切。
+                # v14.301: 场景判定提前 —— [段首承接] 与 [One Continuous Take] 都要
+                # 按"同场/换场"分流, 所以先算出 _os_space_kind。
+                # v14.363: 场景判定改用「本段自己的行程」+ 接缝对比上一段**终点**。
+                # 旧代码对比 _os_scene_names[i-1](上一段起点) -> 链式路线(Sk→S{k+1})下
+                # "本段起点 vs 上段起点"永远不等, 每段都被判成换场, 描述的却是**上一段**
+                # 的换场, 整体错位一段: 段1 拿不到空间规则走不出自己的空间; 段2 收到段1
+                # 的换场并在段首补做 —— 实测就是 2.083s 那一帧硬切。
                 _os_route = (_os_scene_routes[i] if i < len(_os_scene_routes) else None) or {}
                 _os_route_end = _os_route.get("end")
                 _os_route_transit = _os_route.get("transit")
@@ -14485,8 +15691,7 @@ class BSAIH3FilmFactory:
                 # (H3 在 CFG=1.0 下没有负向分支); 不写死具体景别数值(景别由脚本决定);
                 # 允许场景随主体行走自然变化(段4 堤道→公路路口), 因此不写"同一片空间"。
                 if _os_space_kind == "空间过渡" and _os_transit_site == "head":
-                    # v14.301/v14.332: 只有**接缝本身**换场(上段末场景 != 本段起行场景)时,
-                    # 才把换场压进段首重叠区 —— 此时段首本来就该是新空间。
+                    # v14.301: 只有**接缝本身**换场时才把换场压进段首重叠区。
                     _os_rule += _OS_SPACE_TRANSIT_HEAD_RULE
                 elif i == 0:
                     # v14.341: 段1 没有"上一段末帧", 旧的"直接接着上一段末帧往下拍"
@@ -14497,10 +15702,6 @@ class BSAIH3FilmFactory:
                         "连续延续，整段只有同一次行走。"
                     )
                 else:
-                    # v14.341: 接缝连续(上段末场景 == 本段起行场景)时, 段首**必须**接着
-                    # 上一段末帧, 换场留给段中那个过渡物 —— 旧代码在这里被
-                    # "空间过渡" 分支顶掉, 于是段首被钉成"已经跨过门洞", 与 motion
-                    # context 关键帧冲突, 模型只能先拖旧画面再一帧硬切。
                     _os_rule += (
                         "\n[段首承接] 本段的第一帧直接接着上一段末帧那一帧往下拍："
                         "同一时刻、同一段连续行走，主体在画幅中的位置与大小接着上一段末尾"
@@ -14518,11 +15719,8 @@ class BSAIH3FilmFactory:
                 if _os_space_kind == "同场景延续":
                     _os_rule += _OS_SAME_SPACE_RULE
                 elif _os_space_kind == "空间过渡" and _os_transit_site == "mid":
-                    # v14.344: 段中换场 —— 画幅以主体为锚(人与画幅零相对位移, 倒行无来源),
-                    # 前进感由景物迎面流过承担, 由过渡物的柱面整块盖住镜头那两三拍完成置换,
-                    # 主体在那两三拍里被柱面挡住("主体可见"与"整幅被遮"的矛盾在这里被拆开);
-                    # 起幅归属与换场时间窗(第三到第六秒)钉死, 防止 v14.343 那种"整段塌缩到
-                    # 一处空间"的失败(11:12 clip1 整段只在帕特农里走, 故宫一帧没出现)。
+                    # v14.344/347: 段中换场 —— 换场落在段中跨过渡物处(第三到第六秒),
+                    # 由过渡物整块遮挡完成置换; 起幅归属与"换场后只剩 end"钉死。
                     _os_rule += _one_shot_transit_mid_rule(
                         _os_scene_name, _os_route_end, _os_route_transit)
                     _os_rule += _one_shot_scene_anchor_mid_rule(
@@ -14532,19 +15730,18 @@ class BSAIH3FilmFactory:
                     _os_rule += _OS_SCENE_ANCHOR_RULE
                 if _os_space_kind:
                     if _os_transit_site == "mid":
-                        print(f"[H3 Extender] v14.347 一镜到底 clip[{i+1}]: 空间规则 = 空间过渡 "
-                              f"({_os_scene_name} → {_os_route_end}), 换场落在段中 "
-                              f"({_os_route_transit or '过渡物'}) 第三到第六秒之间, "
-                              f"由画幅以主体为锚、柱身迎面涨满画幅整块盖住镜头完成"
-                              f"(起幅归属={_os_scene_name})")
+                        print(f"[H3 Extender] v14.363 一镜到底 clip[{i+1}]: 空间规则 = "
+                              f"空间过渡 ({_os_scene_name} → {_os_route_end}), "
+                              f"换场落在段中({_os_route_transit or '过渡物'})"
+                              f"第三到第六秒之间, 由柱面整块盖住镜头完成置换")
                     else:
                         print(f"[H3 Extender] v14.301 一镜到底 clip[{i+1}]: 空间规则 = "
                               f"{_os_space_kind}"
                               + (f" ({_os_prev_scene} → {_os_scene_name})"
                                  if _os_prev_scene else ""))
-                        if _os_space_kind == "空间过渡":
-                            print("[H3 Extender] v14.332 换场段: 接缝换场(上段末场景 != "
-                                  "本段起行场景), 换场落在段首重叠区(门墙遮挡置换)")
+                    if _os_space_kind == "空间过渡" and _os_transit_site != "mid":
+                        print("[H3 Extender] v14.332 换场段: 换场已压入段首一瞬"
+                              "(门墙遮挡置换), 段中不再出现第二处空间")
                 # v14.292 (2026-11-03): 光影与构图分离 —— 光影描述只改光, 不改构图。
                 #
                 # 实测: clip2 f160 由"中近景(胸像)"硬切到"大远景剪影", 切点正好落在脚本第3拍
@@ -14732,12 +15929,24 @@ class BSAIH3FilmFactory:
                     print(f"[H3 Extender] v14.162 等待异步编码完成失败(可忽略): {_pe_err}")
 
             # v14.335 视频人物替换: 本段对应的源视频片段（无则按普通分镜渲染）
+            # v14.341: remix 档同一套注入，但走 _remix_prompt 的"角色替换+动作迁移"纪律，
+            # 并且掩码交给调用方关掉（见下方 subject_mask=False）。
             _recast_seg = (_recast_plan["segments"].get(i)
                            if (_recast_plan is not None) else None)
+            _remix_this = bool(_recast_seg is not None and _remix_seg is not None)
+            _viggle_this = bool(_recast_seg is not None and _viggle_seg is not None)
+            globals()["_VIGGLE_ACTIVE"] = bool(_viggle_this)
+            if not _viggle_this:
+                globals()["_VIGGLE_RELEASE_POS"] = None
+            _rp_clip_tag = ("H3 Viggle" if _viggle_this
+                            else ("H3 Remix" if _remix_this else "H3 Recast"))
             if _recast_seg is not None:
                 # 纪律块统一注入（保留用户自己写的"谁换成谁"），并摘掉 <Video N>
                 # —— 源视频已作为 V2V latent 进入采样，再当参考视频会双重注入。
-                effective_prompt = _recast_prompt(effective_prompt)
+                effective_prompt = (
+                    (_viggle_prompt if _viggle_this
+                     else (_remix_prompt if _remix_this else _recast_prompt))
+                    (effective_prompt))
 
             positive, latent = _make_ref2va_conditioning(
                 clip,
@@ -14765,6 +15974,15 @@ class BSAIH3FilmFactory:
                         resolved_height,
                         frame_count,
                         ffmpeg=_find_ffmpeg(),
+                        # v14.342/345: 人物替换锁背景(人物掩码)，只有"动作迁移"（提示词写新场景）
+                        # 才全画幅重绘；判定只看**用户自己的分镜正文**（纪律块正文里带
+                        # "全新场景"字样，用 effective_prompt 判定会一律误判成全画幅）。
+                        # v14.345: 用循环里的原始分镜提示词 `_clip_prompt_for_cond` ——
+                        # 这里的 `clip` 是节点输入的 CLIP 文本编码器，不是分镜字典。
+                        subject_mask=((_remix_keep_background(
+                            _clip_prompt_for_cond) if _remix_this
+                            else (False if _viggle_this else True))),
+                        with_audio=(_remix_lock_audio() if _remix_this else True),
                     )
                     _rc_samples = latent.get("samples")
                     if isinstance(_rc_samples, comfy.nested_tensor.NestedTensor):
@@ -14782,7 +16000,7 @@ class BSAIH3FilmFactory:
                                 [_rc_v,
                                  _rc_v[:, :, -1:].repeat(1, 1, _rc_t_tgt - _rc_t_have, 1, 1)],
                                 dim=2)
-                        print(f"[H3 Recast] clip[{i+1}] 源 latent 时间行 {_rc_t_have} -> "
+                        print(f"[{_rp_clip_tag}] clip[{i+1}] 源 latent 时间行 {_rc_t_have} -> "
                               f"{_rc_t_tgt}（与本次 frame_count 对齐）")
                     # 人物掩码的时间行跟着一起对齐，否则 noise_mask 形状对不上
                     if _rc_subject_mask is not None:
@@ -14828,7 +16046,7 @@ class BSAIH3FilmFactory:
                             else:
                                 _rc_vmask = torch.ones_like(_rc_v)
                             _rc_amask = torch.ones_like(_rc_at)
-                            print(f"[H3 Recast] clip[{i+1}] ⚠️ 源视频无可用音轨或未接 "
+                            print(f"[{_rp_clip_tag}] clip[{i+1}] ⚠️ 源视频无可用音轨或未接 "
                                   "audio_vae —— 音频改由模型重新生成（口型不再跟随源片）")
                     else:
                         latent["samples"] = _rc_v
@@ -14844,15 +16062,75 @@ class BSAIH3FilmFactory:
                     else:
                         latent["noise_mask"] = _rc_vmask
                     _rc_area = (float(_rc_vmask.mean()) if _rc_subject_mask is not None else 1.0)
-                    print(f"[H3 Recast] clip[{i+1}] 源画面/原声已灌入 AV latent: {_rc_info}; "
+                    print(f"[{_rp_clip_tag}] clip[{i+1}] 源画面/原声已灌入 AV latent: {_rc_info}; "
                           f"半重绘 denoise={float(denoise):.2f}; "
-                          f"重绘区={'人物掩码 %.1f%%' % (_rc_area * 100) if _rc_subject_mask is not None else '全画幅'}; "
+                          f"重绘区={'人物掩码 %.1f%%(背景锁源像素)' % (_rc_area * 100) if _rc_subject_mask is not None else '全画幅(背景会被重画)'}; "
                           f"源原声{'已锁定' if _rc_az is not None else '未锁定'}")
+                    if _remix_this and _rc_subject_mask is None:
+                        print(f"[{_rp_clip_tag}] clip[{i+1}] ⚠️ 本段按'动作迁移'(全画幅)走：提示词里"
+                              "必须把新场景写清楚，否则背景会被模型自行重画；只想换人请删掉"
+                              "场景类描述，或设 BSAI_H3_REMIX_KEEP_BG=1")
+                    if _viggle_this:
+                        # v14.345: 官方 Viggle Remake 契约 —— 与 Recast/Remix 的"半重绘"
+                        # 相反：目标 latent 必须是**全噪**(视频 mask=1)，源片整段改作
+                        # cond video 进条件(minimax_refs 首个 video block)，源原声仍锁
+                        # clean(mask=0) → 6 步固定 sigma 全重绘，口型/动作/机位跟源片。
+                        _vg_samples = latent.get("samples")
+                        if isinstance(_vg_samples, comfy.nested_tensor.NestedTensor):
+                            _vg_vt, _vg_at = _vg_samples.tensors[0], _vg_samples.tensors[1]
+                        else:
+                            _vg_vt, _vg_at = _vg_samples, None
+                        _vg_v = torch.zeros_like(_vg_vt)
+                        if _vg_at is not None:
+                            latent["samples"] = comfy.nested_tensor.NestedTensor(
+                                (_vg_v, _vg_at))
+                            latent["noise_mask"] = comfy.nested_tensor.NestedTensor(
+                                (torch.ones_like(_vg_v), torch.zeros_like(_vg_at)))
+                        else:
+                            latent["samples"] = _vg_v
+                            latent["noise_mask"] = torch.ones_like(_vg_v)
+                        # 源片 latent → cond video block（放在 minimax_refs 最前，
+                        # 与官方 Viggle Remake Conditioning 的 cond_video_latents 同构）
+                        try:
+                            _vg_blocks = list(ref_blocks or [])
+                            _vg_video_block = {
+                                "kind": "video",
+                                "latent_t": int(_rc_v.shape[2]),
+                                "latent_h": int(_rc_v.shape[3]),
+                                "latent_w": int(_rc_v.shape[4]),
+                                "ref_audio_t": 0,
+                                "latent": _rc_v,
+                                # 官方新版对 source audio 做了去重：音频由 latent 的
+                                # clean 音频行承担，cond video 不再带 audio_latent。
+                                "audio_latent": None,
+                            }
+                            positive = node_helpers.conditioning_set_values(
+                                positive, {"minimax_refs": [_vg_video_block] + _vg_blocks})
+                            # v14.352: 同一份 positive 的"只留参考图"版本，供
+                            # 采样后半程释放源片 cond 时直接换上。
+                            try:
+                                globals()["_VIGGLE_RELEASE_POS"] = node_helpers.conditioning_set_values(
+                                    positive, {"minimax_refs": list(_vg_blocks)})
+                                globals()["_VIGGLE_RELEASE_UNTIL"] = float(
+                                    os.environ.get("BSAI_H3_VIGGLE_RELEASE_UNTIL", "0.9") or 0.9)
+                            except Exception:
+                                pass
+                            globals()["_VIGGLE_ACTIVE"] = True
+                            print(f"[H3 Viggle] clip[{i+1}] 源片已作 cond video 注入 "
+                                  f"(latent {_vg_video_block['latent_t']}×"
+                                  f"{_vg_video_block['latent_h']}×"
+                                  f"{_vg_video_block['latent_w']}), "
+                                  f"参考图 {len(_vg_blocks)} 个, 目标 latent 全噪, "
+                                  f"音频行{'锁源原声' if _vg_at is not None else '交还模型'}")
+                        except Exception as _vg_cond_err:
+                            raise RuntimeError(
+                                f"Viggle cond video 注入失败: {type(_vg_cond_err).__name__}: "
+                                f"{_vg_cond_err}") from _vg_cond_err
                 except Exception as _rc_err:
                     # v14.336: 本段替换不了就别渲 —— 静默当普通分镜渲出来的是"没替换的片子"，
                     # 用户要等十几分钟到出片才发现，代价比直接报错大得多。
                     raise RuntimeError(
-                        f"[H3 Recast] clip[{i+1}] 源片段编码/注入失败，本档中止"
+                        f"[{_rp_clip_tag}] clip[{i+1}] 源片段编码/注入失败，本档中止"
                         "（不退回普通渲染）："
                         f"{type(_rc_err).__name__}: {_rc_err}") from _rc_err
 
@@ -15241,28 +16519,7 @@ class BSAIH3FilmFactory:
                                   "如需 2K/高清放大请改用「双采高清」档或分镜模式")
                     elif one_shot_dual_2k:
                         # v14.276: 2K 档二采照跑, 倍数按单次采样 token 预算取。
-                        # v14.346: 但倍率被预算压成假倍率(几何未变)时不许照跑 ——
-                        # 那条二采不含放大, 只有 4 步同分辨率重绘, 纯掉画质(见预算分支)。
-                        if _os2k_skip_refine:
-                            _eff_refine = False
-                            if not _os_pass_notice_done:
-                                _os_pass_notice_done = True
-                                print("[H3 Extender] ✅ v14.346 一镜到底·2K双采：本次预算下二采"
-                                      "没有任何几何放大(倍率=假倍率)，已跳过二采 —— 不再做同分辨率 "
-                                      f"{int(refine_steps)} 步 denoise {float(refine_denoise):.2f} 重绘，"
-                                      f"输出 = 一采 {int(steps)} 步画面({resolved_width}x{resolved_height})")
-                                _send_extender_warning(
-                                    owner,
-                                    "One-shot 2K dual-pass had no upscale this run (the token "
-                                    "budget collapsed the refine factor to x1.0x, geometry "
-                                    "unchanged), so the refine pass was skipped: it would only "
-                                    "re-denoise the same-resolution latent in 4 steps and smear "
-                                    "the first pass. Output equals the 8-step first pass; enable "
-                                    "upscale_final (realesr) for a real 2K master, or shorten each "
-                                    "clip to <=8s to keep single-call tokens in the healthy zone.",
-                                    clip_index=i,
-                                )
-                        elif not _os_pass_notice_done:
+                        if not _os_pass_notice_done:
                             _os_pass_notice_done = True
                             print("[H3 Extender] ✅ 一镜到底·2K双采：二采照跑"
                                   f"(一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步, denoise {float(refine_denoise):.2f})，"
@@ -15334,7 +16591,7 @@ class BSAIH3FilmFactory:
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
                     owner, i, len(clips), "aborted",
-                    "Interrupted by the user: rendering aborted (generated clips are kept)",
+                    "用户终止：渲染已中止（已保留已生成 CLIP）",
                 )
                 print("[H3 Extender] 用户终止渲染，停止后续 CLIP")
                 break
@@ -15670,6 +16927,8 @@ class BSAIH3FilmFactory:
 
             want_per_clip = str(output_mode) in ("per_clip", "both") and not suppress_auto_merge
             want_merged = str(output_mode) in ("merged", "both") and not suppress_auto_merge
+            # v14.340: FVSR 逐分镜修复结果复用表（si -> 修复后 mp4）
+            _fvrs_cache = {}
 
             if want_per_clip:
                 for si, seg in enumerate(segments_out):
@@ -15685,6 +16944,15 @@ class BSAIH3FilmFactory:
                                                    upscale_model, upscale_fp16,
                                                    upscale_tile, upscale_batch,
                                                    upscale_face_restore)
+                        # v14.340: 音频引导人脸/嘴型修复（TaoMate-FVSR）
+                        if face_fvrs_enabled:
+                            _src_fv = _ff_fvrs_restore_clip(clip_path, float(FPS))
+                            _fvrs_cache[si] = str(_src_fv)
+                            if _src_fv and str(_src_fv) != str(clip_path) and os.path.isfile(str(_src_fv)):
+                                try:
+                                    shutil.copy2(_src_fv, clip_path)
+                                except Exception as _e_fv:
+                                    print(f"[H3 Extender] FVSR per-clip 回写失败: {_e_fv}")
                         item = _comfy_media_item(clip_path, float(FPS), "output")
                         output_ui_videos.append(item)
                         print(f"[H3 Extender] saved per-clip video: {clip_path}")
@@ -15703,6 +16971,16 @@ class BSAIH3FilmFactory:
                     cp = temp_root / f"_mergeclip_{owner}_{si}_{uuid.uuid4().hex[:8]}.mp4"
                     try:
                         _copy_blob_to_file(data_path, blob, cp)
+                        # v14.340: 复用 per-clip 已修复结果；否则对临时合并片段现场修复
+                        if face_fvrs_enabled:
+                            _src_fv = _fvrs_cache.get(si)
+                            if not (_src_fv and os.path.isfile(str(_src_fv))):
+                                _src_fv = _ff_fvrs_restore_clip(cp, float(FPS))
+                            if _src_fv and str(_src_fv) != str(cp) and os.path.isfile(str(_src_fv)):
+                                try:
+                                    shutil.copy2(_src_fv, cp)
+                                except Exception as _e_fv:
+                                    print(f"[H3 Extender] FVSR merge-clip 复用失败: {_e_fv}")
                         clip_paths.append(cp)
                     except Exception:
                         pass
@@ -15899,6 +17177,25 @@ class BSAIH3FilmFactory:
                             "frames": out_frames,
                         })
                         print(f"[H3 Extender] clip_videos: extracted clip {si+1} -> {out_path} ({out_frames} frames, {duration:.1f}s)")
+                        # v14.355: 双保险第二道 —— 开了才跑，产物 <原名>_faceswap.mp4
+                        if _viggle_faceswap_on:
+                            try:
+                                _fs_ref = str(os.environ.get("BSAI_H3_VIGGLE_FACESWAP_REF", "") or "")
+                                if not _fs_ref:
+                                    _fs_imgs = (asset_library or {}).get("images") or []
+                                    if _fs_imgs:
+                                        _fs_ref = str(_fs_imgs[0].get("path") or _fs_imgs[0].get("filename") or "")
+                                _fs_out = _viggle_faceswap_clip(
+                                    str(out_path), _viggle_faceswap_model, _fs_ref or None,
+                                    tag=f"clip{si+1}")
+                                if os.path.isfile(_fs_out) and str(_fs_out) != str(out_path):
+                                    out_path = _fs_out
+                                    clips_info[-1]["file_path"] = str(out_path)
+                                    clips_info[-1]["file_name"] = os.path.basename(str(out_path))
+                                    clips_info[-1]["faceswap"] = True
+                            except Exception as _fs_err:
+                                print(f"[H3 Viggle] v14.355 换脸工序异常(保留原片): {_fs_err}")
+
                     clip_videos_json = json.dumps(clips_info, ensure_ascii=False)
                     print(f"[H3 Extender] clip_videos: {len(clips_info)} clip(s) ready for Premiere Pro")
             except Exception as _cv_err:
@@ -16066,7 +17363,7 @@ NODE_CLASS_MAPPINGS = {
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
 # v14.257: 隐藏启动横幅中的超长版本说明文字（原括号内整段历史配方摘要不再打印）
-print("[BSAI-H3-Film-Factory] v14.347 backend loaded")
+print("[BSAI-H3-Film-Factory] v14.239 backend loaded")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
@@ -16205,6 +17502,7 @@ if getattr(PromptServer, "instance", None) is not None:
                     if os.name == "nt":
                         os.startfile(str(d))
                     else:
+                        import subprocess
                         subprocess.Popen(
                             ["xdg-open", str(d)],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

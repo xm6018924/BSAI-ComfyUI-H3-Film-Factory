@@ -1097,7 +1097,9 @@ function parseState(raw) {
 function serializeState(state) {
     const clips = state.clips.map((c) => {
         // v14.137: _h3ExtDriven 只是 syncExternalPrompts 的运行时标记, 不落盘
-        const { _previewLoaded, _previewVideoUrl, _previewExpanded, _previewReady, _latentPreviewUrl, _latentStep, _latentTotal, _previewError, _h3ExtDriven, upscale, ...rest } = c;
+        // v14.368: 追加过滤前端内部字段, 避免 _promptEl(null)/_assetPanelRefsKey 被写入
+        // clips_json 落盘(此前已污染工作流文件)。
+        const { _previewLoaded, _previewVideoUrl, _previewExpanded, _previewReady, _latentPreviewUrl, _latentStep, _latentTotal, _previewError, _h3ExtDriven, upscale, _promptEl, _assetPanelRefsKey, ...rest } = c;
         // v14.85: 跟随态(null)不落盘，仅开(true)/关(false)存进 clips_json
         if (upscale === true || upscale === false) rest.upscale = upscale;
         return rest;
@@ -1534,6 +1536,15 @@ function wrapResolutionWidgetCallbacks(node, runtime) {
         .lg-node-widget:has(> [node-type="${TARGET}"] > textarea) {
             display: none !important;
         }
+        /* v14.369: 上面那条假设了固定嵌套深度, 部分前端结构不匹配。
+           这里补两条与层级无关的规则 + 元素级标记, 只打在我们自己的
+           clips_json / refs_json 元素上, 不会误伤快捷条与 CLIP 卡片。 */
+        .lg-node-widget:has([data-h3-state-json]) {
+            display: none !important;
+        }
+        [data-h3-state-json] {
+            display: none !important;
+        }
     `;
     document.head.appendChild(style);
 })();
@@ -1626,6 +1637,113 @@ function nukeVisibleHiddenRows(node, keys) {
 }
 
 // Vue 首次渲染参数区有延迟，创建后按固定节奏补几次兜底即可，之后不再常驻轮询。
+function stateJsonGrid(node) {
+    try {
+        return node?.element?.querySelector?.(".lg-node-widgets")
+            || document.querySelector('[data-node-id="' + node?.id + '"] .lg-node-widgets');
+    } catch (e) { return null; }
+}
+
+function markStateJsonHidden(node) {
+    // v14.370: 新版前端里原生 STRING widget 没有 widget.element, 改走 Vue 参数网格。
+    // grid.children 与 node.widgets 顺序一一对应(后端 70 项 + 前端 DOM 项在末尾),
+    // 再用行内容二次校验(clips_json 必含 "clips", refs_json 必含 "refs"),
+    // 校验不过就跳过 —— 宁可不藏, 决不藏错行。
+    if (!node) return;
+    const names = ["clips_json", "refs_json"];
+    const expect = { clips_json: '"clips"', refs_json: '"refs"' };
+
+    // 路径 1: widget.element / inputEl (若存在, 最直接)
+    for (const nm of names) {
+        try {
+            const w = node.widgets?.find((x) => x && x.name === nm);
+            if (!w) continue;
+            const el = w.element || w.inputEl;
+            if (!el || !el.setAttribute) continue;
+            el.setAttribute("data-h3-state-json", "1");
+            const row = el.closest ? el.closest(".lg-node-widget") : null;
+            if (row && row.setAttribute) row.setAttribute("data-h3-state-json", "1");
+            if (el.style) el.style.setProperty("display", "none", "important");
+        } catch (e) {}
+    }
+
+    // 路径 2: Vue 参数网格按索引定位 + 内容校验
+    try {
+        const grid = stateJsonGrid(node);
+        if (!grid) return;
+        const ws = node.widgets || [];
+        for (let i = 0; i < ws.length; i++) {
+            const w = ws[i];
+            if (!w || names.indexOf(w.name) < 0) continue;
+            let row = grid.children[i];
+            if (!row || !row.style) continue;
+            const txt = row.textContent || "";
+            if (txt.indexOf(expect[w.name]) < 0) continue;   // 内容不符, 不藏
+            if (row.getAttribute("data-h3-state-json") === "1") {
+                if (row.style.display !== "none") row.style.setProperty("display", "none", "important");
+                continue;
+            }
+            row.setAttribute("data-h3-state-json", "1");
+            row.style.setProperty("display", "none", "important");
+        }
+    } catch (e) {}
+
+    // 路径 3 (v14.372): 不依赖 node.element / 网格结构, 按内容特征全局扫描。
+    // 只有 clips_json 行含 '"clips":', refs_json 行含 '"refs":';
+    // 加长度上限, 防止误命中整个节点容器(整节点文本必然远超 3000 字符)。
+    try {
+        const rows = document.querySelectorAll(".lg-node-widget");
+        for (const row of rows) {
+            const txt = row.textContent || "";
+            if (!txt || txt.length > 3000) continue;
+            if (txt.indexOf('"clips":') < 0 && txt.indexOf('"refs":') < 0) continue;
+            if (row.style) row.style.setProperty("display", "none", "important");
+            if (row.setAttribute) row.setAttribute("data-h3-state-json", "1");
+        }
+    } catch (e) {}
+}
+
+function installStateJsonObserver(node) {
+    // Vue 重绘(切节点/拖拽/校验)会把行插回来, 用观察器补回隐藏态。
+    // v14.371: 大工作流加载时 grid 可能几秒后才出现, 这里自旋等待(最多 30 次/500ms)。
+    try {
+        if (!node || node.__h3StateJsonObs) return;
+        const grid = stateJsonGrid(node);
+        if (!grid) {
+            const tries = Number(node.__h3StateJsonTries || 0);
+            if (tries < 30) {
+                node.__h3StateJsonTries = tries + 1;
+                setTimeout(() => {
+                    try { markStateJsonHidden(node); } catch (e) {}
+                    try { installStateJsonObserver(node); } catch (e) {}
+                }, 500);
+            }
+            return;
+        }
+        node.__h3StateJsonTries = 0;
+        if (typeof MutationObserver === "undefined") return;
+        const obs = new MutationObserver(() => {
+            if (node.__h3StateJsonT) return;
+            node.__h3StateJsonT = setTimeout(() => {
+                node.__h3StateJsonT = null;
+                try { markStateJsonHidden(node); } catch (e) {}
+            }, 120);
+        });
+        obs.observe(grid, { childList: true, subtree: true });
+        node.__h3StateJsonObs = obs;
+    } catch (e) {}
+}
+
+function scheduleStateJsonHide(node) {
+    if (!node) return;
+    [0, 120, 300, 700, 1300, 2500, 4000, 7000, 11000, 16000, 22000].forEach((d) => {
+        setTimeout(() => {
+            try { markStateJsonHidden(node); } catch (e) {}
+            if (d >= 700) { try { installStateJsonObserver(node); } catch (e) {} }
+        }, d);
+    });
+}
+
 function scheduleHiddenRowFallback(node, keys) {
     if (!node || node.__h3HiddenRowFallback) return;
     node.__h3HiddenRowFallback = true;
@@ -6680,7 +6798,7 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         // 速度档仅留基础 7 档(custom/极速/均衡/精细/VDN×3); FastH3-Trim /
         // FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 / 4K直出 秘制酱料 / Omni 8步单采 在此选择。
         // 选 Omni 时二采 15 行自动隐藏（syncOmniRefineRows），切回双采恢复。
-        { key: "render_pipeline", en: "Pipeline", desc_en: "Render pipeline (all model recipes are selected here, v14.280): Sol-H3 Self-Lift dual-pass (default) -> MV Dual-Pass (v14.280: mirror of the Film Factory v3.2 MV example workflow (128-minute feature edition), node 250 widgets_values verbatim; first pass 8 steps euler/simple shift 12/3 denoise 1.0 + refine pass 4 steps denoise 0.45 + latent x2.0 with minimax_h3_latent_upscaler_3d_fp16.safetensors (SelfLift 3D latent upscale) + align_to=32px + tiled 4x256 overlap + audio_context_length=0 (pure lip-sync contract: audio sourced externally from lip_audio, no model-side latent audio chain; refine audio locked 0.0, no external audio redraw) -> FastH3-Trim (8+4) -> FastH3 4-step VSA (4+2) -> Turbo-v4 (6+4, shift 12/3) -> DMAD 4-step (4+2, lcm) -> action combo (8+4, euler) -> 4K direct secret sauce (self-lift 6+3, latent x2.0 -> DLSS5 pixel upscale to 4K) -> FastH3 Omni 8-step single-pass (skips refine; switch the loader to the Omni model + VSA) -> dual-pass 2K (8+4, latent not upscaled + HyperVAE 2x decode -> 2x pixels -> 2K, audio refine inherits w33 0.7) -> Live Commerce voice modes v14.220: 01 pure-text dubbing (all three audio ports ignored; model reads the storyboard lines with its default voice), 02 ref_audio timbre dubbing (model reads the lines but the voice follows ref_audio; lip_audio/lip_voice ignored), 03 lip_voice lip-sync (model does not generate audio; sound comes entirely from lip_voice driving the mouth; ref_audio ignored; lip_audio is MV-only, but once lip_audio is connected it takes TOP priority on every pipeline and mutes ref_audio/lip_voice, v14.270) -> live commerce fully automatic (12+4 one-click tier: audio_context_length=0 + context off from clip2; manual parameters are ignored) -> H25 Hybrid 8-Step Multi-Ref (v14.223, Bilibili BV1dygg6EE6W: H25 Hybrid = base FL2VA + overlay Ref2VA, Block Range Additive 25-49, + LightX2V 8-step FL2V accel LoRA; 8-step single-pass euler/simple shift 12/3 denoise 1.0, refine skipped; switch the Loader to minimax_h3_hybrid_fl2va_ref2va_b25-49-int8 and the accel-LoRA slot to minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16) -> 4K Regenerate OpenH3Regenerate2K (v14.229, Bilibili BV13uxT66EWq: NVLabs open model regenerates a 768P draft (1344x768) to 2560x1440 in 3 refine steps; tier = 4-step draft + 3-step regenerate (denoise 1.0) + latent x1.9; CFG 1.0 set on the sampler; Loader must use the merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; region license excludes EU/UK/KR/US) -> PRISM 10-Step Motion Boost (v14.231, Bilibili BV1Vino6qE2F: Singularity v2 x 10Eros-Max merged Ref2VA model, HuggingFace OliviaRossi/Minimax-h3_Singularity-x-10Eros-Max_PRISM int8 20.3GB; euler/simple 10 steps denoise 1.0, no LoRA, single-pass, refine skipped; switch the Loader to Minimax-h3_Singularity_x_10Eros-Max_PRISM_int8.safetensors; 5-part prompt recommended) -> Transparent Single-Pass (v14.233, Bilibili BV1arJX69E7L: generate H3 over a flat solid backdrop (green/blue/pure black), 10-step single-pass euler/simple shift 12/3 denoise 1.0, refine skipped so the backdrop stays uniform for clean keying; pair with the 4-step turbo LoRA (~0.8, or ~20 steps without); then key with BSAI_H3_TransparentKey + export with BSAI_H3_SaveTransparentVideo to ProRes 4444 / WebM VP9 / RGBA PNG; prompt must state the flat backdrop, no floor/horizon) -> 4-in-1 Ultimate Accel (v14.234, Bilibili BV1WWxT6cEdY): DMAD 4-step LoRA (official 20 steps -> 8, -57.5%) + SegAttention 2.2.0 (KJNodes PatchSegAttentionKJ, -81% stacked) + reference-input half downscale (-93.25% stacked) + SelfLift dual-pass (6 half-res draft steps + 2 full-res refine steps = 8 NFE, latent x2.0); tier = 6+2, ref half forced, SegAttention co-detected; calm dialogue scenes recommended, dial back for high-motion). -> SolarRenderer Structure Control (v14.235, Bilibili BV1Phxu6PE93: FastH3-Omni + Singularity V2 base; control LoRA reads a structure video frame-by-frame (3D greybox/normal map/DW pose/OpenPose/depth/bbox = video ControlNet) + 4-step LoRA (sampling down to 4 steps); causal version generates block-by-block in real time, each block reads only the previous 5 blocks; tier = 4-step low-res SelfLift draft + 4-step full-res refine (latent x2.0) = 8 NFE, ref_image_size forced max (structure detail kept); Loader suggested: solarrenderer control LoRA + 4-step LoRA (~0.8, FastH3-Omni/Singularity V2 base); feed structure-video frame strips as reference input; prompt must describe camera cuts/landing/environment in detail or the model only outputs the greybox cubes; output can be followed by NVIDIA RTX VFX (Frame Generation 24->48FPS + Super Resolution 2K)). -> PDMD 4-Step SelfLift Dual-Pass (v14.258, UCSD x ByteDance, arXiv 2609.35768 published 2026-09-23/29): PDMD 4-step distillation LoRA - first pass 4 steps (paper 4-step contract, VideoGen-Eval total 83.17, beating all 4-step distillation baselines) + 2-step full-res refine (latent x2.0) = 6 NFE; Loader should mount the Kijai-converted LoRA minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors (Kijai/MiniMax-H3-experimental, standard H3 LoRA path, no custom node needed; rank128 original on pdmd2026 HF); model card requires shift 12/3 + base-model scheduler config; student model targets 1344x768; positioned for fast output/drafting, final-picture quality still refers to dual-pass 2K / 8-step tiers. -> PDMD 2-Step Fast Draft Single (v14.258): PDMD 2-step distillation (pdmd_2NFE_lora, Kijai-converted minimax_h3_pdmd_2step_lora_avg_rank_38_bf16.safetensors) = 2 NFE single-pass direct output; positioned for rapid drafting / shot screening only, NOT for final footage (community note: low-step detail collapses easily, final work needs >=6 steps or dual-pass). -> PTD 4-Step Ref2VA Single-Pass (v14.258, Taobao Content-AI, released 2026-10-20/22, HF MiniMax-H3-Ref2VA-PTD-4Step rank128 bf16 5.58GB; author H20 measured 1344x768/243 frames/4 NFE end-to-end): PTD per-hop Ref2VA acceleration LoRA = reference-image-to-audiovideo 4-step single pass; requires the Ref2VA base model (unpruned ~140GB, or the community ComfyUI-PTD-Compact int8 build) - do not select this tier without a matching base; ref_image_size keeps the user value, not forced. -> PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo, Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA): 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; full speed stack = SegAttention + Sol-Attn + Sol VAE. -> TaoMate HD Progressive Lift (v14.304, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA): 4-step half-res first pass (set the canvas to HALF the target: 960x544 for 1080p) + 3-step refine (denoise 0.45) with a real 3D latent upscaler at its trained x2.0 (auto-picked h3_clean_latent_upscaler...) = 7 NFE to 1920x1088; automatic temporal chunking disabled (per-chunk noise seeds cause seam flicker); cfg 1.0, euler+simple, shift 12/3. -> Singularity V2 + Pika H3 8-Step High-Motion (v14.322, Bilibili BV1y8446DExi): Singularity v2 base + Pika 8-step HD turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract 8 steps / CFG 1.0 / euler-simple / shift 12-3, Flex style 0.6 baked; LightX2V 8-step 768p as an alternative) = 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D latent upscaler, tiled 4x128) = 11 NFE, audio locked in refine (8 steps clear the ~6-step H3 audio floor); stage-1 carries ONE high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, never stack all), stage-2 keeps it at 0.3-0.4; enable one_shot_mode + motion context for 27s / 30s chained long takes; optional +6-step audio LoRA off by default. TaoMate HD 8+4 (v14.323) = the same TaoMate HD tier with 8 first-pass + 4 refine steps = 12 NFE (same LoRA, same x2.0 lift, same 16-tile refine). -> HyperFlow H3 Flash 14B (v14.339, Bilibili BV13oWJ6uEQZ; Video Rebirth low-rank compressed 13.7B/13.9B, GGUF): the official 4/6/8-step fixed sigmas (flow shift 12 is baked in, do not stack the model shift on top) + euler + CFG 1.0 single forward pass + no negative prompt, single-pass direct output (all four official templates t2v/i2v/flf2v/ref2v ship without a second pass); load the weights with the HyperFlow GGUF Loader as minimax_h3_fl2va/ref2va_hyperflow_flash_14b-Q4_K_M.gguf, the full-size H3 acceleration LoRAs do not match its layer names and must not be stacked; 1344x768 / 124 frames (5.2s) / 24fps / 32kHz stereo by default, runs on a 24GB-class card, untested at 16GB.", cycle: ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+4 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)"], cycleAliases: { "MV Dual-Pass (电影工厂 v3.2 原版)": "MV Dual-Pass (Film Factory v3.2 original)", "Sol-H3 Self-Lift 双采 (默认)": "Sol-H3 Self-Lift Dual-Pass (default)", "直播配音高清（音频≥12步）": "Live Dub HD (audio 12+ steps)", "FastH3-4步VSA": "FastH3 4-step VSA", "DMAD-4步": "DMAD 4-step", "武戏组合拳": "Action Combo", "4K直出 秘制酱料": "4K Direct Secret Sauce", "FastH3 Omni 8步单采": "FastH3 Omni 8-step Single-Pass", "双采2K（HyperVAE 2x 解码）": "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2-8步": "QAD-v2 8-step", "直播带货·01 纯文本配音（三口不接）": "Live Commerce 01 Text Dubbing (no audio inputs)", "直播带货·02 ref_audio音色参考配音（只接参考）": "Live Commerce 02 ref_audio Voice Reference", "直播带货·03 lip_voice对口型（只接现成主播音频）": "Live Commerce 03 lip_voice Lip-Sync", "直播带货（全自动）": "Live Commerce (fully automatic)", "FastH3 Omni × SelfLift 超分": "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8步 多参考单采": "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K重生成 OpenH3Regenerate2K (768P草稿直出2560)": "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)": "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "透明视频 单采抠像 (H3 Transparent)": "Transparent Video Single-Pass Keying (H3 Transparent)", "4合1终极加速 (DMAD 8步 SelfLift 6+2 + 参考降分 + SegAttention)": "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)": "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director 极速双采 (MiniMaxH3 Director 移植)": "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "双采2K（官方条件放大）": "Dual-Pass 2K (official condition upscale)", "PDMD 4步 SelfLift 双采 (4+2)": "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2步 极速试稿 (单采)": "PDMD 2-step Turbo Draft (single-pass)", "PTD 4步 Ref2VA 单采 (参考图加速)": "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)": "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+4 双采 (Ref2VA 锁脸)": "PIKA H3 Flex 8+4 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)": "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8步+4步 渐进放大双采 (8+4 1080p直出)": "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika 8步 高动态长视频 (导演台双采)": "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "视频替换 (V2V 人物替换)": "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)": "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)" }, cycleLabels: ["Sol-H3 Self-Lift Dual-Pass (Default)", "MV Dual-Pass (v3.2 Original)", "Live Voice HD (Audio >=12 steps)", "FastH3-Trim", "FastH3 4-Step VSA", "Turbo-v4", "DMAD 4-Step", "Action Combo", "4K Direct (Secret Sauce)", "FastH3 Omni 8-Step Single-Pass", "Dual-Pass 2K (HyperVAE 2x)", "QAD-v2 8-Step", "Live Com. 01 Text Dubbing", "Live Com. 02 ref_audio Timbre", "Live Com. 03 lip_voice Lip-sync", "Live Commerce (Auto)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-Step Multi-Ref", "4K Regenerate (OpenH3Regenerate2K)", "PRISM 10-Step Motion Boost", "Transparent Single-Pass (H3 Keying)", "4-in-1 Ultimate Accel (DMAD 8-Step SelfLift 6+2)", "SolarRenderer Structure Control (4-Step LoRA + Control LoRA)", "Director Fast Dual-Pass (8+3, MiniMaxH3 Director Port)", "Dual-Pass 2K (Official Conditioning Upscale)", "PDMD 4-Step SelfLift Dual-Pass (4+2)", "PDMD 2-Step Fast Draft (Single)", "PTD 4-Step Ref2VA Single-Pass (Ref-Accel)", "PIKA H3 Flex 6+2 (Ref2VA Face-Lock)", "PIKA H3 Flex 8+4 (Ref2VA Face-Lock)", "TaoMate HD (4+3, Half-Res Lift, 1080p)", "TaoMate HD (8+4, Half-Res Lift, 1080p)", "Singularity V2 + Pika 8-Step (High-Motion)", "Video Recast (V2V Character Swap)", "HyperFlow Flash 14B (4/6/8-Step)"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#a5b4fc", border: "#6366f1" }, { color: "#86efac", border: "#16a34a" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#facc15", border: "#a16207" }, { color: "#22d3ee", border: "#0891b2" }, { color: "#a78bfa", border: "#7c3aed" }, { color: "#5eead4", border: "#0d9488" }, { color: "#4ade80", border: "#15803d" }, { color: "#38bdf8", border: "#0369a1" }, { color: "#c084fc", border: "#7e22ce" }, { color: "#4ade80", border: "#15803d" }, { color: "#f0abfc", border: "#a21caf" }, { color: "#f9a8d4", border: "#be185d" }, { color: "#fda4af", border: "#e11d48" }, { color: "#a3e635", border: "#4d7c0f" }, { color: "#fbbf24", border: "#b45309" }, { color: "#f472b6", border: "#be185d" }, { color: "#7dd3fc", border: "#0284c7" }, { color: "#a5b4fc", border: "#6366f1" }, { color: "#f9a8d4", border: "#be185d" }, { color: "#93c5fd", border: "#2563eb" }, { color: "#a7f3d0", border: "#059669" }, { color: "#e9d5ff", border: "#7e22ce" }, { color: "#bef264", border: "#65a30d" }, { color: "#c7d2fe", border: "#4338ca" }, { color: "#67e8f9", border: "#0e7490" }, { color: "#c4b5fd", border: "#6d28d9" }, { color: "#f97316", border: "#c2410c" }, { color: "#22d3ee", border: "#0e7490" }] },
+        { key: "render_pipeline", en: "Pipeline", desc_en: "Render pipeline (all model recipes are selected here, v14.280): Sol-H3 Self-Lift dual-pass (default) -> MV Dual-Pass (v14.280: mirror of the Film Factory v3.2 MV example workflow (128-minute feature edition), node 250 widgets_values verbatim; first pass 8 steps euler/simple shift 12/3 denoise 1.0 + refine pass 4 steps denoise 0.45 + latent x2.0 with minimax_h3_latent_upscaler_3d_fp16.safetensors (SelfLift 3D latent upscale) + align_to=32px + tiled 4x256 overlap + audio_context_length=0 (pure lip-sync contract: audio sourced externally from lip_audio, no model-side latent audio chain; refine audio locked 0.0, no external audio redraw) -> FastH3-Trim (8+4) -> FastH3 4-step VSA (4+2) -> Turbo-v4 (6+4, shift 12/3) -> DMAD 4-step (4+2, lcm) -> action combo (8+4, euler) -> 4K direct secret sauce (self-lift 6+3, latent x2.0 -> DLSS5 pixel upscale to 4K) -> FastH3 Omni 8-step single-pass (skips refine; switch the loader to the Omni model + VSA) -> dual-pass 2K (8+4, latent not upscaled + HyperVAE 2x decode -> 2x pixels -> 2K, audio refine inherits w33 0.7) -> Live Commerce voice modes v14.220: 01 pure-text dubbing (all three audio ports ignored; model reads the storyboard lines with its default voice), 02 ref_audio timbre dubbing (model reads the lines but the voice follows ref_audio; lip_audio/lip_voice ignored), 03 lip_voice lip-sync (model does not generate audio; sound comes entirely from lip_voice driving the mouth; ref_audio ignored; lip_audio is MV-only, but once lip_audio is connected it takes TOP priority on every pipeline and mutes ref_audio/lip_voice, v14.270) -> live commerce fully automatic (12+4 one-click tier: audio_context_length=0 + context off from clip2; manual parameters are ignored) -> H25 Hybrid 8-Step Multi-Ref (v14.223, Bilibili BV1dygg6EE6W: H25 Hybrid = base FL2VA + overlay Ref2VA, Block Range Additive 25-49, + LightX2V 8-step FL2V accel LoRA; 8-step single-pass euler/simple shift 12/3 denoise 1.0, refine skipped; switch the Loader to minimax_h3_hybrid_fl2va_ref2va_b25-49-int8 and the accel-LoRA slot to minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16) -> 4K Regenerate OpenH3Regenerate2K (v14.229, Bilibili BV13uxT66EWq: NVLabs open model regenerates a 768P draft (1344x768) to 2560x1440 in 3 refine steps; tier = 4-step draft + 3-step regenerate (denoise 1.0) + latent x1.9; CFG 1.0 set on the sampler; Loader must use the merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; region license excludes EU/UK/KR/US) -> PRISM 10-Step Motion Boost (v14.231, Bilibili BV1Vino6qE2F: Singularity v2 x 10Eros-Max merged Ref2VA model, HuggingFace OliviaRossi/Minimax-h3_Singularity-x-10Eros-Max_PRISM int8 20.3GB; euler/simple 10 steps denoise 1.0, no LoRA, single-pass, refine skipped; switch the Loader to Minimax-h3_Singularity_x_10Eros-Max_PRISM_int8.safetensors; 5-part prompt recommended) -> Transparent Single-Pass (v14.233, Bilibili BV1arJX69E7L: generate H3 over a flat solid backdrop (green/blue/pure black), 10-step single-pass euler/simple shift 12/3 denoise 1.0, refine skipped so the backdrop stays uniform for clean keying; pair with the 4-step turbo LoRA (~0.8, or ~20 steps without); then key with BSAI_H3_TransparentKey + export with BSAI_H3_SaveTransparentVideo to ProRes 4444 / WebM VP9 / RGBA PNG; prompt must state the flat backdrop, no floor/horizon) -> 4-in-1 Ultimate Accel (v14.234, Bilibili BV1WWxT6cEdY): DMAD 4-step LoRA (official 20 steps -> 8, -57.5%) + SegAttention 2.2.0 (KJNodes PatchSegAttentionKJ, -81% stacked) + reference-input half downscale (-93.25% stacked) + SelfLift dual-pass (6 half-res draft steps + 2 full-res refine steps = 8 NFE, latent x2.0); tier = 6+2, ref half forced, SegAttention co-detected; calm dialogue scenes recommended, dial back for high-motion). -> SolarRenderer Structure Control (v14.235, Bilibili BV1Phxu6PE93: FastH3-Omni + Singularity V2 base; control LoRA reads a structure video frame-by-frame (3D greybox/normal map/DW pose/OpenPose/depth/bbox = video ControlNet) + 4-step LoRA (sampling down to 4 steps); causal version generates block-by-block in real time, each block reads only the previous 5 blocks; tier = 4-step low-res SelfLift draft + 4-step full-res refine (latent x2.0) = 8 NFE, ref_image_size forced max (structure detail kept); Loader suggested: solarrenderer control LoRA + 4-step LoRA (~0.8, FastH3-Omni/Singularity V2 base); feed structure-video frame strips as reference input; prompt must describe camera cuts/landing/environment in detail or the model only outputs the greybox cubes; output can be followed by NVIDIA RTX VFX (Frame Generation 24->48FPS + Super Resolution 2K)). -> PDMD 4-Step SelfLift Dual-Pass (v14.258, UCSD x ByteDance, arXiv 2609.35768 published 2026-09-23/29): PDMD 4-step distillation LoRA - first pass 4 steps (paper 4-step contract, VideoGen-Eval total 83.17, beating all 4-step distillation baselines) + 2-step full-res refine (latent x2.0) = 6 NFE; Loader should mount the Kijai-converted LoRA minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors (Kijai/MiniMax-H3-experimental, standard H3 LoRA path, no custom node needed; rank128 original on pdmd2026 HF); model card requires shift 12/3 + base-model scheduler config; student model targets 1344x768; positioned for fast output/drafting, final-picture quality still refers to dual-pass 2K / 8-step tiers. -> PDMD 2-Step Fast Draft Single (v14.258): PDMD 2-step distillation (pdmd_2NFE_lora, Kijai-converted minimax_h3_pdmd_2step_lora_avg_rank_38_bf16.safetensors) = 2 NFE single-pass direct output; positioned for rapid drafting / shot screening only, NOT for final footage (community note: low-step detail collapses easily, final work needs >=6 steps or dual-pass). -> PTD 4-Step Ref2VA Single-Pass (v14.258, Taobao Content-AI, released 2026-10-20/22, HF MiniMax-H3-Ref2VA-PTD-4Step rank128 bf16 5.58GB; author H20 measured 1344x768/243 frames/4 NFE end-to-end): PTD per-hop Ref2VA acceleration LoRA = reference-image-to-audiovideo 4-step single pass; requires the Ref2VA base model (unpruned ~140GB, or the community ComfyUI-PTD-Compact int8 build) - do not select this tier without a matching base; ref_image_size keeps the user value, not forced. -> PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo, Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA): 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; full speed stack = SegAttention + Sol-Attn + Sol VAE. -> TaoMate HD Progressive Lift (v14.304, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA): 4-step half-res first pass (set the canvas to HALF the target: 960x544 for 1080p) + 3-step refine (denoise 0.45) with a real 3D latent upscaler at its trained x2.0 (auto-picked h3_clean_latent_upscaler...) = 7 NFE to 1920x1088; automatic temporal chunking disabled (per-chunk noise seeds cause seam flicker); cfg 1.0, euler+simple, shift 12/3. -> Singularity V2 + Pika H3 8-Step High-Motion (v14.322, Bilibili BV1y8446DExi): Singularity v2 base + Pika 8-step HD turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract 8 steps / CFG 1.0 / euler-simple / shift 12-3, Flex style 0.6 baked; LightX2V 8-step 768p as an alternative) = 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D latent upscaler, tiled 4x128) = 11 NFE, audio locked in refine (8 steps clear the ~6-step H3 audio floor); stage-1 carries ONE high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, never stack all), stage-2 keeps it at 0.3-0.4; enable one_shot_mode + motion context for 27s / 30s chained long takes; optional +6-step audio LoRA off by default. TaoMate HD 8+4 (v14.323) = the same TaoMate HD tier with 8 first-pass + 4 refine steps = 12 NFE (same LoRA, same x2.0 lift, same 16-tile refine). -> HyperFlow H3 Flash 14B (v14.339, Bilibili BV13oWJ6uEQZ; Video Rebirth low-rank compressed 13.7B/13.9B, GGUF): the official 4/6/8-step fixed sigmas (flow shift 12 is baked in, do not stack the model shift on top) + euler + CFG 1.0 single forward pass + no negative prompt, single-pass direct output (all four official templates t2v/i2v/flf2v/ref2v ship without a second pass); load the weights with the HyperFlow GGUF Loader as minimax_h3_fl2va/ref2va_hyperflow_flash_14b-Q4_K_M.gguf, the full-size H3 acceleration LoRAs do not match its layer names and must not be stacked; 1344x768 / 124 frames (5.2s) / 24fps / 32kHz stereo by default, runs on a 24GB-class card, untested at 16GB.", cycle: ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Video Remix (no-LoRA character swap + motion transfer)", "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)"], cycleAliases: { "MV Dual-Pass (电影工厂 v3.2 原版)": "MV Dual-Pass (Film Factory v3.2 original)", "Sol-H3 Self-Lift 双采 (默认)": "Sol-H3 Self-Lift Dual-Pass (default)", "直播配音高清（音频≥12步）": "Live Dub HD (audio 12+ steps)", "FastH3-4步VSA": "FastH3 4-step VSA", "DMAD-4步": "DMAD 4-step", "武戏组合拳": "Action Combo", "4K直出 秘制酱料": "4K Direct Secret Sauce", "FastH3 Omni 8步单采": "FastH3 Omni 8-step Single-Pass", "双采2K（HyperVAE 2x 解码）": "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2-8步": "QAD-v2 8-step", "直播带货·01 纯文本配音（三口不接）": "Live Commerce 01 Text Dubbing (no audio inputs)", "直播带货·02 ref_audio音色参考配音（只接参考）": "Live Commerce 02 ref_audio Voice Reference", "直播带货·03 lip_voice对口型（只接现成主播音频）": "Live Commerce 03 lip_voice Lip-Sync", "直播带货（全自动）": "Live Commerce (fully automatic)", "FastH3 Omni × SelfLift 超分": "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8步 多参考单采": "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K重生成 OpenH3Regenerate2K (768P草稿直出2560)": "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)": "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "透明视频 单采抠像 (H3 Transparent)": "Transparent Video Single-Pass Keying (H3 Transparent)", "4合1终极加速 (DMAD 8步 SelfLift 6+2 + 参考降分 + SegAttention)": "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)": "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director 极速双采 (MiniMaxH3 Director 移植)": "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "双采2K（官方条件放大）": "Dual-Pass 2K (official condition upscale)", "PDMD 4步 SelfLift 双采 (4+2)": "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2步 极速试稿 (单采)": "PDMD 2-step Turbo Draft (single-pass)", "PTD 4步 Ref2VA 单采 (参考图加速)": "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)": "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8步+2步 双采 (Ref2VA 锁脸)": "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)": "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8步+4步 渐进放大双采 (8+4 1080p直出)": "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika 8步 高动态长视频 (导演台双采)": "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "视频替换 (V2V 人物替换)": "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)": "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Viggle Remake 视频改写 (6步 换人/增删改)": "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake 视频改写+逐帧换脸 (6步 换人)": "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)" }, cycleLabels: ["Sol-H3 Self-Lift Dual-Pass (Default)", "MV Dual-Pass (v3.2 Original)", "Live Voice HD (Audio >=12 steps)", "FastH3-Trim", "FastH3 4-Step VSA", "Turbo-v4", "DMAD 4-Step", "Action Combo", "4K Direct (Secret Sauce)", "FastH3 Omni 8-Step Single-Pass", "Dual-Pass 2K (HyperVAE 2x)", "QAD-v2 8-Step", "Live Com. 01 Text Dubbing", "Live Com. 02 ref_audio Timbre", "Live Com. 03 lip_voice Lip-sync", "Live Commerce (Auto)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-Step Multi-Ref", "4K Regenerate (OpenH3Regenerate2K)", "PRISM 10-Step Motion Boost", "Transparent Single-Pass (H3 Keying)", "4-in-1 Ultimate Accel (DMAD 8-Step SelfLift 6+2)", "SolarRenderer Structure Control (4-Step LoRA + Control LoRA)", "Director Fast Dual-Pass (8+3, MiniMaxH3 Director Port)", "Dual-Pass 2K (Official Conditioning Upscale)", "PDMD 4-Step SelfLift Dual-Pass (4+2)", "PDMD 2-Step Fast Draft (Single)", "PTD 4-Step Ref2VA Single-Pass (Ref-Accel)", "PIKA H3 Flex 6+2 (Ref2VA Face-Lock)", "PIKA H3 Flex 8+2 (Ref2VA Face-Lock)", "TaoMate HD (4+3, Half-Res Lift, 1080p)", "TaoMate HD (8+4, Half-Res Lift, 1080p)", "Singularity V2 + Pika 8-Step (High-Motion)", "Video Recast (V2V Character Swap)", "HyperFlow Flash 14B (4/6/8-Step)", "Video Remix (No-LoRA Swap)", "Viggle Remake 6-Step", "Viggle Remake + FaceSwap"], tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#a5b4fc", border: "#6366f1" }, { color: "#86efac", border: "#16a34a" }, { color: "#fdba74", border: "#ea580c" }, { color: "#fca5a5", border: "#dc2626" }, { color: "#fde047", border: "#ca8a04" }, { color: "#fb923c", border: "#ea580c" }, { color: "#f87171", border: "#b91c1c" }, { color: "#facc15", border: "#a16207" }, { color: "#22d3ee", border: "#0891b2" }, { color: "#a78bfa", border: "#7c3aed" }, { color: "#5eead4", border: "#0d9488" }, { color: "#4ade80", border: "#15803d" }, { color: "#38bdf8", border: "#0369a1" }, { color: "#c084fc", border: "#7e22ce" }, { color: "#4ade80", border: "#15803d" }, { color: "#f0abfc", border: "#a21caf" }, { color: "#f9a8d4", border: "#be185d" }, { color: "#fda4af", border: "#e11d48" }, { color: "#a3e635", border: "#4d7c0f" }, { color: "#fbbf24", border: "#b45309" }, { color: "#f472b6", border: "#be185d" }, { color: "#7dd3fc", border: "#0284c7" }, { color: "#a5b4fc", border: "#6366f1" }, { color: "#f9a8d4", border: "#be185d" }, { color: "#93c5fd", border: "#2563eb" }, { color: "#a7f3d0", border: "#059669" }, { color: "#e9d5ff", border: "#7e22ce" }, { color: "#bef264", border: "#65a30d" }, { color: "#c7d2fe", border: "#4338ca" }, { color: "#67e8f9", border: "#0e7490" }, { color: "#c4b5fd", border: "#6d28d9" }, { color: "#f97316", border: "#c2410c" }, { color: "#22d3ee", border: "#0e7490" }, { color: "#f0abfc", border: "#a21caf" }, { color: "#d8b4fe", border: "#6b21a8" }, { color: "#c084fc", border: "#7e22ce" }] },
         // v14.193: 视觉锚点已改为全自动（自动记录+自动注入）——
         // 不再有手动输入 widget（visual_anchor_notes 已移除），也不新增端口。
         // 每个分镜渲染时自动把"此前分镜正文的全部可见视觉元素状态"
@@ -6993,7 +7111,76 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         try { node.setDirtyCanvas(true, true); } catch (e) {}
     });
     refreshVideoRecast();
+    refreshVideoRecast();
     quickBar.append(videoRecastBtn);
+    // ── v14.365: Viggle Remake 一键档（普通档 <-> +逐帧换脸 两态循环）───────
+    // 独立 DOM 按钮，刻意不进 QUICK_DEFS：QUICK_DEFS 的每个 key 会被
+    // HIDDEN_ROW_KEYS 从参数行隐去，render_pipeline 绝不能走那条路。
+    // 只改 render_pipeline 的值 + 一组跟随档位的常用参数，不新增任何 widget。
+    const VIGGLE_RP_PLAIN = "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)";
+    const VIGGLE_RP_FS = "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)";
+    const VIGGLE_VALUES = [
+        ["steps", 6], ["sampler_name", "euler"], ["scheduler", "simple"], ["denoise", 1],
+        ["refine_enable", false],
+        ["upscale_per_clip", false], ["upscale_final", false],
+        ["output_mode", "both"], ["output_image_audio", true],
+        ["one_shot_mode", "off (storyboard)"],
+    ];
+    const viggleBtn = document.createElement("button");
+    viggleBtn.style.cssText = "font-size:9px;line-height:1.15;padding:3px 9px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;background:rgba(88,28,135,.28);border:1px solid #7e22ce;border-left:3px solid #c084fc;transition:background .12s,box-shadow .12s;";
+    const vgLab = document.createElement("span");
+    vgLab.textContent = "Viggle";
+    vgLab.style.cssText = "font-weight:700;color:#d8b4fe;white-space:nowrap;";
+    const vgSub = document.createElement("span");
+    vgSub.textContent = "Remake 6-step";
+    vgSub.style.cssText = "font-size:7px;color:#d8b4fe;opacity:.65;white-space:nowrap;";
+    viggleBtn.append(vgLab, vgSub);
+    viggleBtn.title = "One-click Viggle Remake tier. Click cycles the Render Pipeline tier: plain Viggle Remake (6-step swap/edit LoRA) <-> Viggle Remake + FaceSwap (6-step + 128 per-frame face swap); clicking from any other tier lands on the plain one.\nAlso applies the tier's usual settings: 6 steps / euler / simple / denoise 1 / refine off / upscale off / output both / one_shot off, and turns Context chaining off for every clip (each clip is driven by its own source frames).\nAsset library: @vidN = the source video to re-dress, @imgN = the replacement identity reference.\nAdds no widget: parameter positions and old 71-value workflows are untouched.";
+    const refreshViggle = () => {
+        const rpw = node.widgets.find((x) => x && x.name === "render_pipeline");
+        const _rpv = rpw && rpw.value || "";
+        const isFs = (_rpv === VIGGLE_RP_FS);
+        const isPlain = (_rpv === VIGGLE_RP_PLAIN);
+        const on = isFs || isPlain;
+        viggleBtn.style.background = on ? (isFs ? "rgba(126,34,206,.72)" : "rgba(88,28,135,.62)") : "rgba(88,28,135,.28)";
+        viggleBtn.style.boxShadow = on ? "0 0 0 1px #7e22ce, 0 0 9px rgba(192,132,252,.55)" : "none";
+        vgSub.textContent = isFs ? "Remake + FaceSwap" : (isPlain ? "Remake 6-step" : "Viggle");
+    };
+    viggleBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        const rpw = node.widgets.find((x) => x && x.name === "render_pipeline");
+        const cur = rpw && rpw.value || "";
+        const next = (cur === VIGGLE_RP_PLAIN) ? VIGGLE_RP_FS : VIGGLE_RP_PLAIN;
+        if (rpw) {
+            rpw.value = next;
+            if (typeof rpw.callback === "function") { try { rpw.callback(next); } catch (e) {} }
+        }
+        for (const [k, v] of VIGGLE_VALUES) {
+            const w = node.widgets.find((x) => x && x.name === k);
+            if (!w) continue;
+            w.value = v;
+            if (typeof w.callback === "function") { try { w.callback(v); } catch (e) {} }
+        }
+        // Viggle 每段都由源片对应片段驱动，Context 续链会把上一段生成画面带进来
+        runtime.state.clips.forEach((clip) => {
+            clip.context_enabled = false;
+            clip.validated = false;
+            clip.render_enabled = true;
+            const cb = document.getElementById(`ctx_${clip.id}`);
+            if (cb) cb.checked = false;
+            const tg = document.getElementById(`rfe_toggle_${clip.id}`);
+            if (tg) tg.style.opacity = "0.5";
+            const ct = document.getElementById(`rfe_content_${clip.id}`);
+            if (ct) { ct.style.opacity = "0.4"; ct.style.pointerEvents = "none"; }
+        });
+        refreshViggle();
+        try { invalidateFrom(runtime.state, 0); } catch (e) {}
+        try { updateHidden(node, runtime); } catch (e) {}
+        try { render(node, runtime); } catch (e) {}
+        try { node.setDirtyCanvas(true, true); } catch (e) {}
+    });
+    refreshViggle();
+    quickBar.append(viggleBtn);
     for (const def of QUICK_DEFS) {
         const w = node.widgets.find((x) => x.name === def.key);
         const C = QUICK_CATEGORIES[QUICK_CAT[def.key]] || QUICK_CATEGORIES.flow;
@@ -7036,8 +7223,11 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
                     if (posBar) {
                         const pct = Math.round(((idx + 1) / def.cycle.length) * 100);
                         posBar.style.width = pct + "%";
-                        posBar.style.background = on ? shades[idx].stripe : C.border;
-                        posBar.style.boxShadow = on ? "0 0 6px " + shades[idx].glow : "none";
+                        // v14.365: shades 只按 min(8, tints.length) 生成，idx 最大可到
+                        // cycle.length-1（现在 37），裸下标会取到 undefined 并抛 TypeError。
+                        const _S = shades[Math.min(idx, shades.length - 1)];
+                        posBar.style.background = on ? _S.stripe : C.border;
+                        posBar.style.boxShadow = on ? "0 0 6px " + _S.glow : "none";
                         posBar.style.opacity = on ? "1" : ".45";
                     }
                 } else {
@@ -7669,10 +7859,21 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     // 注意只藏内部状态：用户参数（width/height/steps/cfg/sampler 等）保持可见。
     try {
         const _hideNames = new Set(["clips_json", "refs_json", "h3_extender_timeline"]);
+        scheduleStateJsonHide(node);  // v14.369: Vue 行渲染后按节奏打标记并由 CSS 隐藏
         for (const _w of (node.widgets || [])) {
             if (!_w || _w === domWidget) continue;
             if (!_hideNames.has(_w.name)) continue;  // 只藏内部状态, 用户参数保留可见
             setWidgetRowHidden(node, _w, true);
+            // v14.368: 部分前端版本不读 options.hidden, 内部状态框(clips_json/refs_json)
+            // 会按文本行数撑成超高 textarea, 把后面参数行与 DOM 容器推出可视区。
+            // 用 LiteGraph 官方语义兜底: computeSize 返回负高度 = 不占位、不绘制。
+            try {
+                if (!_w.__h3NoSize) {
+                    _w.__h3NoSize = true;
+                    _w.computeSize = () => [0, -4];
+                    _w.draw = () => {};
+                }
+            } catch (e) {}
         }
     } catch (e) {}
     // v2.06 (2026-09-19 fix): 用 Object.defineProperty 定义为非可枚举属性,
@@ -7750,7 +7951,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             one_shot_mode: ["off (storyboard)","on (one-shot)"],
             one_shot_sampling: ["Single-pass seamless (recommended)","Dual-pass HD (seam risk)","Dual-pass seamless (8+4)","Dual-pass seamless 2K (8+4)"],
             refine_sampler: ["inherit","euler","res_multistep","dpmpp_2m","lcm","ddim"],
-            render_pipeline: ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+4 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)"],
+            render_pipeline: ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (电影工厂 v3.2 原版)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Video Remix (no-LoRA character swap + motion transfer)", "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)"],
         };
         function detect(w) {
             const n = w.length;
@@ -7821,7 +8022,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             one_shot_mode: { "off (分镜模式)": "off (storyboard)", "on (一镜到底)": "on (one-shot)" },
             one_shot_sampling: { "单采无缝 (推荐)": "Single-pass seamless (recommended)", "双采高清 (接缝风险)": "Dual-pass HD (seam risk)", "双采无缝 (8+4)": "Dual-pass seamless (8+4)", "双采无缝 2K (8+4)": "Dual-pass seamless 2K (8+4)" },
             refine_sampler: { "inherit (跟随一采)": "inherit" },
-            render_pipeline: { "MV Dual-Pass (电影工厂 v3.2 原版)": "MV Dual-Pass (Film Factory v3.2 original)", "Sol-H3 Self-Lift 双采 (默认)": "Sol-H3 Self-Lift Dual-Pass (default)", "直播配音高清（音频≥12步）": "Live Dub HD (audio 12+ steps)", "FastH3-4步VSA": "FastH3 4-step VSA", "DMAD-4步": "DMAD 4-step", "武戏组合拳": "Action Combo", "4K直出 秘制酱料": "4K Direct Secret Sauce", "FastH3 Omni 8步单采": "FastH3 Omni 8-step Single-Pass", "双采2K（HyperVAE 2x 解码）": "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2-8步": "QAD-v2 8-step", "直播带货·01 纯文本配音（三口不接）": "Live Commerce 01 Text Dubbing (no audio inputs)", "直播带货·02 ref_audio音色参考配音（只接参考）": "Live Commerce 02 ref_audio Voice Reference", "直播带货·03 lip_voice对口型（只接现成主播音频）": "Live Commerce 03 lip_voice Lip-Sync", "直播带货（全自动）": "Live Commerce (fully automatic)", "FastH3 Omni × SelfLift 超分": "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8步 多参考单采": "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K重生成 OpenH3Regenerate2K (768P草稿直出2560)": "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)": "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "透明视频 单采抠像 (H3 Transparent)": "Transparent Video Single-Pass Keying (H3 Transparent)", "4合1终极加速 (DMAD 8步 SelfLift 6+2 + 参考降分 + SegAttention)": "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)": "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director 极速双采 (MiniMaxH3 Director 移植)": "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "双采2K（官方条件放大）": "Dual-Pass 2K (official condition upscale)", "PDMD 4步 SelfLift 双采 (4+2)": "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2步 极速试稿 (单采)": "PDMD 2-step Turbo Draft (single-pass)", "PTD 4步 Ref2VA 单采 (参考图加速)": "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)": "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+4 双采 (Ref2VA 锁脸)": "PIKA H3 Flex 8+4 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)": "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8步+4步 渐进放大双采 (8+4 1080p直出)": "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika 8步 高动态长视频 (导演台双采)": "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "视频替换 (V2V 人物替换)": "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)": "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)" },
+            render_pipeline: { "MV Dual-Pass (电影工厂 v3.2 原版)": "MV Dual-Pass (Film Factory v3.2 original)", "Sol-H3 Self-Lift 双采 (默认)": "Sol-H3 Self-Lift Dual-Pass (default)", "直播配音高清（音频≥12步）": "Live Dub HD (audio 12+ steps)", "FastH3-4步VSA": "FastH3 4-step VSA", "DMAD-4步": "DMAD 4-step", "武戏组合拳": "Action Combo", "4K直出 秘制酱料": "4K Direct Secret Sauce", "FastH3 Omni 8步单采": "FastH3 Omni 8-step Single-Pass", "双采2K（HyperVAE 2x 解码）": "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2-8步": "QAD-v2 8-step", "直播带货·01 纯文本配音（三口不接）": "Live Commerce 01 Text Dubbing (no audio inputs)", "直播带货·02 ref_audio音色参考配音（只接参考）": "Live Commerce 02 ref_audio Voice Reference", "直播带货·03 lip_voice对口型（只接现成主播音频）": "Live Commerce 03 lip_voice Lip-Sync", "直播带货（全自动）": "Live Commerce (fully automatic)", "FastH3 Omni × SelfLift 超分": "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8步 多参考单采": "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K重生成 OpenH3Regenerate2K (768P草稿直出2560)": "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10步 运动强化单采 (Singularity v2 × 10Eros-Max)": "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "透明视频 单采抠像 (H3 Transparent)": "Transparent Video Single-Pass Keying (H3 Transparent)", "4合1终极加速 (DMAD 8步 SelfLift 6+2 + 参考降分 + SegAttention)": "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer 结构控制 (控制LoRA + 4步LoRA 逐帧驱动)": "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director 极速双采 (MiniMaxH3 Director 移植)": "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "双采2K（官方条件放大）": "Dual-Pass 2K (official condition upscale)", "PDMD 4步 SelfLift 双采 (4+2)": "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2步 极速试稿 (单采)": "PDMD 2-step Turbo Draft (single-pass)", "PTD 4步 Ref2VA 单采 (参考图加速)": "PTD 4-step Ref2VA Single-Pass (reference accel)", "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)": "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8步+2步 双采 (Ref2VA 锁脸)": "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)": "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8步+4步 渐进放大双采 (8+4 1080p直出)": "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika 8步 高动态长视频 (导演台双采)": "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "视频替换 (V2V 人物替换)": "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B 单采 (4/6/8步 GGUF)": "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Viggle Remake 视频改写 (6步 换人/增删改)": "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake 视频改写+逐帧换脸 (6步 换人)": "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)" },
         };
         function norm(k, v, d) {
             if (ALIAS_CANON[k] && typeof v === "string" && ALIAS_CANON[k][v]) return ALIAS_CANON[k][v];
