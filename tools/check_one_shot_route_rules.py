@@ -213,18 +213,23 @@ def main():
           [w for w in BACK_WORDS if w in mid])
     check("段中换场: 鞋尖朝镜头落步(倒行的直接反证)",
           "鞋尖都朝面前那道镜头抬起来再落下去" in mid
-          and "鞋底在画面里由小变大" in mid, mid[:60])
-    check("段中换场: 遮挡由固定半径的弧线横移完成(主体大小恒定)",
-          "以主体为圆心、半径固定的弧线横移半步" in mid
-          and "距离与高度在这半步里保持固定" in mid, mid[:60])
+          and "鞋底在画幅里由小变大" in mid, mid[:60])
+    check("段中换场: 画幅以主体为锚(人与画幅零相对位移 -> 倒行无来源)",
+          "本段画幅以他为锚" in mid
+          and "位置自始至终固定在同一个地方" in mid, mid[:60])
+    check("段中换场: 前进感由景物迎面流过承担(规则里不提机位朝哪走)",
+          "迎面朝镜头流动过来" in mid and "由远及近、由小及大" in mid, mid[:60])
     check("段中换场: 过渡物立在两处空间之间(视差揭示, 而非时间上的换场)",
           "就立在" in mid and "柱的这一侧是" in mid and "柱的另一侧是" in mid, mid[:60])
-    check("段中换场: 柱面整块盖住画幅(实心石面占满四角)",
-          "整块盖住画幅" in mid and "占满画幅的四角" in mid, mid[:60])
+    check("段中换场: 柱身迎面涨满整幅画幅并整块盖住镜头",
+          "整根柱身涨满整幅画幅" in mid and "整块盖住镜头" in mid
+          and "占满画幅的四角" in mid, mid[:60])
     check("段中换场: 遮盖那两三拍主体被柱面挡住(拆掉双曝前提)",
           "主体整个人在这两三拍里被这块实心石面挡在后面" in mid, mid[:60])
     check("段中换场: 明写每拍只有一层实景(双曝无动机)",
           "每一拍画幅里只有其中一层" in mid, mid[:60])
+    check("段中换场: 正文的'同速穿过'已纳入本段覆盖清单",
+          "与她同速穿过某处" in mid, mid[:60])
     check("段中换场规则不含否定词(CFG=1.0 会把否定词当画面内容)",
           all(w not in mid for w in NEG_WORDS),
           [w for w in NEG_WORDS if w in mid])

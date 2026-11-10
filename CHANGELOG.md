@@ -2,32 +2,35 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
-### v14.343 (2026-11-10) — 一镜到底段中换场「机位零后退 + 柱面整块遮镜」：一次拆掉倒着走与中心淡入淡出两个来源 / One-take mid-clip transition: zero camera retreat + a solid pillar that fully covers the lens — removing both the moonwalk and the cross-dissolve at once
+### v14.343 (2026-11-10) — 一镜到底段中换场「画幅以主体为锚 + 景物迎面流过」：从几何上拆掉倒着走，从遮挡上拆掉中心淡入淡出 / One-take mid-clip transition: the frame is anchored on the subject and the scenery streams towards the lens — killing the moonwalk geometrically and the cross-dissolve via a real occluder
 
 **现象（两片都跑在 v14.342 下，日志 `16:14:05 v14.342 backend loaded`）**
 
 - `h3_clip_250_1_1794213548.mp4`（16:39，960x544 / 24fps / 294 帧）：用户报 `00:05:22`（24fps 第 142 帧 = 5.917s）出现**场景从中心淡入淡出到下一个场景**。抽帧 5.00 / 5.40 / 5.92 / 6.40s 确认：6.40s 一帧里**故宫红门与帕特农柱列同时可见**，帕特农柱列半透明地叠在左侧——不是切镜，是两个场景双曝。
 - `h3_clip_250_2_1794218876.mp4`（18:07，960x544 / 24fps / 288 帧）：`00:01:07`–`00:07:12`（1.29–7.5s）**倒着走**，`00:07:12` 之后同样是双曝（8.00s 一帧里圣家堂哥特柱与山门石柱同时可见）。
+- 抽帧量尺寸：1.29s 她头脚间距占画高约 0.81，3.00s 约 0.81，5.00s 约 0.72，7.50s 约 0.70 —— **她一路变小**，而门洞石柱在画幅边缘一路涨大。
 - `scdet=threshold=0`：两片峰值只有 0.992 / 0.764（渐变过渡每帧差值本来就小，scdet 抓不到），所以这两个缺陷**只能靠抽帧确认**，不能再拿 scdet 当验收标准。
 
-**根因（v14.342 的规则文本自己制造了两个缺陷，各一条）**
+**根因（三层，全部在插件规则层；用户脚本一字未动）**
 
-1. **倒着走**：v14.342 写的是「机位与他同距同高、沿同一条弧线**平稳后退**」。模型把"后退"执行成**拉开距离**——主体正面朝镜头、在画幅里持续变小、地面透视张开，观感就是倒着走。结论：**只要规则里出现"机位后退"，正面机位下必然读成倒行。**
-2. **中心淡入淡出**：同一段文字里一边说「主体全程正对镜头、画幅里位置与大小自始至终稳定」，一边说「过渡物占满整幅画面一两拍」。主体既要可见、又要被整幅遮挡，模型只能让两个场景半透明叠在一起——这就是双曝。**是规则自相矛盾，不是提示词问题。**
+1. **倒着走的几何来源**：v14.342 写「机位与他同距同高、沿同一条弧线**平稳后退**」，模型把"后退"执行成**拉开距离**；更底层的是它继承了脚本正文（不可改）与 `[取景连续]` 同款口径「镜头沿其行进方向前移、正对正面、同距同高」。**镜头朝她行进方向推进 + 她又必须正面朝镜头，几何上唯一解就是她一边迈步一边远离镜头**——这就是倒着走。这一点不解决，换任何措辞都会复发。
+2. **中心淡入淡出的来源**：同一段规则里一边说「主体全程正对镜头、画幅里位置与大小自始至终稳定」，一边说「过渡物占满整幅画面一两拍」。主体既要可见、又要被整幅遮挡，模型只能让两个场景半透明叠在一起——双曝。**是规则自相矛盾。**
+3. 「过渡物始终在画面之内」（脚本正文）与「人穿门而过」并存时，模型会让**人与画幅同速穿过**，于是人一路远离画幅。
 
-**修法（纯规则文本，零新增采样开销，用户脚本一字未动）**
+**修法（纯规则文本，零新增采样开销）**
 
-- 机位**零后退**：换场改为「沿一条以主体为圆心、半径固定的弧线横移半步」，距离与高度固定、只转方位角 —— 半径恒定，主体大小恒定，倒行的观感来源被消除。
-- 遮挡改由**柱面整块盖住镜头**那两三拍完成，并明写「主体整个人在这两三拍里被这块实心石面挡在后面」「画幅里就是石纹、砌缝与投影，占满画幅的四角」—— 主体在这几拍本来就不该在画幅里，"主体可见"与"整幅被遮"的矛盾被拆开，双曝失去动机。
-- 再加上一条语义层的拆解：**过渡物立在两处空间之间**（柱的这一侧是 Sx，另一侧是 Sy），换场不是"时间上把 A 换成 B"，而是"机位绕柱横移、从一侧转到另一侧"的视差揭示。双曝的前提（两个场景要重叠）在语义上不成立。
-- 画面分段交代「每一拍画幅里只有其中一层」：柱面之前是 Sx 实景，遮盖那两三拍只有柱面，柱面移出之后是 Sy 实景。
-- 日志改 `v14.343 … 由机位绕柱横移、柱面整块盖住镜头那两三拍完成(机位距离与高度固定, 全程零后退)`；横幅 `v14.343 backend loaded`。
+- **本段不再交代机位朝任何方向移动**，改成「**画幅以主体为锚**」：他在画面里的位置自始至终固定在同一个地方（占画比例只按本段景别路径平缓变化）；前进感全部由**景物迎面朝镜头流动**承担（地面石缝、石阶棱线、柱列、灯具由远及近、由小及大、从他身侧掠过）。人与画幅之间零相对位移 → 人不会在画幅里远离 → 倒行的观感来源消失，且与正文「过渡物始终在画面之内」不冲突。
+- 换场由**过渡物的柱身迎面涨满整幅画幅**完成：先一小段石边贴在画面一侧，接着整根柱身涨满整幅画幅，在当中两三拍里**整块盖住镜头**（画幅里只有石纹、砌缝、投影，占满四角），并明写「**主体整个人在这两三拍里被这块实心石面挡在后面**」—— 她本来就不该出现在这几拍里，"主体可见"与"整幅被遮"的矛盾被拆开，双曝失去动机。
+- 语义层再拆一次：**过渡物立在两处空间之间**（柱的这一侧是 Sx，另一侧是 Sy），换场是「柱身迎面掠过镜头」的视差揭示，不是"时间上把 A 换成 B"；并明写「每一拍画幅里只有其中一层」。
+- 正文里的「与她同速穿过」一并纳入本段覆盖清单：「脚本里写的登阶、绕过、走入、穿过、与她同速穿过某处，本段统一由画幅迎面进入{transit}这一下完成」。
+- 另加一条倒行的直接反证：「他每一步的鞋尖都朝面前那道镜头抬起来再落下去、脚跟随后抬起，鞋底在画幅里由小变大」。
+- 日志改 `v14.343 … 由画幅以主体为锚、柱身迎面涨满画幅整块盖住镜头完成(人与画幅零相对位移)`；横幅 `v14.343 backend loaded`。
 
-**静态验证**：`ast.parse` OK（16322 行）；`tools/check_one_shot_route_rules.py` 新增 `BACK_WORDS` 与 8 条 v14.343 断言（机位零后退 / 固定半径弧线 / 柱面整块遮镜 / 主体被遮挡 / 过渡物立在两处空间之间 / 每拍只有一层 / 无否定词 / 锚定句挂遮盖前后）→ **40 PASS 0 FAIL**；离线 dump 确认注入文本无切镜词、无否定词、无"后退/退出/拉远"字样。
+**静态验证**：`ast.parse` OK（16327 行）；`tools/check_one_shot_route_rules.py` 新增 `BACK_WORDS` 与 10 条 v14.343 断言（零后退写法 / 画幅以他为锚 / 景物迎面流动 / 柱身涨满整幅并整块盖镜 / 主体被遮挡 / 过渡物立在两处空间之间 / 每拍只有一层 / 鞋尖朝镜头 / 「同速穿过」已覆盖 / 无否定词）→ **43 PASS 0 FAIL**（顺带修掉 `NEG_WORDS` 里裸"别"误伤"景别"的假阳）；`check_recast_pipeline.py` OK；离线 dump 确认注入文本无切镜词、无否定词、无"后退/退出/拉远"字样。
 
-**未验证**：本机未重渲 clip1 / clip2 验证「倒行与双曝是否消失」；clip3–clip5（19:34 / 21:31 / 22:35）仍是 v14.342 产物，同样带着这两个缺陷，需要一并重渲。
+**未验证**：本机未重渲 clip1 / clip2 验证「倒行与双曝是否消失」。13:xx 的第一次提交（`7beefa6`）用的是"绕柱横移"方案，已被本次提交替换（横移半步不足以让柱身真正扫过镜头，且仍未处理"人远离画幅"这一层）。clip3–clip5（19:34 / 21:31 / 22:35）仍是 v14.342 产物，同样带着这两个缺陷，需要一并重渲。
 
-**英文**：Two clips produced under v14.342 (banner logged at 16:14:05) failed in two ways, and both trace back to the same rule text. (1) `h3_clip_250_1_1794213548.mp4` cross-dissolves at 5.917s: a frame at 6.40s shows the Forbidden City red gate and the Parthenon colonnade ghosted on top of each other. (2) `h3_clip_250_2_1794218876.mp4` reads as moonwalking from 1.29s to 7.5s, then cross-dissolves after 7.5s (a frame at 8.00s shows Sagrada Família Gothic piers and the gate's stone jambs simultaneously). scdet peaks are only 0.992 / 0.764 — a gradual dissolve barely moves the per-frame delta, so frame inspection, not scdet, is the acceptance test for these two defects. Root causes inside v14.342's own text: "the camera retreats smoothly along the same arc at the same distance and height" was executed as the camera *increasing* distance, which with a front-facing subject reads exactly as walking backwards; and the same paragraph simultaneously demanded "the subject stays framed at a constant size" and "the transit object fills the whole frame for a beat or two", a contradiction the model resolved by blending both scenes at half opacity. v14.343 removes both: the camera never retreats (it arcs half a step around the subject at a fixed radius, so her size is constant); the swap is carried by the transit pillar covering the entire frame for two or three beats, with the subject explicitly hidden behind that solid stone face during those beats; the transit object is declared to stand *between* the two spaces (Sx on one side, Sy on the other), so the change becomes a parallax reveal rather than a temporal swap; and each beat is declared to contain exactly one layer of scenery. Static checks: `ast.parse` OK (16322 lines), `check_one_shot_route_rules.py` 40 PASS / 0 FAIL, offline dumps free of cut words, negations and any "retreat" phrasing. Live re-render not yet performed; clip3–clip5 are still v14.342 output and carry the same defects.
+**英文**：Two clips produced under v14.342 (banner logged at 16:14:05) failed in two ways. (1) `h3_clip_250_1_1794213548.mp4` cross-dissolves at 5.917s: a frame at 6.40s shows the Forbidden City red gate and the Parthenon colonnade ghosted on top of each other. (2) `h3_clip_250_2_1794218876.mp4` reads as moonwalking from 1.29s to 7.5s, then cross-dissolves after 7.5s (a frame at 8.00s shows Sagrada Família Gothic piers and the gate's stone jambs simultaneously). Measured subject height across the shot: 0.81 / 0.81 / 0.72 / 0.70 of frame height at 1.29s / 3.00s / 5.00s / 7.50s — she shrinks steadily while the gate jambs grow at the frame edges. scdet peaks are only 0.992 / 0.764 — a gradual dissolve barely moves the per-frame delta, so frame inspection, not scdet, is the acceptance test. Root cause (three layers, all in the plugin's rule text): (a) v14.342 said "the camera retreats smoothly along the same arc at the same distance and height", and it inherited the script's own wording "the camera advances along her travel direction, facing her front-on, constant distance" — camera advancing along her travel direction while the subject must face the camera has exactly one geometric solution: she steps forward *and* moves away from the lens, i.e. moonwalking; (b) the same paragraph demanded both "the subject stays framed" and "the transit object fills the whole frame", a contradiction the model resolved by blending the two scenes at half opacity; (c) "the transit object stays inside the frame" plus "the person walks through the gate" makes the model move person and frame together, so the person drifts away from the frame. v14.343 removes the geometry instead of rewording it: the rule no longer states any camera direction and instead anchors the frame on the subject ("his position in the frame is fixed throughout; progress is carried by the scenery streaming towards the lens — floor joints, step edges, colonnades and lamps arriving from far to near and sweeping past him"), so relative displacement between person and frame is zero. The swap is carried by the transit pillar *filling the whole frame from the front* for two or three beats, with the subject explicitly hidden behind that solid stone face; the transit object is declared to stand between the two spaces (Sx on one side, Sy on the other) so the change is a parallax reveal, not a temporal swap; each beat is declared to hold exactly one layer of scenery; the script's "passes through at her speed" verb is explicitly overridden; and an unambiguous stride cue is added ("each step's shoe tip lifts towards the lens and lands, the sole growing in the frame"). Static checks: `ast.parse` OK (16327 lines), `check_one_shot_route_rules.py` 43 PASS / 0 FAIL, `check_recast_pipeline.py` OK, offline dumps free of cut words, negations and any retreat phrasing. Live re-render not yet performed; clip3–clip5 remain v14.342 output with the same defects.
 
 ### v14.342 (2026-11-09) — 一镜到底段中换场「倒着走」根治：遮挡改由机位贴着过渡物退出完成 / One-take mid-clip transition: occlusion now performed by the camera passing the transit object (no more moonwalking)
 
