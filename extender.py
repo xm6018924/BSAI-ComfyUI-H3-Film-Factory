@@ -3722,8 +3722,99 @@ _RP_LEGACY_LABELS = {
 }
 
 
-def _ff_get_upscaler_models():
-    """获取可用的 3D latent upscaler 模型列表; 不可用时返回仅插值选项。"""
+# ============================================================
+# v14.345: 3D upscaler 权重架构探针
+# 本机 Comfyui_Minimax_h3_latent_Upscaler(2026-08-29 版) 的 scan_models() 只按扩展名
+# 把目录里的**全部**权重都列出来, 并且**没有** is_supported_model / describe_model
+# (那是上游新版的 API)。于是 v14.273 的"提前校正"在这台机器上是空转:
+# TypeError / AttributeError 被 except 吞掉, 工作流里存着的
+# h3_clean_latent_upscaler_film_epoch200(base.low_blocks/refine_blocks/to_delta
+# 因子化注意力架构) 会被直接塞进 pure-3D conv 加载器, strict load 必然失败,
+# 静默退成 bislerp 插值 —— 画质明显变软却看不出原因。
+# 这里自己读 safetensors 头做判定(只解析 header, 不加载任何张量, 毫秒级)。
+_FF_UPSCALER_ARCH_CACHE = {}
+
+
+def _ff_upscaler_weight_path(name):
+    """权重文件名 -> 绝对路径; 找不到返回空串。"""
+    if not name:
+        return ""
+    import os as _o
+    try:
+        _p = folder_paths.get_full_path("latent_upscale_models", name)
+        if _p and _o.path.isfile(_p):
+            return _p
+    except Exception:
+        pass
+    try:
+        _d = _FF_UPSCALER_MOD.get_models_dir()
+        for _tail in (name, _o.path.basename(name)):
+            _p = _o.path.join(_d, _tail)
+            if _o.path.isfile(_p):
+                return _p
+    except Exception:
+        pass
+    return ""
+
+
+def _ff_probe_upscaler_arch(name):
+    """判定权重能否被本机 pure-3D conv 加载器 strict 加载。
+
+    返回 (compatible, desc):
+      True  -> 结构与 LatentResizer3D(conv_in/in_blocks/out_blocks, 24ch) 匹配
+      False -> 已知不匹配(因子化注意力 clean 版 / LTX-2.5 版 / 未知布局)
+      None  -> 无法判定(文件缺失/探针异常), 调用方按"照旧尝试加载"处理
+    """
+    import os as _o
+    _path = _ff_upscaler_weight_path(name)
+    if not _path:
+        return None, "missing file"
+    _key = None
+    try:
+        _key = (_path, _o.path.getmtime(_path), _o.path.getsize(_path))
+        if _key in _FF_UPSCALER_ARCH_CACHE:
+            return _FF_UPSCALER_ARCH_CACHE[_key]
+    except Exception:
+        _key = None
+
+    _res = (None, "unknown")
+    try:
+        if _path.lower().endswith(".safetensors"):
+            import json as _json
+            import struct as _struct
+            with open(_path, "rb") as _fh:
+                _ln = _struct.unpack("<Q", _fh.read(8))[0]
+                _hdr = _json.loads(_fh.read(_ln).decode("utf-8"))
+            _keys = [k for k in _hdr.keys() if k != "__metadata__"]
+            _conv = _hdr.get("conv_in.weight")
+            _conv_shape = _conv.get("shape") if isinstance(_conv, dict) else None
+            if (_conv_shape and len(_conv_shape) == 5 and _conv_shape[1] == 24
+                    and any(k.startswith("in_blocks.") for k in _keys)
+                    and any(k.startswith("out_blocks.") for k in _keys)):
+                _res = (True, "pure-3D conv, channels=" + str(_conv_shape[0]) + ", 24ch in")
+            elif any(k.startswith("base.") for k in _keys) or "to_delta.weight" in _hdr:
+                _res = (False, "factorized-attention 'clean' upscaler "
+                               "(base./refine_blocks/to_delta) needs h3_upscaler_dispatch, "
+                               "pure-3D conv loader cannot strict-load it")
+            elif "final_conv.weight" in _hdr:
+                _res = (False, "LTX-2.5 latent upscaler (final_conv) - different architecture")
+            else:
+                _res = (False, "unknown safetensors layout: no conv_in.weight / no in_blocks")
+    except Exception as _pe:
+        _res = (None, "probe failed: " + str(_pe)[:80])
+    if _key is not None:
+        _FF_UPSCALER_ARCH_CACHE[_key] = _res
+    return _res
+
+
+def _ff_get_upscaler_models(compatible_only=False):
+    """获取 3D latent upscaler 权重列表; 不可用时返回仅插值选项。
+
+    compatible_only=True 时只返回本机加载器真能 strict-load 的权重(用于自动纠偏的
+    备选列表)。节点下拉框仍用 False 保留全量文件名 —— 老工作流里存的
+    h3_clean_... 若从列表里消失, 前端会报 "Value not in list" 并把整条 prompt 丢掉;
+    架构不合的权重改为在 _ff_resolve_upscaler_model() 里运行时纠正。
+    """
     opts = ["(bilinear interpolation, no model)"]
     if _FF_UPSCALER_MOD is not None:
         try:
@@ -3734,7 +3825,17 @@ def _ff_get_upscaler_models():
                 names = _FF_UPSCALER_MOD.scan_models(supported_only=True)
             except TypeError:
                 names = _FF_UPSCALER_MOD.scan_models()
-            opts.extend(sorted(n for n in names if not n.startswith("(")))
+            # v14.345: 上游 2026-08-29 版把目录列全、不判架构, 这里按真实 header 过滤
+            _keep = []
+            for _n in names:
+                if str(_n).startswith("("):
+                    continue
+                if compatible_only:
+                    _ok, _ = _ff_probe_upscaler_arch(_n)
+                    if _ok is False:
+                        continue
+                _keep.append(_n)
+            opts.extend(sorted(_keep))
         except Exception:
             pass
     return opts
@@ -3746,21 +3847,31 @@ def _ff_resolve_upscaler_model(name):
     v14.273: 旧工作流里存的权重若不受加载器支持, 会在 load_state_dict 里
     抛错, 被 except 吞掉后静默退化成 bilinear 插值 —— 画质明显变软却看不出
     原因。这里提前发现, 自动纠正并把原因推到前端状态栏, 避免整条链白跑。
+    v14.345: 加载器没有 is_supported_model 接口时(本机 2026-08-29 版), 改走
+    safetensors header 探针, 保证这条校正在本机真的会执行。
     """
     if not name or str(name).startswith("("):
         return name, ""
     if _FF_UPSCALER_MOD is None:
         return name, ""
+
+    _ok = None
+    _desc = "unknown architecture"
     try:
         _ok = bool(_FF_UPSCALER_MOD.is_supported_model(name))
+        _desc = "loader-reported supported"
     except Exception:
-        return name, ""
-    if _ok:
+        _ok = None
+    if _ok is None:
+        _ok, _desc = _ff_probe_upscaler_arch(name)
+    if _ok is not False:
         return name, ""
 
-    _opts = [n for n in _ff_get_upscaler_models() if not str(n).startswith("(")]
+    _opts = [n for n in _ff_get_upscaler_models(compatible_only=True)
+             if not str(n).startswith("(")]
     _fallback = ""
-    for _pref in ("minimax_h3_latent_upscaler_3d", "latent_upscaler_3d", "upscaler_3d"):
+    for _pref in ("minimax_h3_latent_upscaler_3d_fp16", "minimax_h3_latent_upscaler_3d_fp32",
+                  "latent_upscaler_3d", "upscaler_3d"):
         for _n in _opts:
             if _pref in str(_n).lower():
                 _fallback = _n
@@ -3771,15 +3882,12 @@ def _ff_resolve_upscaler_model(name):
         _fallback = _opts[0]
     if not _fallback:
         return "(bilinear interpolation, no model)", (
-            f"3D upscaler weights '{name}' do not match the loader architecture and no "
-            f"compatible weights are installed; fell back to bilinear interpolation")
-    try:
-        _desc = _FF_UPSCALER_MOD.describe_model(name)
-    except Exception:
-        _desc = "unknown architecture"
+            "3D upscaler weights '" + str(name) + "' do not match the loader architecture ("
+            + str(_desc) + ") and no compatible weights are installed; "
+            "fell back to bilinear interpolation")
     return _fallback, (
-        f"3D upscaler weights '{name}' do not match the loader architecture ({_desc}); "
-        f"switched to '{_fallback}' automatically")
+        "3D upscaler weights '" + str(name) + "' do not match the loader architecture ("
+        + str(_desc) + "); switched to '" + str(_fallback) + "' automatically")
 
 
 def _ff_is_nested(samples):
@@ -4035,10 +4143,13 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
                   f"model={upscaler_model}")
             return out
         except Exception as e:
-            print(f"[H3 Extender] Refine 3D upscaler 失败({e}), fallback {method}")
+            print(f"[H3 Extender] Refine 3D upscaler 失败({e}), fallback {method} "
+                  f"(model={upscaler_model})")
             # v14.157: 记录回退原因, 调用处会推送前端显式警告
+            # v14.345: 原因里带上具体权重文件名 —— 不知道是谁失败, 就只能猜
             _FF_UPSCALER_FELL_BACK["hit"] = True
-            _FF_UPSCALER_FELL_BACK["reason"] = str(e)[:180]
+            _FF_UPSCALER_FELL_BACK["reason"] = (
+                "model=" + str(upscaler_model) + " :: " + str(e)[:160])
 
     # fp16/bf16 插值会量化新网格, 二采出现斑点; 统一 fp32 放大后转回原精度
     samples = video.float() if video.dtype in (torch.float16, torch.bfloat16) else video
@@ -15868,7 +15979,7 @@ NODE_CLASS_MAPPINGS = {
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
 # v14.257: 隐藏启动横幅中的超长版本说明文字（原括号内整段历史配方摘要不再打印）
-print("[BSAI-H3-Film-Factory] v14.344 backend loaded")
+print("[BSAI-H3-Film-Factory] v14.345 backend loaded")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",

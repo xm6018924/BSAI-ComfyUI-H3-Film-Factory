@@ -2,6 +2,51 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.345 (2026-11-10) — 3D latent 放大器的架构校正真正生效：`h3_clean` 权重被塞进 pure-3D conv 加载器导致二采静默退成 bislerp / The 3D latent-upscaler architecture guard now actually runs: a `h3_clean` checkpoint was fed to the pure-3D conv loader, so the refine pass silently fell back to bislerp
+
+**现象（8181 实跑日志）**
+
+```
+[H3 Extender] Refine 3D upscaler 失败(Error(s) in loading state_dict for LatentResizer3D:
+        Missing key(s) ... "conv_in.weight" ... "in_blocks.0.in_layers.0.weight" ...
+        Unexpected key(s): "base.low_blocks.0.conv1.bias" ... "to_high.weight" ... ), fallback bislerp
+[H3 Extender] WARNING: 3D semantic upscale failed; fell back to bislerp interpolation (...)
+```
+
+二采（4 步 denoise 0.35）照常跑完，但 **latent 是插值放大而不是语义放大** —— 画质变软，且这条链名义上的 "3D semantic upscale" 完全没生效。
+
+**根因（插件代码，两处）**
+
+1. **工作流里存的是跨架构权重**。`node 250 widgets_values[30] = h3_clean_latent_upscaler_film_epoch200.safetensors`：它的 294 个张量是 `base.low_blocks.* / base.refine_blocks.* / to_high / to_delta / blocks.*.spatial|temporal`（因子化注意力 "clean" 架构），而本机 `Comfyui_Minimax_h3_latent_Upscaler`（2026-08-29 版）的加载器是 pure-3D conv `LatentResizer3D`，要 `conv_in.weight(512,24,3,3,3) / in_blocks.* / out_blocks.*` —— strict load 必炸。
+2. **v14.273 的"提前校正"在这台机器上是空转**。它依赖上游新版的 `_FF_UPSCALER_MOD.is_supported_model()` / `describe_model()`，而本机这个版本的模块**根本没有这两个函数**（`hasattr → False`，已实测）；`scan_models(supported_only=True)` 也因签名不符抛 `TypeError`。两个异常都被 `except: pass` 吞掉，于是 `_ff_resolve_upscaler_model()` 原样返回 `h3_clean`，直到 `load_state_dict` 才炸。**这是插件侧接口假设失效，不是提示词问题，也不是采样参数问题。**
+
+**修法（改插件代码，不动工作流、不换权重名以外的任何东西）**
+
+- 新增 `_ff_upscaler_weight_path()` + `_ff_probe_upscaler_arch()`：**直接读 safetensors header**（只解析头部，不加载张量，毫秒级，按 mtime+size 缓存）判定架构 —— `conv_in.weight` 为 5 维且 in_ch=24 + 存在 `in_blocks./out_blocks.` → pure-3D 可加载；出现 `base.` / `to_delta.weight` → clean 因子化架构（需 `h3_upscaler_dispatch`）；出现 `final_conv.weight` → LTX-2.5 另一套。
+- `_ff_resolve_upscaler_model()` 改为**特性探测**：加载器有 `is_supported_model` 就用，没有就走上面的 header 探针；判定不兼容则自动切到可用权重，并把原因推到前端状态栏。
+- `_ff_get_upscaler_models(compatible_only=False)` 增加开关：**节点下拉框仍列全量文件名**（老工作流里存着 h3_clean，从列表里消失会让前端报 "Value not in list" 把整条 prompt 丢掉），只有"自动纠偏的候选列表"用 `compatible_only=True` 过滤。
+- 二采 3D 放大失败的回退原因里补上**具体权重文件名**（`model=<name> :: <error>`），不再让人猜是谁失败。
+- 横幅改 `v14.345 backend loaded`。
+
+**实测（本机探针输出）**
+
+| 权重 | 探针 | 结论 |
+|---|---|---|
+| h3_clean_latent_upscaler_film_epoch200 | False | clean 因子化注意力，pure-3D 加载器吃不下 |
+| minimax_h3_latent_upscaler_3d_fp16 | True | pure-3D conv, 512ch / 24ch in |
+| h3_upscaler_lms_v0.1_fp32 | True | 同上 |
+| h3_upscaler_sharpness_2000steps_v0.1_fp32 | True | 同上 |
+| ltx-2.5-latent-spatial/temporal-upscaler | False | LTX-2.5 架构 |
+
+工作流里存的值经校正 → `minimax_h3_latent_upscaler_3d_fp16.safetensors`（与 MV 档同款、实机验证过），状态栏提示原文：
+`3D upscaler weights 'h3_clean_...' do not match the loader architecture (factorized-attention 'clean' upscaler ... pure-3D conv loader cannot strict-load it); switched to 'minimax_h3_latent_upscaler_3d_fp16.safetensors' automatically`
+
+**静态验证**：`ast.parse` OK（16449 行）；`check_one_shot_route_rules.py` 47 PASS / 0 FAIL；`check_recast_pipeline.py` OK。
+
+**未验证 / 待办**：本机未重跑出片确认二采日志变成 `Refine 3D upscaler: … model=minimax_h3_latent_upscaler_3d_fp16.safetensors`。若要用回 `h3_clean` 的语义放大质量，需要补装上游的 `h3_upscaler_dispatch.py` 分派模块（本机缺失），那是另一条独立工作项。
+
+**英文**：The 8181 render log showed `Refine 3D upscaler 失败(... LatentResizer3D ... Missing key "conv_in.weight" ... Unexpected key "base.low_blocks.0.conv1.bias" ...), fallback bislerp`, so the 4-step refine pass ran on an interpolated latent instead of a semantically upscaled one — softer picture, and the "3D semantic upscale" path silently did nothing. Two code-side causes. First, the workflow stores `h3_clean_latent_upscaler_film_epoch200.safetensors` (`widgets_values[30]`), whose 294 tensors are the factored-attention "clean" layout (`base.low_blocks.*`, `base.refine_blocks.*`, `to_high`, `to_delta`, `blocks.*.spatial/temporal`), while the installed `Comfyui_Minimax_h3_latent_Upscaler` (2026-08-29 build) instantiates the pure-3D conv `LatentResizer3D`, which needs `conv_in.weight` of shape (512, 24, 3, 3, 3) plus `in_blocks./out_blocks.` — a strict load cannot succeed. Second, v14.273's pre-load correction never ran on this machine: it calls `is_supported_model()` / `describe_model()`, which this build does not have (verified `hasattr → False`), and `scan_models(supported_only=True)` raises `TypeError`; both exceptions were swallowed by `except: pass`, so the stored name was passed straight to `load_state_dict`. This is a broken interface assumption in the plugin, not a prompt or sampling issue. v14.345 adds a real probe that parses the safetensors header only (no tensors, millisecond cost, cached by mtime+size) and classifies pure-3D vs factored-attention vs LTX-2.5; `_ff_resolve_upscaler_model()` now feature-detects the loader API and falls back to the probe when it is missing, switching to a compatible weight and surfacing the reason in the status bar; `_ff_get_upscaler_models(compatible_only=…)` keeps every filename in the node's dropdown (dropping `h3_clean` would make old workflows fail with "Value not in list" and lose the whole prompt) and filters only the auto-correct candidate list; the refine fallback reason now names the weight. Measured probe result: `h3_clean` False, `minimax_h3_latent_upscaler_3d_fp16` / `h3_upscaler_lms` / `h3_upscaler_sharpness` True, both LTX-2.5 weights False; the workflow value resolves to `minimax_h3_latent_upscaler_3d_fp16.safetensors`. Static checks: `ast.parse` OK (16449 lines), 47 PASS / 0 FAIL, recast check OK. Not yet verified by a live render; using `h3_clean` again would require installing the missing upstream `h3_upscaler_dispatch.py`.
+
 ### v14.344 (2026-11-10) — 一镜到底段中换场「起幅归属 + 换场时间窗」：v14.343 实机首片暴露的「整段塌缩到一处空间」 / One-take mid-clip transition: pinning the opening space and the swap window after v14.343's first live clip collapsed the route into a single place
 
 **现象（v14.343 实机首片 `h3_clip_250_1_1794280356.mp4`，11:12 出片，1920x1088 / 24fps / 294 帧）**
