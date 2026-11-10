@@ -2,6 +2,33 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.347 (2026-11-10) — 一镜到底段中换场「步态改成正走」：v14.344 的塌缩已修好，但第一个分镜 moonwalk / One-take mid-clip transition: the gait is now explicitly forward — v14.344 fixed the route collapse, but the subject moonwalked from the first beat
+
+**现象（15:44 那轮 clip1 `h3_clip_250_1_1794297087.mp4`，1920x1088 / 24fps / 294 帧 / 12.25s / 26.8MB；后端 v14.345，规则 v14.344，管线 FastH3 Omni × SelfLift 超分 一采4 + 二采4 denoise 0.5）**
+
+- **v14.344 的三处修法都生效**：0.20s 起幅是 S1 故宫城台拱墙（行程不再塌缩），约 6.5s 柱身整块盖住镜头，7s 之后整段是 S2 帕特农 / 卫城山门并保持到末帧，两端接得上。
+- **但用户报“第一个分镜就倒着走”**。抽帧 0.20 / 1.00 / 2.00 / 3.00 / 5.00 / 6.50 / 8.00 / 9.00 / 11.80s：她本人占画高 0.520（1.0s）→ 0.540 → 0.553 → 0.571，**逐拍单调变大、一路朝镜头走来**，距离上并不倒行。倒行出在**步态**：脚朝镜头抬起、鞋底由小变大，是 moonwalk 的标准姿势；背景在她身侧一路放大（机位在前进）。两者叠起来就是“边走边往后甩腿”。
+- 次级缺陷：6.50s 抽帧她整个人在石面上透出浅影 —— 遮镜那两三拍是半透明叠出来的，不是实心石面。
+
+**根因（插件规则文本，两句并置才成病）**
+
+1. v14.343 写进规则的「他每一步的**鞋尖都朝面前那道镜头抬起来再落下去、脚跟随后抬起，鞋底在画幅里由小变大**」—— 脚尖朝镜头先抬、再把鞋底亮出来并放大，物理上只有**往后甩腿**才会出现；人朝镜头正走时画幅里看到的是鞋面与鞋头，鞋底一辈子不出画。
+2. 「地面石缝、石阶棱线、两侧柱列与灯具**迎面朝镜头流动过来**」= 机位在前进。机位前进 + 人朝镜头露鞋底 → 模型只能让她一边朝镜头一边把腿往后甩。v14.343 删“机位朝哪走”时漏掉的正是这一对。
+3. 遮镜句只写了「画幅里就是这块柱面的石纹、砌缝与投影」，没钉住“只有石头这一层”，模型就把人半透明地压在石面上。
+
+**修法（仍纯规则文本，零新增采样；不动用户脚本、不动工作流、不换 seed、不动阈值）**
+
+- 步态全改成正走：`他每一步都是正走、鞋头朝镜头这一侧：抬起来的那只脚先在他身后离地，膝盖朝镜头这一侧带出去，整只脚从他身后甩到镜头这一侧，鞋头先落到地上、脚跟随后落平；落地那一拍他的重心与胸口都朝镜头这一侧压过去一小寸，画幅里看到的是鞋面、鞋头与鞋带` —— 删掉「鞋底在画幅里由小变大」「脚跟随后抬起」。
+- 景物方向与本段正走绑成同一件事：`地面石缝与石阶棱线一拍比一拍更靠近画幅下缘、也一拍比一拍更宽，最靠前的那道石缝从他脚下滑出画幅下缘；两侧柱列与灯具一拍比一拍更粗、更贴画幅两侧的边缘，依次从他身侧滑出画幅`；`落地的那一格地面随即从他脚下往后滑过画幅下缘`。
+- 遮镜做实：`那两三拍画幅的每一寸都是石头……画幅里只有石头这一层，主体整个人藏在这块实心石面后面，石面的棱边与砌缝都是实的`。
+- v14.343 / v14.344 已验证有效部分全部保留（画幅以主体为锚、起幅归属句、第三到第六秒换场窗、柱身整块遮镜、换场后只剩 end、每拍只有一层实景）。日志行与横幅改 `v14.347`。
+
+**静态验证**：`ast.parse` OK（16536 行）；`check_one_shot_route_rules.py` **49 PASS / 0 FAIL**（新增 4 条：正走步态三要素、moonwalk 两个来源必须消失、景物方向压向下缘、遮镜只有石头一层）；`check_recast_pipeline.py` OK。
+
+**未验证 / 待办**：未实机重跑 clip1。恢复正走的判据：0.3–1.0s 抽帧看得到的是**鞋面与鞋头**、每拍落脚点往画幅下缘走、背景石缝一拍比一拍更宽；6.5s 遮镜那两三拍画幅里没有她的半透明残影。
+
+**英文**：Clip 1 of the 15:44 run (`h3_clip_250_1_1794297087.mp4`, 1920x1088 / 294 frames / 12.25s, backend v14.345, rules v14.344, pipeline FastH3 Omni × SelfLift 4+4 at denoise 0.5) confirmed v14.344's three fixes worked — the opening is S1 (Forbidden City gate wall) so the route no longer collapses, the pillar occludes the lens at about 6.5 s, and from 7 s on the frame is S2 (Acropolis / Parthenon) through the last frame. What the user reported instead was a moonwalk from the very first beat. Her on-screen height goes 0.520 (1.0 s) → 0.540 → 0.553 → 0.571, monotonically increasing — she walks toward the camera, so this is not a distance reversal; it is the gait. Two rule sentences combine into a moonwalk recipe: `his toe lifts toward the lens and lands again, the heel rises after, the sole grows larger in frame` (a toe lifted toward the camera with a growing sole only happens when the leg is kicked backward; walking toward a lens shows the upper of the shoe, never the sole), plus `the ground joints, step edges, colonnades and lamps flow toward the lens` (the camera is advancing). v14.347 rewrites the gait as explicit forward walking (rear foot leaves the ground behind her, knee drives toward the lens, the whole foot swings from behind her to the lens side, toe lands first, heel settles after; the frame shows the upper, the toe and the laces), binds the scenery to that same direction (ground joints and colonnades move one beat closer to the bottom edge each beat and slide out of it), and makes the occlusion opaque (every inch of those two or three beats is stone, stone is the only layer in the frame, the subject is hidden behind that solid stone face). The translucent ghost at 6.50 s is covered by the same occlusion sentence. Static checks: `ast.parse` OK (16536 lines), 49 PASS / 0 FAIL, recast check OK. No live render yet; acceptance is frames at 0.3–1.0 s showing the upper and toe of the shoe, landing points moving toward the bottom edge, background joints widening beat by beat, and no translucent residue during the occluded beats.
+
 ### v14.345 (2026-11-10) — 3D latent 放大器的架构校正真正生效：`h3_clean` 权重被塞进 pure-3D conv 加载器导致二采静默退成 bislerp / The 3D latent-upscaler architecture guard now actually runs: a `h3_clean` checkpoint was fed to the pure-3D conv loader, so the refine pass silently fell back to bislerp
 
 **现象（8181 实跑日志）**
