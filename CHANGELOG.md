@@ -2,7 +2,33 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
-### v14.343 (2026-11-10) — 一镜到底段中换场「画幅以主体为锚 + 景物迎面流过」：从几何上拆掉倒着走，从遮挡上拆掉中心淡入淡出 / One-take mid-clip transition: the frame is anchored on the subject and the scenery streams towards the lens — killing the moonwalk geometrically and the cross-dissolve via a real occluder
+### v14.344 (2026-11-10) — 一镜到底段中换场「起幅归属 + 换场时间窗」：v14.343 实机首片暴露的「整段塌缩到一处空间」 / One-take mid-clip transition: pinning the opening space and the swap window after v14.343's first live clip collapsed the route into a single place
+
+**现象（v14.343 实机首片 `h3_clip_250_1_1794280356.mp4`，11:12 出片，1920x1088 / 24fps / 294 帧）**
+
+- 用户上一轮报的两个缺陷**全部消失**：无硬切（scdet 峰值 2.21 落在 9.21s，抽帧 4.12/4.20/4.28 与 9.10/9.21/9.30 确认是运动帧差，不是切镜）；无中心淡入淡出、无双曝（无任何一帧出现两个场景同时可见）；无倒走（她头脚占画高 0.42 → 0.45 → 0.55 → 0.79 → 0.85 → 0.92 → 0.97 逐拍单调变大，一路朝镜头走来）。
+- 但暴露出**新缺陷**：整段只在 S2（帕特农 / 卫城山门石廊）里走，**S1 故宫一帧都没出现**。抽帧 0.04 / 0.30 / 2.00 / 3.00 / 4.12 / 4.50 / 5.80 / 6.20 / 6.60 / 8.00 / 9.21 / 9.50 / 11.80 全是希腊石廊，两处空间被读成了同一处 —— 行程塌缩。
+
+**根因（规则文本，两处，都在 v14.343 里新写的句子）**
+
+1. **起幅归属被写弱了**：v14.342 同一 clip 注入的首句是「起幅这一路的**地面、灯具与两侧建筑是 S1 的**」，那轮开幅确实是故宫红门；v14.343 改成「起幅时主体**站在{transit}的 S1 一侧**」，模型把"起幅"读成"已经站在券门旁边"，露头就迈出门去，整段留在 S2。
+2. **同一化措辞**：v14.343 写了「两处空间在**同一条地面、同一片夜色**里各自完整地铺开」——同一片地面/同一片夜色等于告诉模型"这是一处地方"，于是没有换一次世界的必要。
+
+**修法（仍纯规则文本，零新增采样；用户脚本一字未动）**
+
+- 首句改回归属句：「起幅到换场之前，画幅里的地面、墙面、门洞、灯具与建筑**全是{start}自己的东西** —— 它们的颜色、材质与标志物按脚本写给{start}的原词出现，与{end}明显不同」。
+- 删掉「同一条地面、同一片夜色」，改成「两处空间各自的地面、墙面、颜色与标志物**彼此明显不同**」。
+- 给换场一个**时间窗**：「换场落在本段中段 —— 大约**第三秒到第六秒之间**的那两三拍」；没有时间锚时模型会把换场提前到 0 秒（等于整段只在 S2）。
+- 明写「换场之后到本段末帧，**画幅里只剩{end}自己的东西**」，两处不再混同。
+- v14.343 已验证有效的部分全部保留：画幅以主体为锚、景物迎面流过、柱身迎面涨满整幅画幅并整块盖住镜头、主体被挡在后面、每拍只有一层、鞋尖朝镜头落步、"同速穿过"由本段覆盖。
+- 日志行改 `v14.344 … 换场落在段中 (…) 第三到第六秒之间 … (起幅归属=Sx)`；横幅 `v14.344 backend loaded`。
+
+**静态验证**：`ast.parse` OK（16338 行）；`check_one_shot_route_rules.py` 新增 4 条 v14.344 断言（起幅归属 / 换场时间窗 / 换场后只剩 end / 两处空间明确不同且无同一化措辞）→ **47 PASS 0 FAIL**；顺带第二次修掉否定词假阳（裸"不"把"不同"判红，与上一轮裸"别"误伤"景别"同源，已加 `BENIGN_WORD_PARTS` 预处理）；`check_recast_pipeline.py` OK。
+
+**未验证**：本机未重渲 clip1 / clip2 验证「故宫是否回到开幅、换场是否落在第三到第六秒、双曝与倒走是否仍未回潮」。
+
+**英文**：The first live clip produced under v14.343 (`h3_clip_250_1_1794280356.mp4`, rendered 11:12, 1920x1088 / 24fps / 294 frames) cleared both defects the user reported — no hard cut (the 2.21 scdet peak at 9.21s is motion, confirmed by frames 4.12/4.20/4.28 and 9.10/9.21/9.30), no cross-dissolve or double exposure anywhere, and no moonwalk (her head-to-feet height grows monotonically 0.42 → 0.45 → 0.55 → 0.79 → 0.85 → 0.92 → 0.97 of frame height as she walks towards the lens) — but it introduced a new failure: the whole clip stays inside S2 (the Parthenon / Propylaea colonnade) and S1 (the Forbidden City) never appears for a single frame. Frames at 0.04 / 0.30 / 2.00 / 3.00 / 4.12 / 4.50 / 5.80 / 6.20 / 6.60 / 8.00 / 9.21 / 9.50 / 11.80 are all Greek stone galleries, i.e. the two spaces were read as one place and the route collapsed. Two sentences of v14.343's own text are responsible. (1) Ownership of the opening shot was weakened: the equivalent rule injected under v14.342 began "the floor, lamps and buildings along this opening stretch belong to S1", and that render did open on the Forbidden City's red gate; v14.343 rewrote it as "at the opening the subject stands on the S1 side of {transit}", which the model read as "already standing beside the gate" — it stepped through immediately and spent the rest of the clip in S2. (2) A unifying phrase, "the two spaces spread out in full on the same floor and under the same night sky", told the model this was one place, so there was no reason to change worlds. v14.344 fixes both: the opening sentence again assigns the pre-swap frames to {start} ("everything in frame — floor, walls, doorway, lamps, buildings — is {start}'s own, with its colours, materials and landmarks drawn from the script's own words for {start}"), the unifying phrase is replaced by "the two spaces differ clearly in floor, walls, colour and landmarks", the swap is given a time window ("around the third to sixth second of this segment"), and the post-swap frames are declared to hold "only {end}'s own things". Everything that did work in v14.343 is kept verbatim: the frame anchored on the subject, scenery streaming towards the lens, the transit pillar filling the frame and covering the lens for two or three beats, the subject hidden behind it, one layer of scenery per beat, the shoe-tip stride cue, and the override of the script's "passes through at her speed". Static checks: `ast.parse` OK (16338 lines), `check_one_shot_route_rules.py` 47 PASS / 0 FAIL (four new assertions, plus a second negation false-positive fix — bare "不" flagged "不同", same class as last round's bare "别" flagging "景别"), `check_recast_pipeline.py` OK. Live re-render not yet performed.
+
 
 **现象（两片都跑在 v14.342 下，日志 `16:14:05 v14.342 backend loaded`）**
 
