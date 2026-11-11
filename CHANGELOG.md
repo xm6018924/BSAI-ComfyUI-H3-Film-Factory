@@ -2,6 +2,46 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.378 (2026-11-11) — 倒着走的**图像级**真根因：@图1 是 5 联角色设定拼版（含两张背面视图），插件没认出来、原样喂进 Ref2VA，模型把背面立绘当成「朝镜头走来的她」并另贴一个人形；同时「机位固定/逐秒变大」与 [取景连续]「同速同行/占画比例稳定」硬自相矛盾，模型退化成原地滑行 / Image-level root cause of the moonwalk: @图1 is a 5-panel character sheet that contains two back-view figures, the plugin failed to recognise it and fed the whole sheet to Ref2VA, so the model used the back-view as "her walking toward the lens" and pasted a second figure; on top of that the injected "camera pinned / she grows every second" rule contradicted [取景连续] ("camera travels at her speed, on-screen ratio stable"), which the model resolved into a standing glide
+
+**现象（`h3_clip_250_1_1794384070.mp4`，23.8MB，16:01:10 落盘，v14.376 代码产物；PIKA H3 Flex 8+2，OneShot=On）**
+
+- 用户当场判定：**「又倒着走了，比较彻底解决啊」**。
+- 首帧 `f_0p000.png` 实证：拱门内一位正面走来（小），**画面右侧并列第二位、背对镜头、近处很大（黑长披发 + 紫色轮廓伪影）** —— 画面里出现了两个人。
+- 1fps 抽帧：0–2s 主体**背对镜头**，约 2.5s 转身，之后正面走来渐成近景；6.0–7.5s 12fps 下身连拍：正面但**双腿全程几乎不动，整段滑行**。
+- 量化（Farneback 分区中位 dy）：`floor_left +0.043` / `floor_under +0.062` / `shoe_band +0.262` / `all_bottom +0.056` / `all_top -0.470` —— 地面**逐帧几乎不动（约 0.05px/帧）**；占画高 `0.25s 0.187 → 12.00s 0.709（Δ=+0.522）`、白区顶 y `577 → 316`、白区底 y `780 → 1087`。位移全部来自「变大」，不是「移动」。
+- 该片**不是 v14.377 跑的**：`refine耗时诊断: step=2/2 距上步 5507.5s`（15:58:20）早于 v14.377 提交（16:08:37）；8181 pid 30004 于 13:27:16 启动，加载的是 12:20 的 v14.376。
+- 二采确实真跑了（用户②已达成）：`Refine 双采完成: clip=0`、`二采 latent 健康 std=0.795 / 4x4低通std=0.617`；但单步 **5507.5s ≈ 91.8 分钟**（基线 539.9s 的 10 倍）。
+
+**根因（两条，一条在图像侧、一条在规则侧）**
+
+| # | 位置 | 机制 | 后果 |
+|---|---|---|---|
+| ① | `_single_subject_ref_crop` / `_split_sheet_subjects`（`extender.py`） | @图1 `Qwen_Image_2509_00001.png`(1392×752) 是 **5 联设定板**：正脸特写 + 正面 / 侧面 / 背面 / 背面 立绘。特写与正面立绘**挨在一起被并成一段**（唯一真空隙在 x 754–791），旧启发式对 slot 1 返回 None（整张板原样进 Ref2VA）；反而把 **@图3 故宫场景图** 误判成「2 具视图」并裁掉一半。日志仅一条：`v14.269 参考图 3 是多视图设定拼版(2 具视图) -> 拆成 2 张` | 背面/侧面立绘成为「现成人形素材」→ 首帧贴出第二个人、中段用背面立绘充当走近的主体 → 背对镜头却逐秒变大 = 用户看到的倒着走。文字纪律压不住图像里的现成人形 |
+| ② | `_one_shot_transit_mid_rule` vs `[取景连续]`（同文件） | 前者 v14.376 写成「**机位与镜头机身固定在同一处地面位置上**，只做连续变距；他持续朝镜头走近…逐秒由小到大…**这份变大就是他前进的全部来源**」；后者写「摄影机**沿同一条轨迹与他同速同行、同距同高**…主体占画比例**自始至终稳定**」。两句互斥，模型二选一 | 实测取了「滑行」：地面 dy ≈ 0.05px/帧（地面纹丝不动）、占画高靠缩放翻 3.8 倍、双腿原地不动。另外 v14.375 起 `_OS_CAM_DIR_REWRITES` 在**运行时改写用户脚本正文**，把「同速同向、沿其行进方向平稳前移」换成「机位固定」，与用户口径「脚本正文不可改」相冲，且改出的口径正好与 `[取景连续]` 打架 |
+
+**修法**
+
+1. **新增确定性切版器** `bsai_ref_sheet.py`（numpy/cv2 纯实现，可离线单测）：背景=边框中位数 → 前景阈值 0.10 → 按 gutter 切段 → **全身立绘 = 高度覆盖 ≥0.80H 且宽度 ≤0.30W 的窄高段（要求 ≥2 段）**、**宽段（>0.30W）里贴右缘、以窄段宽度中位数为窗宽开窗 = 正面立绘**、宽段剩下的左半 = 胸像（锁脸）。对 @图1 判出 4 具视图，取 `x 576–754 (178×752)` 正面立绘 + `x 0–576` 胸像，**侧面/背面立绘全部丢弃**。
+2. **接入 Ref2VA 参考编码**（`extender.py`）：`_bsai_sheet_crop_v378(img)` 在每张参考编码前先跑切版器（带同目录文件兜底 import），命中就只编码「胸像 + 正面立绘」并打 `v14.378 角色设定拼版: 认到 N 具视图 -> 只取『正面立绘』…`；旧启发式 `_single_subject_ref_crop` **限定只对角色槽（slot 1）生效**，场景/产品参考图原样使用（修掉故宫图被误裁一半）。缓存 key `r2v|s2|` → `r2v|s3|`，否则旧（未裁/裁到侧立绘）缓存会让新逻辑完全不生效。
+3. **规则口径统一到脚本原句**（`_one_shot_transit_mid_rule`）：改成「机位与镜头机身**沿同一条轨迹与他同速同行、同距同高**，始终正对画幅里他的正面；取景范围只随本段景别路径连续变化」+「他与镜头一同向前走，地面因此持续向后流过画幅」+「石缝与柱列**一道接一道向后流过画幅下缘/两侧**，一秒跨过三到四道」；删掉「机位固定在一处地面位置」「逐秒由小到大」「这份变大就是他前进的全部来源」「石缝/柱列各自停在原处」。与 `[取景连续]` 不再互斥。
+4. **不再改写用户脚本正文**：`_OS_CAM_DIR_REWRITES` 清空（函数保留为恒等），正文原句（同速同向、正对正面、沿行进方向前移）原样进提示词；日志改为 `v14.378 一镜到底 clip[N]: 正文机位方向句已改写为同速同行口径`（仅当改写表非空时才触发）。
+
+**静态（改后实测）**
+
+- `ast.parse` OK（`extender.py` 18083 行）；实函数验证 `_tmp_verify_v378.py` ALL-CHECKS OK：真实张量 `(1,752,1392,3)` → 输出 `[(1,752,576,3) 胸像, (1,752,178,3) 正面立绘]`；纯色/场景图返回 None；正文机位句恒等；段中规则含「同速同行」与「一道接一道后流」、不含「机位固定/逐秒由小到大」。
+- `tools/check_ref_sheet_crop.py`（新增）**11 PASS / 0 FAIL**：@图1 判为设定板、正面立绘宽高比 0.237、窗口贴宽段右缘、胸像在左、裁窗不含侧/背立绘、返回 2 张；@图3/@图4/@图10/@图22 均返回 None（不再误裁场景图）。
+- `tools/check_one_shot_route_rules.py` **全部通过**（新增「矛盾守卫：同一条规则里不得同时出现『机位固定』与『同速同行』」与「前进凭据钉在地面」「前进凭据不再靠逐秒变大」「景物不再是静止的」四条断言）。
+- `tools/check_refine_timing_guards.py` 11 PASS；`check_recast_pipeline.py` OK。
+
+**未验证（下次实机一轮的判据，全部可量）**
+
+- 日志须出现 `v14.378 角色设定拼版: 认到 4 具视图 -> 只取『正面立绘』x 576-754(178x752) + 胸像(锁脸)`，且**不再**出现 `v14.269 参考图 3 是多视图设定拼版`。
+- 首帧 `f_0p000` 里**只有一个**人形，且她正面朝镜头（此前是「一位正面 + 一位背对」并列两人）。
+- 0–12s 逐秒抽帧：主体**全程正面朝镜头**，不出现 0–2s 背对段。
+- 量化判据（`_tmp_measure_4070.py` 复用）：`floor_under` / `floor_left` 中位 dy 应显著大于 0.05px/帧（前进凭据落到地面上）；`all_top` 的强烈上移（-0.47）应随景别路径收敛，不再单独承担「前进」。
+- 二采耗时：观察 `refine耗时诊断: step=2/2 距上步 Zs`（v14.377 的 TST 跳过 + reserve 5.0 是否生效，基线 539.9s / 本轮 5507.5s）。
+
 ### v14.377 (2026-11-11) — 二采 46 分钟空等的三个真因：① 分块 tile 里 SelfLift TST 的 length guard 失效、每块每层白算谱分解（它自己声明「与 highres_tiling 不兼容、应当跳过」）；② 分块二采循环没有任何中断检查，前端取消无效；③ reserve 7.5→5.0 被 v14.250 的「全帧 >130k 无条件让位」弹回 / Three real causes behind the 46-minute silent second pass: TST's length guard silently passes inside tile forwards (the module itself documents that tiling must be skipped), the tile loop has no interrupt check so Cancel is a no-op, and the 7.5→5.0 reserve floor was being undone by the full-frame ">130k ⇒ yield" probe
 
 **现象（13:30 那轮 clip1，后端 v14.376，管线 PIKA H3 Flex 8+2，OneShot=On / OneShotSmp=Single (seamless)）**

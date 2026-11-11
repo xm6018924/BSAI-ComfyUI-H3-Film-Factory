@@ -3306,6 +3306,60 @@ def _single_subject_ref_crop(img):
         return None
 
 
+def _bsai_sheet_crop_v378(img):
+    """v14.378: 用确定性几何定位「角色设定拼版」的正面立绘（见 bsai_ref_sheet.py）。
+
+    实测 @图1 是 5 联设定板（1 张胸像特写 + 正面 / 侧面 / 背面 / 背面 4 具全身立绘）。
+    Ref2VA 会把板子里**所有**人形当成可复制素材：clip1 首帧同时贴出两个人，中段
+    又把"背面立绘"当成朝镜头走来的那一个 —— 人物背对镜头却逐秒变大，用户看到的就是
+    「从头到尾倒着走」。文字纪律压不住图像里的现成人形，只能在参考源头把侧/背立绘
+    切掉，只把「胸像(锁脸) + 正面全身立绘」喂进去。
+
+    v14.269 的启发式在这张板上失效：胸像与正面立绘挨在一起被并成一段，于是取到的是
+    侧面立绘；同时它把场景图（故宫拱墙）误判成 2 具视图并裁掉一半。这里换成按
+    "≥2 条等高窄段 + 1 条宽段 + 宽段右缘开窗"的确定性判别。
+
+    返回 None 表示不是设定板（调用方继续走原逻辑）。
+    """
+    try:
+        import bsai_ref_sheet as _rs378
+    except Exception:
+        # ComfyUI 不一定把本插件目录放进 sys.path -> 兜底按同目录文件加载
+        try:
+            import importlib.util as _ilu378
+            _p378 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bsai_ref_sheet.py")
+            _spec378 = _ilu378.spec_from_file_location("bsai_ref_sheet_local", _p378)
+            _rs378 = _ilu378.module_from_spec(_spec378)
+            _spec378.loader.exec_module(_rs378)
+        except Exception:
+            return None
+    try:
+        import numpy as _np378
+        if hasattr(img, "detach"):
+            _arr = img[0].detach().float().cpu().numpy()
+        else:
+            _arr = _np378.asarray(img)
+        if _arr.ndim == 3 and _arr.shape[2] == 4:
+            _arr = _arr[..., :3]
+        _pan = _rs378.locate_sheet_panels(_arr)
+        if not _pan:
+            return None
+        _parts = []
+        if _pan.get("bust"):
+            _bx0, _by0, _bx1, _by1 = _pan["bust"]
+            _parts.append(img[:, int(_by0):int(_by1), int(_bx0):int(_bx1), :])
+        _fx0, _fy0, _fx1, _fy1 = _pan["front"]
+        _parts.append(img[:, int(_fy0):int(_fy1), int(_fx0):int(_fx1), :])
+        print(f"[H3 Extender] v14.378 角色设定拼版: 认到 {_pan['views']} 具视图 -> "
+              f"只取『正面立绘』x {_fx0}-{_fx1}({_fx1 - _fx0}x{_fy1 - _fy0})"
+              f"{' + 胸像(锁脸)' if _pan.get('bust') else ''}; "
+              f"侧面/背面立绘已丢弃(它们是倒着走的来源)")
+        return _parts
+    except Exception as _e378:
+        print(f"[H3 Extender] v14.378 角色拼版切版跳过: {_e378}")
+        return None
+
+
 def _refs_from_project_payload(project_payload):
     extender = project_payload.get("extender", {}) if isinstance(project_payload, dict) else {}
     raw = extender.get("refs_json") if isinstance(extender, dict) else None
@@ -3517,10 +3571,25 @@ def _prepare_shared_refs(
 
     for slot, ref in active:
         img = _load_reference_tensor(ref) if isinstance(ref, dict) else ref
+        # v14.378: 先用确定性切版器把「角色设定拼版」切成 胸像(锁脸) + 正面立绘。
+        # 这一步是「人物倒着走」的根治点：拼版里的侧面/背面立绘一旦进了 Ref2VA，
+        # 模型就会把背面那具当成朝镜头走来的她，于是背对镜头逐秒变大。
+        _parts_v378 = _bsai_sheet_crop_v378(img)
+        if _parts_v378:
+            for part in _parts_v378:
+                _encode_one(part, slot)
+            continue
         # v14.269: 多视图设定拼版只保留单人立绘(否则模型会把第二具立绘当第二个人)。
         # v14.336: 取正面全身立绘作为参考, 脸部身份 + 服装/鞋帽全要素都在这一张里;
         # 不再只裁左侧大胸像, 避免下装/袜子/鞋在参考源头缺失。
-        _crop = _single_subject_ref_crop(img)
+        # v14.378: 这条旧启发式只用于角色槽(第 1 张参考); 场景/产品参考图原样使用 ——
+        # 实测它会把故宫拱墙误判成"2 具视图"并裁掉一半, 破坏场景参考。
+        _allow_legacy_crop = False
+        try:
+            _allow_legacy_crop = (int(slot) == 1)
+        except Exception:
+            _allow_legacy_crop = False
+        _crop = _single_subject_ref_crop(img) if _allow_legacy_crop else None
         if _crop is not None:
             cropped, _n_views = _crop
             if isinstance(cropped, list):
@@ -3593,8 +3662,10 @@ def _ref2va_cache_key(vae, width, height, ref_image_size, refs, cache_bias=""):
     # 否则张量 refs 的 _refs_signature 恒定，ref2va 命中旧资产 VAE 编码。
     # v14.269: "|s1" = 多视图设定拼版裁单人立绘(见 _single_subject_ref_crop)。
     # v14.340: "|s2" = 胸像(锁脸)+全身(锁服装鞋帽)双参考; 旧 s1 缓存必须失效。
+    # v14.378: "|s3" = 确定性切版器(v14.378)取正面立绘; 旧 s2 缓存是"未裁切/取到侧立绘"
+    # 的版本, 不失效等于新裁切逻辑完全没生效 —— 必须换 key。
     # 旧 key 的缓存是未裁剪/单立绘版本, 必须失效, 否则裁图逻辑等于没生效。
-    raw = f"r2v|s2|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}|b{cache_bias}".encode("utf-8")
+    raw = f"r2v|s3|{sig}|{int(width)}x{int(height)}|{str(ref_image_size)}|se{REF_IMAGE_SHORT_EDGE}|{vae_tag}|b{cache_bias}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:40]
 
 
@@ -8543,22 +8614,15 @@ def _one_shot_flatten_prompt(text):
 #   v14.376 统一口径: **机位与机身固定在同一处地面位置上不动, 只做连续变距**; 位移全部由
 #   「主播朝镜头走近、画幅里逐秒由小到大」承担。这样"地面不动 + 人在画幅里变大"在物理上
 #   只有在正走时才成立, 倒走会立刻自相矛盾。
-_OS_CAM_DIR_REWRITES = (
-    ("镜头与主播@图1始终在同一条向前行进的连续弧线轨迹上，同速同向、"
-     "正对主播@图1的正面，沿其行进方向平稳前移并随拐点微摆",
-     "机位固定在同一处地面位置上、正对主播@图1的正面，只随拐点小幅微摆，"
-     "镜头位置与焦段不变；主播@图1朝镜头走近，在画幅里因此逐秒由小到大"),
-    ("在这条唯一轨迹上，机身以连续无级的方式改变拍摄距离",
-     "机位与机身固定在同一处地面位置上，取景范围只由连续变距改变"),
-    ("在这条唯一轨迹上，", "机位与机身固定在同一处地面位置上，"),
-    ("机身以连续无级的方式改变拍摄距离",
-     "机位与机身固定在同一处地面位置上、以连续变距改变取景范围"),
-    ("沿其行进方向平稳前移", "固定在同一处地面位置上"),
-    ("沿其行进方向前移", "固定在同一处地面位置上"),
-    ("向前行进的连续弧线轨迹", "连续的同行路线"),
-    ("向前行进", "同行"),
-    ("同速同向、", ""),
-)
+# v14.378 (2026-11-11): 上面 v14.376 的「机位钉在一处地面位置」, 与本插件自己的
+#   [取景连续]（extender.py 内「摄影机沿同一条轨迹与他同速同行、同距同高，主体在画幅中的
+#   占画比例自始至终稳定」）硬自相矛盾。模型二选一, 实测新片 h3_clip_250_1_1794384070:
+#   地面分区中位 dy 仅 +0.04~0.06px/帧(地面纹丝不动), 占画高 0.187→0.709 全靠"变大",
+#   双腿原地不动 —— 就是用户说的"从头到尾倒着走/滑行"。
+#   另外"运行时改写用户脚本正文"本身违背用户口径(脚本正文不可改)。本版整张改写表清空:
+#   脚本原句(同一条轨迹、同速同向、正对正面)与 [取景连续] 一致, 前进凭据只在规则层
+#   钉到地面上(石缝与柱列一道接一道后流过画幅下缘)。函数保留, 改写表为空 = 恒等返回。
+_OS_CAM_DIR_REWRITES = ()
 
 
 def _one_shot_neutralize_camera_dir(text):
@@ -9198,21 +9262,23 @@ def _one_shot_transit_mid_rule(start, end, transit=None):
         # 在画幅里钉死。钉死之后他不可能真的往前走, 模型只能让双腿在画幅下方原地倒腾 ——
         # 用户看到的就是"从头到尾倒着走"。v14.375 那轮二采真跑了、换场也回来了, 唯独这一步
         # 没修, 而且钉得更死。
-        # 现改为: 机位与机身固定在同一处地面位置上、只做变距; 位移全部由他朝镜头走近承担,
-        # 走近多少画幅里就大多少; 脚掌与石缝之间零滑动, 一步跨过一道新石缝。
-        "本段机位与镜头机身固定在同一处地面位置上，全程只做连续变距；"
-        "他持续朝镜头走近，因此画幅里的他逐秒由小到大 —— 他走近多少，画幅里就大多少，"
-        "头顶在画幅里逐秒上移、身体占画高按本段给定的景别路径平缓变大，"
-        "这份变大就是他前进的全部来源。"
-        # v14.376: 步态写成可数、与地面绑死的三步链: 脚跟先着地(正走的落点) / 脚掌与石缝
-        # 零滑动 / 一步跨过一道新石缝。三项都是"倒着走"做不到的事。
+        # v14.378 真根因(新片 h3_clip_250_1_1794384070 取证): 这一句与后面 [取景连续] 的
+        # 「摄影机沿同一条轨迹与他同速同行、同距同高，占画比例自始至终稳定」硬自相矛盾
+        # (一个说机位钉在一处地面、人靠变大前进; 一个说机位与人同速同行、占画比例稳定)。
+        # 模型二选一的结果是"滑行/平移": 实测地面分区中位 dy 只有 +0.04~0.06px/帧(地面
+        # 根本不动), 而占画高 0.187→0.709 全靠变大 —— 位移全部来自缩放, 双腿原地不动。
+        # 现统一到脚本正文自己的口径(用户脚本写的是"镜头与主播同一条轨迹、同速同向、正对
+        # 正面"): 机位跟她同速同行, 前进凭据由「地面一道接一道后流过画幅下缘」承担。
+        "本段机位与镜头机身沿同一条轨迹与他同速同行、同距同高，始终正对画幅里他的正面；"
+        "取景范围只随本段景别路径连续变化，他因此按景别路径平缓变大或变小。"
+        "他与镜头一同向前走，地面因此持续向后流过画幅："
         "他每一步都是一次干净的向前迈步：抬起的那只脚屈膝向前摆、膝盖领先于脚尖，"
         "越过支撑脚之后落在更靠近画幅下缘的一道新石缝上，脚跟先着地、鞋尖随后落平；"
         "落地那一拍画幅下方出现的是鞋面与鞋尖，鞋底与鞋跟朝向地面与画幅下缘。"
-        "脚掌踩实之后与它踩住的那道石缝位置完全重合、一起留在原处；"
-        f"{_start}的地面石缝与石阶棱线各自停在原处、每一拍的位置都一致，"
+        "脚掌踩实之后与它踩住的那道石缝位置完全重合，随后随地面一起从画幅下缘滑出去；"
+        f"{_start}的地面石缝与石阶棱线一道接一道向后流过画幅下缘，"
         "他一步跨过一道：一秒之内他跨过三到四道石缝，已经跨过的石缝留在画幅里他的身后。"
-        f"两侧柱列与灯具各自固定在原处，他一步一步从它们之间走过。"
+        f"两侧柱列与灯具同样一道接一道向后流过画幅两侧，他一步一步从它们之间走过。"
         f"{_transit}的柱身与门框就立在{_start}与{_end}之间：柱的这一侧是{_start}，"
         f"柱的另一侧是{_end}，两处空间各自的地面、墙面、颜色与标志物彼此明显不同。"
         "换场落在本段中段 —— 大约第三秒到第六秒之间的那两三拍："
@@ -9221,7 +9287,7 @@ def _one_shot_transit_mid_rule(start, end, transit=None):
         "镜头 —— 那两三拍画幅的每一寸都是石头：石块的棱边、砌缝、被灯打出的明暗与投影，"
         "画幅里只有石头这一层，柱面离镜头很近、占满画幅的四角，主体整个人藏在这块实心石面"
         "后面，石面的棱边与砌缝都是实的。"
-        "柱身从画面两侧滑出画幅之后，主体重新完整地出现在画幅中央、继续朝镜头走近；换场之后到本段末帧，"
+        "柱身从画面两侧滑出画幅之后，主体重新完整地出现在画幅中央、继续正对镜头向前行走；换场之后到本段末帧，"
         f"画幅里只剩{_end}自己的东西 —— {_end}的地面、墙面、灯具与建筑按脚本写给{_end}的"
         f"原词出现，颜色与材质与{_start}明显不同，并且一直保持到本段末帧。"
         f"本段画面始终是一层完整的实景：换场之前画幅是{_start}的实景，"
@@ -15611,17 +15677,18 @@ class BSAIH3FilmFactory:
                 if _os_flat != _clip_prompt_for_cond:
                     print(f"[H3 Extender] v14.271 一镜到底 clip[{i}]: 提示词已单镜头化(分拍时间标签→连续运镜陈述)")
                     _clip_prompt_for_cond = _os_flat
-                # v14.375: 正文的「机位沿行进方向前移」必须中和 —— 否则和「正对正面 + 推近」
-                # 并置, 模型只能让主体往后甩腿(实测 10:07 那轮 moonwalk)。
+                # v14.378: 正文机位方向句**不再改写**(改写表已清空) —— 脚本原句
+                # 「同一条轨迹、同速同向、正对正面」与本版 [空间过渡]/[取景连续] 的
+                # 「机位与他同速同行、同距同高、正对正面」一致; 改写成"机位固定"会与
+                # [取景连续] 自相矛盾, 实测出"地面不动 + 全靠变大"的滑行(用户判定倒着走)。
                 try:
                     _os_nocam = _one_shot_neutralize_camera_dir(_clip_prompt_for_cond)
                     if _os_nocam != _clip_prompt_for_cond:
-                        print(f"[H3 Extender] v14.375 一镜到底 clip[{i+1}]: "
-                              f"正文机位方向句已中和(改为同距同速·只随主体位移同步移动), "
-                              f"倒行来源已移除")
+                        print(f"[H3 Extender] v14.378 一镜到底 clip[{i+1}]: "
+                              f"正文机位方向句已改写为同速同行口径")
                         _clip_prompt_for_cond = _os_nocam
                 except Exception as _nocam_e:
-                    print(f"[H3 Extender] v14.375 一镜到底 clip[{i+1}]: 机位方向句中和失败({_nocam_e})")
+                    print(f"[H3 Extender] v14.378 一镜到底 clip[{i+1}]: 机位方向句处理失败({_nocam_e})")
                 # v14.286: 用户**显式声明**全片景别时, 正文里的景别词必须同步改写成
                 # 声明值 —— 否则正文写"中景"、锁定指令写"中全景", 两个相反指令同时
                 # 出现, 模型只能折中, 观感上就是主体忽大忽小(另一种景别跳变)。

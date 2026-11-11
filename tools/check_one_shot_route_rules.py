@@ -240,26 +240,35 @@ def main():
           and "脚跟随后抬起" not in mid
           and "迎面朝镜头流动过来" not in mid
           and "甩到镜头" not in mid, mid[:200])
-    check("段中换场: 机位与机身固定在同一处地面位置、只做变距(不再跟着人走)",
-          "机位与镜头机身固定在同一处地面位置上" in mid
-          and "全程只做连续变距" in mid, mid[:60])
-    check("段中换场: 位移全部来自朝镜头走近(走近多少画幅里就大多少, 头顶逐秒上移)",
-          "他持续朝镜头走近" in mid
-          and "这份变大就是他前进的全部来源" in mid
-          and "头顶在画幅里逐秒上移" in mid, mid[:60])
+    # v14.378 (本版翻案): v14.376 的「机位钉在一处地面位置」与本插件自己的 [取景连续]
+    # (摄影机与他同速同行、同距同高、占画比例自始至终稳定)硬自相矛盾。实测新片
+    # h3_clip_250_1_1794384070: 地面中位 dy 仅 +0.04~0.06px/帧(地面不动), 占画高
+    # 0.187→0.709 全靠"变大", 双腿原地不动 = 用户判定"倒着走"。口径统一到脚本原句。
+    check("段中换场: 机位与他同速同行、同距同高(与[取景连续]同一口径)",
+          "沿同一条轨迹与他同速同行、同距同高" in mid
+          and "始终正对画幅里他的正面" in mid, mid[:60])
+    check("段中换场: 前进凭据钉在地面(石缝与柱列一道接一道后流过画幅)",
+          "一道接一道向后流过画幅下缘" in mid
+          and "同样一道接一道向后流过画幅两侧" in mid, mid[:60])
+    check("段中换场: 前进凭据不再靠'逐秒变大'(逐秒由小到大/全部来源 已删)",
+          "逐秒由小到大" not in mid
+          and "全部来源" not in mid
+          and "头顶在画幅里逐秒上移" not in mid, mid[:60])
+    check("矛盾守卫: 同一条规则里不得同时出现『机位固定』与『同速同行』",
+          not ("机位与镜头机身固定在同一处地面位置上" in mid and "同速同行" in mid), mid[:60])
     check("段中换场: 一步跨过一道新石缝且可数(一秒三到四道, 跨过的留在身后)",
           "一秒之内他跨过三到四道石缝" in mid
           and "已经跨过的石缝留在画幅里他的身后" in mid, mid[:60])
     check("段中换场: 落脚点落在更靠近画幅下缘的新石缝上(倒走做不到)",
           "落在更靠近画幅下缘的一道新石缝上" in mid, mid[:60])
-    check("段中换场: 脚掌与石缝零滑动(踩实后与那道石缝位置完全重合、一起留在原处)",
+    check("段中换场: 脚掌与石缝零滑动(踩实后与那道石缝位置完全重合、随它一起后滑)",
           "脚掌踩实之后与它踩住的那道石缝位置完全重合" in mid
-          and "一起留在原处" in mid, mid[:60])
+          and "随后随地面一起从画幅下缘滑出去" in mid, mid[:60])
     check("段中换场: 鞋底鞋跟朝向地面(画幅里只出现鞋面/鞋尖/鞋带)",
           "鞋底与鞋跟朝向地面与画幅下缘" in mid, mid[:60])
-    check("段中换场: 景物静止(石缝每拍位置一致、柱列与灯具固定在原处)",
-          "各自停在原处、每一拍的位置都一致" in mid
-          and "两侧柱列与灯具各自固定在原处" in mid, mid[:60])
+    check("段中换场: 景物不再是静止的(冻住世界+要求行走=原地倒腾, v14.378 已删)",
+          "各自停在原处" not in mid
+          and "各自固定在原处" not in mid, mid[:60])
     check("段中换场: 主体不再被钉死在画幅里(v14.343 的锚三条已拆)",
           "本段画幅以他为锚" not in mid
           and "位置自始至终固定在同一个地方" not in mid
@@ -309,18 +318,15 @@ def main():
         _body_out = m._one_shot_neutralize_camera_dir(_body_probe)
     except Exception as _e:
         _body_out = f"<{_e}>"
-    check("正文机位方向句被中和(机位不再沿行进方向前移 -> 固定不动·走近才变大)",
-          "沿其行进方向" not in _body_out
-          and "机位固定在同一处地面位置上" in _body_out
-          and "朝镜头走近" in _body_out, _body_out[:80])
+    check("正文机位方向句不再被改写(用户脚本正文原样进提示词, v14.378 清空改写表)",
+          _body_out == _body_probe, _body_out[:80])
     _body_probe2 = "在这条唯一轨迹上，机身以连续无级的方式改变拍摄距离"
     try:
         _body_out2 = m._one_shot_neutralize_camera_dir(_body_probe2)
     except Exception as _e:
         _body_out2 = f"<{_e}>"
-    check("正文机身变距句被中和(机身固定不动, 取景范围只由变距改变)",
-          "在这条唯一轨迹上" not in _body_out2
-          and "固定在同一处地面位置上" in _body_out2, _body_out2[:80])
+    check("正文机身变距句不再被改写(取景变化只由脚本自己声明)",
+          _body_out2 == _body_probe2, _body_out2[:80])
     try:
         _src = open(getattr(m, "__file__", ""), "r", encoding="utf-8").read()
     except Exception:
