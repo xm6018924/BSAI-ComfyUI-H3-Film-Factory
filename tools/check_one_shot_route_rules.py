@@ -221,23 +221,41 @@ def main():
     check("段中换场: 机位零后退(规则里没有后退/退出/拉远这类后移写法)",
           all(w not in mid for w in BACK_WORDS),
           [w for w in BACK_WORDS if w in mid])
-    check("段中换场: 步态是正走(抬脚从身后甩向镜头侧、鞋头先落地)",
-          "整只脚从他身后甩到镜头" in mid
-          and "鞋头先落到地上" in mid
-          and "画幅里看到的是鞋面、鞋头与鞋带" in mid, mid[:60])
+    check("段中换场: 步态是正走(蹬地→屈膝前摆→鞋尖先着地, 画幅里只有鞋面鞋尖鞋带)",
+          "在体后蹬地" in mid
+          and "鞋尖朝下先着地" in mid
+          and "鞋面、鞋尖与鞋带" in mid, mid[:60])
     # v14.346 实测(15:44 轮 clip1): 这两句并置 = moonwalk 配方 —— 鞋底朝镜头且变大(只有往后
     # 甩腿才看得见鞋底) + 景物"迎面朝镜头流动"(机位在前进)。机位前进时她只能往后甩腿。
-    check("段中换场: 已删掉 moonwalk 两个来源(鞋底由小变大 / 脚跟随后抬起 / 景物迎面朝镜头)",
+    # v14.375 实测(10:07 轮 clip1 h3_clip_250_1_1794362835): 占画高一路变大、地面砖缝逐帧
+    # 纹丝不动 -> 双脚在画幅下方原地倒腾, moonwalk 仍在。原因是规则改了、**正文**里的
+    # 「机位沿其行进方向平稳前移」没改; 这版规则补了机位几何句 + 落脚点与地面流动同向。
+    check("段中换场: 已删掉 moonwalk 三个来源(鞋底由小变大 / 脚跟随后抬起 / 脚从身后甩向镜头 / 景物迎面朝镜头)",
           "鞋底在画幅里由小变大" not in mid
           and "脚跟随后抬起" not in mid
-          and "迎面朝镜头流动过来" not in mid, mid[:200])
+          and "迎面朝镜头流动过来" not in mid
+          and "甩到镜头" not in mid, mid[:200])
+    check("段中换场: 机位几何一次说清(正前方同距同速、朝画幅纵深移动, 地面朝镜头涌来)",
+          "机位就在主体正前方" in mid
+          and "朝画幅纵深移动" in mid
+          and "地面因此朝镜头涌来" in mid, mid[:60])
+    check("段中换场: 地面流动是唯一位移证据(每迈一步石缝滑走一道, 一秒三到四条)",
+          "唯一的位移证据" in mid
+          and "一秒之内有三到四条石缝" in mid
+          and "他每迈一步脚下的石缝就滑走一道" in mid, mid[:60])
+    check("段中换场: 落脚点与地面流动同向(从画幅下缘以下前摆进来、落地后随地面滑出去)",
+          "从画幅下缘以下往前摆进来" in mid
+          and "随地面一起朝画幅下缘滑出去" in mid, mid[:60])
+    check("段中换场: 鞋底鞋跟朝向地面(画幅里只出现鞋面/鞋尖/鞋带)",
+          "鞋底与鞋跟朝向地面与画幅下缘" in mid, mid[:60])
     check("段中换场: 景物方向与本段正走同向(石缝与柱列压向画幅下缘并滑出)",
           "一拍比一拍更靠近画幅下缘" in mid
           and "滑出画幅下缘" in mid
           and "从他身侧滑出画幅" in mid, mid[:60])
-    check("段中换场: 画幅以主体为锚(人与画幅零相对位移 -> 倒行无来源)",
+    check("段中换场: 画幅以主体为锚(双脚踩在画幅下方同一片地面区域内 -> 倒行无来源)",
           "本段画幅以他为锚" in mid
-          and "位置自始至终固定在同一个地方" in mid, mid[:60])
+          and "位置自始至终固定在同一个地方" in mid
+          and "双脚始终踩在画幅下方同一片地面区域内" in mid, mid[:60])
     check("段中换场: 遮挡做实(遮镜那两三拍画幅里只有石头这一层, 主体藏在后面)",
           "画幅的每一寸都是石头" in mid
           and "画幅里只有石头这一层" in mid
@@ -272,6 +290,28 @@ def main():
           [w for w in NEG_WORDS if w in _neg_scan(mid)])
     check("场景锚定: 置换点挂在柱面盖住镜头之前/移出去之后",
           "柱面盖住镜头之前" in anchor and "柱面从画幅里移出去之后" in anchor, anchor[:60])
+
+    # ── 8) v14.375: 正文机位方向句中和 + 采样档/管线优先级 ─────────────────────
+    # 10:07 轮(h3_clip_250_1_1794362835)两处实测: ① moonwalk 仍在, 因为规则改了而**正文**里
+    # 「镜头与主播@图1…沿其行进方向平稳前移」一字未动; ② OneShotSmp=单采无缝 把 PIKA 8+2
+    # 管线的二采整段跳过, 12s 只跑一采 8 步。
+    _body_probe = ("镜头与主播@图1始终在同一条向前行进的连续弧线轨迹上，同速同向、"
+                   "正对主播@图1的正面，沿其行进方向平稳前移并随拐点微摆")
+    try:
+        _body_out = m._one_shot_neutralize_camera_dir(_body_probe)
+    except Exception as _e:
+        _body_out = f"<{_e}>"
+    check("正文机位方向句被中和(沿其行进方向前移 -> 同距同速·只随位移同步移动)",
+          "沿其行进方向" not in _body_out
+          and "同距同速" in _body_out
+          and "连续的同行弧线轨迹" in _body_out, _body_out[:80])
+    try:
+        _src = open(getattr(m, "__file__", ""), "r", encoding="utf-8").read()
+    except Exception:
+        _src = ""
+    check("采样档与管线冲突已显式处理(管线声明二采时按管线执行, 并播报冲突)",
+          "v14.375 采样档与管线冲突" in _src
+          and "one_shot_single_pass = False" in _src, "extender.py 源码扫描")
 
     print()
     if ok:

@@ -2,6 +2,56 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.375 (2026-11-11) — 两个根治：① 正文里的「机位沿行进方向前移」中和掉，moonwalk 的几何来源清零；② 一镜到底「单采无缝」不再静默吃掉管线二采（PIKA 8+2 真的跑 8+2）/ Two root fixes: the body's "camera advances along its travel direction" is neutralised (removes the geometry that produced the moonwalk), and the one-shot "single-pass" tier can no longer silently swallow a dual-pass pipeline's second pass (PIKA 8+2 now really runs 8+2)
+
+**现象（10:07 那轮 clip1 `h3_clip_250_1_1794362835.mp4`，1920x1088 / 24fps / 294 帧 / 12.25s / 20.6MB；后端 v14.374，管线 PIKA H3 Flex 8+2，OneShot=On，OneShotSmp=Single (seamless)）**
+
+- **用户报②「这一档应该是 1 采 8 步 2 采 2 步，结果没有 2 采」**：日志 1967 行 / 09:52:52 打的是
+  「一镜到底·单采无缝：已跳过二采（refine），链式 latent 不重绘」——一采 8 步跑了，二采整段没跑。
+- **用户报①「第一个分镜就倒着走」**：抽帧 0.20 / 1.00 / 2.00 / 3.00 / 5.00 / 6.50 / 8.00 / 9.00 / 11.80s，
+  占画高 0.52→0.64 一路变大（人朝镜头走来），**而地面砖缝、石阶棱线、灯具逐帧纹丝不动**
+  （0.45–1.65s 10fps 连拍对拍，石缝位置一格都没挪）。人变大 + 地面不动 = 脚下没有位移，
+  双腿只能在画幅下方原地倒腾 —— 这才是「倒着走」的观感来源。另外整段没有换场，11 帧全在 S1。
+
+**根因一：正文（不可改的脚本）与规则在同一件事上对撞，模型只能取交集**
+
+| 来源 | 原句 | 含义 |
+|---|---|---|
+| 脚本正文 | 「镜头与主播@图1始终在同一条向前行进的连续弧线轨迹上，同速同向、正对主播@图1的正面，沿其行进方向平稳前移并随拐点微摆」 | 机位沿行进方向前进 |
+| 脚本正文 | 「机身以连续无级的方式改变拍摄距离……前段匀速推近至中景」 | 画幅里人变大 |
+| 插件规则（v14.347） | 「本段画幅以他为锚……前进感由景物承担」 | 地面必须流动 |
+
+三条同时成立在几何上不可能：机位前进 + 主体变大 + 地面不动。v14.347 只改了**规则**，
+正文那两句一字未动，所以模型把「前进」记在画幅里（人放大）、把「地面流动」省掉
+（地面静止），剩下双腿只能往后倒腾 —— moonwalk。
+
+**根因二：`one_shot_single_pass` 由 OneShotSmp 下拉单方面决定，把管线的二采整段跳过**
+
+`one_shot_single_pass = one_shot_enabled and not one_shot_sampling.startswith("双采")`；
+`OneShotSmp=Single (seamless)` → True → 采样调度处直接 `_eff_refine=False`。用户选的
+「PIKA H3 Flex 8步+2步 双采」因此只跑了一采 8 步。
+
+**修法（都在插件层：规则文本 + 正文改写 + 采样优先级；用户脚本 / 工作流 / seed / 阈值一律未动）**
+
+1. **新增 `_one_shot_neutralize_camera_dir()`**（正文级改写，纯文本，不改用户源文件）：
+   「沿其行进方向平稳前移」→「与主播@图1保持同距同速、只随其位移同步移动」、
+   「向前行进的连续弧线轨迹」→「连续的同行弧线轨迹」、「同速同向、」删掉。
+   接在 `_one_shot_flatten_prompt` 之后、景别统一之前，日志会打
+   `v14.375 一镜到底 clip[N]: 正文机位方向句已中和(改为同距同速·只随主体位移同步移动), 倒行来源已移除`。
+2. **`_one_shot_transit_mid_rule` 补三件事（正向陈述，无否定词）**：
+   ① 机位几何一次说清：「机位就在主体正前方、与他保持固定距离，并以与他相同的速度朝画幅纵深移动……画幅里的地面因此朝镜头涌来」；
+   ② 步态改成机制链「支撑脚在体后蹬地、脚跟先离地 → 屈膝前摆、膝盖领先于脚尖 → 鞋尖朝下先着地、脚跟落平」，并明写「鞋底与鞋跟朝向地面与画幅下缘」；
+   ③ 地面流动是唯一位移证据：「一秒之内有三到四条石缝依次从他脚下滑出画幅下缘，他每迈一步脚下的石缝就滑走一道」+「脚从画幅下缘以下往前摆进来，落地后随地面一起朝画幅下缘滑出去」。
+3. **采样档 vs 管线优先级**：管线自己声明了二采（`refine_enable` 且 `refine_steps >= 1`）就以管线为准，
+   并把冲突播报出来：`⚠️ v14.375 采样档与管线冲突: OneShotSmp=单采无缝, 而渲染管道「…」声明二采 N 步 -> 按管线执行双采 (一采 X 步 + 二采 N 步 denoise …)`。
+   要单采请直接选单采管线档（如「FastH3 Omni 8步单采」），不再靠「单采无缝」去压管线。
+
+**静态（改后实测）**：`ast.parse` OK（17983 行）；`check_one_shot_route_rules` **55 PASS / 0 FAIL**（v14.347 的 4 条步态断言改写 + 新增 6 条，含正文中和与优先级源码扫描）；`check_recast_pipeline` OK。
+
+**未验证（需要实机一轮）**：判据 —— 日志出现 `⚠️ v14.375 采样档与管线冲突` 与二采的 `refine` 步骤段；
+抽帧 0.3–1.0s 看鞋面/鞋尖/鞋带且**地面石缝逐帧朝画幅下缘滑走**（这是唯一的正走证据）；
+6.5s 附近应出现柱面整块遮镜并切到 S2。另：`check_quickbar_enum_sync` 仍 DESYNC（`face_lock_mode` 缺 `fvrs`），启动横幅仍印 `v14.239`，两者都不在本次范围。
+
 ### v14.374 (2026-11-11) — 把 v14.373 误伤的三处搬回来：段内行程串又被整条删、换场光色又被写死成夜色/壁灯、v14.346 的「2K 假倍率跳过二采」整段消失 / Restoring three things v14.373 knocked out: the in-clip route string was deleted again, the transition lighting was hardcoded back to night, and v14.346's fake-factor refine skip had vanished
 
 **现象（静态检查器 `tools/check_one_shot_route_rules.py` 从 49 PASS / 0 FAIL 掉到 45 PASS / 4 FAIL）**
