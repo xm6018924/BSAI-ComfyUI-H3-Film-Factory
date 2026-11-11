@@ -24,6 +24,11 @@ from typing import Any, Callable
 import torch
 import torch.nn.functional as F
 
+try:  # v14.377: 中断检查用; 单独导入本模块做单测时允许缺失
+    import comfy.model_management as _mm_interrupt
+except Exception:  # pragma: no cover
+    _mm_interrupt = None
+
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.spatial_tiles")
 
 VAE_SPATIAL = 16
@@ -413,9 +418,35 @@ def _tiled_model_call(
     saved_shapes = base.latent_shapes
     saved_latent_image = getattr(model_k, "latent_image", None)
     saved_noise = getattr(model_k, "noise", None)
+    # v14.377 (2026-11-11): 分块二采期间暂停 SelfLift TST 注意力 override。
+    # h3_tst.py 自己声明与 highres_tiling 不兼容、tile 调用应当跳过, 但它的长度
+    # guard 是按「当前 forward 的输入 latent」推 frames/rows 的, tile forward 推出
+    # 的正好是 tile 几何 → guard 放行 → 每块每层每个 attention 都白算一遍帧级
+    # 谱分解。实机 py-spy(10s/1000 样本) 有 50% 主机时间落在此处, GPU 仅
+    # ~100W/450W。这里按声明显式跳过, tile 结束即复位, 一采/全帧二采不受影响。
+    _tst_state = getattr(model_k, "_bsai_tst_state", None)
+    _tst_prev_skip = None
+    if _tst_state is not None:
+        _tst_prev_skip = bool(_tst_state.get("skip_tiles"))
+        _tst_state["skip_tiles"] = True
+        if not _tst_prev_skip and not getattr(model_k, "_tst_skip_logged", False):
+            try:
+                model_k._tst_skip_logged = True
+            except Exception:
+                pass
+            log.info(
+                "v14.377 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override "
+                "(TST 与 highres_tiling 不兼容, 按模块自身声明跳过)"
+            )
 
     try:
         for ax_start, ax_end, ov_left, ov_right in plan["regions"]:
+            # v14.377: 每块前检查中断。此前分块二采是一个不可打断的长循环 ——
+            # 实机实测一轮二采 46 分钟日志零增长、ComfyUI /queue 已清空
+            # (running=0) 却仍在算, 前端「取消」对它无效。补上后取消即可生效。
+            if _mm_interrupt is not None:
+                _mm_interrupt.throw_exception_if_processing_interrupted()
+
             tile_x, tile_shapes, (pad_h, pad_w) = _crop_packed(x, full_shapes, axis, ax_start, ax_end)
             tile_mask = None
             if denoise_mask is not None:
@@ -486,6 +517,8 @@ def _tiled_model_call(
         model_k.latent_image = saved_latent_image
         model_k.noise = saved_noise
         model_k._tiled_active = _prev_tiled
+        if _tst_state is not None and _tst_prev_skip is not None:
+            _tst_state["skip_tiles"] = _tst_prev_skip
         if device.type == "cuda":
             torch.cuda.empty_cache()
 

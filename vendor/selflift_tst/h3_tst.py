@@ -98,6 +98,19 @@ def _exact_tension(q, k, v0, frames, rows_per_frame, eps=1e-8, chunk=64):
 
 def _attention_override(state):
     def override(func, q, k, v, heads, mask=None, **kwargs):
+        # v14.377 (2026-11-11): 分块二采(tile forward)期间显式跳过 TST。
+        # 本模块文件头已声明 "not compatible with SelfLift highres_tiling: tile
+        # attention calls fail the length guard and TST skips"。实测该 length
+        # guard 在 tile 调用上失效 —— state["frames"]/rows_per_frame 由当前
+        # forward 的输入 latent 推导, tile forward 推导出的正是 tile 自己的几何,
+        # 于是 s > frames*rows 成立、guard 放行, 每块每层每个 attention 都白跑
+        # 一遍帧级传输算子的谱分解 (实机 py-spy 采样 50% 主机时间落在
+        # _spectral_tension, GPU 功耗仅 ~100W/450W)。由 bsai_h3_spatial_tiles
+        # 在 tile forward 前置位 skip_tiles、结束后复位; guard_misses 照常累加,
+        # 让 _forward_wrapper 打一次 "inactive ... skipped" 说明。
+        if state.get("skip_tiles"):
+            state["guard_misses"] += 1
+            return func(q, k, v, heads, mask=mask, **kwargs)
         frames = state["frames"]
         rows = state["rows_per_frame"]
         qt = _unwrap(q)
@@ -212,12 +225,17 @@ def _forward_wrapper(state, executor, x, timestep, context, transformer_options,
 def patch_model(model, tau, log_diagnostics=True):
     state = {"tau": float(tau), "log_diagnostics": bool(log_diagnostics),
              "exact_debug": os.environ.get("SELFLIFT_TST_EXACT", "0") == "1",
+             # v14.377: 分块二采(tile forward)期间置位 True, TST 整体跳过。
+             "skip_tiles": False,
              "frames": None, "rows_per_frame": None,
              "step": 0, "total_steps": 1, "layers": 50, "calls_this_forward": 0,
              "guard_misses": 0, "warned_inactive": False,
              "fw_abs_tension": [], "fw_abs_tension_post": [], "fw_gamma": [], "fw_active": [],
              "fw_tst_time": [], "fw_events": []}
     patched = model.clone()
+    # v14.377: 把 state 暴露给宿主(电影工厂的分块二采模块要按 tile forward 置位
+    # skip_tiles)。属运行时内部约定, 不改变 TST 本身行为。
+    patched._bsai_tst_state = state
     patched.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL,
                                  "selflift_h3_tst", partial(_forward_wrapper, state))
     patched.model_options.setdefault("transformer_options", {})["optimized_attention_override"] = _attention_override(state)

@@ -6949,10 +6949,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             # v1.88: 分块二采时 ComfyUI 按全幅估算 workspace(ws_need2)并判断
                             # free < ws+2GB 就卸载驻留模型(实测: reserve5.0->驻留16.3GB free5.2GB
                             # <6.5GB -> Unloaded到0 loaded -> 分块forward死锁0/3)。
-                            # 分块时提高 reserve 下限至 7.5GB: 驻留~14.3GB + offload~5.2GB +
-                            # free~7.2GB > ws6.5GB, ComfyUI 不再卸载, 分块forward正常换页。
+                            # v14.341 分块下限 7.5 -> v14.377 5.0: 分块后每 tile 只跑
+                            # ~1/n tokens, per-tile Sol-Attn workspace 远小于全幅
+                            # ws_need2。7.5GB 下限让模型只驻留 13.5GB / offload 6.2GB,
+                            # 每 tile 每层都要过 PCIe 搬权重(实机 py-spy: ~33% 主机
+                            # 时间在 cast_bias_weight/cast_to, GPU 仅 ~100W/450W)。
+                            # v14.224 empty_cache 已解决 cached 池误判; 本段下方的
+                            # v14.250 探针(py-spy 版 v14.377: 分块时按 per-tile 判定)
+                            # 会在 free 真不够时自适应让位抬 reserve, 不会 OOM。
+                            # 下限 5.0GB: 模型驻留 ~17GB / offload ~2.5GB。
                             if tiled_refine:
-                                _r_reserve_gb = max(_r_reserve_gb, 7.5)
+                                _r_reserve_gb = max(_r_reserve_gb, 5.0)
                             # v14.240: 用上次实测的 reserve(见本文件下方 workspace 探针)。
                             # 链式渲染 clip>=2 直接命中, 省一次全卸重驻留。
                             _hint240 = _REFINE_WS_RESERVE_HINT.get(round(_r_factor, 2))
@@ -6963,7 +6970,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _ff_unregister_model(model, label="二采-reserve-branch")
                             _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
                         except Exception:
-                            _r_reserve_gb = 8.0 if tiled_refine else 5.5
+                            _r_reserve_gb = 5.5
                             _ff_unregister_model(model, label="二采-reserve-fallback")
                             _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
                         print(f"[H3 Extender] Refine 二采前 DiT 驻留 {_res_gb:.1f}GB < 12GB, 重新驻留到 VRAM (reserve->{_r_reserve_gb:.1f}GB) ...")
@@ -7018,7 +7025,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                             _r_tok_probe250 = int(_r_m_gate250[0].shape[2]) * int(_r_m_gate250[0].shape[-2]) * int(_r_m_gate250[0].shape[-1])
                                     except Exception:
                                         pass
-                                    if _r_tok_probe250 > 130000:
+                                    # v14.377: 「>130k 无条件让位」这条门是对**全帧未分块**
+                                    # 的病态规模(n>=440k 时 Sol-Attn 超线性恶化)判的。
+                                    # 分块二采单块只有全帧的 1/5~1/8(实测 709,920 -> 每块
+                                    # 136,068), 继续套这条门会把 per-tile 够用的 workspace
+                                    # 误判成不够, 把刚降下来的 reserve 又弹回 7GB 档。
+                                    # 分块时改走真实试分配: 分配得到就保持满驻留, 分配不到
+                                    # 才让位 —— 不掺任何经验常数。
+                                    _tiled_probe377 = bool(tiled_refine)
+                                    if (not _tiled_probe377) and _r_tok_probe250 > 130000:
                                         print(f"[H3 Extender] v14.250 workspace 探针: tokens={_r_tok_probe250:,} > 130k "
                                               f"(已触发自动分块), 不试分配直接判定让位 — "
                                               f"保持满驻留 x{_r_factor}(不降倍率), "
@@ -7035,10 +7050,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                         except Exception as _pe240:
                                             _probe_ok240 = False
                                     if _probe_ok240:
-                                        print(f"[H3 Extender] v14.250 workspace 探针通过: "
-                                              f"free={_free65:.1f}GB 低于阈值 ws {_ws65:.1f}GB+2GB, "
-                                              f"但真实试分配 {_ws65 + 0.5:.1f}GB 成功(池内空闲块可复用), "
-                                              f"Sol-Attn workspace 可用 → 保持满驻留 x{_r_factor}(不降倍率)")
+                                        if _tiled_probe377:
+                                            print(f"[H3 Extender] v14.377 分块 workspace 探针通过: "
+                                                  f"free={_free65:.1f}GB 低于全帧阈值 ws {_ws65:.1f}GB+2GB, "
+                                                  f"但真实试分配 {_ws65 + 0.5:.1f}GB 成功 —— 分块每块仅 "
+                                                  f"~{max(1, _r_tok_probe250 // 5) // 1000}k tokens, "
+                                                  f"保持满驻留 reserve={_r_reserve_gb:.1f}GB(不再弹回 7.5GB)")
+                                        else:
+                                            print(f"[H3 Extender] v14.250 workspace 探针通过: "
+                                                  f"free={_free65:.1f}GB 低于阈值 ws {_ws65:.1f}GB+2GB, "
+                                                  f"但真实试分配 {_ws65 + 0.5:.1f}GB 成功(池内空闲块可复用), "
+                                                  f"Sol-Attn workspace 可用 → 保持满驻留 x{_r_factor}(不降倍率)")
                                     else:
                                         _resv_old240 = float(locals().get('_r_reserve_gb', 5.5))
                                         _deficit240 = (_ws65 + 2.0) - _free65
@@ -7325,12 +7347,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     _ws215 = _ws_tbl.get(round(_r_factor, 1), 2.6)
                     if _free215 < _ws215 + 2.0:
                         # v1.96: _r_reserve_gb 在 spatial fallback 路径可能未定义, 给默认值
-                        _r_reserve_gb = float(locals().get('_r_reserve_gb', 6.8))
-                        # 分块场景: reserve 下限 7.5(v1.88 实测值, 防 ComfyUI 按全幅
-                        # 估算 ws 后卸载驻留). 回退补分块(_r_restore_tiles 已装)与
-                        # tiled_refine 分块同为分块采样, 统一用 7.5 下限. 非分块 6.0.
+                        _r_reserve_gb = float(locals().get('_r_reserve_gb', 5.5))
+                        # v14.377: 分块场景下限 7.5->5.5(此路径仅在 free<ws+2 的
+                        # 运行时真不够时触发, 5.5 已留足 per-tile workspace 余量)。
+                        # 非分块是**全幅** workspace, v1.88 实测 reserve 5.0 -> 驻留
+                        # 16.3GB -> free 5.2GB < 6.5GB -> Unloaded 到 0 loaded ->
+                        # 分块 forward 死锁, 因此非分块保持 6.0, 不下探到 5.0。
                         _is_tiled_now215 = bool(tiled_refine) or _r_restore_tiles is not None
-                        _resv215 = max(7.5, _r_reserve_gb) if _is_tiled_now215 else max(6.0, _r_reserve_gb)
+                        _resv215 = max(5.5, _r_reserve_gb) if _is_tiled_now215 else max(6.0, _r_reserve_gb)
                         if _resv215 > _r_reserve_gb + 1e-6:
                             try:
                                 _ff_unregister_model(model, label="二采-workspace-branch")

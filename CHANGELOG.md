@@ -2,6 +2,42 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.377 (2026-11-11) — 二采 46 分钟空等的三个真因：① 分块 tile 里 SelfLift TST 的 length guard 失效、每块每层白算谱分解（它自己声明「与 highres_tiling 不兼容、应当跳过」）；② 分块二采循环没有任何中断检查，前端取消无效；③ reserve 7.5→5.0 被 v14.250 的「全帧 >130k 无条件让位」弹回 / Three real causes behind the 46-minute silent second pass: TST's length guard silently passes inside tile forwards (the module itself documents that tiling must be skipped), the tile loop has no interrupt check so Cancel is a no-op, and the 7.5→5.0 reserve floor was being undone by the full-frame ">130k ⇒ yield" probe
+
+**现象（13:30 那轮 clip1，后端 v14.376，管线 PIKA H3 Flex 8+2，OneShot=On / OneShotSmp=Single (seamless)）**
+
+- 一采 8 步正常（13:33:22 起，54.9/54.8/54.6/49.3/49.1/52.0/53.1s），13:38:35 进二采，13:38:48 `Refine 分块二采已启用: n_tiles=16 overlap=128px`，13:39:34 `v14.251 二采首步预热完成`，**之后日志零增长到 15:07（88 分钟），没有 `refine耗时诊断`、没有 `Refine 双采完成`、`bsai_clips` 出片数 0**。
+- 同一 16 块配置的历史基线（`comfyui_8181.prev.log`）：11:06:53 预热完 → 11:27:14 `refine耗时诊断: step=2/2 距上步 539.9s` = **20 分 21 秒**。本轮 88 分钟仍在跑（4.3 倍）。
+- 进程取证：`prompt_worker` 线程 active，栈顶 `_sample_h3 → KSAMPLER.sample → _TiledModelProxy → _tiled_model_call → _invoke_model → CFGGuider → minimax_block_lowmem_forward → minimax_attn_lowmem_forward → h3_tst.py:129 override → h3_tst.py:60 _spectral_tension`；本进程 3D 引擎 94.1–98.6%、显存 21.77GB 恒定、CPU 75s 窗口 +74.1s（满一核）。
+- 关键反常：GPU **利用率 100% 但功耗只有 97–111 W / 450 W、SM 2670 / 3105 MHz** —— 卡不是在算，是在等主机。
+- py-spy 函数级采样（10s / 1000 样本）：**503 落在 `_spectral_tension`**、~330 落在 `cast_bias_weight → cast_to → BaseLayoutParams.to_device`（lowvram 权重换页）、其余零散在真正的前向 kernel。
+- `GET /queue` 返回 `queue_running=0 / pending=0`、`/history` 空、`/progress` 404 —— 服务端已经查不到这条任务，**执行线程却还在算**（前端取消对它无效）。
+
+**根因（三条，全部在插件侧）**
+
+| # | 位置 | 机制 | 后果 |
+|---|---|---|---|
+| ① | `vendor/selflift_tst/h3_tst.py` `_attention_override` 的 `if frames is None or frames < 2 or s <= frames * rows:` | `frames/rows_per_frame` 由**当前 forward 的输入 latent** 推导（`_forward_wrapper`），tile forward 推出来的正是 tile 自己的几何 → `s > frames*rows` 成立 → guard 放行 | 每块 × 每层 × 每个 attention 都白跑一遍帧级传输算子 + `eigvalsh`；文件头第 20–23 行本来就写着「not compatible with SelfLift highres_tiling … TST skips」，实测没 skip |
+| ② | `bsai_h3_spatial_tiles.py` `_tiled_model_call` 的 `for ax_start …` 循环 | 循环体内没有 `processing_interrupted()` 检查，中断标志要等采样器回到步边界才被消费 | 分块二采成了一段不可打断的长任务：`/queue` 已清空仍在算 |
+| ③ | `extender.py` v14.250 探针 `if _r_tok_probe250 > 130000:` | 这条门是对**全帧未分块**的病态规模（n ≥ 440k 超线性）判的，分块单块只有全帧 1/5~1/8（709,920 → 每块 136,068），仍被判「无条件让位」 | reserve 5.0 刚落地就被 `_resv240 = min(14, 5.0 + deficit + 0.5)` 弹回 ~6.8GB，驻留回落 ~15GB，降 reserve 的收益被自己吞掉 |
+
+**修法（保留并纠正上一手 reserve 修改的合理部分，再补两个真因）**
+
+1. **分块二采期间显式暂停 TST**（`h3_tst.py`）：`patch_model` 把 `state` 暴露为 `patched._bsai_tst_state`；`_attention_override` 顶部新增 `if state.get("skip_tiles"): state["guard_misses"] += 1; return func(...)`；`bsai_h3_spatial_tiles._tiled_model_call` 在进 tile 循环前置位 `skip_tiles=True`、`finally` 复位，并打一行 `v14.377 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override`。一采与全帧二采不受影响（`skip_tiles` 只在 tile forward 内为真）。
+2. **分块循环加中断检查**（`bsai_h3_spatial_tiles.py`）：每块 `_mm_interrupt.throw_exception_if_processing_interrupted()`，让 UI Cancel 真正生效。
+3. **reserve 下限 7.5 → 5.0（保留）+ 把 v14.250 的门在分块场景改成真实试分配**（`extender.py`）：`_tiled_probe377 = bool(tiled_refine)`，`(not _tiled_probe377) and _r_tok_probe250 > 130000` 才走「无条件让位」；分块时走真实试分配 `ws+0.5GB`，分配得到就保持满驻留并打 `v14.377 分块 workspace 探针通过 … reserve=…(不再弹回 7.5GB)`，分配不到才让位。
+4. **纠正上一手的两处**：异常 fallback 的 `5.5 if tiled_refine else 5.5` 简化为 `5.5`；**非分块** workspace 兜底从 5.0 退回 **6.0** —— 那是全幅 workspace，v1.88 实测 reserve 5.0 → 驻留 16.3GB → free 5.2GB < 6.5GB → `Unloaded` 到 0 loaded → 分块 forward 死锁，不能跟着降。版本注释 v14.341 → v14.377（上一手把这次改动标成了 v14.341）。
+
+**静态（改后实测）**：`ast.parse` OK —— `extender.py` 18020 行、`bsai_h3_spatial_tiles.py` 605 行、`vendor/selflift_tst/h3_tst.py` 243 行；单元验证 PASS（`skip_tiles=True` 时 TST 短路并回落原生 attention、`guard_misses=1`；非分块路径仍进 TST；分块模块导入正常、源码含 `skip_tiles` 置位与中断检查）；`check_one_shot_route_rules` 全部通过（58 PASS / 0 FAIL）；`check_recast_pipeline` OK。`web/extender.js` 未改动。
+
+**未验证（下次实机一轮的判据，全部可量）**
+- 日志 `Refine 二采前 DiT 驻留: resident=X / 19.5GB` —— X 应显著高于本轮 13.5GB（目标 ~17GB）。
+- 日志出现 `v14.377 分块 workspace 探针通过` 或 `v14.250 workspace 自适应让位`（前者=5.0 保住，后者=自动抬到安全值；两者都不出现=探针压根没触发，也要记）。
+- 日志应出现**一次** `[H3 TST] inactive: … not compatible with highres_tiling and was skipped`（证明 tile forward 内确实跳过）。
+- 二采期间 py-spy 采样里 `_spectral_tension` 占比应从 **~50% 掉到 ≈0**；GPU 功耗应从 ~100W 抬到接近额定（300W+）。
+- `refine耗时诊断: step=2/2 距上步 Zs` 的 Z 与基线 539.9s 对比；若仍 >1000s，说明瓶颈不在这三处。
+- 二采进行中点 UI「取消」，日志应立刻停下并报中断（本轮是无效的）。
+
 ### v14.376 (2026-11-11) — moonwalk 的真根因：v14.343 起那条「画幅以他为锚 / 位置固定 / 双脚踩在同一片地面」把主体钉死在画幅里，v14.375 又钉得更死；这版把三条锚全部拆掉，位移改由「朝镜头走近→画幅里逐秒变大」承担 / Real root cause of the moonwalk: since v14.343 the rule pinned the subject inside the frame ("framed on him / his position never changes / both feet stay in the same ground patch"), and v14.375 tightened that pin; this version removes all three anchors and makes the advance come from approaching the lens (frame-filling growth), which is physically incompatible with walking backwards
 
 **现象（11:29 那轮 clip1 `h3_clip_250_1_1794367784.mp4`，1920x1088 / 24fps / 294 帧 / 12.25s / 18.5MB；后端 v14.375；管线 PIKA H3 Flex 8+2；OneShot=On，OneShotSmp=Single (seamless)）**
