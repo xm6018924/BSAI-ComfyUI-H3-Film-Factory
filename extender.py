@@ -4815,6 +4815,11 @@ def _ff_upscale_video_latent(video, scale, align_to_px, method, upscaler_model="
     new_h = _ff_snap_to_multiple(round(h_lat * scale), latent_mult)
     new_w = _ff_snap_to_multiple(round(w_lat * scale), latent_mult)
     if new_h == h_lat and new_w == w_lat:
+        # v14.346/v14.374: 以前这里是「静默 return」, 日志只显示 upscale=x1.02 却不知道
+        # 放大器一次都没跑(本次坏片就是这样被误判成"换权重导致糊")。改为显式播报。
+        print(f"[H3 Extender] ⚠️ v14.346 latent 放大为空操作: 请求 x{float(scale):.2f} 但 "
+              f"{h_lat}x{w_lat} -> {new_h}x{new_w} (align={int(align_to_px)}px 取整后几何未变), "
+              f"3D 放大器未执行, 返回一采 latent")
         return video
 
     orig_dtype = video.dtype
@@ -6232,7 +6237,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _has_upscaler = (refine_upscaler_model
                              and not str(refine_upscaler_model).startswith("(")
                              and _FF_UPSCALER_MOD is not None)
-            if _has_upscaler and _r_factor <= 1.0:
+            if _has_upscaler and _r_factor <= 1.0 and not refine_single_pass:
                 print(f"[H3 Extender] Refine: 选了 3D upscaler 但 factor={_r_factor}, "
                       f"自动提升到 1.5 以启用语义放大")
                 _r_factor = 1.5
@@ -8751,8 +8756,11 @@ _OS_SPACE_TRANSIT_RULE = (
     "与大小连续。跨过之后，本段画面里只有门里这一处空间的地面、墙面、灯具与建筑，"
     "它们在同一次行走里逐帧展开，越往前走越展开，展开之后就一直展开着；左右方位"
     "自始至终保持一致；本段的光线与色调从上一段末帧那一刻的明暗与色温状态起算，"
-    "整段只逐拍向更深的夜色推进一小步，门里新出现的壁灯在原有环境光上由暗到亮"
-    "逐渐显形，天空的亮度与色温随行走连续地向夜的深处演进，步幅与节奏自始至终一致。"
+    # v14.374: 恢复 v14.373 之前的口径 —— 这里不许写死"夜色/壁灯/夜的深处"。换场段的
+    # 明暗与色温只许"从上一段末帧那一刻的状态起算、逐拍朝脚本所写的状态推进"，
+    # 写死具体色调会把白天/室内段强压成夜景(与实测的整段色温渐变切镜同源)。
+    "整段只逐拍朝脚本所写的光线状态推进一小步，门里新出现的灯具在原有环境光上由暗到亮"
+    "逐渐显形，天光的亮度与色温随行走沿同一条连续的方向演进，步幅与节奏自始至终一致。"
 )
 
 # v14.319 (2026-11-05): 光影因果化 —— 把"没有画面内原因的整体换色"改写成
@@ -9279,8 +9287,13 @@ _OS_BRACKET_TITLE_RE = re.compile(r"[\[【]\s*([^\[\]【】\n]{0,30}?)\s*[\]】]
 # 每段开头必须有 [ST]\d{1,2} 编号, 尾巴可选编号。
 # v14.321: 之前只认 S 编号, 用户脚本里夹着 T4 路灯下的老城巷口 → 整条 S4→T4→S5
 # 没被清掉, H3 读到 S5 街口牌坊/后面的 S11 石拱桥 → 在 f31-f32 硬切。
+# v14.374: 恢复 v14.341 修好的字符排除条件 —— 段内行程串是模型唯一的起点/过渡物/
+# 终止空间依据, 绝不能当成"分镜结构"删掉。带 @图 / <Picture> / 括号标注的行必须要
+# 保住; 只有纯 S→T→S 的结构串(不含标签、不含括号注)才允许清。
+# v14.373 把这两组排除条件放宽成 [^→\n]{0,36}, 于是 `S2 …@图4 → T2 …（直行绕过）→ S3`
+# 整条被删, 模型既不知起点也不知过渡物 —— check_one_shot_route_rules 当场掉 3 条。
 _OS_ROUTE_CHAIN_RE = re.compile(
-    r"(?:[ST]\d{1,2}[^→\n]{0,36}→\s*){2,}(?:[ST]\d{1,2}[^；;。\n]{0,36})?"
+    r"(?:[ST]\d{1,2}[^→@<（(\n]{0,24}→\s*){2,}(?:[ST]\d{1,2}[^；;。\n@<（(]{0,24})?"
 )
 
 # 否定式镜头口号 → 正向陈述。
@@ -14005,6 +14018,9 @@ class BSAIH3FilmFactory:
         # 接缝、无分块噪声, 960x544 一采约 x1.39 -> latent 46x82 = 1312x736。
         # 预算只与倍率平方相关(T·H_lat·W_lat), 这里按最长 clip 的 latent T 估算。
         _os2k_decl_px = None
+        # v14.346/v14.374: 本次二采是否"没有任何几何放大"(倍率被预算压成 x1.0x 的假倍率)。
+        # 为 True 时二采整段跳过 —— 详见下方预算分支里的说明。
+        _os2k_skip_refine = False
         if one_shot_dual_2k:
             try:
                 # v14.278: 350k 预算把二采推到 1312x736 / 328,164 tokens(健康上限 130k 的
@@ -14034,6 +14050,34 @@ class BSAIH3FilmFactory:
                       f"({_os2k_t}x{_os2k_nh}x{_os2k_nw}={_os2k_t * _os2k_nh * _os2k_nw:,} tokens <= 预算 "
                       f"{_os2k_budget:,}), 整段一次采样(不分块, 无接缝/无碎纹)")
                 _os2k_decl_px = (int(_os2k_nw * 16), int(_os2k_nh * 16))
+                # v14.346 (2026-11-10 fix): 假倍率必须视为「没有二采」。
+                # 预算 180,000 在 12s 一镜到底(87 latent 帧)下只允许 x1.02, 而
+                # align=40px 取整后 latent 仍是 34x60 —— 与一采完全相同。这条"二采"
+                # 于是不含任何放大, 只是把一采 latent 重新加噪到 0.35 再用 **4 步**
+                # 去噪一遍。两个后果都是掉画质:
+                #   ① 底模是 8 步蒸馏(turbo_8step), 4 步是离轨采样, 出来的是
+                #      单元级(16px)花纹而不是细节;
+                #   ② 本插件 tooltip 已写明 denoise<=0.45 的重绘"基本只是把画面抹平"
+                #      —— 一采 8 步的锐度被这条 4 步重绘抹掉。
+                # 实机产物 h3_clip_250_1_1794296265.mp4(960x544) 全片 16px 网格,
+                # 3.79-5.46s Laplacian 方差 0.00057~0.00066(中位 0.00088, 掉 35-50%),
+                # 就是这条无效二采留下的; 它还白烧 6.4 分钟/段(47.7->200.1s/步)。
+                # 处理: 几何未变就不跑二采, 直接输出一采 8 步画面; 并把原因播报出去,
+                # 不再让"2K双采"这个名字骗人(实际输出=一采尺寸)。
+                _os2k_base_hw = (max(1, int(resolved_height) // 16),
+                                 max(1, int(resolved_width) // 16))
+                if (int(_os2k_nh), int(_os2k_nw)) == _os2k_base_hw:
+                    _os2k_skip_refine = True
+                    print(f"[H3 Extender] ⚠️ v14.346 一镜到底·2K双采: 预算把二采倍率压到 "
+                          f"x{float(refine_upscale_factor):.2f}, 按 align={int(refine_align_to)}px 取整后几何与一采"
+                          f"完全相同(latent {_os2k_base_hw[1]}x{_os2k_base_hw[0]} = "
+                          f"{resolved_width}x{resolved_height}) —— 本次二采没有任何放大, 只会在同分辨率上"
+                          f"用 {int(refine_steps)} 步 denoise {float(refine_denoise):.2f} 重绘一遍(抹平一采锐度), "
+                          f"已整段跳过二采, 输出 = 一采 {int(steps)} 步画面")
+                    print(f"[H3 Extender] ℹ️ v14.346 要真正的 2K: ①开 upscale_final(realesr 像素超分, "
+                          f"当前工作流是关的); ②或把每段时长压到 8s 以内(87->57 latent 帧, tokens 177,480->"
+                          f"116,340)后再开 latent 放大; ③12s 段 + latent x2.0 = 709,920 tokens, 24GB 卡必换页"
+                          f"且满屏碎纹(CHANGELOG v14.276/v14.278 已实测)")
             except Exception as _os2k_err:
                 print(f"[H3 Extender] v14.276 一镜到底·2K双采: 倍率换算失败, 回退 x1.5 ({_os2k_err})")
                 refine_upscale_factor = 1.5
@@ -15309,9 +15353,14 @@ class BSAIH3FilmFactory:
                         if _os_steps != 8 or int(refine_steps) != 4:
                             print(f"[H3 Extender] ⚠️ v14.272 一镜到底·2K双采: 当前一采 {_os_steps} 步 / 二采 {int(refine_steps)} 步, "
                                   f"该档配方为 8+4 (脚本已按配方改写, 若日志仍如此请反馈)")
-                        print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采: 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
-                              f"(denoise {float(refine_denoise):.2f}), 二采倍率按单次采样 token 预算(<=350k)取, "
-                              f"整段一次采样不分块(v14.276 干净优先)")
+                        if _os2k_skip_refine:
+                            print(f"[H3 Extender] ⚠️ v14.346 一镜到底·2K双采: 一采 {int(steps)} 步, "
+                                  f"二采已跳过(倍率=假倍率 x{float(refine_upscale_factor):.2f}, 几何未变), "
+                                  f"输出 {resolved_width}x{resolved_height}")
+                        else:
+                            print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采: 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
+                                  f"(denoise {float(refine_denoise):.2f}), 二采倍率按单次采样 token 预算(<=350k)取, "
+                                  f"整段一次采样不分块(v14.276 干净优先)")
                         if _os_sched != "beta":
                             print(f"[H3 Extender] ℹ️ v14.272 一镜到底·2K双采: 当前调度器={_os_sched}, "
                                   f"参考工作流标准为 beta(仅提示, 不强制)")
@@ -16519,7 +16568,28 @@ class BSAIH3FilmFactory:
                                   "如需 2K/高清放大请改用「双采高清」档或分镜模式")
                     elif one_shot_dual_2k:
                         # v14.276: 2K 档二采照跑, 倍数按单次采样 token 预算取。
-                        if not _os_pass_notice_done:
+                        # v14.346: 但倍率被预算压成假倍率(几何未变)时不许照跑 ——
+                        # 那条二采不含放大, 只有 4 步同分辨率重绘, 纯掉画质(见预算分支)。
+                        if _os2k_skip_refine:
+                            _eff_refine = False
+                            if not _os_pass_notice_done:
+                                _os_pass_notice_done = True
+                                print("[H3 Extender] ✅ v14.346 一镜到底·2K双采：本次预算下二采"
+                                      "没有任何几何放大(倍率=假倍率)，已跳过二采 —— 不再做同分辨率 "
+                                      f"{int(refine_steps)} 步 denoise {float(refine_denoise):.2f} 重绘，"
+                                      f"输出 = 一采 {int(steps)} 步画面({resolved_width}x{resolved_height})")
+                                _send_extender_warning(
+                                    owner,
+                                    "One-shot 2K dual-pass had no upscale this run (the token "
+                                    "budget collapsed the refine factor to x1.0x, geometry "
+                                    "unchanged), so the refine pass was skipped: it would only "
+                                    "re-denoise the same-resolution latent in 4 steps and smear "
+                                    "the first pass. Output equals the 8-step first pass; enable "
+                                    "upscale_final (realesr) for a real 2K master, or shorten each "
+                                    "clip to <=8s to keep single-call tokens in the healthy zone.",
+                                    clip_index=i,
+                                )
+                        elif not _os_pass_notice_done:
                             _os_pass_notice_done = True
                             print("[H3 Extender] ✅ 一镜到底·2K双采：二采照跑"
                                   f"(一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步, denoise {float(refine_denoise):.2f})，"

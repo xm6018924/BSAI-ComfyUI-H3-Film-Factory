@@ -2,6 +2,31 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.374 (2026-11-11) — 把 v14.373 误伤的三处搬回来：段内行程串又被整条删、换场光色又被写死成夜色/壁灯、v14.346 的「2K 假倍率跳过二采」整段消失 / Restoring three things v14.373 knocked out: the in-clip route string was deleted again, the transition lighting was hardcoded back to night, and v14.346's fake-factor refine skip had vanished
+
+**现象（静态检查器 `tools/check_one_shot_route_rules.py` 从 49 PASS / 0 FAIL 掉到 45 PASS / 4 FAIL）**
+
+把 `85697c6` 的整棵树导出到临时目录、用同一份检查脚本对照跑，那边仍是 49/0 —— 四条是 `f0ecad6`（v14.373）引进的：
+
+| 失败断言 | 代码 | 事实 |
+|---|---|---|
+| 清洗后仍以段首行程开头 / 保留终止空间与参考图 / 保留过渡物 T2 | `_OS_ROUTE_CHAIN_RE` | 排除条件从 `[^→@<（(\n]{0,24}` 放宽成 `[^→\n]{0,36}`，于是 `S2 …@图4 → T2 …（直行绕过）→ S3` 整条被当成"分镜结构"删掉 —— 这正是 v14.341 修掉的根因 #2 |
+| 接缝换场规则已去掉写死的夜色/壁灯 | `_OS_SPACE_TRANSIT_RULE` | 被改回"逐拍向更深的夜色推进 / 门里新出现的壁灯 / 天空…向夜的深处演进"，不再是"从上一段末帧那一刻的明暗与色温状态起算、朝脚本所写的光线状态推进" |
+
+另有一处同源回退：`_os2k_skip_refine`、`假倍率`、`空操作`、`skip_refine` 全文 0 命中 —— v14.346 那 6 处「2K 双采假倍率必须跳过二采」的代码被整段抹掉。
+
+**修法（只做三件事，不动用户脚本/工作流/seed/阈值）**
+
+1. `_OS_ROUTE_CHAIN_RE` 恢复 v14.341 口径：`[^→@<（(\n]{0,24}` + `[^；;。\n@<（(]{0,24}` —— 带 `@图` / `<Picture>` / 括号注的行程串必须保住；
+2. `_OS_SPACE_TRANSIT_RULE` 恢复不写死色调的版本（"逐拍朝脚本所写的光线状态推进 / 天光的亮度与色温沿同一条连续的方向演进"）；
+3. 把 v14.346 的六处按原样搬回：`_ff_upscale_video_latent` 几何未变时显式播报空操作、`_sample_h3` 在 `refine_single_pass` 时不把 `_r_factor` 抬到 1.5、`_os2k_skip_refine` 初始化与假倍率判定（`(nh,nw)==(H//16,W//16)`）、预算分支播报原因并给出"真 2K 三条路"、采样调度处跳过二采并推前端告警。
+
+**静态（改后实测）**：`ast.parse` OK（17904 行）；`check_one_shot_route_rules` **49 PASS / 0 FAIL**；`check_recast_pipeline` OK；`node --check web/extender.js` rc=0。
+
+**未在本次范围**：启动横幅仍印 `v14.239 backend loaded`（第 17366 行），与实际版本对不上 —— 按"只做三件事"的要求本次未动，需另行确认后再改。
+
+**未验证**：未实机重跑；判据同 v14.346 —— 日志出现「二采已跳过(倍率=假倍率)」且产物不再有 16px 网格；一镜到底抽帧 0.3–1.0s 看鞋面与鞋头（v14.347 步态）。
+
 ### v14.347 (2026-11-10) — 一镜到底段中换场「步态改成正走」：v14.344 的塌缩已修好，但第一个分镜 moonwalk / One-take mid-clip transition: the gait is now explicitly forward — v14.344 fixed the route collapse, but the subject moonwalked from the first beat
 
 **现象（15:44 那轮 clip1 `h3_clip_250_1_1794297087.mp4`，1920x1088 / 24fps / 294 帧 / 12.25s / 26.8MB；后端 v14.345，规则 v14.344，管线 FastH3 Omni × SelfLift 超分 一采4 + 二采4 denoise 0.5）**
