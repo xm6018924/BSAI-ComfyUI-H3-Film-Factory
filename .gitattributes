@@ -1,0 +1,3 @@
+# git hooks 必须保持 LF —— CRLF 会让 sh 解析 shebang 失败，
+# 守卫钩子静默失效（正是它要防的那类问题）。
+tools/git-hooks/*  text eol=lf
