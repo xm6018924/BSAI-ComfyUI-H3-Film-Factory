@@ -2,6 +2,37 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.384 (2026-11-12) — 二采**只做超分放大、绝不重绘**（覆盖全部渲染管线）/ The second pass is **pure super-resolution only, zero repaint** across every render pipeline
+
+**用户口径**：电影工厂所有二采（8+2 / 8+4 / FastOmini / taomate / 直播配音高清 …），完全按一采结果超分放大，绝不重绘。此前所有"把 denoise 调小"的做法都只是减量，仍是重绘，而且分块 + 权重换页会卡死（v14.379–v14.382 三轮都在这个坑里）。
+
+**修法（不是调参，是换路径）**
+
+1. 模块级开关 `_FF_REFINE_NO_REDRAW`（默认开；`BSAI_H3_REFINE_REDRAW=1` 可恢复旧行为给别的项目用）+ 内部信号 `_FFRefineSkip`。
+2. refine 入口把所有管线配方表里的 `refine_denoise`（0.20/0.35/0.40/0.45/0.50/0.55/1.0…）统一归零并播报 `v14.384 二采不重绘: 请求 denoise=X -> 0.00`。
+3. 潜空间放大（3D upscaler / bislerp）完成的那一刻 `raise _FFRefineSkip()`，**跳出整个重绘段**：CONST 加噪、DisableNoise 去噪、空间分块、时间分块、二采驻留、workspace 探针、塌陷检测全部不执行。交付的 latent 就是放大后的一采结果；VAE 解码照旧，音频保持一采原声。
+4. 新增 `except _FFRefineSkip`（排在 OOM 兜底之前，不会被误判成二采失败），打印 `v14.384 二采只超分放大(不重绘): clip=… 视频 WxH latent 直出(源自一采 xN 放大), 音频保持一采`, 并把 3D upscaler 缓存及早还给下一段一采。
+5. 一镜到底双采提示同步改写：不再警告"重采样会在接缝引入像素漂移"。
+
+**副作用（正面的）**：二采不再跑任何 NFE，v14.379–v14.383 折腾的 TST 空转 / workspace 探针 / reserve 闭环 / 分块耗时在默认路径上全部不再执行；二采耗时 ≈ 一次 3D latent upscale + VAE 解码。
+
+**验证**：新增 `tools/check_refine_no_redraw.py` **17 PASS / 0 FAIL**（含"跳出点在放大之后、在任何加噪/采样之前""捕获子句排在 OOM 之前""驻留/分块/时间分块都在跳出点之后"）；`check_refine_timing_guards.py` 21 PASS；`check_tst_tile_skip.py` 14 PASS；`check_one_shot_route_rules.py` 全绿；`check_recast_pipeline.py` OK；`check_ref_sheet_crop.py` 11 PASS（顺带把 @图1 改成按 `asset_order.json` 的 `images[0]` 解析，资产换人后不再硬编码文件名）。`ast.parse` OK（`extender.py` 18237 行）。
+
+### v14.383 (2026-11-12) — 分块二采 reserve 改按「实测空闲显存」闭环定档 + 每块落 free/tokens 证据 / Tiled second-pass reserve is now a measured-free-VRAM loop, with per-tile free/token evidence in the log
+
+同一张卡、同一版代码、只差 reserve 的两个实机对照：`reserve 8.9 → resident 10.9GB / free ~3.5GB → tile 1/4 = 108.4s`；`reserve 6.8 → resident 14.4GB / free 0.2GB → tile 1 超过 20 分钟未结束`（`py-spy` 连续 4 次 100% 命中 `cast_bias_weight`，GPU 99W/450W）。结论：决定速度的不是"驻留了多少权重"，而是**还剩多少空闲显存**。
+
+- `_sample_h3` 二采驻留段新增闭环：判据与 v14.181 自动分块同源（`tiled_refine or tokens > 130k`），加载后量 `torch.cuda.mem_get_info()`，目标带 free 3.0–6.2GB（定档 3.8GB），最多迭代 3 次双向调 reserve（不足则抬 reserve 降驻留、过剩则降 reserve 升驻留），每次 unregister + 重载 + 实测，最后打印 `v14.383 二采驻留定档`。
+- `bsai_h3_spatial_tiles._tiled_model_call` 每块落 `tile i/n 起算 free=X.XGB tokens≈N` 与 `收尾 free=X.XGB`，下轮可直接看出块内 free 是否被打穿。
+- 验证：`check_refine_timing_guards.py` 21 PASS；`check_tst_tile_skip.py` 14 PASS。
+
+> 注：v14.384 起默认路径不再走分块二采（二采不重绘），本条闭环仅对 `BSAI_H3_REFINE_REDRAW=1` 的旧重绘路径生效。
+
+### v14.382 (2026-11-12) — 分块二采不再沿用「全帧」测出的 reserve 提示 / Tiled second pass no longer inherits the full-frame reserve hint
+
+v14.381 实机：`resident=14.4GB` 虽未被压到 10.9GB，但日志显示 `v14.240 复用上次实测 reserve 6.8GB` —— 那是**全帧**二采测出的 hint，被 `max()` 抬回去，于是分块段仍在 14.4GB 驻留 / 6.3GB 换页。修法：`tiled_refine` 时 `_r_reserve_gb = min(_r_reserve_gb, 5.5)`（目标驻留 ~17GB、offload ~3.2GB，与一采同档），且 `_hint240 = None if tiled_refine else _REFINE_WS_RESERVE_HINT.get(...)`；真不够由 per-tile 探针自适应抬回。验证 `check_refine_timing_guards.py` 18 PASS、`ast` OK（18122 行）。v14.383 随即用实测闭环取代了这个 5.5GB 常数。
+
+
 ### v14.381 (2026-11-12) — 二采剩下的时间全花在**权重换页**上：workspace 探针跑了在 v14.181 自动分块决策**之前**、用的还是旧旗标，把 709,920 tokens 的分块段当成全帧规模，reserve 6.8→8.9GB、resident 14.4→10.9GB，每条 forward 多搬 3.4GB 权重 / What is left of the second pass is pure weight paging: the workspace probe ran *before* v14.181's auto-tiling decision and used a stale flag, so a 709,920-token tiled pass was judged at full-frame scale — reserve 6.8→8.9GB, resident 14.4→10.9GB, 3.4GB extra weight traffic per forward
 
 **实机证据（v14.380 跑，10:41–10:57）**

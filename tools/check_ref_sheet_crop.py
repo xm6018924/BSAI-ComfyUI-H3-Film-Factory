@@ -36,35 +36,53 @@ def load(name):
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
+def sheet_name():
+    """按 asset_order.json 的 images[0] 解析 @图1 —— 资产会换人, 不能写死文件名。"""
+    import json
+    p = os.path.join(os.path.dirname(ASSET), "asset_order.json")
+    try:
+        with io.open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        imgs = data.get("images") or []
+        if imgs:
+            return str(imgs[0])
+    except Exception:
+        pass
+    return "Qwen_Image_2509_00001.png"
+
+
 def main():
-    # 1) 正例：角色 5 联设定板
-    img = load("Qwen_Image_2509_00001.png")
+    # 1) @图1：若当前资产是多视图设定板, 必须切到正面立绘; 若是单人立绘, 必须原样放行
+    name0 = sheet_name()
+    img = load(name0)
     if img is None:
-        check("@图1 存在且可读", False, "缺失")
+        check(f"@图1({name0}) 存在且可读", False, "缺失")
         return 1
     H, W = img.shape[:2]
     res = locate_sheet_panels(img)
-    check("@图1 被判为多视图设定板", res is not None, "None" if res is None else f"views={res['views']}")
     if res is None:
-        return 1
-    fx0, fy0, fx1, fy1 = res["front"]
-    aspect = (fx1 - fx0) / float(fy1 - fy0)
-    check("正面立绘是窄高全身像(宽高比 0.15-0.40)",
-          0.15 <= aspect <= 0.40, f"{aspect:.3f} box={res['front']}")
-    check("正面立绘窗口贴住宽段右缘(即紧邻特写的那一具)",
-          bool(res["boxes"]) and fx1 == max(b[2] for b in res["boxes"] if (b[2] - b[0]) / W > 0.30),
-          f"front.x1={fx1} wide_edges={[b[2] for b in res['boxes'] if (b[2]-b[0])/W>0.30]}")
-    check("胸像参考存在(锁脸用)", res["bust"] is not None, res["bust"])
-    if res["bust"]:
-        check("胸像在正面立绘左侧(不被裁片重叠)",
-              res["bust"][2] <= fx0 + 2, f"bust.x1={res['bust'][2]} front.x0={fx0}")
-    # 关键：裁给 Ref2VA 的窗口里不能含任何侧/背立绘 —— 这正是"倒着走"的来源
-    tails = [b for b in res["boxes"]
-             if b[0] >= fx1 - 4 and (b[3] - b[1]) / H >= 0.80 and b != res["front"]]
-    check("裁出的窗口不含侧/背立绘(它们不在 front 窗内)",
-          all(b[0] >= fx1 for b in tails), f"tail_boxes={tails} front.x1={fx1}")
-    check("返回给 Ref2VA 的参考只有 2 张(胸像+正面立绘)", res["bust"] is not None and res["views"] == 4,
-          f"views={res['views']}")
+        check(f"@图1({name0}) 不是多视图拼版 -> 原样进 Ref2VA(不裁切/不丢视图)", True,
+              f"{W}x{H} single-view")
+    else:
+        check(f"@图1({name0}) 被判为多视图设定板", True, f"views={res['views']}")
+        fx0, fy0, fx1, fy1 = res["front"]
+        aspect = (fx1 - fx0) / float(fy1 - fy0)
+        check("正面立绘是窄高全身像(宽高比 0.15-0.40)",
+              0.15 <= aspect <= 0.40, f"{aspect:.3f} box={res['front']}")
+        check("正面立绘窗口贴住宽段右缘(即紧邻特写的那一具)",
+              bool(res["boxes"]) and fx1 == max(b[2] for b in res["boxes"] if (b[2] - b[0]) / W > 0.30),
+              f"front.x1={fx1} wide_edges={[b[2] for b in res['boxes'] if (b[2]-b[0])/W>0.30]}")
+        check("胸像参考存在(锁脸用)", res["bust"] is not None, res["bust"])
+        if res["bust"]:
+            check("胸像在正面立绘左侧(不被裁片重叠)",
+                  res["bust"][2] <= fx0 + 2, f"bust.x1={res['bust'][2]} front.x0={fx0}")
+        # 关键：裁给 Ref2VA 的窗口里不能含任何侧/背立绘 —— 这正是"倒着走"的来源
+        tails = [b for b in res["boxes"]
+                 if b[0] >= fx1 - 4 and (b[3] - b[1]) / H >= 0.80 and b != res["front"]]
+        check("裁出的窗口不含侧/背立绘(它们不在 front 窗内)",
+              all(b[0] >= fx1 for b in tails), f"tail_boxes={tails} front.x1={fx1}")
+        check("返回给 Ref2VA 的参考只有 2 张(胸像+正面立绘)",
+              res["bust"] is not None and res["views"] == 4, f"views={res['views']}")
 
     # 2) 反例：场景图不得被当成设定板
     for name in ("@图3_1.png", "@图4_1.png", "@图10_1.png", "@图22_1.png"):

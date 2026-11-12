@@ -140,6 +140,21 @@ _CHUNKED_DENOISE_ON = str(os.environ.get("BSAI_H3_CHUNKED_DENOISE", "0")).strip(
 # 30-60s 的纯开销)。键 = refine 倍率, 值 = reserve(GB)。
 _REFINE_WS_RESERVE_HINT = {}
 
+
+# v14.384 (2026-11-12): 二采(Refine / 双采)一律「只超分放大, 绝不重绘」。
+# 用户口径: 不管哪条渲染管线的二采(8+2 / 8+4 / FastOmini / taomate ...), 都
+# 完全按照一采结果做超分放大, 不允许任何程度的去噪重采样。
+# 实现方式不是把 denoise 调小(那还是会重绘、还会因为分块+权重换页卡死),
+# 而是: 潜空间放大(3D upscaler / bislerp)完成的那一刻就用内部信号跳出整个
+# 二采重绘段 —— 加噪、去噪、分块、驻留、workspace 探针、时间分块全部不执行,
+# 交付的 latent 就是放大后的一采结果。VAE 解码照旧, 音频保持一采原声。
+# 需要恢复旧的重绘二采(给别的项目用)时设 BSAI_H3_REFINE_REDRAW=1 后重启。
+class _FFRefineSkip(Exception):
+    """内部信号: 二采已完成超分放大, 跳过其余全部重绘阶段(正常控制流, 非错误)。"""
+
+
+_FF_REFINE_NO_REDRAW = str(os.environ.get("BSAI_H3_REFINE_REDRAW", "0")).strip().lower() not in ("1", "true", "on")
+
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
 # 从未生效过——所以 v14.78 报"已修复"的 shape mismatch 其实一次都没被拦住。
@@ -6276,6 +6291,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             _r_factor = float(refine_upscale_factor)
             _r_steps = max(1, int(refine_steps))
             _r_denoise = max(0.05, min(1.0, float(refine_denoise)))
+            # v14.384: 二采不重绘 —— 覆盖所有渲染管线(8+2 / 8+4 / FastOmini /
+            # taomate / 直播配音高清 ...)的 refine_denoise 表值。放大完成后由下方
+            # _FFRefineSkip 直接收工, 这里置 0 只是让日志/进度口径与实际一致。
+            if _FF_REFINE_NO_REDRAW:
+                if _r_denoise > 1e-6:
+                    print(f"[H3 Extender] v14.384 二采不重绘: 请求 denoise={_r_denoise:.2f} "
+                          f"steps={int(refine_steps)} -> denoise=0.00(只超分放大, 不做任何重采样)")
+                _r_denoise = 0.0
             _r_audio = float(refine_audio_denoise)
             _r_align = max(8, int(refine_align_to))
             # v14.195: 二采音频质量保护(渲染环节)——
@@ -6555,6 +6578,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     samples = _ff_wrap_members([_up_video] + list(_members[1:]), _was_nested)
                     print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
                           f"{_old_hw[1]}x{_old_hw[0]} -> {_up_video.shape[-1]}x{_up_video.shape[-2]} (x{_r_factor})")
+
+            # v14.384: 放大已完成 = 二采的全部工作已做完。这里直接跳出去, 后面
+            # 的 CONST 加噪 / DisableNoise 去噪 / 空间分块 / 时间分块 / 二采驻留 /
+            # workspace 探针 / 塌陷检测全部不执行 —— 「绝不重绘」的落点就在这一行。
+            if _FF_REFINE_NO_REDRAW:
+                raise _FFRefineSkip()
 
             # v14.162 (2026-10-22 fix): 一镜到底连续性修复 —— 二采保留 motion-context keyframe。
             # 旧 v2.55b 在二采完全清空 minimax_keyframes，但二采是 denoise=0.55 的重新采样
@@ -7940,6 +7969,40 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     pass
             samples = _r_samples.to(comfy.model_management.intermediate_device())
             print(f"[H3 Extender] Refine 双采完成: clip={clip_index}")
+        except _FFRefineSkip:
+            # v14.384: 正常控制流 —— 二采只做了超分放大, 已按需跳出重绘段。
+            try:
+                _hv384 = _ff_video_hw(samples)
+            except Exception:
+                _hv384 = (0, 0)
+            try:
+                _m384, _wn384 = _ff_extract_members(samples)
+                _aw384 = int(_m384[1].shape[-1]) if len(_m384) > 1 else 0
+            except Exception:
+                _aw384 = 0
+            print(f"[H3 Extender] v14.384 二采只超分放大(不重绘): clip={clip_index} "
+                  f"视频 {_hv384[1]}x{_hv384[0]} latent 直出(源自一采 x{_r_factor} 放大), "
+                  f"音频保持一采({_aw384} 帧 latent), 已跳过 加噪/去噪/分块/驻留/探针 全部阶段")
+            # 3D upscaler 缓存不再需要(二采不采样), 及早还给下一段一采
+            try:
+                if _FF_UPSCALER_MOD is not None:
+                    import gc as _gc384
+                    import torch as _t384
+                    _cache384 = getattr(_FF_UPSCALER_MOD, "MODEL_CACHE", None)
+                    if isinstance(_cache384, dict) and _cache384:
+                        for _k384 in list(_cache384.keys()):
+                            _m384w = _cache384.pop(_k384)
+                            try:
+                                _m384w.to("cpu")
+                            except Exception:
+                                pass
+                            del _m384w
+                        print(f"[H3 Extender] v14.384 3D upscaler 缓存已清理(二采不采样), 释放 VRAM")
+                    _gc384.collect()
+                    _t384.cuda.synchronize()
+                    _t384.cuda.empty_cache()
+            except Exception:
+                pass
         except torch.cuda.OutOfMemoryError as _oom:
             # v1.43 (2026-09-13 fix #4): OOM fallback 不再 unload_all_models()!
             # v1.37 的 fallback 每次 unload_all_models() 都把 diffusion
@@ -16876,8 +16939,8 @@ class BSAIH3FilmFactory:
                                   "接缝不再因锁 keep 失效而跳变")
                     elif not _os_pass_notice_done:
                         _os_pass_notice_done = True
-                        print("[H3 Extender] ⚠️ 一镜到底·双采高清：二采重采样会在接缝引入像素漂移"
-                              "（参考工作流实测），如出现段间模糊/抖动请改用「单采无缝」档")
+                        print("[H3 Extender] v14.384 一镜到底·双采高清：二采已改为「只超分放大、绝不重绘」"
+                              "(v14.384)，不再有重采样带来的接缝像素漂移")
                 # v14.214 (2026-10-26): 采样前强制释放文本编码器(TE)显存 ——
                 # 长链从第 2 段起 TE 常驻 8~15GB, 采样前 free 从 22GB 掉到 15GB;
                 # 而 H3 DiT 权重 20.6GB 在 24GB 卡上必须走 DynamicVRAM 流式,
