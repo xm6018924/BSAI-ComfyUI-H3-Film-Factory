@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.391-acc8step+pdmd-sigma+refine-full-redraw-content-lock+frontend-guard"
+BUILD = "minimax-h3-extender-v14.392-acc8step+pdmd-sigma+refine-full-redraw-content-lock+frontend-guard+redraw-temporal-chunk"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -6405,6 +6405,18 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] v14.389 二采内容锁: 请求 denoise={_r_denoise:.2f} "
                       f"-> {_FF_REFINE_LOCK_DENOISE:.2f}(保留一采构图, 只补细节)")
                 _r_denoise = _FF_REFINE_LOCK_DENOISE
+            # v14.390: 真重绘(denoise>0)时的分块策略开关。
+            # 默认不动(沿用工作流/管线档的空间分块 + 时间分块到 64k/前向)。
+            # 若分块前向仍慢, 设 BSAI_H3_REFINE_REDRAW_MEM=global 重启: 走 v14.275
+            # 的全上下文时间分块(每段 ~236k tokens, 本机实测 Sol-Attn 稀疏下
+            # 0.7-1.0s/步), 不再裁空间轴 —— 换来的是「不再暂停 TST/稀疏注意力」。
+            if _r_denoise > 1e-6:
+                _rmmd390 = str(os.environ.get("BSAI_H3_REFINE_REDRAW_MEM", "")).strip().lower()
+                if _rmmd390 in ("global", "spatial") and not str(refine_mem_mode).startswith(_rmmd390):
+                    print(f"[H3 Extender] v14.390 二采真重绘分块策略: {refine_mem_mode} -> "
+                          f"{_rmmd390} (env BSAI_H3_REFINE_REDRAW_MEM)")
+                    refine_mem_mode = ("global (全上下文省显存)" if _rmmd390 == "global"
+                                       else "spatial (tiled, compatible)")
             _r_audio = float(refine_audio_denoise)
             _r_align = max(8, int(refine_align_to))
             # v14.195: 二采音频质量保护(渲染环节)——
@@ -6821,10 +6833,32 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # Sol-Attn 健康区, 整段一次调用最干净; 分块只会换来接缝闪烁与碎纹。
             # v14.281: MV 双采档同理 —— 原版 temporal_chunk_tokens=0 即整段一次,
             # 由 refine_no_temp_chunk 显式关闭自动分块(空间 4 块保留)。
+            #
+            # v14.390 (2026-11-12): 上面两条「整段一次」只在二采**不真采样**时成立。
+            # v14.389 把二采重绘打开后, 实机(14:55 开工, FastH3/PIKA 双采档)在二采第
+            # 1 块就死等: 272,136 tokens/块 × 6.4GB 权重 offload × tile forward 内
+            # SelfLift TST 被 v14.380 显式暂停 —— GPU util 100% 但只有 98W、显存带宽
+            # 利用率 1%(SM 空转等搬运), 主机单核 100%, py-spy 落在
+            # _tiled_model_call -> cast_bias_weight, 20 分钟走不完 tile1 的第一步。
+            # 根因是两道否决同时生效: ① v14.306 把 _CHUNKED_DENOISE_ON 默认关成
+            # 「整段一次」; ② v14.281 的 refine_no_temp_chunk 再加一道。于是 v14.270
+            # 那条「每前向 tokens 超预算就切时间」的保护在真重绘路径上从未生效。
+            # 修法: denoise>0(真重绘)时这两道否决一律作废, 交回 token 预算自动分块;
+            # 纯超分(denoise=0)与单采档的旧行为保持不变。
+            _redraw390 = _r_denoise > 1e-6
+            _tc_override390 = bool(refine_no_temp_chunk) and not _use_temporal and _redraw390
             if refine_no_temp_chunk and not _use_temporal:
-                print("[H3 Extender] v14.281 MV 双采: 按原版 temporal_chunk_tokens=0 "
-                      "禁用自动时间分块 -> 整段一次二采(1 段 × 空间分块)", flush=True)
-            if _CHUNKED_DENOISE_ON and not _use_temporal and not refine_single_pass and not refine_no_temp_chunk:
+                if _tc_override390:
+                    print("[H3 Extender] v14.390 MV 双采: 二采真跑重绘(denoise="
+                          f"{_r_denoise:.2f}) → 撤销 v14.281『整段一次』, "
+                          "按 token 预算自动时间分块(272k tokens/块会让主机侧搬运变串行死等)",
+                          flush=True)
+                else:
+                    print("[H3 Extender] v14.281 MV 双采: 按原版 temporal_chunk_tokens=0 "
+                          "禁用自动时间分块 -> 整段一次二采(1 段 × 空间分块)", flush=True)
+            if ((_CHUNKED_DENOISE_ON or _redraw390) and not _use_temporal
+                    and not refine_single_pass
+                    and (not refine_no_temp_chunk or _tc_override390)):
                 try:
                     _t_cand226 = None
                     _h_cand226 = 0
@@ -6897,8 +6931,31 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             # 236k tokens 实测健康(0.7-1.0s/步), 抬到 240k 后
                             # T=87/709,920 tokens 只切 3 段(chunk=29) -> 4 段。
                             _tok_tgt270 = max(_tok_tgt270, 240000.0)
+                        if _redraw390 and not _is_global_mem226:
+                            # v14.390: 真重绘的分块路径没有稀疏注意力可用(v14.380 在
+                            # tile forward 内暂停 TST), 每前向的激活量直接决定成败:
+                            # 272k tokens 时单个激活张量就 ~1.1GB(272k*2048*bf16),
+                            # 50 个 block 反复 malloc/free + 6.4GB 权重换页, 实测
+                            # 20 分钟走不完第 1 块。压到 64k 档: T=87 切成 5 段
+                            # (chunk=20 帧 × 46 × 68 ≈ 62.6k tokens/前向, 激活
+                            # ~250MB), 与 v14.270 设计时"每段 ~22 帧"的实测健康区一致。
+                            try:
+                                _tok_tgt390 = float(os.environ.get(
+                                    "BSAI_H3_REFINE_TILE_TOKEN_TARGET", "65536"))
+                            except Exception:
+                                _tok_tgt390 = 65536.0
+                            if _tok_tgt390 > 0:
+                                _tok_tgt270 = min(_tok_tgt270, max(16384.0, _tok_tgt390))
                         if _trig270 == "off":
                             _need_auto270 = False
+                            # v14.390: 真重绘 + 每前向超预算时, "off" 不再作数 ——
+                            # 这条开关是 v14.270 在不重绘的年代留的回滚口, 真采样时
+                            # 关掉它就是回到 272k tokens/前向的串行死等。
+                            if _redraw390 and _per_tile226 > _tok_tgt270:
+                                _need_auto270 = True
+                                print(f"[H3 Extender] v14.390 忽略 BSAI_H3_TEMPORAL_TRIGGER=off: "
+                                      f"二采真重绘每前向 {int(_per_tile226):,} tokens > "
+                                      f"{int(_tok_tgt270):,}, 必须时间分块", flush=True)
                         elif _trig270 == "legacy":
                             _need_auto270 = (_t_cand226 >= 200)
                         else:

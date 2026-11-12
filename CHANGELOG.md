@@ -2,6 +2,35 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.392 (2026-11-12) — 二采真重绘时必须时间分块（修 v14.389 打开重绘后的二采死等）/ Redrawn second pass must be time-chunked: fixes the second-pass hang that v14.389 exposed
+
+**事故（实机，pid 34184，14:55:53 开工那轮）**
+
+- 配置：FastH3 4步VSA 双采档。一采正常（4 步，53.8s/步，3分35秒）；二采内容锁生效（`v14.389 二采内容锁: 请求 denoise=0.45 -> 0.20`）；3D 放大 60x34 → 120x68 成功。
+- 进入二采后死等：`v14.383 分块二采: tile 1/4 起算 free=3.5GB tokens≈272,136`，**之后 20 分钟零输出**（日志停在 15:07:58，15:28 复查仍未动）。
+- 硬件指纹：GPU util **100%** 但功耗仅 **97-98W**、显存带宽利用率 **1%**、SM 满频 2685MHz、显存 23708MiB/24564MiB；进程 **CPU +10s / 每 10s**（单核忙等）。
+- `py-spy --nonblocking dump`：`KSAMPLER.sample → wrap_sampler_spatial_tiles → _TiledModelProxy.__call__ → _tiled_model_call → _invoke_model → sampling_function → h3_tst._forward_wrapper:261 → **cast_bias_weight (ops.py:464)**`。
+- 同一 tile forward 里 `[H3 TST] inactive: packed sequence shorter than the expected video segment` —— v14.380 的守卫把 SelfLift TST 在分块路径内暂停，**块内没有稀疏注意力**。
+- `/interrupt` 返回 200 并在 15:48:29 记 `Global interrupt`，但 ComfyUI 只在步/块之间检查中断，这一块 forward 本身不返回 —— 只能终止进程（已经用户确认，`Stop-Process -Id 34184`，端口释放、显存回落到 1658MiB）。
+
+**根因**：v14.270 早就有「每前向 tokens 超预算就切时间」的保护，但两道否决同时生效，使它在真重绘路径上**从未执行**——
+① `_CHUNKED_DENOISE_ON` 默认 `0`（v14.306 把工作流请求的 temporal_chunk_tokens 归零成「整段一次」）；
+② `refine_no_temp_chunk`（v14.281 MV 双采「原版 temporal_chunk_tokens=0」）。
+于是每前向 **272,136 tokens**：单个激活张量就 ~1.1GB（272k×2048×bf16），50 个 block 反复分配/释放，叠加 6.4GB 权重 offload（refine 段比一采翻倍、149 个 lowvram patch），GPU 全程等主机。v14.384 当年靠「二采不采样」绕开了这个坑，v14.389 打开重绘后它立刻复现。
+
+**改动（`extender.py`）**
+
+1. `_redraw390 = _r_denoise > 1e-6`：二采是否真在重绘。
+2. 真重绘时 **`refine_no_temp_chunk` 与 `_CHUNKED_DENOISE_ON` 的否决权作废**（新增 `_tc_override390`），交回 v14.270 的 token 预算自动分块。
+3. 真重绘的每前向预算默认压到 **65,536 tokens**（env `BSAI_H3_REFINE_TILE_TOKEN_TARGET`，只向下压、带 16k 下限护栏）。T=87 / 120×68 的 2K 二采实算：`per_tile≈275,094 → 5 段 → chunk=20 帧 × 46 × 68 ≈ **62,560 tokens/前向**`（原 272,136，降 4.3 倍），叠加 `temporal_overlap_tokens=8` 的段间重叠保护接缝。
+4. `BSAI_H3_TEMPORAL_TRIGGER=off` 在真重绘且超预算时被显式忽略并播报（该开关是「不重绘年代」的回滚口）。
+5. 新增 `BSAI_H3_REFINE_REDRAW_MEM=global|spatial`：真重绘时可整体切到 v14.275 全上下文模式（不裁空间轴、每段 ~236k tokens、本机实测 Sol-Attn 稀疏 0.7-1.0s/步）。默认不动工作流设定。
+6. 纯超分（`denoise=0`）与单采档仍保留 v14.281「整段一次」的旧行为。
+
+**验证**：新增 `tools/check_refine_redraw_chunking.py` —— **15 PASS**（真重绘判定位置、两道否决被撤销、64k 目标只向下压且有下限、global 模式不受影响、off 开关让位、纯超分保留旧口子、策略 env 存在）；`check_refine_no_redraw.py` 22 PASS、`check_refine_timing_guards.py` 21 PASS、`check_pipeline_recipes.py` 全绿；`ast.parse` OK（18541 行）。
+
+**English** — With v14.389 redrawing the second pass, a FastH3 dual-pass clip died inside refine: after `tile 1/4 起算 free=3.5GB tokens≈272,136` nothing was logged for 20 minutes. Fingerprint: GPU at 100% util but only 97-98W, 1% memory-bandwidth util, one host core spinning at 100%; `py-spy` lands in `cast_bias_weight` inside `_tiled_model_call`, and the tile forward runs with SelfLift TST force-disabled (v14.380) — i.e. no sparsity. Two vetoes had killed the long-standing v14.270 "split temporally when per-forward tokens exceed budget" guard: `_CHUNKED_DENOISE_ON` defaults to 0 (v14.306's "whole clip in one call") and `refine_no_temp_chunk` (v14.281). `/interrupt` was accepted but ComfyUI only checks it between steps/blocks, and that single forward never returns, so the process had to be stopped (user-confirmed). The fix re-enables automatic temporal chunking whenever the refine pass actually samples and caps the per-forward budget at 65,536 tokens (env-tunable, down-only, 16k floor) — on this 2K workload that turns 272,136 tokens per forward into ~62,560, with the existing 8-frame segment overlap. Escape hatch: `BSAI_H3_REFINE_REDRAW_MEM=global` moves a redrawn refine to the measured-fast global path, and `BSAI_H3_TEMPORAL_TRIGGER=off` no longer applies when the pass really samples. Pure super-res (denoise=0) and single-pass tiers keep the old "whole clip" behaviour.
+
 ### v14.391 (2026-11-12) — 前端守卫：语法与枚举检查变成提交前强制关卡 / Frontend guard: syntax + enum checks are now a hard pre-commit gate
 
 **用户口径**：把「前端语法检查(.mjs) + 快捷条枚举同步自检」固化成提交前必跑的一步。
