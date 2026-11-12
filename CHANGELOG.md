@@ -2,6 +2,24 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.385 (2026-11-12) — 一镜到底段中换场改成「主体自己走过去」，撤掉整幅遮挡机制 / Mid-shot scene change is now the subject walking into the next scene; the full-frame occlusion wipe is gone
+
+**用户口径**（看 `h3_clip_250_1_1794456674` 12.25s 首片后）：场景变化不对；一镜到底模式应该是从上一个场景**自然走进下一个场景**。
+
+**诊断**：v14.378 写进 `_one_shot_transit_mid_rule` 的机制是「柱身从画幅正前方由小及大迎面涨上来 → 整根柱身涨满整幅画幅 → 当中两三拍整块盖住镜头 → 主体整个人藏在实心石面后面」。出片实测：约 9s 柱面石纹涨满整幅、之后直接接一个带蓝拱顶的内景 —— 主体被整幅石面挡掉再出现，观感等于一次转场（wipe/cut），与「一镜到底、不切镜、不转场」的硬原则冲突。根因在**规则文本**（提示词侧），不是采样或二采。
+
+**修法（纯规则文本，零新增采样）**
+
+1. `_one_shot_transit_mid_rule` 换场段全部重写为「走过去」三拍：门洞在画幅正前方由小及大迎面推近 → 两条竖直门框向画幅左右两侧分开、中间空出门洞纵深 → 主体一步一步走近、画幅下方地面从 start 的石缝逐拍过渡到门槛石 → **跨过门槛那一拍**画幅下方出现 end 的第一道石缝、两侧出现 end 的墙与灯 → 之后到末帧，end 的墙面/柱列/灯具把 start 的逐拍换掉。
+2. 新增正向约束：「整个换场过程中主体完整地出现在画幅中央、正面朝镜头、一步一步向前，画幅的四角自始至终看得见地面与两侧建筑，门框的两条竖边与门槛石接住这一下前一后的两处空间」。
+3. 「每拍只有一层实景」改为「画幅里每一拍只有一处空间的实景」（双曝仍无动机，但不再是「石面盖镜那两三拍」）。
+4. `_one_shot_scene_anchor_mid_rule` 置换点同步改为「跨过门槛之前 / 那一拍之后」，分界物 = 门槛石 + 两条门框竖边。
+5. 接缝换场常量 `_OS_SPACE_TRANSIT_RULE` 同源的「画幅被门墙与门框挡住的那一瞬」一并撤掉，改成「门框两条竖边从画幅左右两侧掠过、门外景物逐拍退出、门里景物逐拍进入」。
+
+**验证**：`tools/check_one_shot_route_rules.py` 全绿（新增 7c 组 6 条：换场由主体跨过门洞完成 / 全程完整在画幅里且脚步连续 / **不再有整幅遮挡机制**（`盖住镜头`、`画幅的每一寸都是石头`、`藏在`、`涨满整幅画幅`、`占满画幅的四角` 全部判红）/ 空间逐拍替换 / 每拍只有一处空间实景 / 接缝换场也不再靠门墙遮挡）。`ast.parse` OK。
+
+**English** — `_one_shot_transit_mid_rule` no longer prescribes a full-frame column wipe. The scene change is now performed by the subject: the doorway grows in front of the frame, its two vertical jambs split to the frame edges, the subject steps over the threshold stone, and from that frame onward the new location's ground, walls and lights progressively replace the old ones — the subject stays fully visible in the centre of frame, keeps walking, and the four corners of the frame always show ground and side architecture. `_OS_SPACE_TRANSIT_RULE` (seam transitions) drops its "frame blocked by the door wall for an instant" clause for the same reason. Checker `tools/check_one_shot_route_rules.py` gains 6 guard assertions, including one that fails if any occlusion wording ever comes back.
+
 ### v14.384 (2026-11-12) — 二采**只做超分放大、绝不重绘**（覆盖全部渲染管线）/ The second pass is **pure super-resolution only, zero repaint** across every render pipeline
 
 **用户口径**：电影工厂所有二采（8+2 / 8+4 / FastOmini / taomate / 直播配音高清 …），完全按一采结果超分放大，绝不重绘。此前所有"把 denoise 调小"的做法都只是减量，仍是重绘，而且分块 + 权重换页会卡死（v14.379–v14.382 三轮都在这个坑里）。
