@@ -2,6 +2,29 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.387 (2026-11-12) — 新增渲染管道档 ACC 8 步 SelfLift 双采 (8+4) / New render-pipeline tier: ACC 8-step SelfLift Dual-Pass (8+4)
+
+**用户口径**（附截图 `H3\H3加速\ACC\MiniMax-H3-Ref2VA-Acc-8Step_comfyui_pdd-T8.safetensors`）：检查所有渲染管线，有没有 ACC 这一档？没有就加上，ACC 1 采 8 步 2 采 4 步。
+
+**查证**：插件原来**没有** ACC 档（`grep ACC` 在 `extender.py` / `web/extender.js` 无命中）。本地权重四份均在 `models\loras\H3\H3加速\` 下：`ACC\MiniMax-H3-FL2VA-Acc-8Step_comfy.safetensors`、`ACC\MiniMax-H3-Ref2VA-Acc-8Step_comfyui_pdd-T8.safetensors`、`pdd_acc\minimax_h3_fl2va_pdd_acc_8step_comfyui.safetensors`、`pdd_acc\minimax_h3_ref2va_pdd_acc_8step_comfyui.safetensors`。
+
+**改动（后端 `extender.py`）**
+
+1. `_RENDER_PIPELINE_EN2ZH` 新增 `"ACC 8-step SelfLift Dual-Pass (8+4)": "ACC 8步 SelfLift 双采 (8+4)"`（紧跟 PTD 行）。
+2. `render_pipeline` combo 列表在 `"PTD 4-step Ref2VA Single-Pass (reference accel)"` 之后插入该档，序号 **28**。
+3. 新增分发分支 `elif _rp_mode == "ACC 8步 SelfLift 双采 (8+4)"`：`steps, refine_steps = 8, 4`；`tile_count, refine_denoise = 16, 0.45`；`refine_enable=True`、`refine_upscale_factor=2.0`、`refine_align_to=32`、`tiled_refine=True`、`tile_overlap=128`、`_rp_no_temp_chunk=True`；`shift_video/shift_audio = 12.0/3.0`；`denoise=1.0`；强制 `euler` + `scheduler="simple"`、`refine_sampler="euler"`；打印 Ref2VA / FL2VA 两个权重的挂法与「不要再叠加第二个加速 LoRA」。
+4. `tooltip` 追加第 (35) 条说明。
+
+**改动（前端 `web/extender.js`）**
+
+5. `cycle` / 遗留兼容层 `OPTIONS` 白名单插入规范值（两处同文本）；`cycleAliases` / `ALIAS_CANON` 插入中文别名（两处同文本）；`cycleLabels` 插入显示名；`tints` 在**同一序号**插一条色带。
+6. 顺手修掉一个**既存缺陷**：`tints` 原本只有 37 条而 `cycle`/`cycleLabels` 各 38 条，最后一条 `Viggle Remake Video Edit + FaceSwap` 取不到色带（`color` 为 `undefined`）。本次补一条，三表统一为 39 条、ACC 同为第 28 位。
+7. 节点中文/英文 widget 描述同步补 ACC 一段（LoRA 名、strength 1.0、euler/simple、shift 12/3、8+4、禁叠第二个加速 LoRA）。
+
+**验证**：`tools/check_pipeline_recipes.py` 扩写为 DMAD + ACC（后端 + 前端三表）共 **29 PASS / 0 FAIL**；`check_quickbar_enum_sync.py` 的 `render_pipeline` 由 ERROR 转 **OK（39 项）**（仅剩 `face_lock_mode` 缺 `fvrs` 这条历史遗留）；`ast.parse` OK（18338 行）；`node --check web/extender.js` 通过。
+
+**English** — Added the ACC tier: one 8-step acceleration LoRA pair under `H3加速\ACC` (Ref2VA variant for reference-image-to-audio-video, FL2VA variant for first/last-frame), 8 first-pass steps + 4 refine steps, euler/simple, shift 12/3, denoise 1.0, LoRA strength 1.0, and an explicit warning not to stack a second acceleration LoRA. Backend combo / EN2ZH / dispatch branch and frontend `cycle` / `cycleLabels` / `tints` / `cycleAliases` / `ALIAS_CANON` / legacy `OPTIONS` are all updated together, so the tier is both visible and selectable. The `tints` table was one entry short of `cycle` (37 vs 38) before this change — that pre-existing bug is fixed as well (all three tables now 39, ACC at index 28). Note that since v14.384 the refine pass only super-resolves; the 4 refine steps run solely when `BSAI_H3_REFINE_REDRAW=1`.
+
 ### v14.386 (2026-11-12) — DMAD 渲染管线改为 1 采 8 步 + 2 采 2 步 / The DMAD render pipeline is now 8 first-pass steps + 2 refine steps
 
 **用户口径**：DMAD 渲染管线，改成 1 采 8 步 2 采 2 步。
