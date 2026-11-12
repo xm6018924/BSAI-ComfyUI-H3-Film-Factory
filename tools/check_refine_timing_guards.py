@@ -81,6 +81,12 @@ def main():
           "_ws381 = max(2.0, _ws65 * (1.0 / float(_ntile381)) * 1.5)" in ext)
     check("v14.381 探针按 ws_tile 试分配(不再拿全帧 ws 判让位)",
           "_pb240 = int((_ws381 + 0.5) * 1024 ** 3)" in ext)
+    # v14.382: 分块段不再沿用全帧测出的 reserve 提示 —— 6.8GB 会把 resident 压到
+    # 14.4GB(offload 6.3GB), 二采每块 >150s 常驻 cast_bias_weight。
+    check("v14.382 分块段 reserve 上限 5.5GB(驻留 ~17GB)",
+          "_r_reserve_gb = min(_r_reserve_gb, 5.5)" in ext)
+    check("v14.382 分块段跳过全帧 reserve 提示",
+          "_hint240 = None if tiled_refine else _REFINE_WS_RESERVE_HINT.get(" in ext)
     check("_probe_ok240 有初值(避免 free 足够时 NameError 被外层 except 吞掉)",
           "_ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)\n                            _probe_ok240 = True" in ext)
     check("版本注释已改为 v14.377(不再误标 v14.341)",

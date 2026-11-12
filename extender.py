@@ -7031,9 +7031,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             # 下限 5.0GB: 模型驻留 ~17GB / offload ~2.5GB。
                             if tiled_refine:
                                 _r_reserve_gb = max(_r_reserve_gb, 5.0)
+                                # v14.382 (2026-11-12): 分块段按 per-tile workspace
+                                # 定预算。v14.240 的「上次实测 reserve 提示」是**全帧**
+                                # 二采测出来的(6.8GB), 复用到分块段会把 resident 压到
+                                # 14.4GB / offload 6.3GB —— 实机 py-spy 常驻
+                                # cast_bias_weight, 每块 >150s; 而一采 17.4GB /
+                                # offload 3.2GB 时 710k tokens 只要 65s/步。分块段
+                                # 单块只有 1/n tokens, 用不着全帧 workspace, 因此
+                                # 这里把上限压到 5.5GB(驻留 ~17GB), 真不够时下方
+                                # v14.381 per-tile 探针会自适应抬回。
+                                _r_reserve_gb = min(_r_reserve_gb, 5.5)
                             # v14.240: 用上次实测的 reserve(见本文件下方 workspace 探针)。
                             # 链式渲染 clip>=2 直接命中, 省一次全卸重驻留。
-                            _hint240 = _REFINE_WS_RESERVE_HINT.get(round(_r_factor, 2))
+                            # v14.382: 分块段不复用全帧测出来的提示(见上)。
+                            _hint240 = None if tiled_refine else _REFINE_WS_RESERVE_HINT.get(round(_r_factor, 2))
                             if _hint240:
                                 _r_reserve_gb = max(_r_reserve_gb, min(8.0, _hint240))
                                 print(f"[H3 Extender] v14.240 复用上次实测 reserve "
