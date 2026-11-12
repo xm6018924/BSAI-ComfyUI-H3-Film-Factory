@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.392-acc8step+pdmd-sigma+refine-full-redraw-content-lock+frontend-guard+redraw-temporal-chunk"
+BUILD = "minimax-h3-extender-v14.393-acc8step+pdmd-sigma+refine-full-redraw-content-lock+frontend-guard+redraw-temporal-chunk+refine-sigma0"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -168,7 +168,7 @@ _REFINE_WS_RESERVE_HINT = {}
 #   MiniMax-H3-FL2VA-Acc-8Step_comfy.safetensors            首尾帧 / 文生
 # 配方: 8 步一采(euler + simple, shift 12/3, denoise 1.0) + 4 步二采(denoise 0.45,
 # tile 16 / overlap 128, latent x2.0 -> 2K); LoRA strength 1.0, 禁叠第二个加速 LoRA。
-# 二采自 v14.389 起默认开重绘(内容锁: 0.45 夹到 0.20, 采样后过结构闸门), 这 4 步会真跑。
+# 二采自 v14.389 起默认开重绘(内容锁: 0.45~0.55=真实起点 σ, 采样后过结构闸门), 这 4 步会真跑。
 # 三处必须同时改才真的"看得到 + 选得到 + 生效": 后端 combo/EN2ZH/dispatch 分支,
 # 前端 web/extender.js 的 cycle/cycleLabels/tints(同序号) 与 cycleAliases/ALIAS_CANON,
 # 以及遗留兼容层 OPTIONS 白名单。顺手补了 tints 表原来少一条(38 vs 37)的既存缺陷。
@@ -197,7 +197,7 @@ _REFINE_WS_RESERVE_HINT = {}
 #
 # v14.389 (2026-11-12): 本条被用户新口径反转 —— 「打开所有渲染管线的二采重绘,
 # 但保证二采重绘必须和一采内容一样, 不得重绘成别的画面」。默认改为开重绘, 并加
-# 内容锁(denoise 上限 0.20) + 结构相似度闸门(低于 0.85 丢弃二采回退纯超分)。
+# 内容锁(起点 σ 0.45~0.55, v14.393 起 denoise=真实起点噪声比例) + 结构相似度闸门(低于 0.85 丢弃二采回退纯超分)。
 # v14.384 的整段跳过仍保留, 但只在 BSAI_H3_REFINE_NO_REDRAW=1(或
 # BSAI_H3_REFINE_REDRAW=0)时生效。
 class _FFRefineSkip(Exception):
@@ -214,15 +214,36 @@ class _FFRefineSkip(Exception):
 #      低于 _FF_REFINE_CONTENT_MIN(默认 0.85) 就判定「重绘成别的画面」, 整块丢弃、
 #      回退到一采放大结果并告警 —— 宁可少一点细节, 也不交付另一幅画。
 # 仍需要「绝不重绘」的旧行为时设 BSAI_H3_REFINE_NO_REDRAW=1(或 BSAI_H3_REFINE_REDRAW=0)。
+#
+# v14.393 (2026-11-12): 用户口径修正 —— 0.20 这个上限配上旧 sigma 算法其实没用:
+# `_sigmas()` 是"拉长 total_steps 再取末 N 步"的老 img2img 近似, 而 H3 在 shift12
+# 下 σ(t) 高端极平(t=0.5 时 σ 已经 0.923), 实测 denoise=0.45/0.50 steps=2 的真实
+# 起点 σ = **0.9234**, denoise 夹到 0.20 也只有 0.6294 —— 都是"几乎整帧重生",
+# 所以二采必然画成另一幅。改成两件事:
+#   ① 二采 sigma 改走 _sigmas_exact(denoise = 真实起点噪声比例), 0.45/0.50/0.55
+#      对应 σ0 = 0.4381 / 0.4859 / 0.5427, 即用户要的 "σ≈0.45~0.55 起步";
+#   ② 上限改成 0.55(env BSAI_H3_REFINE_DENOISE_MAX) —— 挡住表里 1.0 那种全量重生;
+#      同时下限 0.45(env BSAI_H3_REFINE_DENOISE_MIN, 设 0 关闭), 把表里 0.20/0.35/0.40
+#      这类"按旧算法其实在 σ≈0.9 全量重生、按新算法又太轻"的档统一抬到真重绘档,
+#      全表二采起点 σ 收敛在 0.438~0.543(即用户要的 σ≈0.45~0.55)。
 _FF_REFINE_NO_REDRAW = (
     str(os.environ.get("BSAI_H3_REFINE_NO_REDRAW", "0")).strip().lower() in ("1", "true", "on")
     or str(os.environ.get("BSAI_H3_REFINE_REDRAW", "1")).strip().lower() in ("0", "false", "off")
 )
 try:
-    _FF_REFINE_LOCK_DENOISE = float(os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.20"))
+    _FF_REFINE_LOCK_DENOISE = float(os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.55"))
 except Exception:
-    _FF_REFINE_LOCK_DENOISE = 0.20
+    _FF_REFINE_LOCK_DENOISE = 0.55
 _FF_REFINE_LOCK_DENOISE = max(0.05, min(1.0, _FF_REFINE_LOCK_DENOISE))
+try:
+    _FF_REFINE_FLOOR_DENOISE = float(os.environ.get("BSAI_H3_REFINE_DENOISE_MIN", "0.45"))
+except Exception:
+    _FF_REFINE_FLOOR_DENOISE = 0.45
+_FF_REFINE_FLOOR_DENOISE = max(0.0, min(_FF_REFINE_LOCK_DENOISE, _FF_REFINE_FLOOR_DENOISE))
+# v14.393: 二采是否走"denoise = 真实起点 σ"的精确 sigma 映射(默认开)。
+# 关掉可回到 v14.389 及以前的"拉长 total_steps 取末 N 步"旧近似(实测会从 σ≈0.92 起跑)。
+_FF_REFINE_SIGMA_EXACT = str(os.environ.get("BSAI_H3_REFINE_SIGMA_EXACT", "1")).strip().lower() not in (
+    "0", "false", "off")
 try:
     _FF_REFINE_CONTENT_MIN = float(os.environ.get("BSAI_H3_REFINE_CONTENT_MIN", "0.85"))
 except Exception:
@@ -6403,8 +6424,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _r_denoise = 0.0
             elif _r_denoise > _FF_REFINE_LOCK_DENOISE:
                 print(f"[H3 Extender] v14.389 二采内容锁: 请求 denoise={_r_denoise:.2f} "
-                      f"-> {_FF_REFINE_LOCK_DENOISE:.2f}(保留一采构图, 只补细节)")
+                      f"-> {_FF_REFINE_LOCK_DENOISE:.2f}(保留一采构图, 只补细节; "
+                      f"v14.393 该值=真实起点 σ, 不再按旧 img2img 近似放大到 0.92)")
                 _r_denoise = _FF_REFINE_LOCK_DENOISE
+            elif _r_denoise > 1e-6 and _r_denoise < _FF_REFINE_FLOOR_DENOISE:
+                # v14.393: 抬到"真重绘"下限 —— 旧算法下这些 0.20/0.35/0.40 的档实际从
+                # σ≈0.92 全量重生(看起来是重绘但其实是换画面), 按精确 σ 又只轻扫一下。
+                print(f"[H3 Extender] v14.393 二采重绘下限: 请求 denoise={_r_denoise:.2f} "
+                      f"-> {_FF_REFINE_FLOOR_DENOISE:.2f}(真实起点 σ, 保证真重绘不脱形)")
+                _r_denoise = _FF_REFINE_FLOOR_DENOISE
             # v14.390: 真重绘(denoise>0)时的分块策略开关。
             # 默认不动(沿用工作流/管线档的空间分块 + 时间分块到 64k/前向)。
             # 若分块前向仍慢, 设 BSAI_H3_REFINE_REDRAW_MEM=global 重启: 走 v14.275
@@ -6805,7 +6833,23 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                       f"({int(_r_sigmas_ext.shape[0])} 段), 覆盖内部 beta "
                       f"{_r_steps}步/{_r_denoise:.2f} 调度")
             else:
-                _r_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
+                # v14.393: 二采 denoise 一律按"真实起点噪声比例"解释。
+                # 旧 `_sigmas()` 是"拉长 total_steps 再取末 N 步"的老 img2img 近似,
+                # H3 在 shift12 下 σ(t) 高端极平(σ(t=0.5)=0.923), 实测 denoise=0.45/
+                # 0.50 steps=2 → σ0=0.9234, 等于整帧重生 → 二采必画成另一幅。
+                # 精确映射把 σ0 钉在 ≈denoise(实测 0.45→0.4381 / 0.50→0.4859 /
+                # 0.55→0.5427), 这才是"从 σ≈0.45~0.55 起步的真重绘"。
+                _r_sigmas = None
+                if _FF_REFINE_SIGMA_EXACT and _r_denoise < 1.0:
+                    try:
+                        _r_sigmas = _sigmas_exact(model, "beta", _r_steps, _r_denoise,
+                                                  tag=f"二采 steps={_r_steps}")
+                    except Exception as _rse:
+                        print(f"[H3 Extender] v14.393 二采 sigma 精确映射失败, 回退旧算法: "
+                              f"{type(_rse).__name__}: {_rse}", flush=True)
+                        _r_sigmas = None
+                if _r_sigmas is None:
+                    _r_sigmas = _sigmas(model, "beta", _r_steps, _r_denoise)
             # v1.45 (2026-09-13 fix #5 画面糊成一片根因): CONST 加噪的噪声必须用真实随机噪声
             # (σ·ε+(1-σ)·x 混合), 但喂给 KSAMPLER.sample 的 noise 参数必须用空噪声!
             # 原因: CFGGuider.sample -> KSAMPLER.sample 内部会对 noise 再执行一次
@@ -8492,7 +8536,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             print(f"[H3 Extender] 二采 latent 塌陷检测失败(可忽略): {_coll_err}")
 
     # v14.389 (2026-11-12): 二采内容闸门 —— 「重绘必须和一采内容一样」的落点。
-    # 二采底图 = 一采放大后的 latent, 内容锁 denoise ≤0.20 已把改结构的能力压得很低;
+    # 二采底图 = 一采放大后的 latent, 内容锁把起点 σ 压在 0.45~0.55(v14.393) —— 只补细节;
     # 但 denoise 再低也仍是重采样, 极端情况(换 seed 争用 / 分块相位不一致 / 模型对
     # 稀疏注意力栈过敏)仍可能整块滑到另一幅画面。这里做确定性判定:
     #   把二采结果与一采放大后的快照各做 4x4 低通(只比结构/构图, 不比细节纹理),
@@ -12882,7 +12926,7 @@ class BSAIH3FilmFactory:
                 # v14.386: 用户口径 —— DMAD 渲染管线改成 1 采 8 步 + 2 采 2 步。
                 # 旧值是 4+2(DMAD 4-step 蒸馏 LoRA 的标称步数); 实测 4 步一采在
                 # H3 上结构/步态偏软, 8 步一采(同一套 DMAD LoRA 继续挂) 更稳,
-                # 二采自 v14.389 起默认开重绘(内容锁: denoise 夹到 0.20 + 结构相似度
+                # 二采自 v14.389 起默认开重绘(内容锁: 起点 σ 0.45~0.55 + 结构相似度
                 # 闸门), 这 2 步会真跑; 要回到 v14.384 的纯超分设
                 # BSAI_H3_REFINE_NO_REDRAW=1。
                 steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
@@ -12891,7 +12935,7 @@ class BSAIH3FilmFactory:
                     sampler_name = "lcm"
                     print(f"[H3 Extender] v14.172 DMAD-4步(渲染管道): 采样器强制 lcm (DMAD 官方配方)")
                 print(f"[H3 Extender] v14.386 DMAD(渲染管道): 一采 8 步 + 二采 2 步 "
-                      f"(v14.389 二采重绘开, 内容锁 denoise≤0.20)")
+                      f"(v14.389 二采重绘开, 内容锁起点 σ 0.45~0.55)")
             elif _rp_mode == "武戏组合拳":
                 # v14.176: 对齐 YZ金鱼「终极篇」武戏配方 (BV1LKJm6VELc):
                 # 一采6步(simple) + 二采6步(总12步, 武戏拟合更清晰),
@@ -13343,7 +13387,7 @@ class BSAIH3FilmFactory:
                 # 同一批低秩子空间, 与 Pika/TaoMate 的禁叠禁忌同源)。
                 # Ref2VA 版要求 Ref2VA 底模(或 hybrid b25-49 混合底模, 分段链路靠
                 # FL2VA 末帧接力); 纯 FL2VA 底模请改用 FL2VA 版权重。
-                # 二采自 v14.389 起默认开重绘(内容锁 denoise 0.45 -> 夹到 0.20,
+                # 二采自 v14.389 起默认开重绘(内容锁 denoise 0.45 即起点 σ≈0.438,
                 # 采样后还有结构相似度闸门), 这 4 步会真跑; 纯超分设
                 # BSAI_H3_REFINE_NO_REDRAW=1。
                 steps, refine_steps = 8, 4
@@ -13365,7 +13409,7 @@ class BSAIH3FilmFactory:
                       "挂 H3加速\\ACC\\ 下的 8 步加速 LoRA(strength 1.0) —— "
                       "Ref2VA 版 MiniMax-H3-Ref2VA-Acc-8Step_comfyui_pdd-T8 / "
                       "FL2VA 版 MiniMax-H3-FL2VA-Acc-8Step_comfy; "
-                      "一采 8 步 + 二采 4 步(v14.389 二采重绘开, 内容锁 denoise≤0.20 + 结构闸门); "
+                      "一采 8 步 + 二采 4 步(v14.389 二采重绘开, 内容锁起点 σ 0.45~0.55 + 结构闸门); "
                       "不要再叠加第二个加速 LoRA")
             elif _rp_mode == "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)":
                 # v14.310 (2026-11-04): Pika H3 Flex 配方 (B站教程 BV1Dy4u67EJo,
@@ -13603,7 +13647,7 @@ class BSAIH3FilmFactory:
                           "upscaler 插件, 二采放大走 bilinear 插值(画质略降)")
                 print("[H3 Extender] 🎬 v14.322 SingularityV2+Pika H3 8步 高动态双采 "
                       "(BV1y8446DExi 配方): 一采 8 步(euler+simple, shift 12/3, CFG 1.0) | "
-                      "二采 SelfLift 渐进 3 步(表值 denoise 0.40 -> v14.389 内容锁夹到 0.20, "
+                      "二采 SelfLift 渐进 3 步(起点 σ 0.45~0.55, v14.393 denoise=真实起点噪声比例, "
                       f"upscaler={refine_upscaler_model or 'bilinear'}, tiled {tile_count}x{tile_overlap}) "
                       "= 11 NFE; 音频二采锁定不重绘 — "
                       "Loader 建议 Minimax-h3_Singularity_ref2va_v2_int8 (链式一镜到底可留 hybrid b25-49); "
@@ -14557,7 +14601,7 @@ class BSAIH3FilmFactory:
                   f"({_dff_first_mp}MP) + 二采 latent x{_df_factor:.3f} -> 目标 "
                   f"{_df_tw}x{_df_th} ({_dff_target_mp}MP, 对齐后实际 "
                   f"~{int(_df_best[2]) * 16}x{int(_df_best[3]) * 16}); "
-                  f"外接 refine_sigmas 可覆盖 beta 3步/0.2 调度")
+                  f"外接 refine_sigmas 可覆盖 beta 3步/起点 σ 0.45~0.55 调度")
 
         cache_resolution = _resolution_from_manifest(manifest)
         cache_has_segments = bool(segments) and cache_resolution is not None

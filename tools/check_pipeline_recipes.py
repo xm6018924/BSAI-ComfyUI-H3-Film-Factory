@@ -101,8 +101,12 @@ def main():
     check("二采重绘默认开(env 需显式 NO_REDRAW=1 才回到纯超分)",
           'os.environ.get("BSAI_H3_REFINE_NO_REDRAW", "0")' in src
           and 'os.environ.get("BSAI_H3_REFINE_REDRAW", "1")' in src)
-    check("二采内容锁 denoise 上限常量存在",
-          'os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.20")' in src)
+    check("二采内容锁 denoise 上限常量存在(v14.393 默认 0.55)",
+          'os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.55")' in src)
+    check("二采重绘下限常量存在(v14.393 默认 0.45)",
+          'os.environ.get("BSAI_H3_REFINE_DENOISE_MIN", "0.45")' in src)
+    check("二采 sigma 走精确映射(denoise=真实起点 σ, v14.393)",
+          '_FF_REFINE_SIGMA_EXACT' in src and '_sigmas_exact(model, "beta"' in src)
     check("二采内容闸门阈值常量存在",
           'os.environ.get("BSAI_H3_REFINE_CONTENT_MIN", "0.85")' in src)
 

@@ -2,6 +2,38 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.393 (2026-11-12) — 二采起点 σ 归位：全部管线从 σ≈0.44~0.54 起步的全分辨率真重绘 / Refine now starts from σ≈0.44–0.54 on every pipeline (real full-resolution redraw that keeps the first pass)
+
+**用户口径**（给了参考实现的机制说明）：`H3SigmaRefiner` 不改变起始 σ，起始 σ 由 `BasicScheduler` 的 denoise 决定；v1.7 的二采从 **σ=1.0** 起步，等于把一采画面整个洗掉，所以二采必然画成全新画面。要让二采「真重绘又不脱形」，要改成**从 σ≈0.45/0.55 起步、在 1088×1920 全分辨率上重绘**。要求全面检查所有渲染管线并按此修改。
+
+**取证（用 ComfyUI 自己的 `ModelSamplingAV(shift=12)` 复算，不是估算）**
+
+`_sigmas()` 是「拉长 total_steps = int(steps/denoise)，再取末 steps+1 步」的老 img2img 近似。H3 在 shift 12 下 σ(t) 高端**极平**（t=0.5 时 σ 已达 0.923），于是名义 denoise 和真实起点 σ 完全脱钩：
+
+| 档位 / 请求 denoise | 旧算法真实起点 σ0 | σ 表 | 精确映射后 σ0 |
+|---|---|---|---|
+| FastH3 4步VSA 双采，denoise=0.45，2 步 | **0.9234** | [0.923, 0.721, 0] | 0.4381 |
+| DMAD 8+2 / PIKA Flex 8+2，0.50，2 步 | **0.9234** | [0.923, 0.721, 0] | 0.4859 |
+| ACC 8+4 / TaoMate 8+4，0.45，4 步 | **0.9234** | [0.923, 0.855, 0.721, 0.425, 0] | 0.4381 |
+| 油画档 8+6，0.55，6 步 | 0.9549 | … | 0.5427 |
+| denoise=1.0 档，3 步 | 1.0000 | [1.0, 0.969, 0.821, 0] | 1.0000 |
+| v14.389 把 denoise 夹到 0.20 后 | 0.6294 | [0.629, 0.339, 0] | 0.1886 |
+
+即：**v14.389 那道「denoise 夹到 0.20 的内容锁」在旧算法下其实是 σ0=0.63**，而表里 0.45/0.50 的档一直是 σ0=0.92 —— 二采从来不是「轻修」，而是近乎整帧重生，这就是二采必成新画面的根因。
+
+**改动（`extender.py`）**
+
+1. **二采 sigma 改走 `_sigmas_exact`**（denoise = 真实起点噪声比例）：在密集 sigma 表上找到 σ≈denoise·σmax 的下标，从那里到 0 均匀取 `steps` 个点，首尾钉死、严格单调不增。实测 denoise 0.45/0.50/0.55 → σ0 = **0.4381 / 0.4859 / 0.5427**，与步数无关（步数只改曲线密度）。开关 `BSAI_H3_REFINE_SIGMA_EXACT`（默认 1，设 0 回旧算法）；精确映射异常时自动回退旧算法并打印，不中断渲染。
+2. **denoise 上限 0.20 → 0.55**（`BSAI_H3_REFINE_DENOISE_MAX`），挡住表里 denoise=1.0 那种全量重生（1.0 → 0.5427）。
+3. **新增 denoise 下限 0.45**（`BSAI_H3_REFINE_DENOISE_MIN`，设 0 关闭）：表里 0.20/0.35/0.40 三档在旧算法下其实是 σ≈0.9 全量重生，按精确 σ 又只轻扫一下 —— 统一抬到真重绘档。
+4. 全表核对（`extender.py` 里 23 组唯一 (一采步数, 二采步数, denoise) → 20 个双采档）：**起点 σ 全部收敛到 0.4381~0.5427**，无一档 >0.56，也无一档退化成纯超分。
+5. 分辨率核对：二采 latent = 120×68 = **1920×1088**（一采 60×34 经 x2 放大），refiner 就在这个全分辨率 latent 上重绘 —— 这一条本来就成立，本次未改。唯一的例外是 v14.184 的「双采2K」档（refine_upscale_factor 强制 1.0、靠 HyperVAE 2x 解码像素翻倍），它的重绘发生在半分辨率 latent 上。
+6. 清掉「denoise 夹到 0.20」的过时播报与注释（DMAD / ACC / SingularityV2+Pika / 内容闸门说明 / refine tooltip），统一改成「起点 σ 0.45~0.55」。
+
+**验证**：新增 `tools/check_refine_sigma_start.py` —— **18 PASS**：① 复算旧算法 σ0=0.9234（证伪「denoise 已在起作用」）；② 精确映射 0.45/0.50/0.55 → 0.4381/0.4859/0.5427，且与步数无关、σ 表单调严格递减收于 0；③ **解析 extender.py 里每一条管线档位表，逐档算夹取后的起点 σ，断言全部落在 0.42~0.56、且 20 档都在真重绘**；④ 代码契约（`_sigmas_exact` 接入、开关默认开、上下限默认值、失败回退、全分辨率 latent）。`check_refine_no_redraw.py` 24 PASS、`check_pipeline_recipes.py` 全绿、`check_refine_redraw_chunking.py` 15 PASS、`check_refine_timing_guards.py` 21 PASS、`check_pdmd_sigma_schedule.py` 12/12、`check_tst_tile_skip.py` 14/14、`check_one_shot_route_rules.py` / `check_recast_pipeline.py` 全绿；`ast.parse` OK（18585 行）。
+
+**English** — The user supplied the mechanism: `H3SigmaRefiner` does not change the start σ; the start σ comes from `BasicScheduler`'s denoise, and their v1.7 refine chain started at **σ=1.0**, which wipes the first pass, so refine always looked like a fresh generation. The requirement: start refine from **σ≈0.45–0.55 and redraw at full 1088×1920**. Measurement with ComfyUI's own `ModelSamplingAV(shift=12)` shows our `_sigmas()` (the old "lengthen total_steps, take the last N points" img2img approximation) had decoupled the number from reality: H3's σ(t) is extremely flat at the high end (σ=0.923 already at t=0.5), so denoise 0.45/0.50 with 2 steps actually started at **σ0=0.9234**, and v14.389's "clamp denoise to 0.20" content lock was really running at σ0=0.6294 — refine has never been a light pass. The fix routes refine sigmas through `_sigmas_exact`, where denoise *is* the real noise fraction: 0.45/0.50/0.55 → σ0 = 0.4381/0.4859/0.5427, independent of step count (toggle `BSAI_H3_REFINE_SIGMA_EXACT`, with automatic fallback to the old curve). The clamp is now `[0.45, 0.55]` (env-tunable, floor can be disabled) so denoise=1.0 tiers land at 0.5427 and the 0.20/0.35/0.40 tiers are lifted into the real-redraw band. All 20 dual-pass tiers parsed out of the source now land in 0.4381–0.5427. Refine resolution was already 120×68 latent = 1920×1088 (2× from the 60×34 first pass), so that part needed no change; the only exception is the v14.184 "双采2K" tier, which redraws at half-resolution latent and doubles pixels at decode time. New checker `tools/check_refine_sigma_start.py` recomputes every tier's start σ and asserts the band (18 PASS).
+
 ### v14.392 (2026-11-12) — 二采真重绘时必须时间分块（修 v14.389 打开重绘后的二采死等）/ Redrawn second pass must be time-chunked: fixes the second-pass hang that v14.389 exposed
 
 **事故（实机，pid 34184，14:55:53 开工那轮）**

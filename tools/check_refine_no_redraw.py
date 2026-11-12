@@ -52,17 +52,24 @@ def main():
     check("内部信号 _FFRefineSkip 仍存在(供 NO_REDRAW 路径使用)",
           "class _FFRefineSkip(Exception):" in src)
 
-    # 2) 噪声上限
-    check("内容锁 denoise 上限常量存在",
-          '_FF_REFINE_LOCK_DENOISE = float(os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.20"))' in src)
-    check("内容锁 denoise 被夹进 [0.05, 1.0] 合法区",
+    # 2) 噪声上限(v14.393: 0.20 -> 0.55, 并新增 0.45 下限; 数值口径见
+    #    check_refine_sigma_start.py —— 那边会用 ComfyUI 自己的 ModelSamplingAV 复算 σ0)
+    check("内容锁 denoise 上限常量存在(默认 0.55)",
+          '_FF_REFINE_LOCK_DENOISE = float(os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.55"))' in src)
+    check("内容锁 denoise 下限常量存在(默认 0.45)",
+          '_FF_REFINE_FLOOR_DENOISE = float(os.environ.get("BSAI_H3_REFINE_DENOISE_MIN", "0.45"))' in src)
+    check("内容锁 denoise 上限被夹进 [0.05, 1.0] 合法区",
           "_FF_REFINE_LOCK_DENOISE = max(0.05, min(1.0, _FF_REFINE_LOCK_DENOISE))" in src)
     idx_entry = src.find("if _FF_REFINE_NO_REDRAW:")
     idx_else = src.find("elif _r_denoise > _FF_REFINE_LOCK_DENOISE:", idx_entry)
     check("refine 入口按开关分支(NO_REDRAW=1 仍回纯超分)",
           idx_entry > 0 and idx_else > idx_entry, f"entry={idx_entry} else={idx_else}")
-    seg2 = src[idx_else:idx_else + 300] if idx_else > 0 else ""
+    seg2 = src[idx_else:idx_else + 800] if idx_else > 0 else ""
     check("重绘路径把 denoise 夹到内容锁上限", "_r_denoise = _FF_REFINE_LOCK_DENOISE" in seg2)
+    idx_floor = src.find("elif _r_denoise > 1e-6 and _r_denoise < _FF_REFINE_FLOOR_DENOISE:", idx_else)
+    check("轻档被抬到真重绘下限(v14.393)", idx_floor > idx_else
+          and "_r_denoise = _FF_REFINE_FLOOR_DENOISE" in src[idx_floor:idx_floor + 900],
+          f"floor at {idx_floor}")
 
     # 3) 一采快照 + 结构闸门
     idx_snap = src.find("_refine_base_snapshot = None")
