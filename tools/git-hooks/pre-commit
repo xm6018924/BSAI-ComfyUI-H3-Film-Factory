@@ -1,0 +1,54 @@
+#!/bin/sh
+# 电影工厂前端守卫 pre-commit
+# 版本化在仓库 tools/git-hooks 下，通过 `python tools/install_git_hooks.py` 启用
+# （installer 会 git config core.hooksPath tools/git-hooks）。
+#
+# 规则：
+#   改动 web/*.js     -> 语法检查(module 模式 node --check) + 快捷条枚举同步  双查
+#   只改 extender.py  -> 快捷条枚举同步
+#   其它改动(文档/工作流) -> 直接放行
+# 跳过：git commit --no-verify
+#
+# 注意：这里刻意不用 grep/sed 等外部命令 —— 用 git 自己的 pathspec 过滤，
+# 避免某些调用方式下 PATH 里没有 Git 的 usr/bin 而导致命令找不到、守卫静默放行。
+
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+cd "$ROOT" || exit 1
+
+SYNTAX_HIT=$(git diff --cached --name-only --diff-filter=ACM -- 'web/*.js')
+ENUM_HIT=$(git diff --cached --name-only --diff-filter=ACM -- 'web/*.js' 'extender.py')
+
+if [ -z "$SYNTAX_HIT" ] && [ -z "$ENUM_HIT" ]; then
+    exit 0
+fi
+
+PY=""
+if [ -x "$ROOT/../../../python/python.exe" ]; then
+    PY="$ROOT/../../../python/python.exe"
+else
+    for c in python python3 py; do
+        if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+    done
+fi
+if [ -z "$PY" ]; then
+    echo "[guard] 找不到 python，跳过前端检查（不阻塞提交）"
+    exit 0
+fi
+
+FLAG=""
+if [ -z "$SYNTAX_HIT" ]; then
+    FLAG="--enum-only"
+elif [ -z "$ENUM_HIT" ]; then
+    FLAG="--syntax-only"
+fi
+
+"$PY" tools/check_frontend_guard.py $FLAG
+rc=$?
+if [ $rc -ne 0 ]; then
+    echo ""
+    echo "[guard] 提交被拦下：前端语法 / 枚举同步未通过（FAIL 明细见上）。"
+    echo "        这条守卫专治「一处结构破坏 -> 整个前端一行都不执行」再漏进仓库。"
+    echo "        确需跳过：git commit --no-verify"
+    exit $rc
+fi
+exit 0
