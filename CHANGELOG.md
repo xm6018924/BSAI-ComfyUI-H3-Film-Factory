@@ -2,6 +2,22 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.386 (2026-11-12) — DMAD 渲染管线改为 1 采 8 步 + 2 采 2 步 / The DMAD render pipeline is now 8 first-pass steps + 2 refine steps
+
+**用户口径**：DMAD 渲染管线，改成 1 采 8 步 2 采 2 步。
+
+**改动**
+
+1. 渲染管道分支 `_rp_mode == "DMAD-4步"`：`steps, refine_steps, tile_count, refine_denoise = 4, 2, 4, 0.5` → **`8, 2, 4, 0.5`**。
+2. 旧速度档遗留值分支 `speed_preset == "DMAD-4步"`（v14.170 以前的工作流会带这个值）：同步改为 **8, 2**，两处口径一致。
+3. 不动：`shift_video/shift_audio = 12.0/2.0`（DMAD 官方双轨迹）、强制 `lcm` 采样器（DMAD 官方配方）、`tile_count=4`、`refine_denoise=0.5`。
+4. 下拉标签 **保持** `DMAD 4-step` / `DMAD-4步` 不变 —— 改标签会让旧工作流里保存的 combo 值变成 `Value not in list`，整条 prompt 被丢（与 v14.x 那次 combo 改名的坑同源）。广播里改为 `v14.386 DMAD(渲染管道): 一采 8 步 + 二采 2 步`。
+5. 提醒：v14.384 起二采默认「只超分放大、绝不重绘」，所以这 2 步只在 `BSAI_H3_REFINE_REDRAW=1` 的旧重绘路径上才会真的跑。
+
+**验证**：新增 `tools/check_pipeline_recipes.py` —— **12 PASS / 0 FAIL**（两个分支都是 `8, 2`、旧 `4, 2` 已清掉、shift 仍 12/2、仍强制 lcm、下拉标签未变、二采不重绘开关仍默认开）；`ast.parse` OK（18276 行）。
+
+**English** — Both DMAD recipe branches (the render-pipeline entry and the legacy speed-preset entry) now use 8 first-pass steps + 2 refine steps instead of 4+2. Shift stays 12/2 and the sampler stays forced to `lcm` (DMAD official contract). The dropdown labels are deliberately left unchanged so existing workflows do not hit `Value not in list`. New checker `tools/check_pipeline_recipes.py` guards both branches against drift.
+
 ### v14.385 (2026-11-12) — 一镜到底段中换场改成「主体自己走过去」，撤掉整幅遮挡机制 / Mid-shot scene change is now the subject walking into the next scene; the full-frame occlusion wipe is gone
 
 **用户口径**（看 `h3_clip_250_1_1794456674` 12.25s 首片后）：场景变化不对；一镜到底模式应该是从上一个场景**自然走进下一个场景**。
