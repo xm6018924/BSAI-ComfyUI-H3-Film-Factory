@@ -19,6 +19,7 @@ from __future__ import annotations
 import inspect
 import logging
 import math
+import time
 from typing import Any, Callable
 
 import torch
@@ -28,6 +29,44 @@ try:  # v14.377: 中断检查用; 单独导入本模块做单测时允许缺失
     import comfy.model_management as _mm_interrupt
 except Exception:  # pragma: no cover
     _mm_interrupt = None
+
+# v14.379 (2026-11-12): 进程级 TST 跳过开关的兜底查找（见 vendor/selflift_tst/h3_tst.py）。
+# v14.377 只查 model_k._bsai_tst_state —— 实测拿不到: model_k 是 BaseModel 外层,
+# state 挂在被 patch 的内层 MiniMaxH3Model 上, 于是 skip 从未置位, 二采仍在每个 tile
+# 每层每个 attention 里白跑 eigvalsh (py-spy 栈顶 _spectral_tension, GPU 100%/96W)。
+import sys as _sys
+
+
+def _find_tst_module():
+    """在已加载的模块里找 h3_tst（它可能在包路径里带连字符，无法直接 import）。"""
+    for _name in ("h3_tst", "vendor.selflift_tst.h3_tst"):
+        _m = _sys.modules.get(_name)
+        if _m is not None and hasattr(_m, "push_tile_skip"):
+            return _m
+    for _name, _m in list(_sys.modules.items()):
+        if _name.endswith("h3_tst") and hasattr(_m, "push_tile_skip"):
+            return _m
+    return None
+
+
+def _find_tst_state(*objs):
+    """沿 BaseModel -> cfg -> 内层扩散模型的链条找 TST state（哪一层挂都认）。"""
+    for _o in objs:
+        if _o is None:
+            continue
+        for _attr in ("_bsai_tst_state", "model", "inner_model"):
+            try:
+                _v = getattr(_o, _attr, None)
+            except Exception:
+                _v = None
+            if _attr == "_bsai_tst_state":
+                if isinstance(_v, dict):
+                    return _v
+            elif _v is not None and _v is not _o:
+                _hit = _find_tst_state(_v)
+                if _hit is not None:
+                    return _hit
+    return None
 
 log = logging.getLogger("ComfyUI-MiniMaxH3-Director.director.spatial_tiles")
 
@@ -423,24 +462,38 @@ def _tiled_model_call(
     # guard 是按「当前 forward 的输入 latent」推 frames/rows 的, tile forward 推出
     # 的正好是 tile 几何 → guard 放行 → 每块每层每个 attention 都白算一遍帧级
     # 谱分解。实机 py-spy(10s/1000 样本) 有 50% 主机时间落在此处, GPU 仅
-    # ~100W/450W。这里按声明显式跳过, tile 结束即复位, 一采/全帧二采不受影响。
-    _tst_state = getattr(model_k, "_bsai_tst_state", None)
+    # ~100W/450W。
+    # v14.379 (2026-11-12): v14.377 的 per-model 属性查找在实机上取不到 state
+    # (model_k 是 BaseModel 外层), skip 从未置位 —— 二采 16 分钟零进展、栈顶仍在
+    # _spectral_tension。改成双保险: ① 深链查找 state; ② h3_tst 模块级 push/pop
+    # 开关(与对象层级无关, 一定生效)。tile 结束即复位, 一采/全帧二采不受影响。
+    _tst_state = _find_tst_state(model_k, cfg, base)
+    _tst_module = _find_tst_module()
     _tst_prev_skip = None
+    _tst_pushed = False
     if _tst_state is not None:
         _tst_prev_skip = bool(_tst_state.get("skip_tiles"))
         _tst_state["skip_tiles"] = True
-        if not _tst_prev_skip and not getattr(model_k, "_tst_skip_logged", False):
-            try:
-                model_k._tst_skip_logged = True
-            except Exception:
-                pass
-            log.info(
-                "v14.377 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override "
-                "(TST 与 highres_tiling 不兼容, 按模块自身声明跳过)"
-            )
+    if _tst_module is not None:
+        try:
+            _tst_module.push_tile_skip()
+            _tst_pushed = True
+        except Exception:
+            _tst_pushed = False
+    if (not getattr(model_k, "_tst_skip_logged", False)) and (_tst_state is not None or _tst_pushed):
+        try:
+            model_k._tst_skip_logged = True
+        except Exception:
+            pass
+        log.info(
+            "v14.379 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override "
+            "(state=%s, module_flag=%s; TST 与 highres_tiling 不兼容, 按模块自身声明跳过)",
+            "found" if _tst_state is not None else "missing",
+            "on" if _tst_pushed else "off",
+        )
 
     try:
-        for ax_start, ax_end, ov_left, ov_right in plan["regions"]:
+        for _ti, (ax_start, ax_end, ov_left, ov_right) in enumerate(plan["regions"]):
             # v14.377: 每块前检查中断。此前分块二采是一个不可打断的长循环 ——
             # 实机实测一轮二采 46 分钟日志零增长、ComfyUI /queue 已清空
             # (running=0) 却仍在算, 前端「取消」对它无效。补上后取消即可生效。
@@ -479,6 +532,7 @@ def _tiled_model_call(
                 )
                 return _invoke_model(model_k, x, sigma, denoise_mask, call_kw)
             base.latent_shapes = tile_shapes
+            _t_tile = time.perf_counter()
             try:
                 pred = _invoke_model(model_k, tile_x, sigma, tile_mask, call_kw)
             finally:
@@ -486,6 +540,14 @@ def _tiled_model_call(
                 base.latent_shapes = saved_shapes
                 model_k.latent_image = saved_latent_image
                 model_k.noise = saved_noise
+            # v14.379: 每块耗时落日志 —— 二采此前 16~90 分钟"无动静"就是因为
+            # 块内没有任何进度输出, 分不清是在算还是卡死。
+            log.info(
+                "v14.379 分块二采: tile %d/%d 用时 %.1fs",
+                _ti + 1,
+                len(plan["regions"]),
+                time.perf_counter() - _t_tile,
+            )
 
             pred_streams = list(comfy.utils.unpack_latents(pred, tile_shapes))
             pred_video = _unpad_hw(pred_streams[0], pad_h, pad_w).float()
@@ -519,6 +581,11 @@ def _tiled_model_call(
         model_k._tiled_active = _prev_tiled
         if _tst_state is not None and _tst_prev_skip is not None:
             _tst_state["skip_tiles"] = _tst_prev_skip
+        if _tst_pushed and _tst_module is not None:
+            try:
+                _tst_module.pop_tile_skip()
+            except Exception:
+                pass
         if device.type == "cuda":
             torch.cuda.empty_cache()
 

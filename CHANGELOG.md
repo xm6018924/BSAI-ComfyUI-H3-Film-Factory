@@ -2,6 +2,41 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.379 (2026-11-12) — 二采「这么久没动静」的真因：v14.377 那个「tile 内跳过 TST」的开关**从来没置上**（拿的是 BaseModel 外层，state 挂在被 patch 的内层 MiniMaxH3Model 上）；改成进程级 push/pop + 深链查找，并给每块加耗时日志 / Second-pass silence root cause: the v14.377 "skip TST inside tile forwards" flag was never set (the tiling module looked for that state on the outer BaseModel while it lives on the patched inner MiniMaxH3Model); replaced with a process-level push/pop plus a deep attribute-chain lookup, and added per-tile timing logs
+
+**现象（2026-11-12 09:23:56 重启后的 clip[0]，后端 v14.378；一采 4 步 × 48.5s 正常，09:41:33 二采预热完成，之后 16 分钟日志零增长）**
+
+- `py-spy dump --pid 12928`：活跃线程 `prompt_worker` 栈顶 = `_spectral_tension (h3_tst.py:60) ← _attention_override (h3_tst.py:142) ← wrap_attn ← minimax_attn_lowmem_forward ← … ← _tiled_model_call (bsai_h3_spatial_tiles.py:483)`。
+- `nvidia-smi`：`utilization.gpu 100%` 但 `power.draw 96.11 W / 450 W`、`clocks.sm 2670 MHz` —— 与 v14.377 诊断的「卡在等主机」完全同型。
+- 日志里**没有任何** `v14.377 分块二采: tile forward 内已暂停 SelfLift TST` 行 —— 自证 skip 分支从未执行。
+- 同一轮 `Refine 二采前 DiT 驻留: resident=14.4GB / total=20.6GB (offload 6.3GB)`，`n_tiles=4`（每块 272,136 tokens）。
+
+**根因**
+
+| 位置 | 机制 | 后果 |
+|---|---|---|
+| `bsai_h3_spatial_tiles._tiled_model_call` 的 `_tst_state = getattr(model_k, "_bsai_tst_state", None)` | `model_k` 是 **BaseModel 外层**（`_TiledModelProxy.__call__` 传进来的 `inner`），而 `_bsai_tst_state` 由 `patch_model()` 挂在**被 patch 的内层 MiniMaxH3Model** 上，属性查找必然返回 None → `skip_tiles` 从未置位 | TST 的 length guard 在 tile forward 上按 tile 自己的几何推导，`s > frames*rows` 成立、guard 放行 → 每块 × 每层 × 每个 attention 都白跑一次帧级谱分解（`eigvalsh`）。46 分钟 → 91.8 分钟 → 16 分钟无进展，是同一条链条 |
+
+**修法**
+
+1. `vendor/selflift_tst/h3_tst.py`：新增进程级开关 `_TILE_SKIP_DEPTH` + `push_tile_skip() / pop_tile_skip() / tile_skip_active()`；`_attention_override` 的短路条件改为 `state.get("skip_tiles") or _TILE_SKIP_DEPTH["n"] > 0` —— 与对象层级无关，一定生效。
+2. `bsai_h3_spatial_tiles.py`：新增 `_find_tst_state()`（沿 `BaseModel → inner_model → 内层` 递归查找，哪一层挂都认）与 `_find_tst_module()`（在 `sys.modules` 里按后缀定位 `h3_tst`，兼容带连字符的包路径）；tile 循环前置位、`finally` 里 pop 复位；日志改为 `v14.379 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override (state=found/missing, module_flag=on/off)`，两种保险各报各的状态。
+3. **每块耗时落日志**：`v14.379 分块二采: tile i/N 用时 X.Xs` —— 此前「块内零输出」导致完全分不清是在算还是卡死。
+
+**静态（改后实测）**
+
+- `ast.parse` OK：`extender.py` 18088 行、`bsai_h3_spatial_tiles.py` 672 行、`vendor/selflift_tst/h3_tst.py` 265 行。
+- `tools/check_tst_tile_skip.py`（新增）**10 PASS / 0 FAIL**：`push_tile_skip()` 期间 `s=1024 > frames*rows=2` 仍直接回落原生 attention（不再跑 `eigvalsh`）、`guard_misses` 累加、pop 后恢复、嵌套深度正确；`_find_tst_state()` 能从外层 `SimpleNamespace(inner_model=…)` 找到最内层 state；源码含 push/pop 与每块耗时日志；`_find_tst_module()` 能定位已加载模块。
+- `tools/check_refine_timing_guards.py` **12 PASS / 0 FAIL**（新增「TST 有进程级开关 push/pop」断言）。
+- `tools/check_one_shot_route_rules.py` 全部通过；`check_ref_sheet_crop.py` 11 PASS；`check_recast_pipeline.py` OK。
+
+**未验证（下次实机判据，全部可量）**
+
+- 日志须出现 `v14.379 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override (state=…, module_flag=on)`。
+- 日志须按块滚动出现 `v14.379 分块二采: tile i/4 用时 X.Xs`（不再有整段静默）。
+- py-spy 采样里 `_spectral_tension` 占比应从 ~50% 掉到 ≈0；`nvidia-smi` 功耗应从 ~96W 抬向 300W+。
+- `refine耗时诊断: step=2/2 距上步 Zs` 与基线 539.9s / 5507.5s 对比。
+
 ### v14.378 (2026-11-11) — 倒着走的**图像级**真根因：@图1 是 5 联角色设定拼版（含两张背面视图），插件没认出来、原样喂进 Ref2VA，模型把背面立绘当成「朝镜头走来的她」并另贴一个人形；同时「机位固定/逐秒变大」与 [取景连续]「同速同行/占画比例稳定」硬自相矛盾，模型退化成原地滑行 / Image-level root cause of the moonwalk: @图1 is a 5-panel character sheet that contains two back-view figures, the plugin failed to recognise it and fed the whole sheet to Ref2VA, so the model used the back-view as "her walking toward the lens" and pasted a second figure; on top of that the injected "camera pinned / she grows every second" rule contradicted [取景连续] ("camera travels at her speed, on-screen ratio stable"), which the model resolved into a standing glide
 
 **现象（`h3_clip_250_1_1794384070.mp4`，23.8MB，16:01:10 落盘，v14.376 代码产物；PIKA H3 Flex 8+2，OneShot=On）**

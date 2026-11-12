@@ -35,6 +35,28 @@ import comfy.patcher_extension
 from comfy.ldm.modules.attention import AttentionTensorContainer
 
 
+# v14.379 (2026-11-12): tile-forward 跳过 TST 的**进程级**开关。
+# v14.377 只把 skip_tiles 挂在 per-model state 上, 而 bsai_h3_spatial_tiles 里拿到的
+# model_k 是 BaseModel 外层、state 挂在被 patch 的内层 MiniMaxH3Model 上 —— 取不到,
+# 于是 skip 从未置位。实机 py-spy(09:58 采样): 栈顶仍是 _spectral_tension, GPU 100%
+# 占用但功耗仅 96W/450W、二采 16 分钟无进展。这里补一层模块级开关, 由分块模块在
+# tile 循环前后 push/pop, 任意对象层级都能生效, 不再依赖属性查找是否命中。
+_TILE_SKIP_DEPTH = {"n": 0}
+
+
+def push_tile_skip():
+    """进入 tile forward 区间: 期间的 attention 调用直接回落原生实现。"""
+    _TILE_SKIP_DEPTH["n"] = int(_TILE_SKIP_DEPTH.get("n", 0)) + 1
+
+
+def pop_tile_skip():
+    _TILE_SKIP_DEPTH["n"] = max(0, int(_TILE_SKIP_DEPTH.get("n", 0)) - 1)
+
+
+def tile_skip_active():
+    return int(_TILE_SKIP_DEPTH.get("n", 0)) > 0
+
+
 def _unwrap(tensor):
     # H3 wraps q/k/v in AttentionTensorContainer, but wrap_attn take()s them
     # before calling this override (it has no container_function attribute),
@@ -108,7 +130,7 @@ def _attention_override(state):
         # _spectral_tension, GPU 功耗仅 ~100W/450W)。由 bsai_h3_spatial_tiles
         # 在 tile forward 前置位 skip_tiles、结束后复位; guard_misses 照常累加,
         # 让 _forward_wrapper 打一次 "inactive ... skipped" 说明。
-        if state.get("skip_tiles"):
+        if state.get("skip_tiles") or _TILE_SKIP_DEPTH.get("n", 0) > 0:
             state["guard_misses"] += 1
             return func(q, k, v, heads, mask=mask, **kwargs)
         frames = state["frames"]

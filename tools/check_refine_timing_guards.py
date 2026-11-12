@@ -40,7 +40,13 @@ def main():
     # 1) TST: skip_tiles 短路 + state 暴露
     tst = src["tst"]
     check("TST 有 skip_tiles 短路分支(置位时直接回落原生 attention)",
-          'if state.get("skip_tiles"):' in tst and "return func(q, k, v, heads, mask=mask, **kwargs)" in tst)
+          'state.get("skip_tiles")' in tst and "_TILE_SKIP_DEPTH" in tst
+          and "return func(q, k, v, heads, mask=mask, **kwargs)" in tst)
+    # v14.379: v14.377 的 per-model 标志在实机上取不到(见 check_tst_tile_skip.py),
+    # 必须有进程级 push/pop 兜底, 否则二采仍是每层空转 eigvalsh。
+    check("TST 有进程级开关 push/pop(不依赖属性查找是否命中)",
+          "def push_tile_skip()" in tst and "def pop_tile_skip()" in tst
+          and "def tile_skip_active()" in tst)
     check("TST 把 state 暴露给宿主(patched._bsai_tst_state)",
           "patched._bsai_tst_state = state" in tst)
     check("TST state 默认 skip_tiles=False(一采不受影响)",
