@@ -555,6 +555,27 @@ def _tiled_model_call(
                 return _invoke_model(model_k, x, sigma, denoise_mask, call_kw)
             base.latent_shapes = tile_shapes
             _t_tile = time.perf_counter()
+            # v14.383 (2026-11-12): 每块落「起算时空闲显存 + 本块 tokens」。
+            # 实机 11:00 那轮 resident 14.4GB 但 free 只剩 0.2GB, 单块 forward
+            # 内部不得不反复腾挪权重(py-spy 全命中 cast_bias_weight), tile 1
+            # 20 分钟没结束 —— 光看 resident 判断不了, 必须看 free。
+            try:
+                _fti, _ = torch.cuda.mem_get_info()
+                _fti_gb = _fti / 1024 ** 3
+            except Exception:
+                _fti_gb = -1.0
+            _tok_ti = 0
+            try:
+                for _sh_ti in tile_shapes:
+                    if getattr(_sh_ti, "__len__", None) and len(_sh_ti) >= 5:
+                        _tok_ti = int(_sh_ti[2]) * int(_sh_ti[-2]) * int(_sh_ti[-1])
+                        break
+            except Exception:
+                _tok_ti = 0
+            log.info(
+                "v14.383 分块二采: tile %d/%d 起算 free=%.1fGB tokens≈%s",
+                _ti + 1, len(plan["regions"]), _fti_gb, f"{_tok_ti:,}" if _tok_ti else "-",
+            )
             try:
                 pred = _invoke_model(model_k, tile_x, sigma, tile_mask, call_kw)
             finally:
@@ -570,6 +591,12 @@ def _tiled_model_call(
                 len(plan["regions"]),
                 time.perf_counter() - _t_tile,
             )
+            try:
+                _ftj, _ = torch.cuda.mem_get_info()
+                log.info("v14.383 分块二采: tile %d/%d 收尾 free=%.1fGB",
+                         _ti + 1, len(plan["regions"]), _ftj / 1024 ** 3)
+            except Exception:
+                pass
 
             pred_streams = list(comfy.utils.unpack_latents(pred, tile_shapes))
             pred_video = _unpad_hw(pred_streams[0], pad_h, pad_w).float()

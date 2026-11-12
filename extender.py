@@ -7062,7 +7062,59 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _res2 = model.loaded_size() / 1024 ** 3
                             print(f"[H3 Extender] Refine 二采前 DiT 驻留: resident={_res2:.1f}GB / total={model.model_size()/1024**3:.1f}GB")
                         except Exception:
+                            _res2 = 0.0
                             pass
+                        # v14.383 (2026-11-12): 分块二采的 reserve 改成**按实测空闲
+                        # 显存闭环定档**, 不再用任何经验常数。
+                        # 实机两次对照(同一张卡 24GB, x2.0 264k/块):
+                        #   reserve 8.9 -> resident 10.9GB / free ~3.5GB -> 每块 108.4s
+                        #   reserve 6.8 -> resident 14.4GB / free 0.2GB  -> 单块 forward
+                        #     内部反复腾挪权重, py-spy 全命中 cast_bias_weight, tile 1
+                        #     >20min 未结束(GPU 99W)
+                        # 结论: 决定速度的不是「驻留多少」, 而是**还剩多少空闲显存** ——
+                        # free≈0 时每个 block 的中间张量都逼出一次权重换页, 比驻留少
+                        # 3GB 还糟。目标带: free 3.0-6.2GB(定档 3.8GB), 迭代 3 次收敛。
+                        _tiled383 = bool(tiled_refine)
+                        _tok383 = 0
+                        try:
+                            _m383, _ = _ff_extract_members(samples)
+                            if _m383 is not None and getattr(_m383[0], "ndim", 0) >= 4:
+                                _tok383 = (int(_m383[0].shape[2]) * int(_m383[0].shape[-2])
+                                           * int(_m383[0].shape[-1]))
+                                if _tok383 > 130000:
+                                    _tiled383 = True
+                        except Exception:
+                            _tok383 = 0
+                        if _tiled383:
+                            try:
+                                _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                                _it383 = 0
+                                while _it383 < 3 and (_free383 < 3.0 or _free383 > 6.2):
+                                    _it383 += 1
+                                    if _free383 < 3.0:
+                                        _d383 = (3.8 - _free383)
+                                    else:
+                                        _d383 = -min(_free383 - 3.8, 2.5)
+                                    _new383 = max(2.5, min(10.0, _r_reserve_gb + _d383))
+                                    if abs(_new383 - _r_reserve_gb) < 0.2:
+                                        break
+                                    _ff_unregister_model(model, label="二采-free-vram-loop")
+                                    _mm3.EXTRA_RESERVED_VRAM = int(_new383 * 1024 ** 3)
+                                    _mm3.load_models_gpu([model])
+                                    _torch3.cuda.synchronize()
+                                    _r_reserve_gb = _new383
+                                    _res383 = model.loaded_size() / 1024 ** 3
+                                    _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                                    print(f"[H3 Extender] v14.383 二采自由显存闭环 {_it383}/3: "
+                                          f"reserve={_r_reserve_gb:.1f}GB resident={_res383:.1f}GB "
+                                          f"free={_free383:.1f}GB (目标 3.8GB, 带 3.0-6.2GB)")
+                                print(f"[H3 Extender] v14.383 二采驻留定档: reserve={_r_reserve_gb:.1f}GB "
+                                      f"resident={model.loaded_size()/1024**3:.1f}GB "
+                                      f"free={_free383:.1f}GB (分块 {_tok383//1000}k tokens/块几何, "
+                                      f"迭代 {_it383} 次)")
+                            except Exception as _e383:
+                                print(f"[H3 Extender] v14.383 二采自由显存闭环失败, 沿用 reserve="
+                                      f"{_r_reserve_gb:.1f}GB: {_e383}")
                         # v1.65: 验证 Sol-Attn workspace 空间, 不足时醒目提示(采样走
                         # lowvram 换页兜底, 不会静默 OOM; 下次跑会在预算区提前降级).
                         # v14.224: free=0 多为 torch caching allocator 的 cached 池未释放
