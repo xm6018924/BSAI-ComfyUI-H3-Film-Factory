@@ -10,6 +10,7 @@ GPU 100% 占用但功耗只有 96W/450W —— v14.377 的 per-model skip 标志
   2) _find_tst_state() 能沿 BaseModel -> inner_model 链条找到挂在最内层的 state;
   3) 分块循环里有 push/pop 与每块耗时日志(否则又变成"无动静")。
 """
+import builtins
 import importlib.util
 import os
 import sys
@@ -33,16 +34,20 @@ def load(mod_name, rel):
     return mod
 
 
+def tst_state_template():
+    return {"tau": 0.2, "log_diagnostics": False, "exact_debug": False, "skip_tiles": False,
+            "frames": 2, "rows_per_frame": 1, "step": 0, "total_steps": 1, "layers": 2,
+            "calls_this_forward": 0, "guard_misses": 0, "warned_inactive": False,
+            "fw_abs_tension": [], "fw_abs_tension_post": [], "fw_gamma": [], "fw_active": [],
+            "fw_tst_time": [], "fw_events": []}
+
+
 def main():
     tst = load("v379_h3_tst", os.path.join("vendor", "selflift_tst", "h3_tst.py"))
     tiles = load("v379_tiles", "bsai_h3_spatial_tiles.py")
 
     # 1) 模块级开关生效(per-model state 故意不置位, 模拟实机取不到 state 的情形)
-    state = {"tau": 0.2, "log_diagnostics": False, "exact_debug": False, "skip_tiles": False,
-             "frames": 2, "rows_per_frame": 1, "step": 0, "total_steps": 1, "layers": 2,
-             "calls_this_forward": 0, "guard_misses": 0, "warned_inactive": False,
-             "fw_abs_tension": [], "fw_abs_tension_post": [], "fw_gamma": [], "fw_active": [],
-             "fw_tst_time": [], "fw_events": []}
+    state = tst_state_template()
     calls = {"n": 0}
 
     def _base(q, k, v, heads, mask=None, **kw):
@@ -83,6 +88,36 @@ def main():
     sys.modules["h3_tst"] = tst
     check("_find_tst_module() 能定位到已加载的 h3_tst",
           tiles._find_tst_module() is tst, tiles._find_tst_module())
+
+    # 4) 复刻实机加载方式: extender 用 importlib 按文件载成 "bsai_selflift_tst",
+    #    且不登记 sys.modules。此时模块查找必然落空, 只有 builtins 进程级计数器能生效。
+    del sys.modules["h3_tst"]
+    spec = importlib.util.spec_from_file_location(
+        "bsai_selflift_tst_probe", os.path.join(BASE, "vendor", "selflift_tst", "h3_tst.py"))
+    foreign = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(foreign)
+    check("复刻模块不在 sys.modules 中", "bsai_selflift_tst_probe" not in sys.modules)
+    check("按模块名扫不到该实例(_find_tst_module 返回 None)", tiles._find_tst_module() is None,
+          tiles._find_tst_module())
+
+    f_state = dict(tst_state_template())
+    calls2 = {"n": 0}
+
+    def _base2(q, k, v, heads, mask=None, **kw):
+        calls2["n"] += 1
+        return "BASE-ATTN"
+
+    ov2 = foreign._attention_override(f_state)
+    setattr(builtins, tiles._TST_SKIP_KEY, 1)
+    try:
+        r2 = ov2(_base2, q.clone(), k, v, 2)
+        active_inside = foreign._tile_skip_active()
+    finally:
+        setattr(builtins, tiles._TST_SKIP_KEY, 0)
+    check("builtins 计数器能穿透『不在 sys.modules 的 h3_tst 实例』",
+          r2 == "BASE-ATTN" and calls2["n"] == 1 and active_inside,
+          f"r={r2} calls={calls2['n']} active={active_inside}")
+    check("计数器归零后该实例恢复 TST", not foreign._tile_skip_active())
 
     print()
     if FAIL:

@@ -34,17 +34,35 @@ except Exception:  # pragma: no cover
 # v14.377 只查 model_k._bsai_tst_state —— 实测拿不到: model_k 是 BaseModel 外层,
 # state 挂在被 patch 的内层 MiniMaxH3Model 上, 于是 skip 从未置位, 二采仍在每个 tile
 # 每层每个 attention 里白跑 eigvalsh (py-spy 栈顶 _spectral_tension, GPU 100%/96W)。
+# 第二次实机(10:16)又被证明: 模块级开关也打不通 —— extender 用 importlib 按文件把
+# h3_tst 载成 "bsai_selflift_tst", 且**不登记 sys.modules**, 宿主按模块名扫不到。
+# 因此主通道改成 builtins 上的进程级计数器(与模块身份、对象层级全部无关), 模块
+# push/pop 只作为附带的记账。
+import builtins as _builtins
 import sys as _sys
+
+_TST_SKIP_KEY = "_BSAI_TST_TILE_SKIP"
 
 
 def _find_tst_module():
-    """在已加载的模块里找 h3_tst（它可能在包路径里带连字符，无法直接 import）。"""
-    for _name in ("h3_tst", "vendor.selflift_tst.h3_tst"):
+    """在已加载的模块里找 h3_tst（可能按文件加载、名字也不带 h3_tst 后缀）。
+
+    只认「文件是 h3_tst.py 或名字带 h3_tst」的模块: 全量按属性扫描会误中
+    torch.ops 这类惰性命名空间(它对任意属性名都 hasattr 为真)。
+    """
+    for _name in ("h3_tst", "bsai_selflift_tst", "vendor.selflift_tst.h3_tst"):
         _m = _sys.modules.get(_name)
         if _m is not None and hasattr(_m, "push_tile_skip"):
             return _m
     for _name, _m in list(_sys.modules.items()):
-        if _name.endswith("h3_tst") and hasattr(_m, "push_tile_skip"):
+        try:
+            _f = getattr(_m, "__file__", "") or ""
+        except Exception:
+            _f = ""
+        if not (_f.endswith("h3_tst.py") or "h3_tst" in str(_name).lower()):
+            continue
+        if callable(getattr(_m, "push_tile_skip", None)) and callable(
+                getattr(_m, "pop_tile_skip", None)):
             return _m
     return None
 
@@ -467,10 +485,16 @@ def _tiled_model_call(
     # (model_k 是 BaseModel 外层), skip 从未置位 —— 二采 16 分钟零进展、栈顶仍在
     # _spectral_tension。改成双保险: ① 深链查找 state; ② h3_tst 模块级 push/pop
     # 开关(与对象层级无关, 一定生效)。tile 结束即复位, 一采/全帧二采不受影响。
+    # v14.379 (2026-11-12): v14.377 的 per-model 属性查找在实机上取不到 state
+    # (model_k 是 BaseModel 外层); 第二版只走 h3_tst 模块级开关, 实机(10:16)又被
+    # 证明打不通 —— 该模块是 importlib 按文件载成 "bsai_selflift_tst" 且不进
+    # sys.modules。第三版以 builtins 上的进程级计数器为主通道, 与模块身份/对象
+    # 层级全无关; state 与模块 push/pop 都作为附带的第二、第三通道。
     _tst_state = _find_tst_state(model_k, cfg, base)
     _tst_module = _find_tst_module()
     _tst_prev_skip = None
     _tst_pushed = False
+    _tst_flag_prev = int(getattr(_builtins, _TST_SKIP_KEY, 0))
     if _tst_state is not None:
         _tst_prev_skip = bool(_tst_state.get("skip_tiles"))
         _tst_state["skip_tiles"] = True
@@ -480,17 +504,15 @@ def _tiled_model_call(
             _tst_pushed = True
         except Exception:
             _tst_pushed = False
-    if (not getattr(model_k, "_tst_skip_logged", False)) and (_tst_state is not None or _tst_pushed):
-        try:
-            model_k._tst_skip_logged = True
-        except Exception:
-            pass
-        log.info(
-            "v14.379 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override "
-            "(state=%s, module_flag=%s; TST 与 highres_tiling 不兼容, 按模块自身声明跳过)",
-            "found" if _tst_state is not None else "missing",
-            "on" if _tst_pushed else "off",
-        )
+    setattr(_builtins, _TST_SKIP_KEY, _tst_flag_prev + 1)
+    log.info(
+        "v14.380 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override "
+        "(builtins_flag=%s, module=%s, state=%s; TST 与 highres_tiling 不兼容, "
+        "按模块自身声明跳过)",
+        int(getattr(_builtins, _TST_SKIP_KEY, 0)),
+        "found" if _tst_module is not None else "missing",
+        "found" if _tst_state is not None else "missing",
+    )
 
     try:
         for _ti, (ax_start, ax_end, ov_left, ov_right) in enumerate(plan["regions"]):
@@ -543,7 +565,7 @@ def _tiled_model_call(
             # v14.379: 每块耗时落日志 —— 二采此前 16~90 分钟"无动静"就是因为
             # 块内没有任何进度输出, 分不清是在算还是卡死。
             log.info(
-                "v14.379 分块二采: tile %d/%d 用时 %.1fs",
+                "v14.380 分块二采: tile %d/%d 用时 %.1fs",
                 _ti + 1,
                 len(plan["regions"]),
                 time.perf_counter() - _t_tile,
@@ -586,6 +608,7 @@ def _tiled_model_call(
                 _tst_module.pop_tile_skip()
             except Exception:
                 pass
+        setattr(_builtins, _TST_SKIP_KEY, _tst_flag_prev)
         if device.type == "cuda":
             torch.cuda.empty_cache()
 

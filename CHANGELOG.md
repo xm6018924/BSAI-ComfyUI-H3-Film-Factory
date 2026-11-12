@@ -2,6 +2,33 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.380 (2026-11-12) — v14.379 的模块级开关**实机仍然打不通**：h3_tst 是被 importlib 按文件载成 `bsai_selflift_tst`、且不登记 `sys.modules`，宿主按模块名扫不到；补上第三条通道 —— `builtins` 上的进程级计数器，与模块身份、对象层级全无关 / v14.379's module-level flag still never fired on the real box: `h3_tst` is loaded by importlib from a file as `bsai_selflift_tst` and never registered in `sys.modules`, so the host cannot find it by name; added a third channel — a process-wide counter on `builtins`, independent of module identity and object nesting
+
+**实机证据（重启后 10:09–10:16，pid 12268，v14.379 代码已加载）**
+
+- 一采 4 步 × 64.5s 正常；二采预热 4 块各 7.5–7.9s，`v14.379 分块二采: tile 1/4 … 4/4` 按时打出（证明新代码在跑）。
+- 10:16:06 真二采第 1 步起，日志再无任何 tile 行；`py-spy dump`：`prompt_worker` 栈顶仍是 `_spectral_tension (h3_tst.py:82) ← _attention_override (h3_tst.py:164)`；`nvidia-smi` 100% / 2670 MHz / **98.5 W** —— 同一症状。
+- 日志里**没有** `v14.379 分块二采: tile forward 内已暂停…` 行 —— 说明 `_tst_state` 与 `_tst_pushed` 双双为假，即模块级 push 也没生效。
+
+**根因（第二层）**
+
+`extender._apply_h3_tst` 用 `spec_from_file_location("bsai_selflift_tst", …)` + `module_from_spec` + `exec_module` 载入内置 TST，**模块名既不是 `h3_tst` 后缀、也从不写进 `sys.modules`**。于是分块模块的 `_find_tst_module()` 无论按名查还是全量扫都找不到那个实例，`push_tile_skip()` 从未被调用 —— 而真正干活的 `_attention_override` 闭包恰恰属于这个游离实例。
+
+**修法（第三通道，确定性）**
+
+1. `h3_tst.py`：新增 `builtins._BSAI_TST_TILE_SKIP` 进程级计数器，`push_tile_skip()/pop_tile_skip()` 同步增减；`_tile_skip_active()` 判定 = 模块深度 **or** builtins 计数器；override 短路条件改为 `state.get("skip_tiles") or _tile_skip_active()`。builtins 在一个进程内只有一份，任何加载方式都绕不过去。
+2. `bsai_h3_spatial_tiles.py`：tile 循环前**自己**直接 `setattr(builtins, _TST_SKIP_KEY, prev+1)`、`finally` 还原 `prev`；模块 push/pop 与 state 保留为第 2、第 3 通道；跳过日志改为无条件播报 `(builtins_flag=N, module=found/missing, state=found/missing)`，三种通道各报各的，首次调用即打。
+3. `_find_tst_module()` 收紧扫描：只认「`__file__` 是 `h3_tst.py` 或名字含 `h3_tst`」且 `push/pop` 可调用 —— 全量按属性扫会误中 `torch.ops` 这类惰性命名空间（对任意属性名 `hasattr` 都为真）。
+4. 日志前缀改 `v14.380`，与本版对齐。
+
+**验证**
+
+- `tools/check_tst_tile_skip.py` 扩到 **14 PASS / 0 FAIL**，新增关键一条：用 `spec_from_file_location("bsai_selflift_tst_probe", …)` **复刻实机加载方式**（不进 `sys.modules`、名字不带 `h3_tst`），确认 `_find_tst_module()` 返回 None，而**只置 builtins 计数器**就能让该游离实例的 override 直接回落原生 attention，归零后恢复。
+- `check_refine_timing_guards.py` 12 PASS；`check_one_shot_route_rules.py` 全绿。
+- `ast.parse` OK：`bsai_h3_spatial_tiles.py` 684 行、`h3_tst.py` 282 行。
+
+**判据（下一次跑二采）**：日志出现 `v14.380 分块二采: tile forward 内已暂停…(builtins_flag=1, module=…, state=…)` 且紧接着逐块 `v14.380 分块二采: tile i/4 用时 X.Xs`；`py-spy` 里 `_spectral_tension` 归零；功耗从 ~99W 抬向 300W+。
+
 ### v14.379 (2026-11-12) — 二采「这么久没动静」的真因：v14.377 那个「tile 内跳过 TST」的开关**从来没置上**（拿的是 BaseModel 外层，state 挂在被 patch 的内层 MiniMaxH3Model 上）；改成进程级 push/pop + 深链查找，并给每块加耗时日志 / Second-pass silence root cause: the v14.377 "skip TST inside tile forwards" flag was never set (the tiling module looked for that state on the outer BaseModel while it lives on the patched inner MiniMaxH3Model); replaced with a process-level push/pop plus a deep attribute-chain lookup, and added per-tile timing logs
 
 **现象（2026-11-12 09:23:56 重启后的 clip[0]，后端 v14.378；一采 4 步 × 48.5s 正常，09:41:33 二采预热完成，之后 16 分钟日志零增长）**
