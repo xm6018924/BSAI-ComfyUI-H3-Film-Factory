@@ -172,6 +172,20 @@ _REFINE_WS_RESERVE_HINT = {}
 # 前端 web/extender.js 的 cycle/cycleLabels/tints(同序号) 与 cycleAliases/ALIAS_CANON,
 # 以及遗留兼容层 OPTIONS 白名单。顺手补了 tints 表原来少一条(38 vs 37)的既存缺陷。
 
+# v14.388 (2026-11-12): PDMD 4 步档出片全是噪点 —— 根因是调度器给错了网格。
+# 实机(12:41-13:27 六段全噪)配方: PDMD 4步 LoRA strength 1.0 + euler + **simple**
+# + shift 12/3 + 4 步。simple 生成的是等间距 base 位置 u=linspace(1,0,5)
+# = [1.0,0.75,0.5,0.25,0.0], 经 shift 12 映射成 σ=[1.0,0.973,0.9231,0.8,0.0];
+# 而 DMD 系 4-NFE 学生的训练边界是 base_schedule [1.0,0.7,0.4,0.15,0.0]
+# (5 边界 / 4 NFE, 与 PDMD 模型卡「4 步 + 底模发布版调度配置 shift 12/3」一致),
+# 映射后 σ=[1.0,0.96552,0.88889,0.67925,0.0]。学生只在后者的噪声位置上有效,
+# 喂等间距网格后末步还是从 σ=0.8 一次跳到 0 —— 结果就是整段纯噪声。
+# 修法: 新增 scheduler="pdmd_manual"(训练边界经 model_sampling 的 shift 映射),
+# PDMD 4 步档改用它; 加步数时只在训练曲线的相邻边界间插值, 少步只取子集。
+# 同机对照佐证: 同样的底模/稀疏注意力栈, 8 步 + beta 的 turbo_4step 档出过完整
+# 正片(2026-11-03), FastH3 4 步 + beta 档也出过正常 clip —— 只有 PDMD 这一档
+# 被钉在 simple 上。tools\check_pdmd_sigma_schedule.py 离线复算两条曲线并断言。
+
 # v14.384 (2026-11-12): 二采(Refine / 双采)一律「只超分放大, 绝不重绘」。
 # 用户口径: 不管哪条渲染管线的二采(8+2 / 8+4 / FastOmini / taomate ...), 都
 # 完全按照一采结果做超分放大, 不允许任何程度的去噪重采样。
@@ -4210,6 +4224,20 @@ _VIGGLE_REMAKE_SIGMAS = {
 }
 
 
+# v14.388 (2026-11-12): PDMD(DMD 系 4-NFE 学生) 的训练噪声边界(base_schedule)。
+# 来源: MiniMax H3 的 DMD2 蒸馏元数据契约 —— `_minimax_h3.sigma_shift_scales` =
+# {video 12.0, audio 3.0}, `base_schedule = [1.0, 0.7, 0.4, 0.15, 0.0]`(5 个连续
+# 边界 = 4 个 NFE), 与 PDMD 模型卡的「4 步 + 底模发布版调度配置(shift 12/3)」一致。
+# 这里是**未乘 shift 的 base 位置**(0..1000 的 timestep 写法, 交给 model_sampling
+# 的 time_snr_shift 映射), 不能直接当 σ 用, 也不能交给 simple 等间距网格。
+# v14.387 之前 PDMD 4 步档强改 scheduler="simple" —— simple 生成 u=linspace(1,0,5)
+# = [1.0, 0.75, 0.5, 0.25, 0.0], 经 shift 12 映射成 σ=[1.0, 0.973, 0.9231, 0.8, 0.0]:
+# 学生从未在这些噪声位置训练过, 末步还要从 σ=0.8 一次跳到 0 —— 实机结果就是整段纯
+# 噪声(2026-11-12 12:41-13:27 六段全噪)。改成训练边界后 σ=[1.0, 0.96552, 0.88889,
+# 0.67925, 0.0], 每一步都落在学生见过的位置上。
+_PDMD_H3_SIGMA_KNOTS = (1000.0, 700.0, 400.0, 150.0, 0.0)
+
+
 # v14.352/v14.353: 运行时标记（采样函数与硬切拦截要用）
 _VIGGLE_ACTIVE = False          # 当前这一段是不是 Viggle 档
 _VIGGLE_RELEASE_POS = None      # 只含参考图的 positive（σ 早停释放源片 cond 用）
@@ -4375,6 +4403,17 @@ def _sigmas(model, scheduler: str, steps: int, denoise: float):
     if str(scheduler) == "hyperflow_manual":
         _hf_steps = steps if steps in _HYPERFLOW_H3_SIGMAS else 6
         return torch.tensor(_HYPERFLOW_H3_SIGMAS[_hf_steps], dtype=torch.float32).cpu()
+    if str(scheduler) == "pdmd_manual":
+        # v14.388: PDMD 4-NFE 学生的训练噪声边界, 经 model_sampling 的 shift(12/3) 映射。
+        # 不能用 simple/linspace 等间距(那是蒸馏学生没训练过的调度, 会直接出噪声);
+        # 加步数时在训练曲线的相邻边界间线性插值, 少步时只取子集, 不引入新位置。
+        _pd = ms.sigma(torch.tensor(_PDMD_H3_SIGMA_KNOTS, dtype=torch.float32)).cpu()
+        _pd_want = max(2, int(steps))
+        if _pd_want != int(_pd.shape[0]) - 1:
+            _pd = _viggle_resample_sigmas([float(v) for v in _pd.tolist()], _pd_want)
+        print(f"[H3 Extender] v14.388 PDMD sigma 曲线(训练边界): 步数={int(_pd.shape[0]) - 1} "
+              f"σ={[round(float(v), 5) for v in _pd.tolist()]}", flush=True)
+        return _pd
     # v14.347: 第 35 档打开 exact 模式 —— denoise 就是真实起点噪声比例
     if _SIGMAS_EXACT and denoise < 1.0:
         try:
@@ -13072,8 +13111,12 @@ class BSAIH3FilmFactory:
                 denoise = 1.0
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
-                    print(f"[H3 Extender] v14.258 PDMD 4步 SelfLift 双采(渲染管道): 采样器强制 euler + simple (PDMD 4步蒸馏契约)")
-                scheduler = "simple"
+                    print(f"[H3 Extender] v14.258 PDMD 4步 SelfLift 双采(渲染管道): 采样器强制 euler (PDMD 4步蒸馏契约)")
+                # v14.388: 原来是 scheduler="simple"(等间距 u=linspace(1,0,5)), 出片全噪 ——
+                # 蒸馏学生只在固定噪声边界上训练过, 必须喂它自己的 base_schedule。
+                scheduler = "pdmd_manual"
+                print("[H3 Extender] v14.388 PDMD 4步(渲染管道): 调度器 = 训练边界 "
+                      "[1.0,0.7,0.4,0.15,0.0] 经 shift 12/3 映射(不再用 ComfyUI simple 等间距)")
                 print("[H3 Extender] 🧪 v14.258 PDMD 4步 SelfLift 双采 (4+2): "
                       "PDMD(UCSD×字节, arXiv 2609.35768, 2026-09-23/29 发布) 4步蒸馏 LoRA —— "
                       "一采 4 步(论文 4 步契约, VideoGen-Eval 总分 83.17, 超所有 4 步蒸馏基线) "

@@ -2,6 +2,32 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.388 (2026-11-12) — PDMD 4 步档出片全是噪点：调度器改成学生训练用的噪声边界 / PDMD 4-step tier produced pure noise: it now runs on the student's own trained sigma boundaries
+
+**用户口径**（附截图，Pipeline 显示 `PDMD 4-Step SelfLift Dual-…`，`output\bsai_clips` 六段全噪）：检查这档渲染管线出来全是噪点。
+
+**取证**
+
+1. 实机配方（`comfyui_8181.log` 12:36:43 的 `EFFECTIVE-RECIPE`）：`pipeline=PDMD 4步 SelfLift 双采 (4+2)`，`一采 steps=4 sampler=euler **scheduler=simple** denoise=1.0 shift=12.0/3.0`；LoRA 实挂 `H3\H3加速\PDMD\minimax_h3_pdmd_4step_lora_avg_rank_57_bf16.safetensors strength=1.00`（`LoRA补丁:208/208`），底模 `minimax_h3_hybrid_fl2va_ref2va_b25-49-int8`。
+2. 出片量化：`h3_clip_250_1..6_*.mp4` 六段抽帧全是彩色静态噪点（只在中央有极淡轮廓），即「latent 从未被去噪成结构」。
+3. 同机对照：同一底模、同一 `Sol-Attn=ON / Spark=RepBlock topk=10%` 稀疏注意力栈，`turbo_4step` 档 8 步 + **beta** 出过完整正片（2026-11-03），`FastH3 4步VSA` 档 4 步 + **beta** 也出过正常 clip（12:11）。只有 PDMD 这一档被钉在 `simple` 上。
+4. 曲线复算（`tools\check_pdmd_sigma_schedule.py`，用 ComfyUI 自己的 `ModelSamplingAV`）：
+   - `simple` 4 步 = 等间距 base 位置 `u=linspace(1,0,5)=[1.0,0.75,0.5,0.25,0.0]` → **σ=[1.0, 0.973, 0.9231, 0.8, 0.0]**；
+   - PDMD 训练边界 `base_schedule=[1.0,0.7,0.4,0.15,0.0]`（5 边界 / 4 NFE）→ **σ=[1.0, 0.96552, 0.88889, 0.67925, 0.0]**；
+   - 前三步全挤在 σ≈0.99–0.92（模型在这些位置没被训练过），末步还要从 σ=0.8 一次跳到 0 —— 正是「全是噪点」的成因。
+
+**改动（`extender.py`）**
+
+1. 新增常量 `_PDMD_H3_SIGMA_KNOTS = (1000.0, 700.0, 400.0, 150.0, 0.0)`（训练边界，未乘 shift 的 base 位置写法）。
+2. `_sigmas()` 新增 `scheduler == "pdmd_manual"` 分支：用 `model_sampling.sigma()` 经 shift 12/3 映射；`steps` 不等于 4 时只在训练曲线的相邻边界间线性插值（少步只取子集），不引入模型没见过的新位置；打印实际 σ 表。
+3. `elif _rp_mode == "PDMD 4步 SelfLift 双采 (4+2)"` 的 `scheduler = "simple"` → `scheduler = "pdmd_manual"`；采样器仍强制 `euler`，shift 仍 `12.0/3.0`，仍 4 步一采 / 2 步二采（二采自 v14.384 只超分不重绘）。
+
+**验证**：新增 `tools/check_pdmd_sigma_schedule.py` —— **12 PASS / 0 FAIL**（离线复算 σ 表逐位一致、5 边界 4 NFE、首尾钉死、严格单调、源码断言 PDMD 档不再用 simple）；`tools/check_pipeline_recipes.py` 扩写后 **36 PASS / 0 FAIL**（含「4 步蒸馏档不许吃等间距网格」这组守卫，并把 PIKA / Viggle / HyperFlow 三条固定 σ 曲线一起锁住）；`ast.parse` OK（18363 行）。
+
+**注**：ACC 8+4 档（v14.387）目前仍走 `euler + simple`，属同类未实测配方，这次没有改它 —— 用前先跑一段验收。
+
+**English** — The PDMD 4-step tier rendered six clips of pure noise. Root cause is the scheduler, not the weights: `simple` builds five *evenly spaced* base positions `[1.0, 0.75, 0.5, 0.25, 0.0]`, which shift 12 maps to `σ=[1.0, 0.973, 0.9231, 0.8, 0.0]`, while a DMD-family 4-NFE student was trained on the pinned boundaries `[1.0, 0.7, 0.4, 0.15, 0.0]` → `σ=[1.0, 0.96552, 0.88889, 0.67925, 0.0]`. The student never saw those intermediate noise levels, and the last step still had to jump from σ=0.8 straight to 0. The fix adds a `pdmd_manual` sigma branch (boundaries mapped through `model_sampling`, interpolated only along the trained curve when the step count differs) and points the PDMD 4-step tier at it. Same machine, same base model and the same sparse-attention stack produced a full film at 8 steps + beta (`turbo_4step`) and a normal clip at 4 steps + beta (`FastH3 4步VSA`) — PDMD was the only tier pinned to `simple`. New checker `tools/check_pdmd_sigma_schedule.py` recomputes both curves offline and guards against regressions.
+
 ### v14.387 (2026-11-12) — 新增渲染管道档 ACC 8 步 SelfLift 双采 (8+4) / New render-pipeline tier: ACC 8-step SelfLift Dual-Pass (8+4)
 
 **用户口径**（附截图 `H3\H3加速\ACC\MiniMax-H3-Ref2VA-Acc-8Step_comfyui_pdd-T8.safetensors`）：检查所有渲染管线，有没有 ACC 这一档？没有就加上，ACC 1 采 8 步 2 采 4 步。

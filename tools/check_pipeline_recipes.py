@@ -101,6 +101,29 @@ def main():
           '_FF_REFINE_NO_REDRAW = str(os.environ.get("BSAI_H3_REFINE_REDRAW", "0"))'
           in src)
 
+    # ── v14.388: 4 步蒸馏档不许吃 ComfyUI 的等间距 simple 网格 ─────────
+    # PDMD 4 步档曾强改 scheduler="simple" -> σ=[1.0,0.973,0.9231,0.8,0],
+    # 与学生的训练边界 [1.0,0.7,0.4,0.15,0] 经 shift 12 映射出的
+    # [1.0,0.96552,0.88889,0.67925,0] 不是同一条路线 -> 整段出纯噪声。
+    i_pdmd = src.find('elif _rp_mode == "PDMD 4步 SelfLift 双采 (4+2)":')
+    check("PDMD 4 步分支存在", i_pdmd > 0)
+    if i_pdmd > 0:
+        nxt = src.find("elif _rp_mode ==", i_pdmd + 10)
+        body = src[i_pdmd:nxt]
+        check("PDMD 4 步用训练边界调度(pdmd_manual)",
+              'scheduler = "pdmd_manual"' in body)
+        check("PDMD 4 步不再用 simple 等间距",
+              'scheduler = "simple"' not in body)
+        check("PDMD 训练边界常量 = [1.0,0.7,0.4,0.15,0] 的 timestep 写法",
+              "_PDMD_H3_SIGMA_KNOTS = (1000.0, 700.0, 400.0, 150.0, 0.0)" in src)
+    # 其余蒸馏档同理: 只要它们把 scheduler 钉成 simple, 就会重复这个坑。
+    for _tag, _marker in (
+        ("PIKA Flex 6+2", "pika_manual"),
+        ("Viggle Remake", "_VIGGLE_REMAKE_SIGMAS"),
+        ("HyperFlow Flash", "_HYPERFLOW_H3_SIGMAS"),
+    ):
+        check(f"{_tag} 仍走自己的固定 σ 曲线({_marker})", _marker in src)
+
     # ── 前端三张同序号表(cycle / cycleLabels / tints) ──────────────────
     # 后端加档而前端没跟 -> 下拉里选不到(v14.213 的坑); tints 少一条 ->
     # 最后一条档位画到它时 color 是 undefined(v14.387 顺手补的那个既存缺陷)。
@@ -132,7 +155,7 @@ def main():
 
     print()
     if ok:
-        print("全部通过 (v14.386 DMAD 8+2 / v14.387 ACC 8+4 渲染管道自检)")
+        print("全部通过 (v14.386 DMAD 8+2 / v14.387 ACC 8+4 / v14.388 PDMD 训练边界 渲染管道自检)")
         return 0
     print(f"失败 {len(fails)} 项: {fails}")
     return 1
