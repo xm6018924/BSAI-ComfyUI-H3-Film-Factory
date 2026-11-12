@@ -2,6 +2,34 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.381 (2026-11-12) — 二采剩下的时间全花在**权重换页**上：workspace 探针跑了在 v14.181 自动分块决策**之前**、用的还是旧旗标，把 709,920 tokens 的分块段当成全帧规模，reserve 6.8→8.9GB、resident 14.4→10.9GB，每条 forward 多搬 3.4GB 权重 / What is left of the second pass is pure weight paging: the workspace probe ran *before* v14.181's auto-tiling decision and used a stale flag, so a 709,920-token tiled pass was judged at full-frame scale — reserve 6.8→8.9GB, resident 14.4→10.9GB, 3.4GB extra weight traffic per forward
+
+**实机证据（v14.380 跑，10:41–10:57）**
+
+- TST 判据全部命中：`v14.380 分块二采: tile forward 内已暂停…(builtins_flag=1, module=missing, state=missing)`；预热 4 块各 9.0–9.4s；二采不再静默。
+- 但真二采：`tile 1/4 用时 108.4s`，然后 **tile 2 卡 7 分钟以上**（日志停在 10:53:49）。
+- `nvidia-smi`：`100% / 102→136W / memory.used 24,008MiB`（几乎占满）。
+- `py-spy`：栈顶 `CastBiasWeightContext → cast_bias_weight → cast_to → QuantizedTensor.__torch_dispatch__ → BaseLayoutParams.to_device` —— **主机侧权重搬运/量化转换**，不是算力。
+- 日志：`v14.250 workspace 探针: tokens=709,920 > 130k (已触发自动分块), 不试分配直接判定让位` → `v14.250 workspace 自适应让位: reserve 6.8->8.9GB, resident=10.9GB`。
+
+**根因**
+
+`_sample_h3` 里 reserve/workspace 探针（约 L7065）在 v14.181 自动分块决策（约 L7255）**之前**执行，判据用的是函数入口拿到的 `tiled_refine`，而这个管线（PIKA H3 Flex 8+2）的分块是 v14.181 按 `tokens > 130k` 现场决定的，那时还是 False → 落进「>130k 无条件让位」，把分块段按全帧规模估 workspace，主动把 resident 压掉 3.5GB。基准表里每条 forward 因此多搬 3.4GB 权重，tile 越跑越慢（108s → 7min+）。
+
+顺带修掉一个潜伏 bug：`_probe_ok240` 原本只在部分分支赋值，`free >= ws+2GB` 时到 `if _probe_ok240:` 会 `NameError`，被外层 `except Exception: pass` 静默吞掉。
+
+**修法**
+
+1. 探针改成与 v14.181 **同一判据**：`_will_tile381 = bool(tiled_refine) or _r_tok_probe250 > 130000`。
+2. 分块时 workspace 按**块几何**估：`_ntile381 = _ff_auto_refine_tile_count(samples, 4, tile_overlap)`、`_ws381 = max(2.0, _ws65 / n * 1.5)`，试分配按 `_ws381 + 0.5GB` 而不是全帧 `_ws65`。
+3. 试分配通过 → **保持满驻留**（不再为全帧 workspace 让位）；失败才走原有让位路径 —— 可量、可回退。
+4. `_probe_ok240 = True` 初始化，消除 NameError 静默路径。
+5. 播报改 `v14.381 分块 workspace 探针通过: ws_tile≈X.XGB(全帧 Y.YGB, N 块), 试分配 Z.ZGB 成功 → 保持满驻留 reserve=R`。
+
+**验证**：`tools/check_refine_timing_guards.py` **16 PASS / 0 FAIL**（新增 4 条：同判据、按块缩放、按 ws_tile 试分配、`_probe_ok240` 有初值）；`check_tst_tile_skip.py` 14 PASS；`ast.parse` OK（`extender.py` 18111 行）。
+
+**判据（下一轮二采）**：日志应出现 `v14.381 分块 workspace 探针通过`（而不是 `v14.250 … 让位`）且 `Refine 二采前 DiT 驻留: resident=14.4GB` 不被压低；每块耗时从 108.4s 往 30–50s 走；`py-spy` 不再常驻 `cast_bias_weight`；功耗从 ~100W 抬向 300W+。
+
 ### v14.380 (2026-11-12) — v14.379 的模块级开关**实机仍然打不通**：h3_tst 是被 importlib 按文件载成 `bsai_selflift_tst`、且不登记 `sys.modules`，宿主按模块名扫不到；补上第三条通道 —— `builtins` 上的进程级计数器，与模块身份、对象层级全无关 / v14.379's module-level flag still never fired on the real box: `h3_tst` is loaded by importlib from a file as `bsai_selflift_tst` and never registered in `sys.modules`, so the host cannot find it by name; added a third channel — a process-wide counter on `builtins`, independent of module identity and object nesting
 
 **实机证据（重启后 10:09–10:16，pid 12268，v14.379 代码已加载）**

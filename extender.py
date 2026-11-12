@@ -7063,6 +7063,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _f65, _t65 = _torch65.cuda.mem_get_info()
                             _free65 = _f65 / 1024 ** 3
                             _ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                            _probe_ok240 = True
                             if _free65 < _ws65 + 2.0:
                                 _fixed65 = False
                                 try:
@@ -7103,15 +7104,34 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                     # 误判成不够, 把刚降下来的 reserve 又弹回 7GB 档。
                                     # 分块时改走真实试分配: 分配得到就保持满驻留, 分配不到
                                     # 才让位 —— 不掺任何经验常数。
-                                    _tiled_probe377 = bool(tiled_refine)
+                                    # v14.381 (2026-11-12): 这段探针跑在 v14.181 自动分块
+                                    # 决策之前，用的是本函数早先拿到的 tiled_refine 旗标；
+                                    # 而 v14.181 的真判据是「tokens > 130k 就分块」。实测
+                                    # 709,920 tokens 明明走自动分块(每块 272k)，这里却还是
+                                    # False，于是落回「>130k 无条件让位」：reserve 6.8->8.9GB、
+                                    # resident 14.4->10.9GB，每条 forward 多搬 3.4GB 权重，
+                                    # v14.380 实机二采每块 108.4s。改为按**块几何**判 workspace:
+                                    # 单块序列约为全帧的 1/n，workspace 随序列长度缩放。
+                                    _will_tile381 = bool(tiled_refine) or _r_tok_probe250 > 130000
+                                    _ws381 = _ws65
+                                    _ntile381 = 1
+                                    if _will_tile381 and _r_tok_probe250 > 0:
+                                        try:
+                                            _ntile381 = max(1, int(_ff_auto_refine_tile_count(
+                                                samples, 4, tile_overlap)))
+                                        except Exception:
+                                            _ntile381 = 4
+                                        _ws381 = max(2.0, _ws65 * (1.0 / float(_ntile381)) * 1.5)
+                                    _tiled_probe377 = _will_tile381
                                     if (not _tiled_probe377) and _r_tok_probe250 > 130000:
                                         print(f"[H3 Extender] v14.250 workspace 探针: tokens={_r_tok_probe250:,} > 130k "
                                               f"(已触发自动分块), 不试分配直接判定让位 — "
                                               f"保持满驻留 x{_r_factor}(不降倍率), "
                                               f"分块后每块 ~{_r_tok_probe250 // 4 // 1000}k 在健康区")
+                                        _probe_ok240 = False
                                     else:
                                         try:
-                                            _pb240 = int((_ws65 + 0.5) * 1024 ** 3)
+                                            _pb240 = int((_ws381 + 0.5) * 1024 ** 3)
                                             _pt240 = _torch65.empty(_pb240 // 4, dtype=_torch65.float32,
                                                                     device="cuda")
                                             del _pt240
@@ -7120,13 +7140,16 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                             _probe_ok240 = True
                                         except Exception as _pe240:
                                             _probe_ok240 = False
+                                            print(f"[H3 Extender] v14.381 分块 workspace 探针失败: "
+                                                  f"ws_tile≈{_ws381:.1f}GB 试分配 "
+                                                  f"{_ws381 + 0.5:.1f}GB 失败({_pe240})")
                                     if _probe_ok240:
                                         if _tiled_probe377:
-                                            print(f"[H3 Extender] v14.377 分块 workspace 探针通过: "
-                                                  f"free={_free65:.1f}GB 低于全帧阈值 ws {_ws65:.1f}GB+2GB, "
-                                                  f"但真实试分配 {_ws65 + 0.5:.1f}GB 成功 —— 分块每块仅 "
-                                                  f"~{max(1, _r_tok_probe250 // 5) // 1000}k tokens, "
-                                                  f"保持满驻留 reserve={_r_reserve_gb:.1f}GB(不再弹回 7.5GB)")
+                                            print(f"[H3 Extender] v14.381 分块 workspace 探针通过: "
+                                                  f"ws_tile≈{_ws381:.1f}GB(全帧 {_ws65:.1f}GB, "
+                                                  f"{_ntile381} 块), 试分配 {_ws381 + 0.5:.1f}GB 成功 "
+                                                  f"→ 保持满驻留 reserve={_r_reserve_gb:.1f}GB"
+                                                  f"(不为全帧 workspace 让位)")
                                         else:
                                             print(f"[H3 Extender] v14.250 workspace 探针通过: "
                                                   f"free={_free65:.1f}GB 低于阈值 ws {_ws65:.1f}GB+2GB, "

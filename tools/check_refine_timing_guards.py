@@ -71,7 +71,18 @@ def main():
     check("v14.250 '>130k 无条件让位' 已限定为非分块",
           "(not _tiled_probe377) and _r_tok_probe250 > 130000" in ext)
     check("分块试分配通过时有专属播报(实机可判 5.0 是否保住)",
-          "v14.377 分块 workspace 探针通过" in ext)
+          "v14.381 分块 workspace 探针通过" in ext)
+    # v14.381: 探针必须先按「v14.181 会不会自动分块」预测, 再按块几何估 workspace ——
+    # 否则 709,920 tokens 的分块段会被当成全帧规模, reserve 6.8->8.9、resident
+    # 14.4->10.9GB, 每条 forward 多搬 3.4GB 权重(实机二采每块 108.4s)。
+    check("v14.381 分块预测与 v14.181 同判据(tokens>130k 即分块)",
+          "_will_tile381 = bool(tiled_refine) or _r_tok_probe250 > 130000" in ext)
+    check("v14.381 workspace 按块几何缩放(ws_tile = ws_full / n_tiles × 余量)",
+          "_ws381 = max(2.0, _ws65 * (1.0 / float(_ntile381)) * 1.5)" in ext)
+    check("v14.381 探针按 ws_tile 试分配(不再拿全帧 ws 判让位)",
+          "_pb240 = int((_ws381 + 0.5) * 1024 ** 3)" in ext)
+    check("_probe_ok240 有初值(避免 free 足够时 NameError 被外层 except 吞掉)",
+          "_ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)\n                            _probe_ok240 = True" in ext)
     check("版本注释已改为 v14.377(不再误标 v14.341)",
           "v14.341 分块下限 7.5 -> v14.377 5.0" in ext)
 
