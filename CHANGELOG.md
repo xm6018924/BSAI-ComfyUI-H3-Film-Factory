@@ -2,6 +2,50 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.391 (2026-11-12) — 前端守卫：语法与枚举检查变成提交前强制关卡 / Frontend guard: syntax + enum checks are now a hard pre-commit gate
+
+**用户口径**：把「前端语法检查(.mjs) + 快捷条枚举同步自检」固化成提交前必跑的一步。
+
+**为什么必须固化**
+
+「一处结构破坏 -> 整个前端一行都不执行」在本插件已经犯了两次：v14.365（`cycleLabels` 里 `, ,` 空位 + 两个字符串相邻缺逗号）、v14.387（`render_pipeline` 的 QUICK_DEFS 对象尾部多一个 `]`）。两次的症状都不是报错，而是「该隐藏的参数没隐藏 + 全局提示词/CLIP 卡片消失」，排查成本极高；而且对 `.js` 直接 `node --check` 会被文件头 `import` 干扰、语法错仍然返回 0，人工盯必漏。
+
+**改动（新增三个文件，`extender.py` 只改 BUILD）**
+
+1. `tools/check_frontend_guard.py` —— 统一守卫。(a) 把 `web/*.js` **原样复制成 `.mjs`** 再 `node --check`，绕开 import 干扰；(b) 调 `tools/check_quickbar_enum_sync.py` 查前后端枚举与遗留兼容层一致性。支持 `--syntax-only` / `--enum-only` / `--js <paths>`，退出码 0/1。
+2. `tools/git-hooks/pre-commit` —— 按改动范围分级，避免每次提交都等 torch 加载：改 `web/*.js` 跑语法+枚举双查；只改 `extender.py` 只查枚举；文档/工作流直接放行。
+3. `tools/install_git_hooks.py` —— 一行启用 `git config core.hooksPath tools/git-hooks`（`--uninstall` 可撤销）。钩子**放进版本库**而不是 `.git/hooks`：后者不进版本库，换机/重新 clone 即静默失效，而它要防的正是静默失效。
+4. `.gitattributes` —— `tools/git-hooks/* text eol=lf`。`core.autocrlf=true` 会把钩子改写成 CRLF，`sh` 解析 shebang 会挂，守卫同样会静默失效。
+
+**写这套东西时自己踩到的三个坑（都已修）**
+
+1. **`grep` fail-open**：初版钩子用 `grep` 判断 staged 文件，直接调用 `sh.exe` 时 PATH 里没有 Git 的 `usr/bin`，报 `grep: command not found` 后**静默放行**（负向测试第一次就是这样漏过去的）。改成纯 `git diff --cached --name-only -- 'web/*.js'` pathspec 过滤，不依赖任何外部命令。
+2. **CRLF**：见上，`.gitattributes` 钉 LF；实测 `git rm --cached` + 重新 checkout 后仍 `CR=0`。
+3. **执行位**：`git rm --cached` 后再 add 会把 100755 掉成 100644，用 `git update-index --chmod=+x` 恢复；远端 `git ls-tree` 确认 `100755`。
+
+**验证**：`tools/check_frontend_guard.py` 全量 —— 3 个 web js 全部 OK + 枚举 `SYNC OK`，exit=0；负向实测 —— 临时放一个含多余 `]` 的 `web/_guardtest_broken.js` 并 `git add`，直接执行钩子打印 `SyntaxError` 精确行号、`exit=1`，提交被拦下，测试文件已清理；钩子文件 `CR=0` / `#!/bin/sh` / mode 100755。
+
+**English** — The guard is now enforced at commit time instead of by eye. `tools/check_frontend_guard.py` copies each `web/*.js` to `.mjs` before `node --check` (checking the `.js` directly is defeated by the leading `import` and returns 0 on real syntax errors), then runs `check_quickbar_enum_sync.py`. `tools/git-hooks/pre-commit` runs syntax+enum when `web/*.js` changed, enum only when `extender.py` changed, and passes everything else through; it is versioned in the repo and enabled via `core.hooksPath` (a `.git/hooks` copy would die on the next clone). `.gitattributes` pins `tools/git-hooks/*` to LF, since `core.autocrlf=true` would corrupt the shebang and silently disable the guard. The hook deliberately avoids `grep`/`sed` — the first version called `grep`, which is absent from PATH when `sh` is invoked outside Git's own environment, and the guard **passed silently**; staging detection now uses git pathspecs only. Verified both ways: clean run exits 0 with 3/3 js OK + enum SYNC OK, and a deliberately broken `web/*.js` is blocked with exit=1.
+
+### v14.390 (2026-11-12) — 修掉 extender.js 又一处致命语法错误（整个前端从 v14.387 起一行没执行）+ face_lock_mode 第四态补齐 / Another fatal syntax error in extender.js (nothing in the extension has run since v14.387) + the missing fourth face_lock_mode state
+
+**用户口径**：参数区该隐藏的没隐藏，全局提示词和所有 CLIP 区域消失；怀疑是 `extender.js` 语法错误。
+
+**归因**：机制判断正确、版本归因需修正。用户拿到的诊断说 `cycleLabels` 里 `, ,` + 相邻字符串缺逗号、且「从 v14.365 起从未执行」—— 那处确实是历史 bug，但已在 `f0ecad6`（v14.373）修好。当前文件是**另一处**：`render_pipeline` 的 QUICK_DEFS 对象（`web/extender.js:6801` 行尾）多写了一个 `]` —— 现状 `... { color: "#43e0d0", border: "#0e7490" }]] },`，正确应为 `}] },`，报 `SyntaxError: Unexpected token ']'`。
+
+用 `.mjs` 模式 `node --check` 逐提交定位：`f0ecad6` rc=0、`f1361cd` rc=0、`6fd60f2`（v14.387 新增 ACC 8步档）rc=1 —— 是加 ACC 档往 cycle/cycleLabels/tints 里加项时写坏的，其后 `8c222a6`、`6c98e5b` 都没再碰 js。
+
+**检查盲点确认**：同一文件 `node --check extender.js` 返回 **0**，复制成 `.mjs` 才返回 **1**（文件头 `import` 干扰）。上一次提交前校验正是「`.js` 检查通过就放行」，坏代码因此被推上 GitHub。
+
+**改动（`web/extender.js`）**
+
+1. 删掉多余的 `]`：python 字节级替换（锚点必须 count==1 才写），519874 -> 519873 字节；确认无 BOM、替换前后 CRLF 9275 / LF 9275 一致（避免整文件行尾被重写）。
+2. **`face_lock_mode` 第四态前端补齐**（`tools/check_quickbar_enum_sync.py` 报 2 个 ERROR）：后端 v14.340 已加 `fvrs (audio-guided restore)`，前端 `cycle` / `cycleLabels` / `OPTIONS` 白名单 / `ALIAS_CANON` 四处全缺 —— 载入含该值的工作流会被**静默改写成默认 `off`**。补 4 处（label 取 `FVRS (audio restore)`，中文别名 `fvrs (音频引导修复·TaoMate-FVRS)`），并在档位说明补 fvrs 文案。
+
+**验证**：`.mjs` 模式 `node --check` rc=0；`check_quickbar_enum_sync.py` exit=0 输出 `SYNC OK`；`render_pipeline 39=39=39`、`face_lock_mode 4=4=4=4`；远端 `origin/main:web/extender.js` 单独再 check 也 rc=0。
+
+**English** — The user's symptom diagnosis (whole extension never executed) was mechanically right, the version attribution was not: the `, ,` + adjacent-string error belongs to v14.365 and was already fixed in `f0ecad6` (v14.373). The live file had a second, newer break — an extra `]` at the tail of the `render_pipeline` QUICK_DEFS object (`}]] },` should be `}] },`), written in `6fd60f2` (v14.387) when the ACC 8-step tier was added. Proven by `node --check` in `.mjs` mode across commits (`f0ecad6`=0, `f1361cd`=0, `6fd60f2`=1) — and by the blind spot that let it ship: on the `.js` file the same check returns 0, because the leading `import` defeats it. Also fixed the missing fourth `face_lock_mode` state `fvrs (audio-guided restore)`: absent from `cycle`/`cycleLabels`/`OPTIONS`/`ALIAS_CANON`, which silently rewrote any workflow carrying that value back to `off`. After the fix: `.mjs` rc=0, enum checker exits 0 with `SYNC OK`, `render_pipeline` 39/39/39, `face_lock_mode` 4/4/4/4.
+
 ### v14.389 (2026-11-12) — 二采全部打开重绘 + 内容锁（重绘但绝不换画面）/ Refine (second pass) is now ON for every pipeline, with a content lock so it can never paint a different scene
 
 **用户口径**：打开所有渲染管线的二采重绘，但是保证二采重绘必须和一采内容一样，不得重绘成别的画面。

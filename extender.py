@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.389-acc8step+pdmd-sigma+refine-full-redraw-content-lock"
+BUILD = "minimax-h3-extender-v14.391-acc8step+pdmd-sigma+refine-full-redraw-content-lock+frontend-guard"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
