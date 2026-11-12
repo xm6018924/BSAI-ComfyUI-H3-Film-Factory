@@ -2,6 +2,25 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.389 (2026-11-12) — 二采全部打开重绘 + 内容锁（重绘但绝不换画面）/ Refine (second pass) is now ON for every pipeline, with a content lock so it can never paint a different scene
+
+**用户口径**：打开所有渲染管线的二采重绘，但是保证二采重绘必须和一采内容一样，不得重绘成别的画面。
+（本条反转 v14.384 的「所有二采一律只超分放大、绝不重绘」。）
+
+**改动（`extender.py`）**
+
+1. **默认翻转**：`_FF_REFINE_NO_REDRAW` 改为默认 `False`（env `BSAI_H3_REFINE_NO_REDRAW` 默认 `0`，`BSAI_H3_REFINE_REDRAW` 默认 `1`）。要回到 v14.384 的纯超分，设 `BSAI_H3_REFINE_NO_REDRAW=1` 或 `BSAI_H3_REFINE_REDRAW=0`，`_FFRefineSkip` 整段跳过仍在，行为与 v14.384 完全一致。
+2. **噪声上限（内容锁第一道）**：二采 `denoise` 一律夹到 `_FF_REFINE_LOCK_DENOISE`（默认 **0.20**，env `BSAI_H3_REFINE_DENOISE_MAX` 可调）。各管线表里的 `0.45 / 0.5 / 0.55 / 1.0` 不再原样生效 —— 二采底图是一采放大后的 latent，denoise 越小保留的构图/动作/场景越多。0.20 不是随手定的：插件自己的「Director 极速二采」契约就是 beta 3 步 denoise 0.2。
+3. **结构闸门（内容锁第二道，确定性判定）**：放大完成那一刻把一采放大后的 latent 拍成 CPU float32 快照；二采采样完成后，把结果与快照各做 4×4 低通（只比结构/构图，不比细节纹理），逐通道算余弦相似度取均值，低于 `_FF_REFINE_CONTENT_MIN`（默认 **0.85**，env 可调）即判定「重绘成别的画面」——整块丢弃、回退到一采放大结果，日志与状态栏告警都打出来（`v14.389 二采内容闸门: 结构相似度 X.XXX`）。**这是「不得重绘成别的画面」的落点**：相似度正常时保留二采（拿到细节增量），异常时保底交付纯超分，不会出现换了一幅画。
+4. **音频同步锁**：内容锁期间音频重绘默认锁死（沿用一采音频，画面与声音是同一份），env `BSAI_H3_REFINE_AUDIO_REDRAW=1` 可放开。
+5. 顺手清掉 v14.384 遗留的过时文案：DMAD / ACC 档的注释与播报、SingularityV2+Pika 档播报、一镜到底双采高清播报，全部改成「v14.389 二采重绘开 + 内容锁 denoise≤0.20 + 结构闸门」，不再声称「只超分不重绘」。
+
+**覆盖范围**：所有 `refine_enable=True` 的双采档（PIKA Flex 8+2 / 6+2、TaoMate 8+4、DD 高速、DMAD 8+2、ACC 8+4、PDMD 4+2、FastOmini、taomate、直播配音高清、SingularityV2+Pika8步、比武 6+6 等）。单采档（`PDMD 2步 极速试稿`、`PTD 4步 单采`、视频替换/Recast 等 `refine_enable=False`）本来就没有二采，未动。
+
+**验证**：`tools/check_refine_no_redraw.py` 已按新契约整篇改写 —— **22 PASS**（默认重绘开 / 双 env 反向开关 / denoise 上限夹取 / 快照在放大后跳出点前且存 CPU / 闸门在采样后塌陷检测后几何对齐前 / 4×4 低通 + 余弦 + 阈值 + 回退 + 告警 / 音频锁排在 lip 分支之前）；`check_pipeline_recipes.py` 同步改写断言（新增「二采重绘默认开」「内容锁 denoise 上限」「内容闸门阈值」三条），**全绿**；`check_pdmd_sigma_schedule.py` 12/12；`check_refine_timing_guards.py` 21/21；`check_tst_tile_skip.py` 14/14；`check_one_shot_route_rules.py` / `check_ref_sheet_crop.py` / `check_recast_pipeline.py` 全绿；`ast.parse` OK（18482 行）。
+
+**English** — v14.384's global "never redraw" is reversed: refine now actually samples on every dual-pass tier. Two locks keep the result on the same content as the first pass — (a) refine denoise is clamped to `_FF_REFINE_LOCK_DENOISE` (default 0.20; the plugin's own Director refine contract uses beta/3 steps/denoise 0.2), and (b) a deterministic structure gate: the upscaled first-pass latent is snapshotted to CPU float32, then after refine both tensors are 4×4 low-passed (structure only, not texture), per-channel cosine similarity is averaged, and anything below `_FF_REFINE_CONTENT_MIN` (default 0.85) is discarded and rolled back to the plain super-res latent with a loud log line and a UI warning. Audio redraw is locked to the first-pass audio under the same lock. Setting `BSAI_H3_REFINE_NO_REDRAW=1` (or `BSAI_H3_REFINE_REDRAW=0`) restores the old pure-super-res path byte-for-byte. Checker `tools/check_refine_no_redraw.py` was rewritten for the new contract (22 PASS) and `check_pipeline_recipes.py` asserts the three new invariants.
+
 ### v14.388 (2026-11-12) — PDMD 4 步档出片全是噪点：调度器改成学生训练用的噪声边界 / PDMD 4-step tier produced pure noise: it now runs on the student's own trained sigma boundaries
 
 **用户口径**（附截图，Pipeline 显示 `PDMD 4-Step SelfLift Dual-…`，`output\bsai_clips` 六段全噪）：检查这档渲染管线出来全是噪点。

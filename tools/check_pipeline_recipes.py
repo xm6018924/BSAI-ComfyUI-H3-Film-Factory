@@ -97,9 +97,14 @@ def main():
           "Ref2VA-Acc-8Step" in acc and "FL2VA-Acc-8Step" in acc)
 
     # ── 共同前提 ────────────────────────────────────────────────────────
-    check("二采不重绘默认开(8+4 的 4 步不产生额外重绘)",
-          '_FF_REFINE_NO_REDRAW = str(os.environ.get("BSAI_H3_REFINE_REDRAW", "0"))'
-          in src)
+    # v14.389: 默认从「二采一律不重绘」翻成「二采一律重绘 + 内容锁」。
+    check("二采重绘默认开(env 需显式 NO_REDRAW=1 才回到纯超分)",
+          'os.environ.get("BSAI_H3_REFINE_NO_REDRAW", "0")' in src
+          and 'os.environ.get("BSAI_H3_REFINE_REDRAW", "1")' in src)
+    check("二采内容锁 denoise 上限常量存在",
+          'os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.20")' in src)
+    check("二采内容闸门阈值常量存在",
+          'os.environ.get("BSAI_H3_REFINE_CONTENT_MIN", "0.85")' in src)
 
     # ── v14.388: 4 步蒸馏档不许吃 ComfyUI 的等间距 simple 网格 ─────────
     # PDMD 4 步档曾强改 scheduler="simple" -> σ=[1.0,0.973,0.9231,0.8,0],
@@ -155,7 +160,7 @@ def main():
 
     print()
     if ok:
-        print("全部通过 (v14.386 DMAD 8+2 / v14.387 ACC 8+4 / v14.388 PDMD 训练边界 渲染管道自检)")
+        print("全部通过 (v14.386 DMAD 8+2 / v14.387 ACC 8+4 / v14.388 PDMD 训练边界 / v14.389 二采重绘+内容锁 渲染管道自检)")
         return 0
     print(f"失败 {len(fails)} 项: {fails}")
     return 1

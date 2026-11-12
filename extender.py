@@ -155,8 +155,9 @@ _REFINE_WS_RESERVE_HINT = {}
 # v14.386 (2026-11-12): DMAD 渲染管线步数改成 1 采 8 步 + 2 采 2 步。
 # 旧值 4+2(DMAD 4-step 蒸馏 LoRA 的标称步数); 用户口径要求 8+2。渲染管道档
 # ("DMAD-4步") 与旧速度档遗留值(speed_preset == "DMAD-4步") 两处同时改, 保持一致;
-# shift 12/2 与强制 lcm 采样器(官方配方)不动。二采在 v14.384 起默认只超分放大
-# 不重绘, 这 2 步只在 BSAI_H3_REFINE_REDRAW=1 的旧重绘路径上才会真的跑。
+# shift 12/2 与强制 lcm 采样器(官方配方)不动。二采自 v14.389 起默认开重绘
+# (内容锁 denoise≤0.20 + 结构相似度闸门), 这 2 步会真跑; 要回到纯超分设
+# BSAI_H3_REFINE_NO_REDRAW=1。
 # 下拉名保持 "DMAD 4-step"/"DMAD-4步" 不改 —— 改标签会让旧工作流的保存值变成
 # "Value not in list", 与 v14.x 那次 combo 改名的坑同源。
 
@@ -167,7 +168,7 @@ _REFINE_WS_RESERVE_HINT = {}
 #   MiniMax-H3-FL2VA-Acc-8Step_comfy.safetensors            首尾帧 / 文生
 # 配方: 8 步一采(euler + simple, shift 12/3, denoise 1.0) + 4 步二采(denoise 0.45,
 # tile 16 / overlap 128, latent x2.0 -> 2K); LoRA strength 1.0, 禁叠第二个加速 LoRA。
-# 二采自 v14.384 起默认只超分放大、不重绘, 这 4 步只在 BSAI_H3_REFINE_REDRAW=1 时生效。
+# 二采自 v14.389 起默认开重绘(内容锁: 0.45 夹到 0.20, 采样后过结构闸门), 这 4 步会真跑。
 # 三处必须同时改才真的"看得到 + 选得到 + 生效": 后端 combo/EN2ZH/dispatch 分支,
 # 前端 web/extender.js 的 cycle/cycleLabels/tints(同序号) 与 cycleAliases/ALIAS_CANON,
 # 以及遗留兼容层 OPTIONS 白名单。顺手补了 tints 表原来少一条(38 vs 37)的既存缺陷。
@@ -193,12 +194,40 @@ _REFINE_WS_RESERVE_HINT = {}
 # 而是: 潜空间放大(3D upscaler / bislerp)完成的那一刻就用内部信号跳出整个
 # 二采重绘段 —— 加噪、去噪、分块、驻留、workspace 探针、时间分块全部不执行,
 # 交付的 latent 就是放大后的一采结果。VAE 解码照旧, 音频保持一采原声。
-# 需要恢复旧的重绘二采(给别的项目用)时设 BSAI_H3_REFINE_REDRAW=1 后重启。
+#
+# v14.389 (2026-11-12): 本条被用户新口径反转 —— 「打开所有渲染管线的二采重绘,
+# 但保证二采重绘必须和一采内容一样, 不得重绘成别的画面」。默认改为开重绘, 并加
+# 内容锁(denoise 上限 0.20) + 结构相似度闸门(低于 0.85 丢弃二采回退纯超分)。
+# v14.384 的整段跳过仍保留, 但只在 BSAI_H3_REFINE_NO_REDRAW=1(或
+# BSAI_H3_REFINE_REDRAW=0)时生效。
 class _FFRefineSkip(Exception):
     """内部信号: 二采已完成超分放大, 跳过其余全部重绘阶段(正常控制流, 非错误)。"""
 
 
-_FF_REFINE_NO_REDRAW = str(os.environ.get("BSAI_H3_REFINE_REDRAW", "0")).strip().lower() not in ("1", "true", "on")
+# v14.389 (2026-11-12): 用户口径改成「所有渲染管线的二采都开重绘, 但二采内容必须
+# 和一采一样, 不得重绘成别的画面」。所以默认从「一律不重绘」翻成「一律重绘」,
+# 并加两道内容锁:
+#   ① 噪声上限: 二采 denoise 一律夹到 _FF_REFINE_LOCK_DENOISE(默认 0.20) —— 二采
+#      的底图就是一采放大后的 latent, denoise 越小保留的构图/动作越多; 各管线表里
+#      0.45/0.5/0.55/1.0 这类值不再原样生效。
+#   ② 结构闸门: 二采采样完成后, 把结果和一采放大后的 latent 做低通余弦相似度,
+#      低于 _FF_REFINE_CONTENT_MIN(默认 0.85) 就判定「重绘成别的画面」, 整块丢弃、
+#      回退到一采放大结果并告警 —— 宁可少一点细节, 也不交付另一幅画。
+# 仍需要「绝不重绘」的旧行为时设 BSAI_H3_REFINE_NO_REDRAW=1(或 BSAI_H3_REFINE_REDRAW=0)。
+_FF_REFINE_NO_REDRAW = (
+    str(os.environ.get("BSAI_H3_REFINE_NO_REDRAW", "0")).strip().lower() in ("1", "true", "on")
+    or str(os.environ.get("BSAI_H3_REFINE_REDRAW", "1")).strip().lower() in ("0", "false", "off")
+)
+try:
+    _FF_REFINE_LOCK_DENOISE = float(os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.20"))
+except Exception:
+    _FF_REFINE_LOCK_DENOISE = 0.20
+_FF_REFINE_LOCK_DENOISE = max(0.05, min(1.0, _FF_REFINE_LOCK_DENOISE))
+try:
+    _FF_REFINE_CONTENT_MIN = float(os.environ.get("BSAI_H3_REFINE_CONTENT_MIN", "0.85"))
+except Exception:
+    _FF_REFINE_CONTENT_MIN = 0.85
+_FF_REFINE_CONTENT_MIN = max(0.0, min(1.0, _FF_REFINE_CONTENT_MIN))
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -6356,19 +6385,26 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     #      音频默认锁定（零噪声 + noise_mask=0，保持一采音频不重绘）。
     #   3) DisableNoise 二采：从 CONST 加噪 latent 走完整去噪曲线
     #      （refine_denoise=1.0 时全量重绘，=0.55 时保留 45% 底图信息）。
+    # v14.389: 内容闸门的一采快照在 refine 段内赋值, 这里先占位 —— 二采未启用时
+    # 闸门必须看到 None 而不是 NameError。
+    _refine_base_snapshot = None
     if refine_enable:
         try:
             _r_factor = float(refine_upscale_factor)
             _r_steps = max(1, int(refine_steps))
             _r_denoise = max(0.05, min(1.0, float(refine_denoise)))
-            # v14.384: 二采不重绘 —— 覆盖所有渲染管线(8+2 / 8+4 / FastOmini /
-            # taomate / 直播配音高清 ...)的 refine_denoise 表值。放大完成后由下方
-            # _FFRefineSkip 直接收工, 这里置 0 只是让日志/进度口径与实际一致。
+            # v14.384: 二采不重绘(仅当用户显式要旧行为: BSAI_H3_REFINE_NO_REDRAW=1)
+            # v14.389: 默认改为「全部重绘 + 内容锁」—— 二采底图是一采放大后的 latent,
+            # denoise 夹到 _FF_REFINE_LOCK_DENOISE, 保留一采的构图/动作/场景。
             if _FF_REFINE_NO_REDRAW:
                 if _r_denoise > 1e-6:
                     print(f"[H3 Extender] v14.384 二采不重绘: 请求 denoise={_r_denoise:.2f} "
                           f"steps={int(refine_steps)} -> denoise=0.00(只超分放大, 不做任何重采样)")
                 _r_denoise = 0.0
+            elif _r_denoise > _FF_REFINE_LOCK_DENOISE:
+                print(f"[H3 Extender] v14.389 二采内容锁: 请求 denoise={_r_denoise:.2f} "
+                      f"-> {_FF_REFINE_LOCK_DENOISE:.2f}(保留一采构图, 只补细节)")
+                _r_denoise = _FF_REFINE_LOCK_DENOISE
             _r_audio = float(refine_audio_denoise)
             _r_align = max(8, int(refine_align_to))
             # v14.195: 二采音频质量保护(渲染环节)——
@@ -6379,7 +6415,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             #    12 兜底)。② 音频重绘开启且二采步数 <12 → 自动提升到 12(官方
             #    音频下限), 根治"从噪声画 4 步音频"的轰鸣/崩坏。
             if _has_audio and float(_r_audio) >= 0.5:
-                if _lip_locked and os.environ.get("BSAI_H3_LIP_AUDIO_REDRAW", "0") != "1":
+                if not _FF_REFINE_NO_REDRAW and os.environ.get("BSAI_H3_REFINE_AUDIO_REDRAW", "0") != "1":
+                    # v14.389 内容锁同样管音频: 二采画面要与一采一致, 声音也必须是同一份,
+                    # 不然低步数重绘音频会换成另一段(且历史实测有低频轰鸣)。默认锁死。
+                    _r_audio = 0.0
+                    print(f"[H3 Extender] v14.389 二采内容锁: 音频重绘 "
+                          f"{float(refine_audio_denoise):.1f} -> 锁定(沿用一采音频)"
+                          f"；确需重绘音频设 BSAI_H3_REFINE_AUDIO_REDRAW=1")
+                elif _lip_locked and os.environ.get("BSAI_H3_LIP_AUDIO_REDRAW", "0") != "1":
                     _r_audio = 0.0
                     print(f"[H3 Extender] v14.195 lip_audio 对口型: 参考原声已锁定, "
                           f"二采音频重绘 {float(refine_audio_denoise):.1f} 会把它重绘成 "
@@ -6648,6 +6691,22 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     samples = _ff_wrap_members([_up_video] + list(_members[1:]), _was_nested)
                     print(f"[H3 Extender] Refine 潜空间放大: clip={clip_index} "
                           f"{_old_hw[1]}x{_old_hw[0]} -> {_up_video.shape[-1]}x{_up_video.shape[-2]} (x{_r_factor})")
+
+            # v14.389: 这里 samples = 一采放大后的 latent, 就是二采重绘的底图。
+            # 拍一份快照: 二采采样完成后拿它做内容闸门(结构相似度不足就回退到这一份),
+            # 同时它也是「二采只该补细节、不该换画面」的参照基准。
+            _refine_base_snapshot = None
+            if not _FF_REFINE_NO_REDRAW and _r_denoise > 1e-6:
+                try:
+                    _bs_m, _bs_n = _ff_extract_members(samples)
+                    if _bs_m:
+                        # 存 CPU float32: 二采是最吃 VRAM 的阶段, 不让快照再占一份显存
+                        _refine_base_snapshot = (
+                            _bs_m[0].detach().to("cpu", dtype=torch.float32),
+                            list(_bs_m[1:]), _bs_n,
+                        )
+                except Exception as _bs_err:
+                    print(f"[H3 Extender] v14.389 一采快照失败(内容闸门将跳过): {_bs_err}")
 
             # v14.384: 放大已完成 = 二采的全部工作已做完。这里直接跳出去, 后面
             # 的 CONST 加噪 / DisableNoise 去噪 / 空间分块 / 时间分块 / 二采驻留 /
@@ -8374,6 +8433,59 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                           f"通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}")
         except Exception as _coll_err:
             print(f"[H3 Extender] 二采 latent 塌陷检测失败(可忽略): {_coll_err}")
+
+    # v14.389 (2026-11-12): 二采内容闸门 —— 「重绘必须和一采内容一样」的落点。
+    # 二采底图 = 一采放大后的 latent, 内容锁 denoise ≤0.20 已把改结构的能力压得很低;
+    # 但 denoise 再低也仍是重采样, 极端情况(换 seed 争用 / 分块相位不一致 / 模型对
+    # 稀疏注意力栈过敏)仍可能整块滑到另一幅画面。这里做确定性判定:
+    #   把二采结果与一采放大后的快照各做 4x4 低通(只比结构/构图, 不比细节纹理),
+    #   逐通道算余弦相似度取均值; < _FF_REFINE_CONTENT_MIN(默认 0.85) 即判定
+    #   「重绘成别的画面」, 整块丢弃回退到一采放大结果并告警。
+    if _refine_base_snapshot is not None:
+        try:
+            _g_m, _g_n = _ff_extract_members(samples)
+            _g_v = _g_m[0] if _g_m else None
+            _g_base, _g_rest, _g_nst = _refine_base_snapshot
+            if (_g_v is not None and _g_base is not None
+                    and _g_v.dim() == 5 and _g_base.dim() == 5
+                    and tuple(_g_v.shape) == tuple(_g_base.shape)):
+                _g_a = _g_base  # 快照本来就是 CPU float32
+                _g_b = _g_v.detach().to("cpu", dtype=torch.float32)
+                _g_t = int(_g_a.shape[2])
+                if _g_t > 8:
+                    _g_idx = torch.linspace(0, _g_t - 1, 8).long()
+                    _g_a = _g_a[:, :, _g_idx]
+                    _g_b = _g_b[:, :, _g_idx]
+                _g_ba, _g_ce, _g_ta, _g_ha, _g_wa = _g_a.shape
+                _g_pa = torch.nn.functional.avg_pool2d(
+                    _g_a.permute(0, 2, 1, 3, 4).reshape(_g_ba * _g_ta, _g_ce, _g_ha, _g_wa),
+                    4, ceil_mode=True)
+                _g_pb = torch.nn.functional.avg_pool2d(
+                    _g_b.permute(0, 2, 1, 3, 4).reshape(_g_ba * _g_ta, _g_ce, _g_ha, _g_wa),
+                    4, ceil_mode=True)
+                _g_va = _g_pa.reshape(_g_pa.shape[0], _g_ce, -1)
+                _g_vb = _g_pb.reshape(_g_pb.shape[0], _g_ce, -1)
+                _g_cos = float(torch.nn.functional.cosine_similarity(
+                    _g_va, _g_vb, dim=2).mean())
+                if _g_cos < _FF_REFINE_CONTENT_MIN:
+                    _g_back = _g_base.to(dtype=_g_v.dtype, device=_g_v.device)
+                    samples = _ff_wrap_members([_g_back] + list(_g_rest), _g_nst)
+                    _g_hw = tuple(_g_base.shape[-2:])
+                    print(f"[H3 Extender] ⚠ v14.389 二采内容闸门: 结构相似度 "
+                          f"{_g_cos:.3f} < {_FF_REFINE_CONTENT_MIN:.2f}, 判定重绘成别的画面, "
+                          f"已丢弃二采结果回退一采放大 {_g_hw[1]}x{_g_hw[0]}(clip={clip_index})")
+                    _send_extender_warning(
+                        owner_id,
+                        f"二采重绘偏离一采内容(结构相似度={_g_cos:.3f} < "
+                        f"{_FF_REFINE_CONTENT_MIN:.2f})，已自动回退一采放大结果，"
+                        f"本段按纯超分交付",
+                        clip_index=clip_index,
+                    )
+                else:
+                    print(f"[H3 Extender] v14.389 二采内容闸门: 结构相似度 {_g_cos:.3f} "
+                          f">= {_FF_REFINE_CONTENT_MIN:.2f}, 二采与一采内容一致, 保留二采")
+        except Exception as _g_err:
+            print(f"[H3 Extender] v14.389 二采内容闸门失败(可忽略): {_g_err}")
 
     # v1.74b (2026-09-15 fix #10): 链几何对齐 —— 若链上已有段且本次 latent 几何不同
     # (per-clip 降级被拦截后仍可能 OOM fallback 到一采尺寸 / 异常路径),
@@ -12713,15 +12825,16 @@ class BSAIH3FilmFactory:
                 # v14.386: 用户口径 —— DMAD 渲染管线改成 1 采 8 步 + 2 采 2 步。
                 # 旧值是 4+2(DMAD 4-step 蒸馏 LoRA 的标称步数); 实测 4 步一采在
                 # H3 上结构/步态偏软, 8 步一采(同一套 DMAD LoRA 继续挂) 更稳,
-                # 二采在 v14.384 起已「只超分放大、绝不重绘」, 这 2 步只留给
-                # BSAI_H3_REFINE_REDRAW=1 的旧重绘路径。
+                # 二采自 v14.389 起默认开重绘(内容锁: denoise 夹到 0.20 + 结构相似度
+                # 闸门), 这 2 步会真跑; 要回到 v14.384 的纯超分设
+                # BSAI_H3_REFINE_NO_REDRAW=1。
                 steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
                 shift_video, shift_audio = 12.0, 2.0
                 if str(sampler_name) != "lcm":
                     sampler_name = "lcm"
                     print(f"[H3 Extender] v14.172 DMAD-4步(渲染管道): 采样器强制 lcm (DMAD 官方配方)")
                 print(f"[H3 Extender] v14.386 DMAD(渲染管道): 一采 8 步 + 二采 2 步 "
-                      f"(二采默认只超分放大不重绘)")
+                      f"(v14.389 二采重绘开, 内容锁 denoise≤0.20)")
             elif _rp_mode == "武戏组合拳":
                 # v14.176: 对齐 YZ金鱼「终极篇」武戏配方 (BV1LKJm6VELc):
                 # 一采6步(simple) + 二采6步(总12步, 武戏拟合更清晰),
@@ -13173,8 +13286,9 @@ class BSAIH3FilmFactory:
                 # 同一批低秩子空间, 与 Pika/TaoMate 的禁叠禁忌同源)。
                 # Ref2VA 版要求 Ref2VA 底模(或 hybrid b25-49 混合底模, 分段链路靠
                 # FL2VA 末帧接力); 纯 FL2VA 底模请改用 FL2VA 版权重。
-                # 二采自 v14.384 起默认只超分放大、不重绘, 4 步只在
-                # BSAI_H3_REFINE_REDRAW=1 的旧重绘路径上才会真的跑。
+                # 二采自 v14.389 起默认开重绘(内容锁 denoise 0.45 -> 夹到 0.20,
+                # 采样后还有结构相似度闸门), 这 4 步会真跑; 纯超分设
+                # BSAI_H3_REFINE_NO_REDRAW=1。
                 steps, refine_steps = 8, 4
                 tile_count, refine_denoise = 16, 0.45
                 refine_enable = True
@@ -13194,7 +13308,7 @@ class BSAIH3FilmFactory:
                       "挂 H3加速\\ACC\\ 下的 8 步加速 LoRA(strength 1.0) —— "
                       "Ref2VA 版 MiniMax-H3-Ref2VA-Acc-8Step_comfyui_pdd-T8 / "
                       "FL2VA 版 MiniMax-H3-FL2VA-Acc-8Step_comfy; "
-                      "一采 8 步 + 二采 4 步(二采默认只超分放大、绝不重绘); "
+                      "一采 8 步 + 二采 4 步(v14.389 二采重绘开, 内容锁 denoise≤0.20 + 结构闸门); "
                       "不要再叠加第二个加速 LoRA")
             elif _rp_mode == "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)":
                 # v14.310 (2026-11-04): Pika H3 Flex 配方 (B站教程 BV1Dy4u67EJo,
@@ -13432,7 +13546,7 @@ class BSAIH3FilmFactory:
                           "upscaler 插件, 二采放大走 bilinear 插值(画质略降)")
                 print("[H3 Extender] 🎬 v14.322 SingularityV2+Pika H3 8步 高动态双采 "
                       "(BV1y8446DExi 配方): 一采 8 步(euler+simple, shift 12/3, CFG 1.0) | "
-                      "二采 SelfLift 渐进 3 步(denoise 0.40, latent x2.0, "
+                      "二采 SelfLift 渐进 3 步(表值 denoise 0.40 -> v14.389 内容锁夹到 0.20, "
                       f"upscaler={refine_upscaler_model or 'bilinear'}, tiled {tile_count}x{tile_overlap}) "
                       "= 11 NFE; 音频二采锁定不重绘 — "
                       "Loader 建议 Minimax-h3_Singularity_ref2va_v2_int8 (链式一镜到底可留 hybrid b25-49); "
@@ -17070,8 +17184,9 @@ class BSAIH3FilmFactory:
                                   "接缝不再因锁 keep 失效而跳变")
                     elif not _os_pass_notice_done:
                         _os_pass_notice_done = True
-                        print("[H3 Extender] v14.384 一镜到底·双采高清：二采已改为「只超分放大、绝不重绘」"
-                              "(v14.384)，不再有重采样带来的接缝像素漂移")
+                        print("[H3 Extender] v14.389 一镜到底·双采高清：二采开重绘 + 内容锁"
+                              f"(denoise 夹到 {_FF_REFINE_LOCK_DENOISE:.2f}, 采样后过结构相似度闸门"
+                              f" ≥{_FF_REFINE_CONTENT_MIN:.2f} 才保留), 不会重绘成别的画面")
                 # v14.214 (2026-10-26): 采样前强制释放文本编码器(TE)显存 ——
                 # 长链从第 2 段起 TE 常驻 8~15GB, 采样前 free 从 22GB 掉到 15GB;
                 # 而 H3 DiT 权重 20.6GB 在 24GB 卡上必须走 DynamicVRAM 流式,

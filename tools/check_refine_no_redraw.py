@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""v14.384 二采「只超分放大、绝不重绘」静态自检。
+"""v14.389 二采「重绘 + 内容锁」静态自检。
 
-背景(用户口径): 电影工厂所有渲染管线的二采(8+2 / 8+4 / FastOmini /
-taomate / 直播配音高清 ...)都不许重绘, 必须完全按照一采结果超分放大。
-实现不是"把 denoise 调小"(那还是会重绘, 而且分块+权重换页会卡死), 而是在
-潜空间放大完成的那一刻用 _FFRefineSkip 跳出整个重绘段。
+背景(用户口径): 电影工厂所有渲染管线的二采都开重绘, 但二采结果必须和一采内容
+一样, 不得重绘成别的画面。
 
-本脚本只做静态断言, 不加载 ComfyUI:
-  1) 模块级开关与内部信号存在
-  2) refine 入口把 denoise 强制归零(覆盖所有管线表值)
-  3) 跳出点在「潜空间放大」之后、任何加噪/采样之前
-  4) 捕获子句排在 OOM 兜底之前(否则会被当成二采失败)
-  5) 采样入口(_ff_const_add_noise / guider.sample)全部在跳出点之后
+v14.384 曾经是「一律不重绘」(denoise 归零 + _FFRefineSkip 跳出整个重绘段) ——
+那条结论已被本次诉求反转, 本脚本随之改写, 现在守的是三道同时成立的闸门:
+
+  1) 默认值: env 未设 = 重绘开; 只有 BSAI_H3_REFINE_NO_REDRAW=1
+     (或 BSAI_H3_REFINE_REDRAW=0) 才回到 v14.384 的纯超分行为。
+  2) 噪声上限: 二采 denoise 一律夹到 _FF_REFINE_LOCK_DENOISE(默认 0.20), 覆盖
+     各管线表里的 0.45/0.5/0.55/1.0。
+  3) 结构闸门: 采样完成后与「一采放大后的快照」做 4x4 低通余弦相似度,
+     低于 _FF_REFINE_CONTENT_MIN(默认 0.85) 即丢弃二采结果、回退一采放大。
+  4) 音频: 内容锁期间音频默认锁死(沿用一采), env 可放开。
+
+本脚本只做静态断言, 不加载 ComfyUI。
 """
 import io
 import os
@@ -38,59 +42,71 @@ def check(name, ok, detail=""):
 def main():
     src = io.open(EXT, "r", encoding="utf-8").read()
 
-    check("模块级开关 _FF_REFINE_NO_REDRAW 存在",
-          "_FF_REFINE_NO_REDRAW = str(os.environ.get(\"BSAI_H3_REFINE_REDRAW\"" in src)
-    check("内部信号 _FFRefineSkip 存在",
+    # 1) 默认值翻转
+    i_flag = src.find("_FF_REFINE_NO_REDRAW = (")
+    check("模块级开关 _FF_REFINE_NO_REDRAW 存在(新式双 env 定义)", i_flag > 0, f"at {i_flag}")
+    seg = src[i_flag:i_flag + 400] if i_flag > 0 else ""
+    check("默认是「重绘开」: NO_REDRAW 默认 0", 'get("BSAI_H3_REFINE_NO_REDRAW", "0")' in seg)
+    check("保留反向开关: REFINE_REDRAW 默认 1(设 0 即回到纯超分)",
+          'get("BSAI_H3_REFINE_REDRAW", "1")' in seg)
+    check("内部信号 _FFRefineSkip 仍存在(供 NO_REDRAW 路径使用)",
           "class _FFRefineSkip(Exception):" in src)
-    check("开关默认是「不重绘」(env 未设 = 生效)",
-          'not in ("1", "true", "on")' in src.split("_FF_REFINE_NO_REDRAW = ")[1][:200])
 
-    # 入口归零
+    # 2) 噪声上限
+    check("内容锁 denoise 上限常量存在",
+          '_FF_REFINE_LOCK_DENOISE = float(os.environ.get("BSAI_H3_REFINE_DENOISE_MAX", "0.20"))' in src)
+    check("内容锁 denoise 被夹进 [0.05, 1.0] 合法区",
+          "_FF_REFINE_LOCK_DENOISE = max(0.05, min(1.0, _FF_REFINE_LOCK_DENOISE))" in src)
     idx_entry = src.find("if _FF_REFINE_NO_REDRAW:")
-    check("refine 入口按开关强制 denoise=0", idx_entry > 0, f"at {idx_entry}")
-    check("入口归零后有 _r_denoise = 0.0",
-          src.find("_r_denoise = 0.0", idx_entry) > idx_entry)
+    idx_else = src.find("elif _r_denoise > _FF_REFINE_LOCK_DENOISE:", idx_entry)
+    check("refine 入口按开关分支(NO_REDRAW=1 仍回纯超分)",
+          idx_entry > 0 and idx_else > idx_entry, f"entry={idx_entry} else={idx_else}")
+    seg2 = src[idx_else:idx_else + 300] if idx_else > 0 else ""
+    check("重绘路径把 denoise 夹到内容锁上限", "_r_denoise = _FF_REFINE_LOCK_DENOISE" in seg2)
 
-    # 跳出点位置
+    # 3) 一采快照 + 结构闸门
+    idx_snap = src.find("_refine_base_snapshot = None")
+    idx_assign = src.find("_refine_base_snapshot = (")
     idx_up = src.find("Refine 潜空间放大: clip=")
     idx_skip = src.find("raise _FFRefineSkip()")
-    check("潜空间放大锚点存在", idx_up > 0, f"at {idx_up}")
-    check("跳出点在放大之后", idx_skip > idx_up, f"up={idx_up} skip={idx_skip}")
+    check("一采快照先占位(二采未启用时闸门不会 NameError)", idx_snap > 0, f"at {idx_snap}")
+    check("快照在_放大之后_、跳出点之前拍(拿到的是一采放大后的底图)",
+          0 < idx_up < idx_assign < idx_skip,
+          f"up={idx_up} assign={idx_assign} skip={idx_skip}")
+    check("快照存 CPU float32(不在二采最吃 VRAM 时再占一份显存)",
+          'detach().to("cpu", dtype=torch.float32)' in src[idx_assign:idx_assign + 400])
+    idx_gate = src.find("_g_cos = float(")
+    check("内容闸门存在", idx_gate > 0, f"at {idx_gate}")
+    check("闸门在采样之后(位于塌陷检测之后、几何对齐之前)",
+          idx_gate > idx_skip
+          and idx_gate < src.find("v1.74b (2026-09-15 fix #10)"))
+    seg3 = src[idx_gate - 1200:idx_gate + 2600] if idx_gate > 0 else ""
+    check("闸门用 4x4 低通(只比结构, 不比细节纹理)",
+          "avg_pool2d" in seg3 and "4, ceil_mode=True" in seg3.replace(" ", " "))
+    check("闸门用余弦相似度",
+          "cosine_similarity" in seg3)
+    check("闸门按阈值判定, 低于阈值即丢弃二采",
+          "_FF_REFINE_CONTENT_MIN" in seg3 and "if _g_cos <" in seg3)
+    check("丢弃二采时回退到一采放大快照",
+          "_g_back = _g_base.to(" in seg3 and "_g_nst" in seg3)
+    check("回退时大声打印(实机可在日志里看到相似度与回退)",
+          "判定重绘成别的画面" in seg3 and "_g_cos:.3f" in seg3)
+    check("回退时推送告警(不只写日志)",
+          "_send_extender_warning" in seg3)
 
-    # 采样入口必须在跳出点之后
-    idx_noise = src.find("_r_noise = comfy.sample.prepare_noise(samples")
-    idx_sample = src.find("_r_guider.sample(", idx_skip)  # 二采那处(跳过点之后的第一处)
-    check("二采加噪在跳出点之后", idx_noise > idx_skip, f"noise={idx_noise} skip={idx_skip}")
-    check("二采采样调用在跳出点之后", idx_sample > idx_skip, f"sample={idx_sample} skip={idx_skip}")
-
-    # 捕获子句顺序: 必须在 OOM 之前
-    idx_catch = src.find("except _FFRefineSkip:")
-    idx_oom = src.find("except torch.cuda.OutOfMemoryError as _oom:")
-    idx_generic = src.find("except Exception as _re:", idx_oom)
-    check("捕获 _FFRefineSkip 的子句存在", idx_catch > 0, f"at {idx_catch}")
-    check("捕获子句排在 OOM 兜底之前", 0 < idx_catch < idx_oom, f"catch={idx_catch} oom={idx_oom}")
-    check("捕获子句排在通用 except 之前", idx_oom < idx_generic)
-
-    # 捕获子句里必须真的收工, 不能回退一采
-    seg = src[idx_catch:src.find("except torch.cuda.OutOfMemoryError as _oom:")]
-    check("捕获子句打印『只超分放大』", "二采只超分放大(不重绘)" in seg)
-    check("捕获子句不把 samples 换回一采备份",
-          "_samples_pre_upscale" not in seg)
-
-    # 跳过段覆盖: 分块/驻留/时间分块 全在跳出点之后
-    for name, anchor in (
-        ("二采驻留", "Refine 二采前 DiT 驻留"),
-        ("v14.181 自动分块", "v14.181 方案A"),
-        ("时间分块", "v2.02 时间分块二采"),
-    ):
-        pos = src.find(anchor)
-        check(f"{name} 在跳出点之后(不执行)", pos > idx_skip, f"{anchor} at {pos}")
+    # 4) 音频锁
+    idx_audio = src.find("v14.389 二采内容锁: 音频重绘")
+    check("内容锁期间音频默认锁死", idx_audio > 0, f"at {idx_audio}")
+    check("音频锁有 env 放开口",
+          'os.environ.get("BSAI_H3_REFINE_AUDIO_REDRAW", "0")' in src)
+    check("音频锁分支排在 lip_audio 分支之前(先锁后判)",
+          0 < idx_audio < src.find("v14.195 lip_audio 对口型"))
 
     print()
     if FAIL:
         print(f"有 {FAIL} 条失败 / 共 {PASS + FAIL} 条")
         return 1
-    print(f"全部通过 ({PASS} 条 v14.384 二采不重绘自检)")
+    print(f"全部通过 ({PASS} 条 v14.389 二采重绘+内容锁自检)")
     return 0
 
 
