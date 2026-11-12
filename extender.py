@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.367-pika-flex-8+2-real-dual-pass"
+BUILD = "minimax-h3-extender-v14.389-acc8step+pdmd-sigma+refine-full-redraw-content-lock"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -18012,7 +18012,9 @@ NODE_CLASS_MAPPINGS = {
 
 # v14.144 启动标记：重启 ComfyUI 后控制台出现此行即确认加载的是最新后端
 # v14.257: 隐藏启动横幅中的超长版本说明文字（原括号内整段历史配方摘要不再打印）
-print("[BSAI-H3-Film-Factory] v14.239 backend loaded")
+# v14.389: 横幅改为直接打印 BUILD —— 原来硬编码 v14.239, 与 BUILD 长期脱节,
+# 控制台看到的"已加载版本"和 manifest 里的 build 对不上, 无法一眼判断是否重启生效。
+print(f"[BSAI-H3-Film-Factory] {BUILD} backend loaded")
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BSAIH3FilmFactory": "BSAI ComfyUI H3 Film Factory",
