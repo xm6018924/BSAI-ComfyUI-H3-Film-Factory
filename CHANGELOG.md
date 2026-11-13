@@ -2,6 +2,13 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.399 (2026-11-13) — 时间分块二采门限抬到稀疏健康区，修 global 包装转密集注意力换页卡死 / Temporal-chunk refine gate raised to the sparse healthy zone, fixing the dense-attention weight-swap stall
+
+- 现场：v14.398 切 global 后，DMAD 二采按 240k/段预算切成 chunk=29（236,640 tokens/段）。时间分块门限旧值 180k，236k>180k 同时触发两件事：注入 `sol_max_tokens` 把 Sol-Attn 降级 dense，并安装 selflift global 包装走全序列密集注意力 + 分块 MLP。24GB 上权重驻留 16.2GB 后 free 掉到 ~400MiB，每个 Linear 现场量化 cast/搬运换页，首段 6 分钟无进度、功耗 ~99W 空转（与前两次卡死同签名）。
+- 改动：门限按路径拆分。单采样档（`refine_single_pass`）维持 180k；时间分块路径按稀疏 Sol-Attn 基准实测健康上界 300k 判（218k=0.97s/步、293k=0.70s/步，440k 才进病态区）；非分块整段仍用 `_REFINE_MAX_SOL_TOKENS=130k`。这样 236k/段不再超门，跳过 global 包装、不注入 dense 门，保留稀疏 Sol-Attn；global 无空间分块的结构不变。
+- 步数/denoise/采样器/倍率/时间分块预算均不变。
+- English: After moving to global, the DMAD refine chunks to 236,640 tokens/segment (chunk=29). The old 180k temporal gate both injected `sol_max_tokens` to downgrade Sol-Attn to dense and installed the selflift global wrapper (full-sequence dense attention + chunked MLP); with 16.2GB resident, free dropped to ~400MiB and per-Linear quant cast/weight swapping stalled the first segment at ~99W. The gate is now split per path: single-pass stays 180k, temporal chunks use the proven sparse healthy upper bound 300k (218k 0.97s, 293k 0.70s; sick only past 440k), non-chunked whole-segment stays 130k. A 236k segment now stays sparse, skips the global wrapper and dense downgrade; the no-spatial-tile global structure is unchanged. Steps/denoise/sampler/scale/chunk budget unchanged.
+
 ### v14.398 (2026-11-13) — DMAD 4-Step 二采切 global 全上下文，修复低显存权重换页卡死 / DMAD 4-Step refine moves to global full-context, fixing the low-VRAM weight-swap stall
 
 - 现场：DMAD 4-Step 档二采（x2.0 共 709,920 tokens，spatial 4 块 × 时间 7 段、chunk=20）首段首向前向卡死约 30 分钟无进度；free VRAM 仅 ~522MiB，CPU 单核满载、GPU util 100% 但功耗 ~100W 空转；py-spy 栈停在 `cast_bias_weight → Linear.forward_comfy_cast_weights → Attention.forward → DiTBlock.forward`，即低显存下每个 Linear 现场量化 cast 再搬上卡、SM 等搬运的换页风暴（stderr 无 OOM/异常）。

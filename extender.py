@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.398-pika-dmad-refine-global-context"
+BUILD = "minimax-h3-extender-v14.399-temporal-gate-sparse-keep"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -7596,7 +7596,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # v14.278: 单次采样档的 tokens 已由倍率预算压到 <=180,000(与一采同规模),
             # 门限按 180k 判 —— 仍用 130k 会把它误判成病态规模, 强制降级 dense
             # 并套 global 包装(全序列 dense attention, 每步上百秒)。
-            _r_gate_limit = 180000 if (_use_temporal or refine_single_pass) else _REFINE_MAX_SOL_TOKENS
+            # v14.399: 时间分块路径的单段 sparse Sol-Attn 基准健康区上界 ~293k
+            # (218k=0.97s, 293k=0.70s; 440k 才病态), 旧代码把 _use_temporal 也压到
+            # 180k, 导致 236k/段被误判超门 -> 注入 sol_max_tokens 降级 dense + 套
+            # selflift global 包装走全序列密集注意力, 24GB 上权重无法驻留换页卡死。
+            # 单采样档(refine_single_pass)维持 180k; 时间分块按稀疏实测上界 300k 判。
+            if refine_single_pass:
+                _r_gate_limit = 180000
+            elif _use_temporal:
+                _r_gate_limit = 300000
+            else:
+                _r_gate_limit = _REFINE_MAX_SOL_TOKENS
             # v14.164 (2026-10-22 fix #v14.173): 方案A — 先分块再决定 dense 降级。
             # 旧顺序(v14.148 先注入 sol_max_tokens -> v14.164 后分块)导致分块成功后
             # dense 门仍留在 transformer_options 里, 每个 262k token 的 tile 强制
