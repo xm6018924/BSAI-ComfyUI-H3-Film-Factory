@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.399-temporal-gate-sparse-keep"
+BUILD = "minimax-h3-extender-v14.400-temporal-gate-sparse-keep+u4k-engines-dlss5-real"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -5263,14 +5263,17 @@ def _ff_build_xfade_merge_cmd(ff, clip_paths, output_path, vfade=0.5, afade=0.05
     return cmd, durations
 
 
-def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_restore):
+def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_restore,
+                          u4k_opts=None):
     """对已生成的视频文件做像素超分重编码（原子替换原文件）。
 
     引擎：
       bicubic —— ffmpeg scale 滤镜（最快、无模型依赖、内存安全）；
       realesr —— 逐帧读入 → ComfyUI UpscaleModelLoader → 重编码（质量优先）；
-      dlss5  —— 预留（需 NVIDIA DLSS SDK 与驱动），暂回退 bicubic；
-      auto   —— 按可用性自动选择。
+      dlss5  —— NVIDIA DLSS 5 神经超分（真实调用 video2dlssnr.exe；缺 DLL/exe 才回退 bicubic）；
+      auto   —— 按可用性自动选择；
+      v14.394 起另有 13 档 4K 引擎（auto_route/flashvsr/relayvsr/seedvr2/seedvr2_int8/
+      rtx/rtx_vfx/vosr2/vosr_dlss/vosr_rtx/topaz_*），委托 BSAI-H3-upscale-4K 的引擎函数执行。
     默认平衡档=auto → realesr 可用则 realesr，否则 bicubic。
     """
     import torch
@@ -5297,6 +5300,29 @@ def _ff_upscale_video_file(path, factor, engine, model, fp16, tile, batch, face_
         if engine_eff == "auto":
             engine_eff = "realesr" if _ff_realesr_available(model) else "bicubic"
         tmp = path.with_name(path.stem + ".upscaled" + path.suffix)
+        # v14.394: 4K 引擎档 -> 委托 BSAI-H3-upscale-4K 的引擎函数（含真实 DLSS5）
+        if u4k_opts and engine_eff in _FF_U4K_ENGINE_LABELS:
+            _u4k_scale = float(u4k_opts.get("scale") or 0.0)
+            if _u4k_scale > 0.5:
+                factor = _u4k_scale
+                fw = max(2, int(round(w * factor)) // 2 * 2)
+                fh = max(2, int(round(h * factor)) // 2 * 2)
+            _o = dict(u4k_opts)
+            _o["scale"] = float(factor)
+            _res = _ff_upscale_video_u4k(path, tmp, ff, w, h, fps, engine_eff, _o)
+            if _res is True:
+                os.replace(tmp, path)
+                print(f"[H3 Extender] v14.394 4K 引擎超分完成: {path.name} {w}x{h} -> {fw}x{fh} "
+                      f"engine={engine_eff}", flush=True)
+                if face_restore:
+                    _ff_face_restore_file(path, ff)
+                return True
+            if isinstance(_res, tuple) and _res and str(_res[0]) == "realesr":
+                # auto_route 解析到 Real-ESRGAN .pth：改走既有 realesr 通道，不丢用户意图
+                model = str(_res[1]) if len(_res) > 1 and _res[1] else model
+                engine_eff = "realesr"
+            else:
+                engine_eff = "bicubic"
         if engine_eff == "bicubic":
             cmd = [
                 ff, "-y", "-i", str(path),
@@ -5531,6 +5557,414 @@ def _ff_upscale_video_realesr(path, tmp, ff, fw, fh, fps, model, fp16, tile, bat
         raise RuntimeError("realesr: 无输出帧")
     if enc.wait() != 0:
         raise RuntimeError("realesr: ffmpeg 重编码失败")
+
+
+# ===================== v14.394: BSAI-H3-upscale-4K 引擎委托层 =====================
+# 设计取舍：直接调用 4K 插件的引擎函数，不复制它 4300 行、也不走它的节点包装类 ——
+# 那个类的 upscale() 入口无条件 model_management.unload_all_models()，逐 CLIP 超分时
+# 会把 H3 底模踢出显存，下一段要重新加载（分钟级/段）。张量契约照抄插件：
+# frames = [B,H,W,3] float32 CPU 0..1，Topaz 例外（吃 uint8 吐 uint8）。
+
+_FF_U4K_ENGINE_LABELS = {
+    "auto_route": "Auto Route (content-based)",
+    "flashvsr": "FlashVSR-v1.1 (diffusion video SR)",
+    "relayvsr": "RelayVSR (one-step Wan VSR)",
+    "seedvr2": "SeedVR2 7B (diffusion video SR)",
+    "seedvr2_int8": "SeedVR2 7B INT8 (native ComfyUI)",
+    "rtx": "NVIDIA RTX Video Super Res",
+    "rtx_vfx": "NVIDIA RTX VSR - Denoise/Deblur (VFX)",
+    "dlss5": "DLSS 5 (NVIDIA neural SR)",
+    "vosr2": "VOSR 2.0 (CVPR2026 generative SR)",
+    "vosr_dlss": "VOSR 2.0 + DLSS 5 (dual-engine)",
+    "vosr_rtx": "VOSR 2.0 + RTX (recommended 2-stage)",
+    "topaz_slp26": "Topaz Starlight 2.6 (generative)",
+    "topaz_astra": "Topaz Astra (generative)",
+    "topaz_wonder35": "Topaz Wonder 3.5 (generative)",
+}
+
+# 自带时序建模的引擎：时域后处理要归零（4K 插件口径）
+_FF_U4K_SELF_TEMPORAL = frozenset({"flashvsr", "relayvsr", "seedvr2", "seedvr2_int8", "vosr2"})
+
+# u4k_engine_params 允许透传的键 = 4K 节点 INPUT_TYPES 的参数名
+_FF_U4K_PARAM_KEYS = frozenset({
+    "auto_prefer", "scale", "tile_size", "tile_pad", "batch_frames", "use_fp16",
+    "use_compile", "temporal_strength", "detail_amount", "detail_radius", "softness",
+    "face_restore", "face_det_backend", "face_det_conf", "face_blend", "face_fidelity",
+    "detail_mode", "input_adaptive", "face_temporal", "dlss_style", "dlss_intensity",
+    "dlss_detail", "dlss_motion", "rtx_vfx_op", "rtx_vfx_level", "rtx_strength",
+    "vosr_cfg", "vosr_steps", "vosr_scale", "dlss_chain_scale", "rtx_chain_scale",
+    "sv2_steps", "sv2_cfg", "sv2_sampler", "sv2_scheduler", "sv2_color",
+    "flashvsr_anti_ghost", "relay_weights", "relay_detail",
+})
+
+# 引擎函数级、但 4K 节点没做成 widget 的旋钮（我们额外开放给 u4k_engine_params）
+_FF_U4K_PARAM_KEYS_EXTRA = frozenset({
+    "seed", "topaz_strength", "topaz_max_gpu_mem", "topaz_qp", "topaz_compile",
+})
+
+_FF_U4K_PARAM_KEYS_ALL = _FF_U4K_PARAM_KEYS | _FF_U4K_PARAM_KEYS_EXTRA
+
+_FF_U4K_MODULE_CACHE = [None, False]  # [module, 已尝试过]
+
+
+def _ff_u4k_module():
+    """懒加载 BSAI-H3-upscale-4K 插件模块（缓存；找不到就打印并按 bicubic 回退）。
+
+    查找顺序：环境变量 BSAI_U4K_PLUGIN_DIR -> 本插件同级目录 -> 本插件 _vendor/。
+    """
+    if _FF_U4K_MODULE_CACHE[0] is not None:
+        return _FF_U4K_MODULE_CACHE[0]
+    if _FF_U4K_MODULE_CACHE[1]:
+        return None
+    _FF_U4K_MODULE_CACHE[1] = True
+    import importlib.util as _ilu
+    import sys as _sys
+
+    cands = []
+    env = (os.environ.get("BSAI_U4K_PLUGIN_DIR") or "").strip().strip('"')
+    if env:
+        cands.append(env)
+    here = os.path.dirname(os.path.abspath(__file__))
+    cands.append(os.path.join(os.path.dirname(here), "BSAI-H3-upscale-4K"))
+    cands.append(os.path.join(here, "_vendor", "BSAI-H3-upscale-4K"))
+    py = None
+    for d in cands:
+        p = os.path.join(d, "bsai_h3_upscale_4k.py")
+        if d and os.path.isfile(p):
+            py = p
+            break
+    if not py:
+        print("[H3 Extender] v14.394 未找到 BSAI-H3-upscale-4K 插件（可设 BSAI_U4K_PLUGIN_DIR）；"
+              "4K 引擎档将回退 bicubic", flush=True)
+        return None
+    try:
+        d = os.path.dirname(py)
+        if d not in _sys.path:
+            _sys.path.insert(0, d)
+        spec = _ilu.spec_from_file_location("bsai_h3_upscale_4k", py)
+        mod = _ilu.module_from_spec(spec)
+        _sys.modules.setdefault("bsai_h3_upscale_4k", mod)
+        spec.loader.exec_module(mod)
+        _FF_U4K_MODULE_CACHE[0] = mod
+        print(f"[H3 Extender] v14.394 已接入 BSAI-H3-upscale-4K 引擎: {d}", flush=True)
+        return mod
+    except Exception as e:
+        print(f"[H3 Extender] v14.394 加载 BSAI-H3-upscale-4K 失败: {e}", flush=True)
+        return None
+
+
+def _ff_u4k_collect_opts(kwargs):
+    """收集 u4k_* 控件 + u4k_engine_params(JSON 长尾)，返回引擎参数 dict。"""
+    o = {
+        "scale": float(kwargs.get("u4k_scale", 0.0) or 0.0),
+        "auto_prefer": str(kwargs.get("u4k_auto_prefer", "Quality")),
+        "input_adaptive": str(kwargs.get("u4k_input_adaptive", "Auto")),
+        "detail_amount": float(kwargs.get("u4k_detail_amount", 0.50)),
+        "softness": float(kwargs.get("u4k_softness", 0.10)),
+        "temporal_strength": float(kwargs.get("u4k_temporal_strength", 0.20)),
+        "face_restore": str(kwargs.get("u4k_face_restore", "Off")),
+        "tile_pad": int(kwargs.get("u4k_tile_pad", 32) or 0),
+        "batch_frames": int(kwargs.get("upscale_batch", 4) or 4),
+    }
+    raw = kwargs.get("u4k_engine_params", "") or ""
+    if isinstance(raw, str) and raw.strip():
+        import json as _json
+        try:
+            extra = _json.loads(raw)
+        except Exception as e:
+            print(f"[H3 Extender] v14.394 u4k_engine_params JSON 解析失败({e})，忽略", flush=True)
+            extra = None
+        if isinstance(extra, dict):
+            bad = sorted(k for k in extra if k not in _FF_U4K_PARAM_KEYS_ALL)
+            if bad:
+                print(f"[H3 Extender] v14.394 u4k_engine_params 不认识的键 {bad}；"
+                      f"合法键 = {sorted(_FF_U4K_PARAM_KEYS_ALL)}", flush=True)
+            else:
+                o.update({str(k): v for k, v in extra.items()})
+    return o
+
+
+def _ff_u4k_call_engine(mod, frames, engine, scale, opts, fps=30.0):
+    """按引擎把一批 NHWC 帧交给 4K 插件的引擎函数；参数口径逐项照抄其节点分派。"""
+    d = opts
+    if engine == "flashvsr":
+        return mod._flashvsr_upscale(
+            frames, float(scale), seed=int(d.get("seed", 42)),
+            anti_ghost=float(d.get("flashvsr_anti_ghost", 0.40)), local_range=5)
+    if engine == "relayvsr":
+        return mod._relayvsr_upscale(
+            frames, float(scale),
+            weights=str(d.get("relay_weights", "Auto (by scale)")),
+            detail=float(d.get("relay_detail", 1.0)))
+    if engine == "seedvr2":
+        return mod._seedvr2_upscale(frames, float(scale), seed=int(d.get("seed", 42)))
+    if engine == "seedvr2_int8":
+        return mod._seedvr2_native_upscale(
+            frames, float(scale), seed=int(d.get("seed", 42)),
+            steps=int(d.get("sv2_steps", 12)), cfg=float(d.get("sv2_cfg", 1.2)),
+            sampler_name=str(d.get("sv2_sampler", "euler")),
+            scheduler=str(d.get("sv2_scheduler", "normal")),
+            color_correction=str(d.get("sv2_color", "lab")))
+    if engine == "rtx":
+        return mod._rtx_upscale(frames, float(scale))
+    if engine == "rtx_vfx":
+        return mod._rtx_vfx_upscale(
+            frames, float(scale), op=str(d.get("rtx_vfx_op", "Denoise")),
+            level=str(d.get("rtx_vfx_level", "ULTRA")),
+            strength=float(d.get("rtx_strength", 1.0)))
+    if engine == "dlss5":
+        return mod._dlssnr_upscale(
+            frames, float(scale), style=str(d.get("dlss_style", "Cinematic")),
+            preset="Default", intensity=float(d.get("dlss_intensity", 1.0)),
+            detail=float(d.get("dlss_detail", 1.0)),
+            motion=bool(d.get("dlss_motion", True)),
+            skin=0.0, color=0.0)
+    if engine == "vosr2":
+        return mod._vosr_upscale(
+            frames, scale=float(scale),
+            cfg_scale=float(d.get("vosr_cfg", 0.5)),
+            infer_steps=int(d.get("vosr_steps", 1)))
+    if engine == "vosr_dlss":
+        return mod._vosr_dlss_chain(
+            frames, vosr_scale=int(d.get("vosr_scale", 2)),
+            dlss_scale=int(d.get("dlss_chain_scale", 2)),
+            dlss_style=str(d.get("dlss_style", "Cinematic")),
+            dlss_intensity=float(d.get("dlss_intensity", 1.0)),
+            dlss_detail=float(d.get("dlss_detail", 1.0)),
+            dlss_motion=bool(d.get("dlss_motion", True)))
+    if engine == "vosr_rtx":
+        return mod._vosr_rtx_chain(
+            frames, vosr_scale=int(d.get("vosr_scale", 2)),
+            rtx_scale=int(d.get("rtx_chain_scale", 2)))
+    if engine.startswith("topaz_"):
+        import numpy as _np_u4k
+        import torch as _torch_u4k
+        mid = {"topaz_slp26": "slp-26", "topaz_astra": "astra",
+               "topaz_wonder35": "wonder-3.5"}[engine]
+        u8 = (frames.clamp(0.0, 1.0).mul_(255.0).round_().to(_torch_u4k.uint8)
+              .cpu().numpy().astype(_np_u4k.uint8))
+        # 4K 节点口径：Topaz 引擎上限 4x
+        out_np = mod._topaz_upscale(
+            u8, fps=float(fps or 24.0), scale=min(float(scale), 4.0),
+            strength=float(d.get("topaz_strength", 1.0)),
+            max_gpu_mem=float(d.get("topaz_max_gpu_mem", 14.0)),
+            qp=int(d.get("topaz_qp", 14)), model_id=mid)
+        return _torch_u4k.from_numpy(out_np.astype(_np_u4k.float32) / 255.0)
+    return None
+
+
+def _ff_u4k_postprocess(mod, out, lr_np, opts, temporal, scale):
+    """4K 插件的后处理链：输入自适应 -> 时域+细节重建 -> softness -> 人脸修复。"""
+    d = opts
+    detail_amount = float(d.get("detail_amount", 0.50))
+    detail_radius = float(d.get("detail_radius", 1.8))
+    detail_mode = str(d.get("detail_mode", "smart"))
+    softness = float(d.get("softness", 0.10))
+    input_adaptive = str(d.get("input_adaptive", "Auto"))
+
+    in_short = float(min(out.shape[1], out.shape[2]) / max(1e-6, float(scale)))
+    try:
+        detail_eff, mode_eff, soft_eff, _adapt = mod._apply_input_adaptive(
+            input_adaptive, in_short, detail_amount, detail_mode, softness)
+    except Exception:
+        detail_eff, mode_eff, soft_eff = detail_amount, detail_mode, softness
+
+    try:
+        out = mod._video_temporal_detail(
+            out, lr_np, float(temporal), float(detail_eff),
+            float(detail_radius), float(scale), mode_eff)
+    except Exception as e:
+        print(f"[H3 Extender] v14.394 4K 细节/时域后处理跳过: {e}", flush=True)
+
+    if soft_eff and float(soft_eff) > 0:
+        try:
+            import torch as _torch_soft
+            if _torch_soft.cuda.is_available():
+                out = mod._soften_chunked(out, float(soft_eff))
+        except Exception as e:
+            print(f"[H3 Extender] v14.394 4K softness 跳过: {e}", flush=True)
+
+    face_mode = str(d.get("face_restore", "Off") or "Off")
+    if face_mode != "Off":
+        conf = float(d.get("face_det_conf", 0.15))
+        blend = float(d.get("face_blend", 0.70))
+        fid = float(d.get("face_fidelity", 0.60))
+        if face_mode == "Small-Face (CodeFormer)":
+            # 4K 插件 v2.3.2 口径：小脸档保留温和 blend / 高 fidelity，防逐帧抖
+            fake_mode, conf, blend, fid = ("CodeFormer", min(0.20, conf),
+                                          min(0.45, blend), max(0.75, fid))
+        else:
+            fake_mode = face_mode
+        try:
+            out, _ = mod._face_restore_frames(
+                out, fake_mode, conf, blend, fid,
+                temporal=float(d.get("face_temporal", 0.50)),
+                det_backend=mod._map_det_backend(str(d.get("face_det_backend", "Auto")))
+            )
+        except Exception as e:
+            print(f"[H3 Extender] v14.394 4K 人脸修复跳过: {e}", flush=True)
+    return out
+
+
+def _ff_upscale_video_u4k(path, tmp, ff, w, h, fps, engine, opts):
+    """BSAI-H3-upscale-4K 引擎的流式超分（raw 解码 -> 逐块引擎 -> ffmpeg 管道编码）。
+
+    返回：
+      True                    成功（tmp 已写好）
+      False                   失败（未产出 tmp，调用方回退 bicubic 保出片）
+      ("realesr", 模型名)     auto_route 解析到 Real-ESRGAN .pth，调用方改走既有通道
+    """
+    import torch
+    import torch.nn.functional as F
+
+    mod = _ff_u4k_module()
+    if mod is None:
+        return False
+
+    scale = float(opts.get("scale", 0.0) or 0.0)
+    if scale <= 1.0:
+        return False
+    ow = max(2, int(round(w * scale)) // 2 * 2)
+    oh = max(2, int(round(h * scale)) // 2 * 2)
+
+    raw = str(tmp) + ".u4kraw"
+    try:
+        subprocess.run([ff, "-y", "-i", str(path), "-f", "rawvideo",
+                        "-pix_fmt", "rgb24", raw],
+                       check=True, capture_output=True, timeout=7200)
+    except Exception as e:
+        print(f"[H3 Extender] v14.394 4K 超分抽帧失败: {e}", flush=True)
+        return False
+
+    per = int(w) * int(h) * 3
+    n_frames = max(1, os.path.getsize(raw) // per)
+    bs = max(1, min(int(opts.get("batch_frames", 4) or 4), 8))
+    arr = np.memmap(raw, dtype=np.uint8, mode="r")
+
+    resolved = engine
+    enc = None
+    pipe_err = None
+    ok = True
+    try:
+        with torch.inference_mode():
+            for s in range(0, n_frames, bs):
+                chunk = np.array(arr[s * per:(s + bs) * per])
+                fr_np = chunk.reshape(-1, h, w, 3).astype(np.float32) / 255.0
+                frames = torch.from_numpy(fr_np)
+
+                if resolved == "auto_route":
+                    try:
+                        _name, _over, _notes = mod._auto_route(
+                            frames, prefer=str(opts.get("auto_prefer", "Quality")),
+                            scale=scale,
+                            user_face=str(opts.get("face_restore", "Off")),
+                            user_detail=float(opts.get("detail_amount", 0.50)),
+                            user_detail_mode=str(opts.get("detail_mode", "smart")),
+                            user_adaptive=str(opts.get("input_adaptive", "Auto")))
+                    except Exception as e:
+                        print(f"[H3 Extender] v14.394 auto_route 失败，回退 bicubic: {e}", flush=True)
+                        ok = False
+                        break
+                    for k, v in (_over or {}).items():
+                        opts[str(k)] = v
+                    _lbl2val = {v: k for k, v in _FF_U4K_ENGINE_LABELS.items()}
+                    resolved = _lbl2val.get(str(_name))
+                    print(f"[H3 Extender] v14.394 auto_route -> {_name}"
+                          + (f" ({'; '.join(_notes)})" if _notes else ""), flush=True)
+                    if not resolved:
+                        if str(_name).lower().endswith(".pth"):
+                            arr._mmap.close()
+                            try:
+                                os.unlink(raw)
+                            except OSError:
+                                pass
+                            return ("realesr", str(_name))
+                        print(f"[H3 Extender] v14.394 auto_route 选中的 {_name} 不是已接入引擎，"
+                              f"回退 bicubic", flush=True)
+                        ok = False
+                        break
+
+                try:
+                    out = _ff_u4k_call_engine(mod, frames, resolved, scale, opts, fps)
+                except Exception as e:
+                    print(f"[H3 Extender] v14.394 引擎 {resolved} 执行失败，回退 bicubic: {e}",
+                          flush=True)
+                    ok = False
+                    break
+                if out is None:
+                    ok = False
+                    break
+
+                if out.dtype == torch.uint8:
+                    out = out.float().div_(255.0)
+                temporal = float(opts.get("temporal_strength", 0.20))
+                if resolved in _FF_U4K_SELF_TEMPORAL:
+                    temporal = 0.0
+                out = _ff_u4k_postprocess(mod, out, fr_np, opts, temporal, scale)
+
+                if int(out.shape[1]) != oh or int(out.shape[2]) != ow:
+                    out = F.interpolate(
+                        out.permute(0, 3, 1, 2).contiguous(),
+                        size=(oh, ow), mode="area").permute(0, 2, 3, 1).contiguous()
+
+                out_u8 = out.clamp(0.0, 1.0).mul_(255.0).byte().cpu().numpy()
+                if enc is None:
+                    enc = subprocess.Popen(
+                        [ff, "-y",
+                         "-f", "rawvideo", "-pix_fmt", "rgb24",
+                         "-s", f"{ow}x{oh}", "-r", str(fps or 30.0), "-i", "pipe:0",
+                         "-i", str(path),
+                         "-map", "0:v:0", "-map", "1:a?",
+                         "-c:v", "libx264", "-crf", "18", "-preset", "slow",
+                         "-pix_fmt", "yuv420p", "-c:a", "copy",
+                         str(tmp)],
+                        stdin=subprocess.PIPE)
+                try:
+                    for _fi in range(int(out_u8.shape[0])):
+                        enc.stdin.write(out_u8[_fi].tobytes())
+                except OSError as _we:
+                    pipe_err = _we
+                    break
+                del out, out_u8, frames, chunk, fr_np
+    finally:
+        if enc is not None:
+            try:
+                enc.stdin.close()
+            except Exception:
+                pass
+            if pipe_err is not None:
+                try:
+                    enc.kill()
+                except Exception:
+                    pass
+            try:
+                enc.wait(timeout=600)
+            except Exception:
+                try:
+                    enc.kill()
+                except Exception:
+                    pass
+            if pipe_err is not None:
+                ok = False
+        try:
+            arr._mmap.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(raw)
+        except OSError:
+            pass
+
+    if not ok:
+        try:
+            if Path(tmp).exists():
+                Path(tmp).unlink()
+        except Exception:
+            pass
+        return False
+    if not Path(tmp).exists() or os.path.getsize(tmp) < 1024:
+        return False
+    return True
 
 
 def _ff_face_restore_file(path, ff):
@@ -11805,9 +12239,13 @@ class BSAIH3FilmFactory:
                 ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"],
                 {"default": "Balanced (quality+speed)", "tooltip": "Upscale mode preset: Balanced = 2.0x auto (DLSS5 if available, else REALESR); Quality first = 3.0x REALESR; Speed first = 1.5x auto; Custom = explicit values from the widgets below."},
             ),
+            # v14.394: 4 -> 17 档。legacy 4 项保持最前（旧工作流取值/默认索引不变），
+            # 其后为 BSAI-H3-upscale-4K 的引擎集，由该插件自己的引擎函数执行。
             "upscale_engine": (
-                ["auto", "dlss5", "realesr", "bicubic"],
-                {"default": "auto", "tooltip": "Upscale engine: auto = automatic; dlss5 = NVIDIA DLSS5 (requires an NVIDIA driver + library); realesr = RealESRGAN (upscale_models); bicubic = built-in interpolation (fastest, no model dependency)."},
+                ["auto", "dlss5", "realesr", "bicubic", "auto_route", "flashvsr", "relayvsr",
+                 "seedvr2", "seedvr2_int8", "rtx", "rtx_vfx", "vosr2", "vosr_dlss", "vosr_rtx",
+                 "topaz_slp26", "topaz_astra", "topaz_wonder35"],
+                {"default": "auto", "tooltip": "Upscale engine. Legacy 4: auto = automatic (REALESR if available else bicubic); dlss5 = NVIDIA DLSS5 neural SR (routed to the real DLSS NR engine since v14.394, falls back with a message when the DLL/exe is missing); realesr = RealESRGAN (upscale_models); bicubic = built-in interpolation (fastest, no model dependency). v14.394 adds the BSAI-H3-upscale-4K engine set, executed by that plugin's own engine functions: auto_route = content-based auto routing (uses u4k_auto_prefer), flashvsr = FlashVSR-v1.1 diffusion video SR, relayvsr = one-step Wan VSR, seedvr2 = SeedVR2 7B diffusion SR, seedvr2_int8 = SeedVR2 7B INT8 on ComfyUI's native chain, rtx = NVIDIA RTX Video Super Res, rtx_vfx = RTX denoise/deblur (same-resolution VFX), vosr2 = VOSR 2.0 generative SR, vosr_dlss = VOSR then DLSS5, vosr_rtx = VOSR then RTX (recommended 2-stage), topaz_slp26 / topaz_astra / topaz_wonder35 = Topaz generative engines (Starlight 2.6 / Astra / Wonder 3.5). Fine-tune with the u4k_* widgets; per-engine long-tail knobs go in u4k_engine_params (JSON)."},
             ),
             "upscale_factor": (
                 "FLOAT",
@@ -12060,6 +12498,50 @@ class BSAIH3FilmFactory:
                 "forceInput": True,
                 "tooltip": "v14.238 Director port: external SIGMAS input (mirrors the reference plugin's Refine node behavior). When connected to BasicScheduler/ManualSigmas, the refine pass follows the external sigma curve exactly; when unconnected, the internal beta schedule (refine_steps/refine_denoise) is used.",
             },
+        )
+        # ===== v14.394: BSAI-H3-upscale-4K 引擎档的配套控件 =====
+        # 全部追加在 optional 最末尾，不挤占/不移位任何既有 widget index。
+        optional["u4k_scale"] = (
+            "FLOAT",
+            {"default": 0.0, "min": 0.0, "max": 8.0, "step": 0.01,
+             "tooltip": "4K 引擎倍率。0 = 跟随 upscale_factor；>0 时覆盖它（支持 2.67 / 3.0 这类非整数倍率，例如 1080p->2880p）。"},
+        )
+        optional["u4k_auto_prefer"] = (
+            ["Quality", "Speed", "Portrait", "Anime", "UHD"],
+            {"default": "Quality", "tooltip": "auto_route 的偏好档：Quality = 画质优先；Speed = 速度优先；Portrait = 人像；Anime = 二次元；UHD = 超高分辨率保守档。"},
+        )
+        optional["u4k_input_adaptive"] = (
+            ["Auto", "Off", "UHD Conservative", "HD Enhance"],
+            {"default": "Auto", "tooltip": "输入自适应后处理（4K 插件口径）：Auto = 按输入短边自动选；Off = 关闭；UHD Conservative = 4K 输入保守（少细节、弱柔化）；HD Enhance = HD 输入增强。"},
+        )
+        optional["u4k_detail_amount"] = (
+            "FLOAT",
+            {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01,
+             "tooltip": "细节重建强度（4K 插件默认 0.50）。输入自适应会按档位再收敛。"},
+        )
+        optional["u4k_softness"] = (
+            "FLOAT",
+            {"default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01,
+             "tooltip": "柔化强度（4K 插件默认 0.10），用于压掉超分后的锐化过冲/振铃；显存紧时内部自动分块。"},
+        )
+        optional["u4k_temporal_strength"] = (
+            "FLOAT",
+            {"default": 0.20, "min": 0.0, "max": 1.0, "step": 0.01,
+             "tooltip": "时域一致性强度（0.20，论文推荐）。对自带时序的引擎（FlashVSR/SeedVR2/RelayVSR/VOSR）自动归零，避免二次抹动。"},
+        )
+        optional["u4k_face_restore"] = (
+            ["Off", "GFPGANv1.4", "CodeFormer", "Small-Face (CodeFormer)"],
+            {"default": "Off", "tooltip": "超分后逐帧人脸修复（独立于 upscale_face_restore）：GFPGANv1.4 / CodeFormer / Small-Face (CodeFormer) = 小脸档，保留温和 blend 与高 fidelity 防逐帧抖。"},
+        )
+        optional["u4k_tile_pad"] = (
+            "INT",
+            {"default": 32, "min": 0, "max": 512, "step": 1,
+             "tooltip": "4K 插件分块处理的 padding（像素），越大接缝越少越慢；默认 32。"},
+        )
+        optional["u4k_engine_params"] = (
+            "STRING",
+            {"default": "", "multiline": True,
+             "tooltip": '引擎长尾参数（JSON，留空=全默认）。例：{"dlss_style":"Cinematic","dlss_detail":1.0,"sv2_steps":12,"rtx_vfx_op":"Denoise","topaz_strength":1.0}。白名单校验，不认识的键会在控制台打印合法键清单。'},
         )
         # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
         # 让旧版工作流(71 项)载入时尾部错位/NaN。改为"档位化"：
@@ -12587,6 +13069,8 @@ class BSAIH3FilmFactory:
         upscale_batch = int(kwargs.get("upscale_batch", 4))
         upscale_fp16 = bool(kwargs.get("upscale_fp16", True))
         upscale_face_restore = bool(kwargs.get("upscale_face_restore", False))
+        # v14.394: 4K 引擎档配套参数（u4k_* 控件 + JSON 长尾）
+        u4k_opts = _ff_u4k_collect_opts(kwargs)
         _up_factor, _up_engine = _ff_resolve_upscale_mode(
             upscale_mode, upscale_factor, upscale_engine
         )
@@ -15453,7 +15937,7 @@ class BSAIH3FilmFactory:
                                 _ff_upscale_video_file(clip_path, _up_factor, _up_engine,
                                                        upscale_model, upscale_fp16,
                                                        upscale_tile, upscale_batch,
-                                                       upscale_face_restore)
+                                                       upscale_face_restore, u4k_opts=u4k_opts)
                             # v14.340: 音频引导人脸/嘴型修复（TaoMate-FVSR）
                             if face_fvrs_enabled:
                                 _src_fv = _ff_fvrs_restore_clip(clip_path, float(FPS))
@@ -15547,7 +16031,7 @@ class BSAIH3FilmFactory:
                             _ff_upscale_video_file(merged_path, _up_factor, _up_engine,
                                                    upscale_model, upscale_fp16,
                                                    upscale_tile, upscale_batch,
-                                                   upscale_face_restore)
+                                                   upscale_face_restore, u4k_opts=u4k_opts)
 
                         try:
                             item = _comfy_media_item(merged_path, float(FPS), "output")
@@ -17762,7 +18246,7 @@ class BSAIH3FilmFactory:
                             _ff_upscale_video_file(clip_path, _up_factor, _up_engine,
                                                    upscale_model, upscale_fp16,
                                                    upscale_tile, upscale_batch,
-                                                   upscale_face_restore)
+                                                   upscale_face_restore, u4k_opts=u4k_opts)
                         # v14.340: 音频引导人脸/嘴型修复（TaoMate-FVSR）
                         if face_fvrs_enabled:
                             _src_fv = _ff_fvrs_restore_clip(clip_path, float(FPS))
@@ -17867,7 +18351,7 @@ class BSAIH3FilmFactory:
                             _ff_upscale_video_file(merged_path, _up_factor, _up_engine,
                                                    upscale_model, upscale_fp16,
                                                    upscale_tile, upscale_batch,
-                                                   upscale_face_restore)
+                                                   upscale_face_restore, u4k_opts=u4k_opts)
                         item = _comfy_media_item(merged_path, float(FPS), "output")
                         output_ui_videos.append(item)
 

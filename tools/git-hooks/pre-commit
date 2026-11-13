@@ -51,4 +51,18 @@ if [ $rc -ne 0 ]; then
     echo "        确需跳过：git commit --no-verify"
     exit $rc
 fi
+
+# v14.394: 动了 extender.py 或引擎对齐工具时，再跑一遍 4K 引擎对齐自检
+# （标签能路由到 4K 插件里的引擎 / mod._xxx 函数真实存在 / 参数白名单在线）
+U4K_HIT=$(git diff --cached --name-only --diff-filter=ACM -- 'extender.py' 'tools/check_u4k_engine_parity.py')
+if [ -n "$U4K_HIT" ]; then
+    "$PY" tools/check_u4k_engine_parity.py --quiet
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        echo ""
+        echo "[guard] 提交被拦下：4K 引擎对齐自检未通过（FAIL 明细见上）。"
+        echo "        确需跳过：git commit --no-verify"
+        exit $rc
+    fi
+fi
 exit 0

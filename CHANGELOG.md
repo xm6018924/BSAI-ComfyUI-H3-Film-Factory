@@ -2,6 +2,41 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+> 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
+
+### v14.400 (2026-11-13) — 放大模式：按 BSAI-H3-upscale-4K 逐项接入 13 个引擎，DLSS5 真正落地 / Upscale modes: 13 BSAI-H3-upscale-4K engines wired in, DLSS5 now real
+
+**用户口径**：按 `BSAI-H3-upscale-4K` 插件逐项升级电影工厂的像素超分能力，尤其是它的「放大模式」引擎列表；并明确「电影工厂的 dlss5 目前只是占位、实际回退 bicubic，一并解决，真正实现 dlss5」。
+
+**做法：直接调用 4K 插件的引擎函数，不复制它 4300 行、也不走它的节点包装类**
+
+那个节点类的 `upscale()` 入口会无条件 `model_management.unload_all_models()`，逐 CLIP 超分时会把 H3 底模踢出显存，下一段要重新加载（分钟级/段），属于性能倒退；直接调引擎函数还能跟着插件版本自动跟进实现细节与权重路径。张量契约照抄插件：帧为 `[B,H,W,3] float32 CPU 0..1`，Topaz 例外（吃 uint8 吐 uint8）。
+
+**改动**
+
+1. `upscale_engine` 枚举 4 项 -> **17 项**：legacy 4 项（`auto`,`dlss5`,`realesr`,`bicubic`）保持最前，旧工作流取值与默认索引不变；其后为 `auto_route`,`flashvsr`,`relayvsr`,`seedvr2`,`seedvr2_int8`,`rtx`,`rtx_vfx`,`vosr2`,`vosr_dlss`,`vosr_rtx`,`topaz_slp26`,`topaz_astra`,`topaz_wonder35`。
+2. `optional` 末尾新增 9 个 `u4k_*` 控件（不动任何既有 widget 的 index/类型/默认值）：`u4k_scale`（0 = 跟随 `upscale_factor`，支持 2.67 / 3.0 这类非整数倍率）、`u4k_auto_prefer`、`u4k_input_adaptive`、`u4k_detail_amount`、`u4k_softness`、`u4k_temporal_strength`、`u4k_face_restore`（含 Small-Face (CodeFormer) 四态）、`u4k_tile_pad`、`u4k_engine_params`（JSON 长尾，白名单校验，不认识的键会打印合法键清单）。
+3. 新增委托层：`_ff_u4k_module()`（懒加载 + 缓存，`BSAI_U4K_PLUGIN_DIR` → 上级目录 → `_vendor/` 三处查找）、`_ff_u4k_collect_opts()`、`_ff_u4k_call_engine()`（每引擎参数口径照抄 4K 节点分派）、`_ff_u4k_postprocess()`（输入自适应 → 时域+细节 → softness → 人脸修复，自带时序的引擎按插件口径把 temporal 归零）、`_ff_upscale_video_u4k()`（raw 解码 → memmap 分块 → 引擎 → 必要时 area resize → ffmpeg stdin 管道编码，保留原音轨）。
+4. `_ff_upscale_video_file()` 增 `u4k_opts` 形参 + 三态收口：成功 / `auto_route` 解析到 `.pth` 改走既有 realesr 通道 / 失败回退 bicubic 保出片；**dlss5 从此走真实 DLSS NR 引擎**（缺 DLL/exe 才带提示回退）。
+5. 四处 `_ff_upscale_video_file(...)` 调用点统一补 `u4k_opts=u4k_opts`。
+6. 前端 `web/extender.js`：新增 `upscale_engine` 快捷条按钮（17 档 cycle + 17 个 cycleLabels）、OPTIONS 白名单同步 17 项（否则载入含新值的工作流会被静默改写）、label 文案更新；`detect()` 补 72..96 键分支——新节点存 80 个 widgets_values，落进老纪元分支会被绝对索引错位重排。
+7. 新建 `tools/check_u4k_engine_parity.py`（纯 AST，不 import torch/comfy）：校验引擎标签能在插件 `ENGINE_OPTIONS/TOPAZ_OPTIONS` 找到、`mod._xxx` 调用的函数真实存在、`u4k_engine_params` 键 ⊆ 4K 节点 `INPUT_TYPES`、后端 17 项枚举与前端白名单一致且前 4 项仍是 legacy、DLSS5 四件套就位。`tools/git-hooks/pre-commit` 增一步：动了 `extender.py` 就顺带跑它。
+
+**端到端实测抓到并修掉的两个真 bug（静态检查抓不到）**
+
+- `_ff_u4k_module()` 里写成 `import importlib.util as _ilu` 之后又调 `_ilu.util.module_from_spec(...)` —— 加载 4K 插件直接失败，**静默回退 bicubic**，等于什么都没接上。
+- `_ff_upscale_video_u4k()` 里把非 auto_route 引擎的 `resolved` 置成 None —— 所有新引擎空跑。改为 `resolved = engine`。
+
+**验证**
+
+- `python tools/check_u4k_engine_parity.py` → `=== u4k parity OK ===`，exit=0。
+- `python tools/check_frontend_guard.py` → 3 个 `.mjs` 语法 OK + `SYNC OK` + `GUARD OK`，exit=0。
+- `ast.parse(extender.py)` OK（19069 行）。
+- **DLSS5 端到端**：造 1 秒 256x144 测试片，离线加载插件模块后调 `_ff_upscale_video_file(..., "dlss5", ...)`，日志 `video2dlssnr.exe | 256x144 x2 frames -> 512x288`，产物实测 512x288@8fps、无「回退 bicubic」告警。引擎级亦单独跑过：`torch.rand(2,144,256,3)` → `(2,288,512,3)` float，值域 0.004–1.000。
+- 其余 13 个引擎目前只有静态对齐校验，未逐个实跑（FlashVSR/SeedVR2/RelayVSR/VOSR 会加载 6–12GB 权重，Topaz 需 74GB 引擎目录）；`auto_route` 解析到 `.pth` 的改道分支也尚未实跑。
+
+**行为变化提示**：旧工作流选了 `dlss5` 的，出片从「bicubic 占位」变成「真实 DLSS NR」（更锐、依赖 RTX 与 `models/DLSS5` 四件套）；`bicubic` / `realesr` / `auto` 不变。
+
 ### v14.399 (2026-11-13) — 时间分块二采门限抬到稀疏健康区，修 global 包装转密集注意力换页卡死 / Temporal-chunk refine gate raised to the sparse healthy zone, fixing the dense-attention weight-swap stall
 
 - 现场：v14.398 切 global 后，DMAD 二采按 240k/段预算切成 chunk=29（236,640 tokens/段）。时间分块门限旧值 180k，236k>180k 同时触发两件事：注入 `sol_max_tokens` 把 Sol-Attn 降级 dense，并安装 selflift global 包装走全序列密集注意力 + 分块 MLP。24GB 上权重驻留 16.2GB 后 free 掉到 ~400MiB，每个 Linear 现场量化 cast/搬运换页，首段 6 分钟无进度、功耗 ~99W 空转（与前两次卡死同签名）。
@@ -40,7 +75,6 @@ All notable changes, bilingual. 所有重要版本双语说明。
 - 分块二采内暂停 SelfLift TST 改为环境开关 `BSAI_H3_TST_IN_TILES=1`（默认 0 仍暂停，规避谱分解主机烧穿）；用于 A/B 验证恢复临时一致性校正是否缓解成片帧间闪烁。
 - 分块段 reserve/workspace 折减条件从仅空间分块扩展到时间分块：纯时间分段每前向只跑 1/n 帧，不再按全帧 workspace 高估 reserve，减少 PCIe 权重换页；真不够时原有 per-tile 探针自适应抬回 reserve，兜底保留。
 - English: Temporal-segment overlap now blends accumulated and chunk latents with a smoothstep ramp instead of a hard takeover; TST skip inside tiles is now opt-in via `BSAI_H3_TST_IN_TILES` (default off); reserve/workspace trimming applies to temporal-chunked passes as well, reducing weight swapping over PCIe, with the existing per-tile probe still raising reserve on real shortage.
-
 ### v14.393 (2026-11-12) — 二采起点 σ 归位：全部管线从 σ≈0.44~0.54 起步的全分辨率真重绘 / Refine now starts from σ≈0.44–0.54 on every pipeline (real full-resolution redraw that keeps the first pass)
 
 **用户口径**（给了参考实现的机制说明）：`H3SigmaRefiner` 不改变起始 σ，起始 σ 由 `BasicScheduler` 的 denoise 决定；v1.7 的二采从 **σ=1.0** 起步，等于把一采画面整个洗掉，所以二采必然画成全新画面。要让二采「真重绘又不脱形」，要改成**从 σ≈0.45/0.55 起步、在 1088×1920 全分辨率上重绘**。要求全面检查所有渲染管线并按此修改。

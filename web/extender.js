@@ -1255,7 +1255,7 @@ const BSAI_BILINGUAL_LABELS = {
     "upscale_tile": "Upscale tile pixels (0 = full frame; use 512-1024 when VRAM is tight)",
     "upscale_model": "Upscale model (Real-ESRGAN models in models/upscale_models)",
     "upscale_factor": "Upscale factor (relative to the refine output resolution)",
-    "upscale_engine": "Upscale engine (auto/dlss5/realesr/bicubic)",
+    "upscale_engine": "Upscale engine (auto/dlss5/realesr/bicubic + 13 4K engines)",
     "upscale_mode": "Upscale mode (balanced / quality first / speed first / custom)",
     "upscale_per_clip": "Per-clip upscale toggle (default off)",
     "upscale_final": "Full-film upscale toggle (default off)",
@@ -6765,6 +6765,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "speed_preset", en: "Speed", desc_en: "Speed preset (7 tiers): custom -> Turbo -> Balanced -> Fine -> Turbo-VDN -> Balanced-VDN -> Fine-VDN. Model recipes now live in Render Pipeline (v14.172).", cycle: ["custom", "Turbo", "Balanced", "Fine", "Turbo-VDN", "Balanced-VDN", "Fine-VDN"], cycleLabels: ["Custom", "Turbo", "Balanced", "Fine", "Turbo-VDN", "Balanced-VDN", "Fine-VDN"], cycleAliases: { "极速": "Turbo", "均衡": "Balanced", "精细": "Fine", "极速-VDN": "Turbo-VDN", "均衡-VDN": "Balanced-VDN", "精细-VDN": "Fine-VDN" }, tints: [{ color: "#94a3b8", border: "#475569" }, { color: "#5eead4", border: "#14b8a6" }, { color: "#2dd4bf", border: "#0d9488" }, { color: "#34d399", border: "#059669" }, { color: "#e879f9", border: "#c026d3" }, { color: "#d8b4fe", border: "#a21caf" }, { color: "#c084fc", border: "#7c3aed" }] },
         { key: "refine_lipsync_mode", en: "Lipsync", desc_en: "Lip-sync x refine presets: lock lip-sync -> audio redraw 0.7 -> full audio redraw 1.0.", cycle: ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"], cycleLabels: ["Lock lip-sync (recommended)", "Audio redraw 0.7", "Full audio redraw 1.0"], cycleAliases: { "锁定保口型(推荐)": "Lock lip-sync (recommended)", "音频参与重绘0.7": "Audio redraw 0.7", "音频全重绘1.0": "Full audio redraw 1.0" } },
         { key: "upscale_mode", en: "UpxMode", desc_en: "Upscale mode: Balanced (quality+speed) -> Quality first -> Speed first -> Custom.", cycle: ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"], cycleLabels: ["Balanced (quality+speed)", "Quality first", "Speed first", "Custom"], cycleAliases: { "平衡(质量+速度)": "Balanced (quality+speed)", "质量优先": "Quality first", "速度优先": "Speed first", "自定义": "Custom" } },
+        // v14.394: 放大引擎快捷按钮（与 BSAI-H3-upscale-4K 的放大模式逐项对齐，17 项）
+        // cycle 必须与后端 upscale_engine 枚举逐字一致；cycleLabels 是按钮显示名，两份同增同删。
+        { key: "upscale_engine", en: "UpxEng", desc_en: "Upscale engine (17): legacy auto/dlss5/realesr/bicubic + the BSAI-H3-upscale-4K engine set (auto_route / flashvsr / relayvsr / seedvr2 / seedvr2_int8 / rtx / rtx_vfx / vosr2 / vosr_dlss / vosr_rtx / topaz tiers). Fine-tune with u4k_* widgets.", cycle: ["auto", "dlss5", "realesr", "bicubic", "auto_route", "flashvsr", "relayvsr", "seedvr2", "seedvr2_int8", "rtx", "rtx_vfx", "vosr2", "vosr_dlss", "vosr_rtx", "topaz_slp26", "topaz_astra", "topaz_wonder35"], cycleLabels: ["Auto", "DLSS5", "RealESR", "Bicubic", "AutoRoute", "FlashVSR", "RelayVSR", "SeedVR2", "SeedVR2-i8", "RTX VSR", "RTX VFX", "VOSR 2.0", "VOSR+DLSS", "VOSR+RTX", "Topaz SL2.6", "Topaz Astra", "Topaz W3.5"] },
         { key: "pause_enable", en: "Pause", desc_en: "Pause automatically after each CLIP; resumes after the timeout when there is no input." },
         // v14.106: 全部 true/false 一键开关扩展（其余布尔参数全覆盖）
         { key: "output_image_audio", en: "Preview", desc_en: "Decode a preview for every CLIP (image + audio stream, can feed upscalers). Off = cache only; export with Final Decode." },
@@ -7943,7 +7946,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             block_cache_device: ["cpu","gpu"],
             refine_lipsync_mode: ["Lock lip-sync (recommended)","锁定保口型(推荐)","Audio redraw 0.7","音频参与重绘0.7","Full audio redraw 1.0","音频全重绘1.0"],
             upscale_mode: ["Balanced (quality+speed)","平衡(质量+速度)","Quality first","质量优先","Speed first","速度优先","Custom","自定义"],
-            upscale_engine: ["auto","dlss5","realesr","bicubic"],
+            upscale_engine: ["auto","dlss5","realesr","bicubic","auto_route","flashvsr","relayvsr","seedvr2","seedvr2_int8","rtx","rtx_vfx","vosr2","vosr_dlss","vosr_rtx","topaz_slp26","topaz_astra","topaz_wonder35"],
             speed_preset: ["custom","Turbo","Balanced","Fine","Turbo-VDN","Balanced-VDN","Fine-VDN"],
             env_audio_enable: ["global_inherit","on","off"],
             face_lock_mode: ["off","auto (face-lock)","refine (small-face inpaint)","fvrs (audio-guided restore)"],
@@ -7973,6 +7976,10 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             //          n===68 即 CUR68; n===69 仍为旧 CUR69 文件, 映射时丢弃 w[67]）。
             // v14.238: 71 键 = 现役 + refine_sampler(67) + director_fast_first_mp(68)
             //          + director_fast_target_mp(69) + timeline(70)。
+            // v14.394: 80 键 = 现役 71 键布局 + 9 个 u4k_* 控件(70..78) + timeline(79)。
+            // 0..69 与 CUR71 完全同键，按 CUR71 处理；70..78 的 u4k 值交给 ComfyUI 自身的
+            // widgets_values 还原（applyToNode 只写 0..70，不会误改它们）。
+            if (n > 71 && n <= 96) return "CUR71";
             if (n === 71) return "CUR71";
             if (n === 69) return "CUR69";
             if (n === 68) return "CUR68";
