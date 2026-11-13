@@ -96,6 +96,61 @@ def main():
     check("ACC: 明示 Ref2VA / FL2VA 两个权重的挂法",
           "Ref2VA-Acc-8Step" in acc and "FL2VA-Acc-8Step" in acc)
 
+    # ── BSAI6+2 高低噪采样 (v14.401) ────────────────────────────────────
+    # 用户口径: 一采 6 步同时作 SplitSigmas 切点, 二采 2 步; 两者相加 8 进
+    # BasicScheduler(beta, denoise 1), 在 step=6 切成高噪 6 步 / 低噪 2 步,
+    # 二采前 MinimaxH3LatentUpscaler3D 放大(放大不算步)。
+    # 判据必须守住"两段来自同一条 8 步 beta 曲线"这一条 —— 一旦谁把一采改成
+    # 独立的 6 步 beta, 切点 σ 就整体偏掉, 二采起点不再是 SplitSigmas 的切点。
+    b62_en = "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)"
+    b62_zh = "BSAI6+2高低噪采样"
+
+    check("BSAI6+2: 英文标签进了渲染管道 combo 列表", f'"{b62_en}"' in src, b62_en)
+    check("BSAI6+2: EN2ZH 映射存在", f'"{b62_en}": "{b62_zh}"' in src)
+    check("BSAI6+2: 中文内部值有对应的 elif 分支", f'_rp_mode == "{b62_zh}"' in src, b62_zh)
+
+    # 该档注释较长, 窗口放宽到 6000 字符, 否则判据落在窗口外会假 FAIL(首次即此)。
+    b62 = section(src, rf'e(?:l)?if _rp_mode == "{re.escape(b62_zh)}"', span=6000)
+    check("BSAI6+2: 一采 6 步 + 二采 2 步", "steps, refine_steps = 6, 2" in b62)
+    check("BSAI6+2: 一采走 8 步 beta 曲线的高噪段(切点在 6)",
+          'scheduler = "bsai6plus2_high"' in b62)
+    check("BSAI6+2: 二采 sigma 由同一条曲线切出并直送(refine_sigmas)",
+          "_bsai_6plus2_split(" in b62 and "refine_sigmas = _b62_lo" in b62)
+    check("BSAI6+2: 总 8 步 = 6+2, 放大不计步(denoise 1.0 全生成)",
+          "denoise = 1.0" in b62 and "refine_upscale_factor = 2.0" in b62)
+    check("BSAI6+2: 二采前 3D latent 放大 + align 32",
+          "refine_align_to = 32" in b62 and "minimax_h3_latent_upscaler_3d_fp16" in b62)
+    check("BSAI6+2: 两段采样器都是 euler(参考工作流 KSamplerSelect)",
+          'refine_sampler = "euler"' in b62 and "sampler_name = \"euler\"" in b62)
+    check("BSAI6+2: shift 双轨迹 12/3", "shift_video, shift_audio = 12.0, 3.0" in b62)
+    check("BSAI6+2: 打开切分采样标志(免 denoise 夹取/免结构闸门)",
+          "_FF_SPLIT_SIGMA_MODE = True" in b62)
+
+    # 曲线本体: 8 步 beta 在 step=6 切开, 且一采/二采共用同一次计算
+    check("BSAI6+2: 切分常量 = 8 总步 / 6 切点",
+          "_BSAI6P2_TOTAL_STEPS = 8" in src and "_BSAI6P2_SPLIT_STEP = 6" in src)
+    check("BSAI6+2: 切分函数用 beta 8 步一次算好再切(_bsai_6plus2_split)",
+          "def _bsai_6plus2_split(" in src
+          and 'calculate_sigmas(ms, "beta", _total)' in src)
+    hi = section(src, r'str\(scheduler\) in \("bsai6plus2_high", "bsai6plus2_low"\)', span=700)
+    check("BSAI6+2: _sigmas 支持高噪/低噪两个哨兵调度",
+          "_hi62, _lo62 = _bsai_6plus2_split(" in hi
+          and '"bsai6plus2_high"' in hi and '"bsai6plus2_low"' in hi)
+    check("BSAI6+2: 二采内容锁的 denoise 夹取对该档让位",
+          "elif _r_denoise > _FF_REFINE_LOCK_DENOISE and not _FF_SPLIT_SIGMA_MODE:" in src)
+    check("BSAI6+2: 二采重绘下限抬高对该档让位",
+          "and not _FF_SPLIT_SIGMA_MODE:" in src
+          and "_r_denoise < _FF_REFINE_FLOOR_DENOISE" in src)
+    check("BSAI6+2: 结构相似度闸门对该档让位", 
+          "if _refine_base_snapshot is not None and not _FF_SPLIT_SIGMA_MODE:" in src)
+    check("BSAI6+2: 每轮进入 extend 复位切分标志",
+          "global _FF_SPLIT_SIGMA_MODE" in src and "_FF_SPLIT_SIGMA_MODE = False" in src)
+    check("BSAI6+2: 二采 fallback 重跑仍走低噪段",
+          '"bsai6plus2_low" if _FF_SPLIT_SIGMA_MODE else "beta"' in src)
+    check("BSAI6+2: 时间分块对该档硬关(分块会逐段重加噪, 破坏续算)",
+          "if _FF_SPLIT_SIGMA_MODE:\n                _use_temporal = False" in src
+          and "_tc_override390 = False" in src)
+
     # ── 共同前提 ────────────────────────────────────────────────────────
     # v14.389: 默认从「二采一律不重绘」翻成「二采一律重绘 + 内容锁」。
     check("二采重绘默认开(env 需显式 NO_REDRAW=1 才回到纯超分)",
@@ -161,10 +216,23 @@ def main():
             check("前端 cycleAliases / ALIAS_CANON 都带 ACC 中文别名",
                   js.count(f'"ACC 8步 SelfLift 双采 (8+4)": "ACC 8-step SelfLift Dual-Pass (8+4)"') == 2,
                   str(js.count('"ACC 8步 SelfLift 双采 (8+4)"')))
+            # v14.401: 新档追加在两张表的最末尾(不动既有档位序号)
+            check("前端 cycle 末位是 BSAI6+2 且与后端同名",
+                  bool(cyc) and cyc[-1] == "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)",
+                  cyc[-1] if cyc else "")
+            check("前端 cycleLabels 末位同序号同步",
+                  bool(labs) and labs[-1] == "BSAI 6+2 High/Low-Noise Split (6+2, beta SplitSigmas)",
+                  labs[-1] if labs else "")
+            check("前端 cycleAliases / ALIAS_CANON 都带 BSAI6+2 中文别名",
+                  js.count('"BSAI6+2高低噪采样": "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)"') == 2,
+                  str(js.count('"BSAI6+2高低噪采样"')))
+            check("前端 OPTIONS 白名单含 BSAI6+2(否则含新档的工作流会被静默回落)",
+                  js.count('"BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)"') == 4,
+                  str(js.count('"BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)"')))
 
     print()
     if ok:
-        print("全部通过 (v14.386 DMAD 8+2 / v14.387 ACC 8+4 / v14.388 PDMD 训练边界 / v14.389 二采重绘+内容锁 渲染管道自检)")
+        print("全部通过 (v14.386 DMAD 8+2 / v14.387 ACC 8+4 / v14.388 PDMD 训练边界 / v14.389 二采重绘+内容锁 / v14.401 BSAI6+2 高低噪切分 渲染管道自检)")
         return 0
     print(f"失败 {len(fails)} 项: {fails}")
     return 1

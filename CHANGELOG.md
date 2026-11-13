@@ -4,6 +4,50 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.401 (2026-11-13) — 新增「BSAI6+2高低噪采样」渲染管道：一条 8 步 beta 曲线在 step=6 切开，一采 6 步 + 二采 2 步续算 / New "BSAI6+2 High/Low-Noise Split Sampling" tier: one 8-step beta schedule split at step 6, 6-step first pass + 2-step continuation
+
+**用户口径**：把「一采 6 步、同时作 SplitSigmas 切点；二采 2 步；两者相加 8 进 BasicScheduler(beta, denoise 1)，切成高噪 6 步 / 低噪 2 步分别交给两个 SamplerCustomAdvanced；二采前用 MinimaxH3LatentUpscaler3D 放大，放大不算采样步」这条路线加成第 40 档渲染管道，命名为「BSAI6+2高低噪采样」，参数以参考工作流为准。
+
+**参数来源：逐节点核对的参考工作流 `卡点舞蹈MV工作流_纯音乐版.json`**
+
+| 节点 | 值 | 落到哪 |
+|---|---|---|
+| Int「一采步数」(600) | 6 | `steps` + SplitSigmas 切点 |
+| Int「二采步数」(601) | 2 | `refine_steps` |
+| MathExpression `a+b`(602) | 8 | 总步数 |
+| BasicScheduler(507) | beta / 8 步 / denoise 1 | 一次算出的曲线 |
+| SplitSigmas(604) step=6 | 高噪 7 点 / 低噪 3 点 | `_bsai_6plus2_split()` |
+| KSamplerSelect(506/609) | euler ×2 | `sampler_name` / `refine_sampler` |
+| BasicGuider(503/608) | CFG 1.0 | `_BasicGuider` |
+| MinimaxH3LatentUpscaler3D(606) | fp16 / target dimensions / align 32 | `refine_upscaler_model` + factor 2.0 + align 32 |
+
+**三个不是"照抄就能对"的点（静态检查抓不到，靠算 sched 曲线才暴露）**
+
+1. **一采不能按 steps=6 自己算 beta**。8 步 beta 的切点 σ 实测 `0.72073`（shift 12），而独立 6 步 beta 的末位是 `0.54871`；两者不是同一条路线，二采起点会整体偏掉。故新增哨兵调度 `bsai6plus2_high` / `bsai6plus2_low`，两段都从**同一次** `calculate_sigmas(beta, 8)` 结果里切（`_bsai_6plus2_split`），并做方向保险（σ 序列反了就翻转）。
+2. **二采不能重加噪**。一采停在 σ≈0.72，输出 latent 本身就是半噪底；按 CONST 口径再加一次噪会叠到等效 σ≈0.92，2 步二采等于从零重画。新档改走"续算"：`_r_latent` 直接沿用一采 latent，只补一步 `inverse_noise_scaling`（`x -> x/(1-σ)`）抵掉采样器内部的 `(1-σ)` 缩放，净结果是原样喂入低噪段。
+3. **内容锁（0.45~0.55 denoise 夹取）与 0.85 结构相似度闸门对该档让位**。两者都为"一采跑完整条曲线到 σ=0"的常规双采设计；本档一采的合法产物是半噪 latent，拿它当闸门基准会把正确二采判成"换画面"并回退到半噪底。以模块标志 `_FF_SPLIT_SIGMA_MODE` 收口（`extend()` 每轮复位），只影响该档，其它档行为不变。
+
+**改动**
+
+1. `extender.py`：新增常量 `_BSAI6P2_TOTAL_STEPS=8` / `_BSAI6P2_SPLIT_STEP=6` / `_FF_SPLIT_SIGMA_MODE`、函数 `_bsai_6plus2_split()`；`_sigmas` 支持两个哨兵调度。
+2. 新分支 `elif _rp_mode == "BSAI6+2高低噪采样":`：`steps, refine_steps = 6, 2`、`scheduler="bsai6plus2_high"`、`denoise=1.0`、`refine_upscale_factor=2.0`、`refine_align_to=32`、`tiled_refine=True` / `tile_count=16` / `tile_overlap=128`、`_rp_no_temp_chunk=True`、shift 12/3、两段强制 euler；`refine_sigmas` 由切分函数直送低噪段（用户外接该端口时以用户为准），`refine_denoise` 取真实切点 σ；3D upscaler 优先探测 `latent_upscaler_3d` + fp16（退 bf16/fp32，再退任意 3D 权重，全无则 bilinear 并告警）。
+3. 二采加噪处新增切分续算分支（不 prepare_noise、不 const 加噪、补逆缩放），非本档路径一行未动；同时把该档的时间分块硬关（`_use_temporal=False` + 撤销 v14.390 的 `_tc_override390`）—— 分块路径每段都会重新 `prepare_noise` + CONST 加噪，会把"续算"打回"逐段重画"。
+4. 二采 fallback 重跑同步改走 `bsai6plus2_low`（否则失败回退会退回普通 beta 2 步）。
+5. 后端枚举末尾追加第 40 项（既有档位 index 全部不变）、`_RENDER_PIPELINE_EN2ZH` 增映射、tooltip 增 (40) 说明。
+6. 前端 `web/extender.js`：cycle / cycleLabels / tints / cycleAliases / `H3LegacyCompat.OPTIONS` / `ALIAS_CANON` 六表同步追加。
+7. `tools/check_pipeline_recipes.py` 增 24 条该档判据（曲线同源、切点直送、euler、shift、续算、时间分块硬关、三处闸门让位、每轮复位、前端四表末位与白名单），并把分支窗口放宽到 6000 字符（首次窗口 2200 截断导致假 FAIL，已修）。
+8. `RENDER_PIPELINES_REFERENCE.md` 增 H 节（参数出处节点表 + 实测 σ 曲线 + 三个坑），档数 34 → 40，维护规程第 11 步档数同步。
+
+**验证**
+
+- `python -m py_compile extender.py` → exit=0（19312 行）。
+- `python tools/check_pipeline_recipes.py` → 全 PASS（含新增 21 条），exit=0。
+- `python tools/check_frontend_guard.py` → 3 个 `.mjs` 语法 OK + `SYNC OK` + `GUARD OK`，exit=0。
+- 切分曲线离线实测：`ModelSamplingDiscreteFlow(shift=12)` 的 8 步 beta = `[1.0, 0.99499, 0.98251, 0.96074, 0.92336, 0.85529, 0.72073, 0.42491, 0.0]`；高噪 7 点与低噪 3 点首尾同值（0.72073）、两段均严格递减、低噪末位 0、总步 8。
+- **未做实机出片验证**：该档只在 CPU 侧核对了 σ 曲线与代码路径，未跑 GPU 端到端（需要 H3 底模 + DMAD LoRA + 3D upscaler 权重与 24GB 级显存）。实机首次出片时建议先看日志里的 `v14.401 SplitSigmas 二采注入` 一行确认切点 σ 与 `二采续算(不加噪)` 是否同时出现。
+
+**English**: New tier 40 `BSAI 6+2 High/Low-Noise Split Sampling`, parameters traced node-by-node from the user's reference workflow (卡点舞蹈MV工作流_纯音乐版.json): Int 一采=6 doubles as the SplitSigmas cut point, Int 二采=2, a+b=8 feeds BasicScheduler(beta, denoise 1); SplitSigmas(step=6) yields a 7-point high half (6 steps) and a 3-point low half (2 steps), both euler with BasicGuider CFG 1.0; MinimaxH3LatentUpscaler3D (fp16, target dimensions, align 32) enlarges the latent between passes and does not count as a step. Three non-copy-paste details: (a) the first pass must NOT compute its own 6-step beta — the 8-step curve's cut sigma is 0.72073 while an independent 6-step beta ends at 0.54871, so both halves are sliced from one `calculate_sigmas(beta, 8)` call via sentinel schedulers `bsai6plus2_high/_low`; (b) the second pass must NOT re-noise — the first-pass latent already sits at sigma 0.72, and a CONST re-noise would stack to ~0.92 and turn a 2-step tail into a from-scratch repaint, so it continues from the existing noise state with only an `inverse_noise_scaling` pre-division to cancel the sampler's internal (1-sigma) scaling; (c) the v14.389 0.45–0.55 denoise clamp and the 0.85 structure gate are bypassed for this tier only (via `_FF_SPLIT_SIGMA_MODE`, reset per run), because its first pass legitimately ends half-noisy. Wired through backend enum (appended as #40, no existing index moves), EN2ZH, tooltip, all six frontend tables, plus 21 new assertions in `tools/check_pipeline_recipes.py` and a new section H in RENDER_PIPELINES_REFERENCE.md. Verified: py_compile, recipe checker (all PASS), frontend guard (SYNC + GUARD OK), and the sigma curve numerically. Not yet validated end-to-end on GPU.
+
 ### v14.400 (2026-11-13) — 放大模式：按 BSAI-H3-upscale-4K 逐项接入 13 个引擎，DLSS5 真正落地 / Upscale modes: 13 BSAI-H3-upscale-4K engines wired in, DLSS5 now real
 
 **用户口径**：按 `BSAI-H3-upscale-4K` 插件逐项升级电影工厂的像素超分能力，尤其是它的「放大模式」引擎列表；并明确「电影工厂的 dlss5 目前只是占位、实际回退 bicubic，一并解决，真正实现 dlss5」。

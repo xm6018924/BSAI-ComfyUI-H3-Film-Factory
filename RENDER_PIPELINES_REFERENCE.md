@@ -37,7 +37,7 @@
 
 ---
 
-## 三、渲染管道（render_pipeline）全 34 档
+## 三、渲染管道（render_pipeline）全 40 档
 
 ### A. 默认/通用
 
@@ -127,6 +127,40 @@
 
 **权重选择**：纯文生/首帧/首尾帧 → `fl2va_gguf/`；参考图 Ref2VA（电影工厂 `@图N` 链路）→ `ref2va_gguf/`。二采在官方四套模板中均不存在，本档保持单采。
 
+### H. 高低噪切分采样（v14.401，SplitSigmas 6+2）
+
+| # | 管道 | 一采+二采 | 关键参数 | 配套 | 适用 |
+|---|---|---|---|---|---|
+| 40 | **BSAI6+2高低噪采样**<br>`BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)` | 6+2=8（放大不计步） | **同一条** 8 步 beta 曲线（denoise 1）在 step=6 处 SplitSigmas 切开；两段都 euler + BasicGuider(CFG 1.0)；shift 12/3；二采起点 σ = 切点直送（不做 0.45~0.55 夹取）；二采前 3D latent x2.0 / align 32 / tiled 16x128 | 模型侧照参考工作流：hybrid b25-49 int8 基模 + `DMAD full_dareties_v4_step600` 类加速 LoRA(0.8) + Sol-Attn；权重名以本机目录为准 | 一采只跑到切点、二采续算低噪段的高/低噪分档路线 |
+
+**参数出处**：用户参考工作流 `卡点舞蹈MV工作流_纯音乐版.json` 的采样段，逐节点核对过（节点号见 `extender.py` 该分支注释）：
+
+| 工作流节点 | 值 | 在电影工厂里的等价物 |
+|---|---|---|
+| Int「一采步数」(600) | 6 | `steps`，同时 = SplitSigmas 切点 |
+| Int「二采步数」(601) | 2 | `refine_steps` |
+| MathExpression `a+b`(602) | 8 | 总步数（`_BSAI6P2_TOTAL_STEPS`） |
+| BasicScheduler(507) | beta / steps=8 / denoise 1 | 一次算出的 8 步 beta 曲线 |
+| SplitSigmas(604) | step=6 | `_bsai_6plus2_split()`：高噪 7 点(6 步) / 低噪 3 点(2 步) |
+| SamplerCustomAdvanced(502/610) + KSamplerSelect(506/609) | euler ×2 | `sampler_name = euler` / `refine_sampler = euler` |
+| BasicGuider(503/608) | CFG 1.0 单前向 | `_BasicGuider` |
+| MinimaxH3LatentUpscaler3D(606) | `minimax_h3_latent_upscaler_3d_fp16` / target dimensions / align 32 | `refine_upscaler_model` + `refine_upscale_factor=2.0` + `refine_align_to=32` |
+
+**实测切点 σ（`comfy.samplers.calculate_sigmas` + `ModelSamplingDiscreteFlow(shift=12)`，8 步 beta）**：
+
+```
+1.0  0.99499  0.98251  0.96074  0.92336  0.85529 | 0.72073  0.42491  0.0
+└──────────── 高噪 6 步（一采）────────────┘   └── 低噪 2 步（二采）──┘
+```
+
+三点必须一起看，否则很容易"看着像、其实不是这条路"：
+
+1. **一采不能按 steps=6 单独算 beta**。独立 6 步 beta 的 σ 是 `1.0 0.99173 0.96936 0.92336 0.82061 0.54871 0`，切点落在 0.5487 而不是 0.7207 —— 二采起点整体偏掉，等于换了一条调度曲线。本档因此用哨兵调度 `bsai6plus2_high` / `bsai6plus2_low`，两段都从**同一次** 8 步 beta 计算结果里切。
+2. **二采不重加噪**。一采在 σ≈0.72 收工，输出 latent 本身就是 `σ·ε+(1-σ)·x0` 的半噪底；再按 CONST 口径加一次噪会叠到等效 σ≈0.92（`σ·ε+(1-σ)·x` 二次混合），2 步二采就成了从零重画。本档直接沿用一采噪声状态，只补一步 `inverse_noise_scaling`（`x -> x/(1-σ)`）抵掉采样器内部的 `(1-σ)` 缩放，净结果是原样喂入。
+3. **内容锁 / 结构闸门对该档让位**。v14.389 的 0.45~0.55 denoise 夹取与 0.85 结构相似度闸门都是为"一采已跑完整条曲线到 σ=0"的常规双采设计的。本档一采的合法产物就是半噪 latent，拿它当闸门基准会把正确二采判成"换了画面"并回退到半噪底（比不跑二采更糟）。该档连续性由"同一曲线 + 切点 σ 直送"保证。
+
+**已知偏差**：空间放大是对半噪 latent 做的（与参考工作流一致），放大会在噪声上引入轻微插值痕迹，由二采 2 步低噪段吸收；`refine_upscale_factor` 与 `refine_align_to` 可按目标分辨率调整，工作流里的 1280x704 + align 32 即 `x2.0 + align 32` 的实测组合。
+
 ---
 
 ## 四、全局关键开关
@@ -177,7 +211,7 @@
 | 8 | 旧值兼容表-白名单 | `extender.js` `H3LegacyCompat.OPTIONS.render_pipeline` | 值不在白名单会被 `norm()` 静默回落默认档 |
 | 9 | 旧值兼容表-别名 | `extender.js` `H3LegacyCompat.ALIAS_CANON.render_pipeline` | 中文旧标签 → 英文规范值 |
 | 10 | DEFAULTS | `extender.js` `H3LegacyCompat.DEFAULTS` 第 65 位 | 仅在改默认档时才动 |
-| 11 | 跑自检 | `node --check web/extender.js`、`py_compile extender.py`、三表逐字比对、重启后 `/object_info/BSAIH3FilmFactory` 计 33 项 | 全通过才算改完 |
+| 11 | 跑自检 | `node --check web/extender.js`、`py_compile extender.py`、三表逐字比对、重启后 `/object_info/BSAIH3FilmFactory` 计 40 项（档数随版本递增，以 combo 长度为准） | 全通过才算改完 |
 
 两条硬约束：任何新 widget 只能追加在 `optional` 最末尾（现役最后一项是 `refine_sigmas`），不得挤占既有 widget index；只改后端不改前端的效果是"UI 里选不到新档 + 含新档的旧工作流加载被打回默认档"。
 
