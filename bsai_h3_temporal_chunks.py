@@ -104,9 +104,14 @@ def slice_nested_temporal(members, start_t: int, end_t: int):
 
 
 def merge_guarded(accumulated_video, chunk_video, start_t: int, locked_tokens: int):
-    """ownership 合并: 锁区原样保留 accumulated, 过渡区发布 chunk 的桥接, 新区直接拼接。
+    """ownership 合并: 锁区原样保留 accumulated, 过渡区 smoothstep 交叉淡入 chunk, 新区直接拼接。
 
     accumulated_video/chunk_video 形状 (1,24,T,H,W)。返回新的累计视频。
+
+    v1.01: 过渡区旧实现把 chunk 整段接管(100% 替换 accumulated), 两段各自独立采样
+    的结果在重叠边界形成一次硬跳变(亮度/对比/纹理阶跃)。改为与采样掩码一致的
+    smoothstep 斜坡做 latent 加权混合: w=0 端保留 accumulated, w=1 端发布 chunk,
+    消除边界阶跃; 锁区与新区行为不变。
     """
     if accumulated_video is None:
         return chunk_video
@@ -116,9 +121,12 @@ def merge_guarded(accumulated_video, chunk_video, start_t: int, locked_tokens: i
     transition = overlap - locked_tokens
     published = accumulated_video.clone()
     if transition > 0:
-        published[:, :, start_t + locked_tokens:start_t + overlap] = chunk_video[
-            :, :, locked_tokens:overlap
-        ]
+        vals = torch.linspace(0.0, 1.0, transition,
+                               dtype=accumulated_video.dtype, device=accumulated_video.device)
+        w = _blend(vals, "smoothstep").reshape(1, 1, transition, 1, 1)
+        acc_t = accumulated_video[:, :, start_t + locked_tokens:start_t + overlap]
+        ch_t = chunk_video[:, :, locked_tokens:overlap]
+        published[:, :, start_t + locked_tokens:start_t + overlap] = acc_t * (1.0 - w) + ch_t * w
     if overlap >= chunk_video.shape[2]:
         return published
     return torch.cat((published, chunk_video[:, :, overlap:]), dim=2)

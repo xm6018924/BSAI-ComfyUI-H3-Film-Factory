@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.393-acc8step+pdmd-sigma+refine-full-redraw-content-lock+frontend-guard+redraw-temporal-chunk+refine-sigma0"
+BUILD = "minimax-h3-extender-v14.396-recipe-guard-x2-upscale+temporal-chunk-fix+tst-tile-env+seam-crossfade+reserve-temporal"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -6952,7 +6952,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _tile_infl226 = 1.0
                         else:
                             try:
-                                _spatial_n226 = max(1, int(tile_count))
+                                # v14.395: 空间包装 clamp_n_tiles / _ff_auto_refine_tile_count
+                                # 都把切块数上限夹到 8; 旧代码直接用配方 tile_count(如 16),
+                                # 每块 token 被低估约 2 倍(估 136k / 实测 189k), 导致自动
+                                # 时间分块阈值不触发、段数切不够。按真实上限 8 估算。
+                                _spatial_n226 = max(1, min(8, int(tile_count)))
                             except Exception:
                                 _spatial_n226 = 1
                         # 1.55x = overlap 128px 的 tile 膨胀系数, 与 v14.179 实测
@@ -7288,7 +7292,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             # v14.250 探针(py-spy 版 v14.377: 分块时按 per-tile 判定)
                             # 会在 free 真不够时自适应让位抬 reserve, 不会 OOM。
                             # 下限 5.0GB: 模型驻留 ~17GB / offload ~2.5GB。
-                            if tiled_refine:
+                            # v14.396: 折减条件从仅空间分块(tiled_refine)扩展到时间分块
+                            # (_use_temporal)。纯时间分块段每前向只跑 1/n 帧, 用不着全帧
+                            # workspace; 旧路径仍按全帧 ws 公式给高 reserve, resident 被压到
+                            # ~14.4GB / offload ~6.3GB, 每段都过 PCIe 搬权重换页。真不够时
+                            # 下方 v14.381 per-tile 探针会自适应把 reserve 抬回, 不会 OOM。
+                            if tiled_refine or locals().get("_use_temporal", False):
                                 _r_reserve_gb = max(_r_reserve_gb, 5.0)
                                 # v14.382 (2026-11-12): 分块段按 per-tile workspace
                                 # 定预算。v14.240 的「上次实测 reserve 提示」是**全帧**
@@ -7303,7 +7312,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             # v14.240: 用上次实测的 reserve(见本文件下方 workspace 探针)。
                             # 链式渲染 clip>=2 直接命中, 省一次全卸重驻留。
                             # v14.382: 分块段不复用全帧测出来的提示(见上)。
-                            _hint240 = None if tiled_refine else _REFINE_WS_RESERVE_HINT.get(round(_r_factor, 2))
+                            _hint240 = None if (tiled_refine or locals().get("_use_temporal", False)) else _REFINE_WS_RESERVE_HINT.get(round(_r_factor, 2))
                             if _hint240:
                                 _r_reserve_gb = max(_r_reserve_gb, min(8.0, _hint240))
                                 print(f"[H3 Extender] v14.240 复用上次实测 reserve "
@@ -13918,12 +13927,20 @@ class BSAIH3FilmFactory:
             # 仅当未选中任何渲染管道时, 才回退到本档后备配方 8+4/0.45。
             _rp_is_recipe279 = bool(locals().get("_rp_handled", False)) and \
                 str(_rp_mode or "").strip() not in ("", "(none)", "custom", "None")
+            # v14.394: 选中显式渲染管道配方时, 二采结构(倍率/分块/显存模式/是否
+            # 开二采)一律以配方为准; 一镜到底·2K档的"干净优先"全局单次采样约束
+            # (180k token 预算压倍率 / 强制 global 不分块 / 假倍率跳过二采)只在
+            # 未选配方的后备路径生效。旧实现无条件套用这套约束, 把 PIKA 8+2 /
+            # TaoMate / ACC 等配方声明的 x2.0 空间分块二采压成假倍率 x1.02 并整段
+            # 跳过, 出片停在一采 960x544(成片 h3_clip_250_1_1794539887.mp4)。
+            _os2k_recipe = _rp_is_recipe279
             if _rp_is_recipe279:
                 print(f"[H3 Extender] v14.279 一镜到底·2K双采: 渲染管道配方优先 "
                       f"({_rp_mode}) -> 一采 {steps} 步 / 二采 {refine_steps} 步 / "
                       f"denoise {float(refine_denoise):.2f} / sampler={sampler_name} "
-                      f"/ shift {float(shift_video):g}-{float(shift_audio):g} "
-                      f"(2K 档不再覆盖)")
+                      f"/ shift {float(shift_video):g}-{float(shift_audio):g}; "
+                      f"二采倍率 x{float(refine_upscale_factor):.2f} / 分块={bool(tiled_refine)} "
+                      f"以配方为准, 不走 2K 档预算折减")
             else:
                 steps, refine_steps, tile_count, refine_denoise = 8, 4, 4, 0.45
                 shift_video, shift_audio = 12.0, 3.0
@@ -13931,25 +13948,27 @@ class BSAIH3FilmFactory:
                     sampler_name = "euler"
                 print("[H3 Extender] v14.279 一镜到底·2K双采: 未选渲染管道, "
                       "使用本档后备配方 一采 8 步 + 二采 4 步 (denoise 0.45) + euler")
-            refine_enable = True
+                refine_enable = True
             _hv2x_decl = 1.0
-            # v14.275 (fix): 二采强制 global 全上下文, 禁用空间分块。
-            # 本档 latent 已被 3D upscaler 放大到 709,920 tokens, 空间分块每块只有
-            # 46/120 的宽度, 却仍带整套 ref2va 角色参考(PackedLayout 里 refs/keyframes
-            # 一并裁到 tile 尺寸) → 模型在每块里独立重新构图: 实机 tile1(0~736px)凭空
-            # 画出放大版人脸, tile4(1312~1920px)画出第二个沈砚, cosine 融合后就是
-            # 半透明重影 + 满屏碎屑。global 包装不裁空间轴: 整帧一次前向, attention
-            # 全序列稀疏(Sol-Attn), 仅 MLP 按 4096 token 分块压激活 → 无接缝、无重构图。
-            # v14.253 的教训已写在直播带货档: 横带叠加正是 spatial 分块造成的。
-            tiled_refine = False
-            if not refine_mem_global:
-                refine_mem_global = True
-                refine_mem_mode = "global (全上下文省显存)"
-                print("[H3 Extender] v14.275 一镜到底·2K双采: 二采强制 global 全上下文"
-                      "(禁用 spatial 空间分块 —— 每块独立重构图会造成重影/碎屑)")
-            print("[H3 Extender] 🎥 v14.279 一镜到底·2K双采: 只接管结构(二采/"
-                  "global/不分块), 二采倍率按单次采样 token 预算取; 步数/denoise "
-                  "以渲染管道为准")
+            if not _os2k_recipe:
+                # v14.275 (fix): 后备路径二采强制 global 全上下文, 禁用空间分块。
+                # 本档 latent 已被 3D upscaler 放大到 709,920 tokens, 空间分块每块只有
+                # 46/120 的宽度, 却仍带整套 ref2va 角色参考(PackedLayout 里 refs/keyframes
+                # 一并裁到 tile 尺寸) → 模型在每块里独立重新构图: 实机 tile1(0~736px)凭空
+                # 画出放大版人脸, tile4(1312~1920px)画出第二个沈砚, cosine 融合后就是
+                # 半透明重影 + 满屏碎屑。global 包装不裁空间轴: 整帧一次前向, attention
+                # 全序列稀疏(Sol-Attn), 仅 MLP 按 4096 token 分块压激活 → 无接缝、无重构图。
+                # v14.253 的教训已写在直播带货档: 横带叠加正是 spatial 分块造成的。
+                tiled_refine = False
+                if not refine_mem_global:
+                    refine_mem_global = True
+                    refine_mem_mode = "global (全上下文省显存)"
+                    print("[H3 Extender] v14.275 一镜到底·2K双采: 二采强制 global 全上下文"
+                          "(禁用 spatial 空间分块 —— 每块独立重构图会造成重影/碎屑)")
+            print("[H3 Extender] 🎥 v14.279 一镜到底·2K双采: "
+                  + ("显式配方接管二采结构(倍率/分块/显存模式/是否开二采)" if _os2k_recipe
+                     else "只接管结构(二采/global/不分块), 二采倍率按单次采样 token 预算取; 步数/denoise "
+                          "以渲染管道为准"))
         # v14.221 (自动提速护栏): 检测到 HyperVAE 2x 权重可用且当前二采会因
         # latent x2.0 放大导致 24GB 换页超时(实测 834s/步)时, 自动把二采
         # 降级到"双采2K"提速路径: factor=1.0 + HyperVAE 2x 解码直出 2K,
@@ -14688,7 +14707,9 @@ class BSAIH3FilmFactory:
         # v14.346/v14.374: 本次二采是否"没有任何几何放大"(倍率被预算压成 x1.0x 的假倍率)。
         # 为 True 时二采整段跳过 —— 详见下方预算分支里的说明。
         _os2k_skip_refine = False
-        if one_shot_dual_2k:
+        # v14.394: 显式配方档(PIKA 8+2 / TaoMate / ACC 等)保留配方倍率与分块策略,
+        # 不走 180k token 预算折减; 预算压倍率 + 假倍率跳过只作用于未选配方的后备路径。
+        if one_shot_dual_2k and not locals().get("_os2k_recipe", False):
             try:
                 # v14.278: 350k 预算把二采推到 1312x736 / 328,164 tokens(健康上限 130k 的
                 # 2.5 倍)。实机出片: 满屏细织纹网格、亮白晕斑、细节被抹平, 且单角色被
@@ -16015,20 +16036,26 @@ class BSAIH3FilmFactory:
                         if _os_sched != "beta":
                             print(f"[H3 Extender] ℹ️ v14.185 一镜到底·单采: 当前调度器={_os_sched}, 参考工作流标准为 beta(仅提示, 不强制)")
                     elif one_shot_dual_2k:
-                        # v14.272: 2K 档配方已钉死(8+4/denoise 0.45/euler/shift 12-3),
-                        # 这里只做校验与回报, 不改用户参数。
-                        if _os_steps != 8 or int(refine_steps) != 4:
+                        # v14.272: 2K 档后备配方钉死(8+4/denoise 0.45/euler/shift 12-3),
+                        # 这里只做校验与回报, 不改用户参数。显式配方档步数/调度器以配方为准,
+                        # 不再用后备 8+4 / beta 口径告警。
+                        if (not locals().get("_os2k_recipe", False)
+                                and (_os_steps != 8 or int(refine_steps) != 4)):
                             print(f"[H3 Extender] ⚠️ v14.272 一镜到底·2K双采: 当前一采 {_os_steps} 步 / 二采 {int(refine_steps)} 步, "
-                                  f"该档配方为 8+4 (脚本已按配方改写, 若日志仍如此请反馈)")
+                                  f"该档后备配方为 8+4 (脚本已按配方改写, 若日志仍如此请反馈)")
                         if _os2k_skip_refine:
                             print(f"[H3 Extender] ⚠️ v14.346 一镜到底·2K双采: 一采 {int(steps)} 步, "
                                   f"二采已跳过(倍率=假倍率 x{float(refine_upscale_factor):.2f}, 几何未变), "
                                   f"输出 {resolved_width}x{resolved_height}")
+                        elif locals().get("_os2k_recipe", False):
+                            print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采(配方档): 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
+                                  f"(denoise {float(refine_denoise):.2f}), 二采倍率 x{float(refine_upscale_factor):.2f} / "
+                                  f"分块={bool(tiled_refine)} 按渲染管道配方执行")
                         else:
                             print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采: 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
                                   f"(denoise {float(refine_denoise):.2f}), 二采倍率按单次采样 token 预算(<=350k)取, "
                                   f"整段一次采样不分块(v14.276 干净优先)")
-                        if _os_sched != "beta":
+                        if (not locals().get("_os2k_recipe", False)) and _os_sched != "beta":
                             print(f"[H3 Extender] ℹ️ v14.272 一镜到底·2K双采: 当前调度器={_os_sched}, "
                                   f"参考工作流标准为 beta(仅提示, 不强制)")
                     elif one_shot_seamless_dual:
@@ -17270,10 +17297,16 @@ class BSAIH3FilmFactory:
                                 )
                         elif not _os_pass_notice_done:
                             _os_pass_notice_done = True
-                            print("[H3 Extender] ✅ 一镜到底·2K双采：二采照跑"
-                                  f"(一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步, denoise {float(refine_denoise):.2f})，"
-                                  f"二采 latent 放大 x{float(refine_upscale_factor):.2f}(按 token 预算取, 整段一次采样)；"
-                                  "接缝沿用 v14.215 双采段头锚点修复")
+                            if locals().get("_os2k_recipe", False):
+                                print("[H3 Extender] ✅ 一镜到底·2K双采(配方档)：二采照跑"
+                                      f"(一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步, denoise {float(refine_denoise):.2f})，"
+                                      f"二采 latent 放大 x{float(refine_upscale_factor):.2f} / 分块={bool(tiled_refine)} 按渲染管道配方执行；"
+                                      "接缝沿用 v14.215 双采段头锚点修复")
+                            else:
+                                print("[H3 Extender] ✅ 一镜到底·2K双采：二采照跑"
+                                      f"(一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步, denoise {float(refine_denoise):.2f})，"
+                                      f"二采 latent 放大 x{float(refine_upscale_factor):.2f}(按 token 预算取, 整段一次采样)；"
+                                      "接缝沿用 v14.215 双采段头锚点修复")
                     elif one_shot_seamless_dual:
                         # v14.215: 双采无缝档 —— 二采照跑(1采8步+2采4步), 接缝靠
                         # v14.215 的锚点重采样修复(段头锁 keep 真正生效)。
@@ -17328,7 +17361,13 @@ class BSAIH3FilmFactory:
                     refine_mem_mode=("global" if refine_mem_global else "spatial"),
                     temporal_chunk_tokens=int(temporal_chunk_tokens),
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
-                    refine_single_pass=bool(one_shot_dual_2k),
+                    # v14.395: refine_single_pass 只在 2K 后备(非配方)路径为 True ——
+                    # 那条路径倍率已按单次采样预算取好、整段一次最干净。显式配方档是
+                    # 真·双采 x2.0 空间分块二采, 必须传 False, 否则 6863/6904 会把
+                    # v14.390/v14.270 的自动时间分块保护整道关掉, 空间块带完整 T=87
+                    # (~189k tokens/前向), 满显存换页死等(cast_bias_weight 空转)。
+                    refine_single_pass=bool(one_shot_dual_2k
+                                            and not locals().get("_os2k_recipe", False)),
                     refine_no_temp_chunk=bool(_rp_no_temp_chunk),
                     one_shot_trim_frames=int(trim_frames or 0),
                     omni_8step_mode=omni_8step_mode,

@@ -2,6 +2,24 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.396 (2026-11-13) — 配方档二采结构归位 + 二采卡死修复 + 分段接缝/换页优化 / Recipe-owned refine structure, refine stall fix, seam crossfade and temporal-chunk reserve tuning
+
+**v14.394 — 显式配方档二采不再被 2K 后备预算折减 / Explicit recipe pipelines keep their own refine structure**
+- 选中显式渲染管道（PIKA H3 Flex 8+2 / TaoMate / ACC 等）时，二采倍率、分块、显存模式、是否开二采一律以配方为准；一镜到底·2K 后备路径的「180k token 预算压倍率 / 强制 global 不分块 / 假倍率跳过二采」只在未选配方的后备路径生效。
+- 修复旧实现无条件套用后备约束，把配方声明的 x2.0 空间分块二采压成假倍率 x1.02 并整段跳过，出片停在一采 960×544。
+- English: When an explicit pipeline recipe is selected, the refine scale, tiling, VRAM mode and refine-on/off follow the recipe; the 2K fallback's budget-driven scale reduction, forced global and fake-scale skip-refine now apply only to the non-recipe fallback. Fixes refine being skipped and output stuck at first-pass 960×544.
+
+**v14.395 — 修配方档二采第 1 块满显存换页死等 / Fix recipe refine stall on the first spatial tile**
+- `refine_single_pass` 只在 2K 后备（非配方）路径为 True；显式配方档是真·双采 x2.0 空间分块二采，必须传 False，否则自动时间分块保护被整道关掉，空间块带完整 T 序列（~189k tokens/前向）满显存换页死等。
+- 空间切块数估算按真实上限 8 夹取（旧代码直接用配方 tile_count=16，每块 token 被低估约 2 倍，时间分块阈值不触发、段数切不够）。
+- English: Recipe pipelines now pass `refine_single_pass=False` so the auto temporal-chunk guard stays active; spatial tile count for token estimation is clamped to the real cap of 8. Fixes the cast/weight-swap busy-loop stall on the first refine tile.
+
+**v14.396 — 分段接缝交叉淡入 + TST 分块开关 + 时间分块 reserve 折减 / Seam crossfade, opt-in TST in tiles, temporal-chunk reserve**
+- `merge_guarded` 过渡区由「chunk 整段接管」改为与采样掩码一致的 smoothstep latent 加权混合，消除段间边界亮度/对比/纹理硬跳变；锁区与新区行为不变。
+- 分块二采内暂停 SelfLift TST 改为环境开关 `BSAI_H3_TST_IN_TILES=1`（默认 0 仍暂停，规避谱分解主机烧穿）；用于 A/B 验证恢复临时一致性校正是否缓解成片帧间闪烁。
+- 分块段 reserve/workspace 折减条件从仅空间分块扩展到时间分块：纯时间分段每前向只跑 1/n 帧，不再按全帧 workspace 高估 reserve，减少 PCIe 权重换页；真不够时原有 per-tile 探针自适应抬回 reserve，兜底保留。
+- English: Temporal-segment overlap now blends accumulated and chunk latents with a smoothstep ramp instead of a hard takeover; TST skip inside tiles is now opt-in via `BSAI_H3_TST_IN_TILES` (default off); reserve/workspace trimming applies to temporal-chunked passes as well, reducing weight swapping over PCIe, with the existing per-tile probe still raising reserve on real shortage.
+
 ### v14.393 (2026-11-12) — 二采起点 σ 归位：全部管线从 σ≈0.44~0.54 起步的全分辨率真重绘 / Refine now starts from σ≈0.44–0.54 on every pipeline (real full-resolution redraw that keeps the first pass)
 
 **用户口径**（给了参考实现的机制说明）：`H3SigmaRefiner` 不改变起始 σ，起始 σ 由 `BasicScheduler` 的 denoise 决定；v1.7 的二采从 **σ=1.0** 起步，等于把一采画面整个洗掉，所以二采必然画成全新画面。要让二采「真重绘又不脱形」，要改成**从 σ≈0.45/0.55 起步、在 1088×1920 全分辨率上重绘**。要求全面检查所有渲染管线并按此修改。

@@ -39,9 +39,17 @@ except Exception:  # pragma: no cover
 # 因此主通道改成 builtins 上的进程级计数器(与模块身份、对象层级全部无关), 模块
 # push/pop 只作为附带的记账。
 import builtins as _builtins
+import os as _os
 import sys as _sys
 
 _TST_SKIP_KEY = "_BSAI_TST_TILE_SKIP"
+
+# v14.396: 默认仍在 tile forward 内暂停 SelfLift TST(与 v14.380 一致, 规避谱分解
+# 主机烧穿)。设 BSAI_H3_TST_IN_TILES=1/true/on 可保留 TST 在分块二采内生效, 用于
+# A/B 验证「恢复临时一致性校正」是否缓解成片帧间闪烁; 该路径未经实机性能验证,
+# 默认关闭, 不要在默认档打开。
+_TST_IN_TILES = str(_os.environ.get("BSAI_H3_TST_IN_TILES", "0")).strip().lower() in (
+    "1", "true", "on", "yes")
 
 
 def _find_tst_module():
@@ -495,24 +503,29 @@ def _tiled_model_call(
     _tst_prev_skip = None
     _tst_pushed = False
     _tst_flag_prev = int(getattr(_builtins, _TST_SKIP_KEY, 0))
-    if _tst_state is not None:
-        _tst_prev_skip = bool(_tst_state.get("skip_tiles"))
-        _tst_state["skip_tiles"] = True
-    if _tst_module is not None:
-        try:
-            _tst_module.push_tile_skip()
-            _tst_pushed = True
-        except Exception:
-            _tst_pushed = False
-    setattr(_builtins, _TST_SKIP_KEY, _tst_flag_prev + 1)
-    log.info(
-        "v14.380 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override "
-        "(builtins_flag=%s, module=%s, state=%s; TST 与 highres_tiling 不兼容, "
-        "按模块自身声明跳过)",
-        int(getattr(_builtins, _TST_SKIP_KEY, 0)),
-        "found" if _tst_module is not None else "missing",
-        "found" if _tst_state is not None else "missing",
-    )
+    if not _TST_IN_TILES:
+        if _tst_state is not None:
+            _tst_prev_skip = bool(_tst_state.get("skip_tiles"))
+            _tst_state["skip_tiles"] = True
+        if _tst_module is not None:
+            try:
+                _tst_module.push_tile_skip()
+                _tst_pushed = True
+            except Exception:
+                _tst_pushed = False
+        setattr(_builtins, _TST_SKIP_KEY, _tst_flag_prev + 1)
+        log.info(
+            "v14.380 分块二采: tile forward 内已暂停 SelfLift TST 注意力 override "
+            "(builtins_flag=%s, module=%s, state=%s; TST 与 highres_tiling 不兼容, "
+            "按模块自身声明跳过)",
+            int(getattr(_builtins, _TST_SKIP_KEY, 0)),
+            "found" if _tst_module is not None else "missing",
+            "found" if _tst_state is not None else "missing",
+        )
+    else:
+        log.info(
+            "v14.396 BSAI_H3_TST_IN_TILES=1: 分块二采保留 SelfLift TST 注意力 override "
+            "(A/B 模式, 未暂停临时一致性校正; 谱分解开销需实机观察)")
 
     try:
         for _ti, (ax_start, ax_end, ov_left, ov_right) in enumerate(plan["regions"]):
