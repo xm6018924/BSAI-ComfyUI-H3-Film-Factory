@@ -118,7 +118,7 @@ from .patch_h3_audio_row_order import (
     is_applied as _row_order_patch_applied,
 )
 
-BUILD = "minimax-h3-extender-v14.396-recipe-guard-x2-upscale+temporal-chunk-fix+tst-tile-env+seam-crossfade+reserve-temporal"
+BUILD = "minimax-h3-extender-v14.398-pika-dmad-refine-global-context"
 
 # v14.307 (里程碑): 全部渲染管道统一口径 —— 时间分块关闭、空间分块保留。
 # 逐档核对后修正 TaoMate HD 档的 `tiled_refine = _CHUNKED_DENOISE_ON`
@@ -12940,11 +12940,22 @@ class BSAIH3FilmFactory:
                 # BSAI_H3_REFINE_NO_REDRAW=1。
                 steps, refine_steps, tile_count, refine_denoise = 8, 2, 4, 0.5
                 shift_video, shift_audio = 12.0, 2.0
+                # v14.398: 二采改 global 全上下文(不裁空间轴)。spatial 分块下 709,920
+                # tokens 挤在 24GB, free 掉到 ~522MiB, 权重无法驻留, 每个 DiTBlock 的
+                # Linear 现场量化 cast 再搬上卡, GPU SM 空转等搬运(实测单核满载、功耗
+                # ~100W、二采首段首块 30 分钟无进度, py-spy 栈停在
+                # cast_bias_weight→Linear.forward_comfy_cast_weights→Attention→DiTBlock)。
+                # global 不裁空间轴, 不装空间分块包装, TST 与 Sol-Attn 稀疏注意力保留,
+                # 仅 MLP 按 4096 token 分块压激活; 时间分块仍按 240k/段预算触发。
+                # 与 v14.397 PIKA 档同一修法; 真不够时 v14.224/v14.253 自动回退 spatial。
+                tiled_refine = False
+                refine_mem_global = True
+                refine_mem_mode = "global (全上下文省显存)"
                 if str(sampler_name) != "lcm":
                     sampler_name = "lcm"
                     print(f"[H3 Extender] v14.172 DMAD-4步(渲染管道): 采样器强制 lcm (DMAD 官方配方)")
                 print(f"[H3 Extender] v14.386 DMAD(渲染管道): 一采 8 步 + 二采 2 步 "
-                      f"(v14.389 二采重绘开, 内容锁起点 σ 0.45~0.55)")
+                      f"(v14.389 二采重绘开, 内容锁起点 σ 0.45~0.55; global 全上下文)")
             elif _rp_mode == "武戏组合拳":
                 # v14.176: 对齐 YZ金鱼「终极篇」武戏配方 (BV1LKJm6VELc):
                 # 一采6步(simple) + 二采6步(总12步, 武戏拟合更清晰),
@@ -13468,7 +13479,16 @@ class BSAIH3FilmFactory:
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
-                tiled_refine = True
+                # v14.397: 二采改 global 全上下文(不裁空间轴)。spatial 分块下 TST 被自身
+                # 长度守卫跳过(tile 前向 packed 序列无 refs/context 行可分, s==frames*rows),
+                # 帧间一致性校正失效; 且每块带整套 ref2va 参考独立重画, 实测成片周期性
+                # 变亮洗软 + 横带/水波纹(同 v14.253 直播档结论: 横带叠加正是 spatial 分块
+                # 造成)。global 保留 TST 与 Sol-Attn 稀疏注意力, 仅 MLP 按 4096 token 分块
+                # 压激活; 真不够时 v14.224 自动回退 spatial。时间分块仍由 v14.390 按 token
+                # 预算触发, 每段 ~236k tokens。
+                tiled_refine = False
+                refine_mem_global = True
+                refine_mem_mode = "global (全上下文省显存)"
                 tile_overlap = 128
                 _rp_no_temp_chunk = True
                 shift_video, shift_audio = 12.0, 3.0
@@ -13497,7 +13517,7 @@ class BSAIH3FilmFactory:
                 print("[H3 Extender] 🎬 v14.367 PIKA H3 Flex 8步+2步 双采 (Ref2VA 锁脸): "
                       f"一采 {steps} 步 lcm + Pika 6 步轨迹细分 σ (非 simple 等间距), "
                       f"二采 {refine_steps} 步 euler + beta + denoise 0.45 + SelfLift x2.0 渐进放大 "
-                      f"({tile_count} 块 / overlap {tile_overlap}); "
+                      f"(global 全上下文 / overlap {tile_overlap}); "
                       "LoRA 槽挂 pika_h3_flex_ref2va_v1_bf16.safetensors "
                       "(strength 1.0, 禁叠第二个加速 LoRA), 底模留 hybrid b25-49")
             elif _rp_mode in ("TaoMate HD 3步 渐进放大双采 (2+1 1080p直出)",

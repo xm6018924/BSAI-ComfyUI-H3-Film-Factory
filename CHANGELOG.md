@@ -2,6 +2,20 @@
 
 All notable changes, bilingual. 所有重要版本双语说明。
 
+### v14.398 (2026-11-13) — DMAD 4-Step 二采切 global 全上下文，修复低显存权重换页卡死 / DMAD 4-Step refine moves to global full-context, fixing the low-VRAM weight-swap stall
+
+- 现场：DMAD 4-Step 档二采（x2.0 共 709,920 tokens，spatial 4 块 × 时间 7 段、chunk=20）首段首向前向卡死约 30 分钟无进度；free VRAM 仅 ~522MiB，CPU 单核满载、GPU util 100% 但功耗 ~100W 空转；py-spy 栈停在 `cast_bias_weight → Linear.forward_comfy_cast_weights → Attention.forward → DiTBlock.forward`，即低显存下每个 Linear 现场量化 cast 再搬上卡、SM 等搬运的换页风暴（stderr 无 OOM/异常）。
+- 改动：该配方二采由 spatial 切 global 全上下文（`tiled_refine=False`、`refine_mem_global=True`、`refine_mem_mode="global 全上下文"`）。global 不裁空间轴、不装空间分块包装，TST 与 Sol-Attn 稀疏注意力保留，仅 MLP 按 4096 token 分块压激活；时间分块仍按 240k/段预算触发。与 v14.397 PIKA 档同一修法；global 包装失败或真不够时，既有 v14.224/v14.253 机制自动回退 spatial 兜底。
+- 步数/denoise/采样器不变：一采 8 步 lcm + 二采 2 步 euler 链路，denoise 0.50。
+- English: The DMAD 4-Step refine stalled in a low-VRAM weight-swap storm on the first segment/tile (free ~522MiB, single-core busy casting quantized Linear weights per block, GPU idle at ~100W). Its refine now uses global full-context like v14.397: no spatial crop, no tile wrapper, TST and Sol-Attn sparse attention retained, only the MLP chunked at 4096 tokens; temporal chunking still triggers at the 240k/segment budget, with the existing automatic spatial fallback if global cannot fit. Steps/denoise/sampler unchanged.
+
+### v14.397 (2026-11-13) — PIKA 8+2 二采改 global 全上下文，消除分块洗软/横带 / PIKA 8+2 refine moves to global full-context to remove tiled wash-out and banding
+
+- 诊断：PIKA H3 Flex 8+2 配方二采原走 spatial 空间分块（tile16）。tile forward 只裁 H/W、保留全 T，packed 序列无独立 refs/context 行可分（`s == frames*rows`），TST 长度守卫自跳过；叠加 v14.380 的分块暂停，二采全程无帧间一致性校正。每块又带整套 ref2va 参考独立重画，实测成片周期性变亮洗软，横向砖墙上叠加为可感知的横带/水波纹（尖峰帧多在分段内部，非段间接缝）。
+- 改动：该配方二采由 spatial 切 global 全上下文（`tiled_refine=False`、`refine_mem_global=True`、`refine_mem_mode="global 全上下文"`）。global 不裁空间轴，不安装空间分块包装，TST 与 Sol-Attn 稀疏注意力在二采保持生效；仅 MLP 按 4096 token 分块压激活；时间分块仍按 240k/段预算触发（~236k tokens/段）。global 包装失败或真不够时，既有 v14.224/v14.253 机制自动回退 spatial 兜底。
+- denoise 0.45 / 2 步 euler / x2.0 3D 放大保持不变；本轮未下调重绘强度，留待 global 路径 A/B 后再定。
+- English: The PIKA 8+2 refine previously ran spatial tiles; inside a tile the packed sequence has no separable refs/context rows, so the TST length guard skips itself (and v14.380 pauses TST in tiles), leaving the refine with no frame-to-frame consistency correction, while each tile repaints against the full ref2va reference — producing periodic brightness/contrast wash-out that reads as banding/ripple over textured horizontal walls. The recipe now uses global full-context refine: no spatial crop, no tile wrapper, TST and Sol-Attn sparse attention stay active, only the MLP is chunked at 4096 tokens; temporal chunking still triggers at the 240k/segment budget. Existing fallback to spatial remains if global cannot fit. Denoise/2-step/euler/x2.0 unchanged pending the A/B.
+
 ### v14.396 (2026-11-13) — 配方档二采结构归位 + 二采卡死修复 + 分段接缝/换页优化 / Recipe-owned refine structure, refine stall fix, seam crossfade and temporal-chunk reserve tuning
 
 **v14.394 — 显式配方档二采不再被 2K 后备预算折减 / Explicit recipe pipelines keep their own refine structure**
