@@ -1,7 +1,27 @@
 # 分镜拆段与顺序渲染节点 / Storyboard segmentation nodes
 
 这两个插件原本独立放在 `custom_nodes/` 下，现随电影工厂仓库一起归档，位置：`storyboard_nodes/`。
-安装时把它们各自剪切到 `ComfyUI/custom_nodes/`（保持目录名不变），重启 ComfyUI 即可。
+
+## 安装：用目录联接消灭双副本（推荐）
+
+直接复制会让“运行副本”和“仓库副本”变成两份独立文件，改了运行副本而不提交，GitHub 上会静默落后。本机做法是用
+**目录联接（junction）**把 `custom_nodes/` 下的目录名指向本仓库里的源码，从此物理上只有一份：
+
+```powershell
+# 两个插件各做一次；GIT_DEST 换成你本仓库的实际路径
+$repo = "C:\BSAI\ComfyUI-BSAI_pro_v43\ComfyUI\custom_nodes\BSAI-ComfyUI-H3-Film-Factory\storyboard_nodes"
+$live = "C:\BSAI\ComfyUI-BSAI_pro_v43\ComfyUI\custom_nodes"
+foreach ($n in "A_MiniMaxH3StoryboardDuration","A_MiniMaxH3StoryboardRefVideo") {
+  Move-Item -LiteralPath (Join-Path $live $n) -Destination "C:\BSAI\_node_backups\${n}_pre_junction"
+  New-Item -ItemType Junction -Path (Join-Path $live $n) -Target (Join-Path $repo $n) | Out-Null
+}
+```
+
+这样 ComfyUI 加载的就是 Git 跟踪的文件，改完 `git status` 立刻可见，`commit` 即发布。
+
+> 注意：联接损坏（目录被删、仓库被移动）会让插件“消失”，重建联接即可；`__pycache__`、`*.bak` 已在仓库 `.gitignore`
+> 里忽略，落在仓库目录里也不会进提交。
+> 若不用联接，也可以把两个目录直接复制到 `custom_nodes/`，但每次改动都要手动拷回仓库再提交。
 
 | 目录 | 节点 | 作用 |
 |---|---|---|
