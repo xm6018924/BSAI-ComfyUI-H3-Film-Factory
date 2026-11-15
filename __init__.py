@@ -200,6 +200,17 @@ try:
 except Exception as e:
     print(f"[H3 Film Factory] storyboard_nodes import failed: {e}")
 
+# === 二采条件化几何守卫（关键帧网格与放大后潜空间对齐）===
+try:
+    from .bsai_h3_cond_guard import (
+        NODE_CLASS_MAPPINGS as COND_GUARD_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as COND_GUARD_DISPLAY,
+    )
+    NODE_CLASS_MAPPINGS.update(COND_GUARD_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(COND_GUARD_DISPLAY)
+except Exception as e:
+    print(f"[H3 Film Factory] bsai_h3_cond_guard.py import failed: {e}")
+
 # === Server-side API endpoints ===
 try:
     from . import server
