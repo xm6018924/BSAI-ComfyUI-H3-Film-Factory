@@ -96,6 +96,35 @@ def _find_asset_file(type_dir, fname, input_dir):
     return None
 
 
+def _resolve_library_entry(entry, kind, input_dir):
+    """Resolve an ASSET_LIBRARY entry to a file proven inside
+    input/bsai_assets/<kind> or the input root.
+
+    The entry may not be trusted: BSAI_AssetLibraryInput builds it, but
+    /prompt can hand this node any dict. The NAME is looked up on disk; a bare
+    path is accepted only when its text is safe and it lands in those trees.
+    """
+    if not isinstance(entry, dict):
+        return None
+    name = str(entry.get("name") or entry.get("filename") or "")
+    type_dir = os.path.join(input_dir, "bsai_assets", kind)
+    if name:
+        found = _find_asset_file(type_dir, name, input_dir)
+        if found:
+            return found
+    path = str(entry.get("path") or "")
+    if path and not _unsafe_asset_name(path):
+        try:
+            real = os.path.realpath(path)
+            for base in (os.path.realpath(type_dir), os.path.realpath(input_dir)):
+                if os.path.commonpath([base, real]) == base and os.path.isfile(real):
+                    return real
+        except (ValueError, OSError):
+            pass
+    print(f"[BSAI AssetRefSelector] asset refused before load: {name or path}")
+    return None
+
+
 def _resolve_directory(path):
     if not path:
         return None
@@ -111,12 +140,18 @@ def _resolve_directory(path):
 
 
 def _load_image_tensor(path):
+    if _unsafe_asset_name(path):
+        print(f"[BSAI AssetLibrary] image path refused before open: {path}")
+        return torch.zeros(1, 64, 64, 3, dtype=torch.float32)
     img = Image.open(path).convert('RGB')
     arr = np.array(img, dtype=np.float32) / 255.0
     return torch.from_numpy(arr)
 
 
 def _load_video_frames(path, max_frames=243):
+    if _unsafe_asset_name(path):
+        print(f"[BSAI AssetLibrary] video path refused before open: {path}")
+        return torch.zeros(1, 64, 64, 3, dtype=torch.float32)
     if cv2 is None:
         return torch.zeros(1, 64, 64, 3, dtype=torch.float32)
     cap = cv2.VideoCapture(path)
@@ -137,6 +172,9 @@ def _load_video_frames(path, max_frames=243):
 
 
 def _load_audio_from_file(path):
+    if _unsafe_asset_name(path):
+        print(f"[BSAI AssetLibrary] audio path refused before open: {path}")
+        return {"waveform": torch.zeros(2, 1, 44100, dtype=torch.float32), "sample_rate": 44100}
     if _HAS_COMFY_UTILS:
         try:
             return comfy.utils.load_audio(path)
@@ -309,6 +347,7 @@ class BSAI_AssetRefSelector:
         }
 
     def select_assets(self, asset_library, prompt):
+        input_dir = folder_paths.get_input_directory()
         images = asset_library.get("images", [])
         videos = asset_library.get("videos", [])
         audios = asset_library.get("audios", [])
@@ -327,7 +366,11 @@ class BSAI_AssetRefSelector:
         for i, ref_idx in enumerate(img_refs):
             found = next((a for a in images if a["index"] == ref_idx), None)
             if found:
-                tensor = _load_image_tensor(found["path"])
+                asset_path = _resolve_library_entry(found, "images", input_dir)
+                if not asset_path:
+                    print(f"[BSAI AssetRefSelector] @img{ref_idx} refused: not under bsai_assets")
+                    continue
+                tensor = _load_image_tensor(asset_path)
                 selected_images.append(tensor)
                 formatted = re.sub(rf'@(?:图|img){ref_idx}(?!\d)', f'<Picture {i + 1}>', formatted, flags=re.IGNORECASE)
             else:
@@ -343,8 +386,12 @@ class BSAI_AssetRefSelector:
         for i, ref_idx in enumerate(vid_refs):
             found = next((a for a in videos if a["index"] == ref_idx), None)
             if found:
-                ref_videos[i] = _load_video_frames(found["path"])
-                ref_video_audios[i] = _load_audio_from_file(found["path"])
+                asset_path = _resolve_library_entry(found, "videos", input_dir)
+                if not asset_path:
+                    print(f"[BSAI AssetRefSelector] @vid{ref_idx} refused: not under bsai_assets")
+                    continue
+                ref_videos[i] = _load_video_frames(asset_path)
+                ref_video_audios[i] = _load_audio_from_file(asset_path)
                 formatted = re.sub(rf'@(?:视频|vid){ref_idx}(?!\d)', f'<Video {i + 1}>', formatted, flags=re.IGNORECASE)
             else:
                 print(f"[BSAI AssetRefSelector] Warning: @vid{ref_idx} not found in library (have {len(videos)} videos)")
@@ -353,7 +400,11 @@ class BSAI_AssetRefSelector:
         for i, ref_idx in enumerate(aud_refs):
             found = next((a for a in audios if a["index"] == ref_idx), None)
             if found:
-                ref_audios[i] = _load_audio_from_file(found["path"])
+                asset_path = _resolve_library_entry(found, "audios", input_dir)
+                if not asset_path:
+                    print(f"[BSAI AssetRefSelector] @aud{ref_idx} refused: not under bsai_assets")
+                    continue
+                ref_audios[i] = _load_audio_from_file(asset_path)
                 formatted = re.sub(rf'@(?:音频|aud){ref_idx}(?!\d)', f'<Audio {i + 1}>', formatted, flags=re.IGNORECASE)
             else:
                 print(f"[BSAI AssetRefSelector] Warning: @aud{ref_idx} not found in library (have {len(audios)} audios)")

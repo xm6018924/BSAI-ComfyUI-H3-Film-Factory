@@ -21,6 +21,7 @@ import hashlib
 import io
 import json
 import math
+import ntpath
 import os
 import re
 from pathlib import Path
@@ -802,6 +803,121 @@ def _recast_find_video_asset(asset_library, tag_num: int):
         return videos[idx]
     return None
 
+# ── v14.402 asset-path confinement (PR #3497 review, items 1-3) ──────────
+# An ASSET_LIBRARY entry carries whatever /prompt sent, and the loaders used
+# to open it without a text check. Windows resolves \\host\share and C:\x as
+# rooted paths and authenticates to that host on the first stat/open, so every
+# asset path is now rebuilt from its NAME inside input/bsai_assets (falling
+# back to the input root) or refused before any filesystem call.
+
+
+def _windows_rooted_text(value):
+    """True when Windows treats the text as rooted or as a network share."""
+    text = str(value or "").strip().replace("/", "\\")
+    if not text:
+        return False
+    drive, _tail = ntpath.splitdrive(text)
+    return bool(drive) or text.startswith("\\")
+
+
+def _unsafe_path_text(value):
+    """Reject empty, URL, network-share, drive-rooted and '..' text."""
+    text = str(value or "").strip()
+    if not text:
+        return True
+    if "://" in text:
+        return True
+    if _windows_rooted_text(text):
+        return True
+    return ".." in [p for p in text.replace("\\", "/").split("/")]
+
+
+_ASSET_KIND_DIRS = {"images": "images", "videos": "videos", "audios": "audios"}
+
+
+def _asset_path_bases(kind):
+    """Directories an asset may live in: bsai_assets/<kind>/ then the input root."""
+    try:
+        input_dir = os.path.realpath(folder_paths.get_input_directory())
+    except Exception:
+        return []
+    sub = _ASSET_KIND_DIRS.get(str(kind), str(kind))
+    return [os.path.realpath(os.path.join(input_dir, "bsai_assets", sub)), input_dir]
+
+
+def _stays_under(path, bases):
+    try:
+        real = os.path.realpath(str(path))
+    except Exception:
+        return None
+    for base in bases:
+        try:
+            if os.path.commonpath([base, real]) == base and os.path.isfile(real):
+                return real
+        except (ValueError, OSError):
+            continue
+    return None
+
+
+def _asset_path_allowed(path):
+    """True when a bare path stays inside one of the asset/input directories."""
+    if _unsafe_path_text(path):
+        return False
+    for kind in _ASSET_KIND_DIRS:
+        if _stays_under(path, _asset_path_bases(kind)):
+            return True
+    return False
+
+
+def _resolve_asset_file(entry, kind, log=print, label=""):
+    """Resolve an asset-library entry to a path proven inside bsai_assets/<kind>
+    or the input root. The entry NAME is authoritative; a bare path is only
+    accepted when its text is safe and it really lands in those directories.
+    Returns None (and logs) when the value cannot be proven safe."""
+    name = ""
+    path = ""
+    if isinstance(entry, dict):
+        name = str(entry.get("name") or entry.get("filename") or "")
+        path = str(entry.get("path") or "")
+    elif entry is not None:
+        name = str(entry)
+        path = str(entry)
+
+    bases = _asset_path_bases(kind)
+    if not bases:
+        log("[H3 Asset] %s refused: the input directory is unavailable" % (label or kind))
+        return None
+    if name and not _unsafe_path_text(name):
+        found = _stays_under(os.path.join(bases[0], name), bases)
+        if found:
+            return found
+    if path and not _unsafe_path_text(path):
+        found = _stays_under(path, bases)
+        if found:
+            return found
+    log("[H3 Asset] %s refused: %r is not a file under input/bsai_assets"
+        % (label or kind, name or path))
+    return None
+
+
+def _clip_output_path(owner_text, clip_index, suffix=None):
+    """Build output/bsai_clips/h3_clip_<owner>_<n>_<suffix>.mp4 and prove the
+    final path stays inside output/bsai_clips before anything is created."""
+    safe = _safe_name(str(owner_text))
+    base = Path(_clip_output_dir())
+    name = "h3_clip_%s_%d" % (safe, int(clip_index) + 1)
+    if suffix:
+        name += "_%s" % suffix
+    full = base / (name + ".mp4")
+    try:
+        base_real = os.path.realpath(str(base))
+        full_real = os.path.realpath(str(full))
+        if os.path.commonpath([base_real, full_real]) != base_real:
+            raise RuntimeError("clip path escapes output/bsai_clips: %s" % full)
+    except ValueError:
+        raise RuntimeError("clip path escapes output/bsai_clips: %s" % full)
+    return full
+
 
 _IMG_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 _VID_EXTS = (".mp4", ".avi", ".mov", ".mkv", ".webm", ".flv")
@@ -1284,9 +1400,10 @@ def _recast_build_plan(clips, asset_library, ffmpeg=None, log=print):
     if not isinstance(entry, dict):
         log(f"[H3 Recast] 资产库里找不到 @视频{tag_num}（视频资产数不足）")
         return None
-    path = entry.get("path") or entry.get("filename") or ""
-    if not path or not os.path.isfile(str(path)):
-        log(f"[H3 Recast] @视频{tag_num} 指向的文件不存在: {path}")
+    path = _resolve_asset_file(entry, "videos", log=log, label=f"@视频{tag_num}")
+    if not path:
+        log(f"[H3 Recast] @视频{tag_num} 指向的文件不存在或不在资产目录: "
+            f"{entry.get('path') or entry.get('name') or ''}")
         return None
 
     duration = _recast_probe_duration(path, ffmpeg)
@@ -1533,9 +1650,10 @@ def _remix_build_plan(clips, asset_library, ffmpeg=None, log=print,
     if not isinstance(entry, dict):
         log(f"[H3 Remix] 资产库里找不到 @视频{tag_num}（视频资产数不足）")
         return None
-    path = entry.get("path") or entry.get("filename") or ""
-    if not path or not os.path.isfile(str(path)):
-        log(f"[H3 Remix] @视频{tag_num} 指向的文件不存在: {path}")
+    path = _resolve_asset_file(entry, "videos", log=log, label=f"@视频{tag_num}")
+    if not path:
+        log(f"[H3 Remix] @视频{tag_num} 指向的文件不存在或不在资产目录: "
+            f"{entry.get('path') or entry.get('name') or ''}")
         return None
 
     duration = _recast_probe_duration(path, ffmpeg)
@@ -4687,6 +4805,11 @@ def _ff_upscaler_weight_path(name):
     """权重文件名 -> 绝对路径; 找不到返回空串。"""
     if not name:
         return ""
+    # v14.402 (PR #3497 item 3): never join rooted / network-share / '..'
+    # text onto the models directory — Windows would stat the share.
+    if _unsafe_path_text(name):
+        print(f"[H3 Extender] upscaler weight name refused: {name}")
+        return ""
     import os as _o
     try:
         _p = folder_paths.get_full_path("latent_upscale_models", name)
@@ -4787,6 +4910,31 @@ def _ff_get_upscaler_models(compatible_only=False):
         except Exception:
             pass
     return opts
+
+
+def _ff_confine_upscaler_model(name):
+    """Only a model that is in the latent-upscale list may be loaded.
+
+    PR #3497 item 3: VALIDATE_INPUTS accepts **kwargs so ComfyUI skips the
+    combo check, which let /prompt pass any path-ish value. Anything not in
+    the list falls back to bilinear instead of being joined onto disk.
+    """
+    text = str(name or "").strip()
+    if not text or text.startswith("("):
+        return text
+    try:
+        allowed = {str(x) for x in (_ff_get_upscaler_models() or [])}
+    except Exception:
+        allowed = set()
+    if not allowed:
+        return text if not _unsafe_path_text(text) else "(bilinear interpolation, no model)"
+    if text in allowed:
+        return text
+    base = os.path.basename(text)
+    if base in allowed:
+        return base
+    print(f"[H3 Extender] refine_upscaler_model refused (not in the model list): {text}")
+    return "(bilinear interpolation, no model)"
 
 
 def _ff_resolve_upscaler_model(name):
@@ -7136,15 +7284,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                           f"见 v1.47 显存预算)")
                     _send_extender_warning(
                         owner_id,
-                        f"二采倍率被显存预算降级 x{_orig_f}→x{_chosen2}，"
-                        f"本段成片像素低于声明值（细节会明显变软）",
+                        f"Refine scale downgraded by the VRAM budget x{_orig_f}->x{_chosen2}; "
+                        f"this clip is below the declared pixel size (details look softer)",
                         clip_index=clip_index,
                     )
                 elif _auto_tiled:
                     _send_extender_warning(
                         owner_id,
-                        f"显存不足，已自动启用分块二采保住 x{_orig_f} 倍率"
-                        f"（速度略降，画质不缩水）",
+                        f"VRAM is tight: tiled refine enabled to keep x{_orig_f} "
+                        f"(slightly slower, same quality)",
                         clip_index=clip_index,
                     )
                 elif _chosen2 is None:
@@ -7201,8 +7349,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if _FF_UPSCALER_FELL_BACK["hit"]:
                     _send_extender_warning(
                         owner_id,
-                        f"3D 语义放大失败，已回退 bislerp 插值"
-                        f"（{_FF_UPSCALER_FELL_BACK['reason']}）",
+                        f"3D semantic upscale failed; fell back to bislerp interpolation "
+                        f"({_FF_UPSCALER_FELL_BACK['reason']})",
                         clip_index=clip_index,
                     )
                 if tuple(_up_video.shape[-2:]) != tuple(_members[0].shape[-2:]):
@@ -9057,9 +9205,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                               f"已自动回退一采 latent {_pre_hw[1]}x{_pre_hw[0]}")
                         _send_extender_warning(
                             owner_id,
-                            f"二采结果塌陷成灰片(通道内std={_cdisp:.3f})，"
-                            f"已自动回退一采 latent；建议降低 refine_denoise / "
-                            f"refine_steps，或关闭二采",
+                            f"Refine collapsed into a gray frame (in-channel std={_cdisp:.3f}); "
+                            f"reverted to the first-pass latent. Consider lowering "
+                            f"refine_denoise / refine_steps, or turning refine off",
                             clip_index=clip_index,
                         )
                     else:
@@ -9117,9 +9265,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                           f"已丢弃二采结果回退一采放大 {_g_hw[1]}x{_g_hw[0]}(clip={clip_index})")
                     _send_extender_warning(
                         owner_id,
-                        f"二采重绘偏离一采内容(结构相似度={_g_cos:.3f} < "
-                        f"{_FF_REFINE_CONTENT_MIN:.2f})，已自动回退一采放大结果，"
-                        f"本段按纯超分交付",
+                        f"Refine redraw drifted from the first-pass content "
+                        f"(structure similarity={_g_cos:.3f} < {_FF_REFINE_CONTENT_MIN:.2f}); "
+                        f"reverted to the first-pass upscale, this clip is delivered as pure upscale",
                         clip_index=clip_index,
                     )
                 else:
@@ -11096,7 +11244,8 @@ def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
         ctl["event"].clear()
     _send_extender_progress(
         node_id, clip_index, total, "paused",
-        f"Clip {clip_index + 1} 已生成完成，渲染已暂停 — 可点「继续 / 仅当前 / 中止」，无干预 {int(timeout)}s 后自动继续",
+        f"Clip {clip_index + 1} finished; rendering paused - use Resume / Current only / Abort; "
+        f"auto-resuming in {int(timeout)}s",
     )
     decided = ctl["event"].wait(timeout)
     with _render_ctl_lock:
@@ -11105,25 +11254,25 @@ def _maybe_pause_between(node_id, clip_index, loop_end, total, timeout):
     if not decided:
         _send_extender_progress(
             node_id, clip_index, total, "resumed",
-            f"暂停超时无干预 → 自动继续渲染 Clip {clip_index + 2}",
+            f"Pause timed out with no action -> auto-resuming Clip {clip_index + 2}",
         )
         return True
     if state == "resume":
         _send_extender_progress(
             node_id, clip_index, total, "resumed",
-            f"用户点击「继续」→ 渲染 Clip {clip_index + 2}",
+            f"Resume clicked -> rendering Clip {clip_index + 2}",
         )
         return True
     if state == "stop_after":
         _send_extender_progress(
             node_id, clip_index, total, "stopped",
-            "已停止后续渲染：仅保留已生成的 CLIP（可点「合并输出」合成视频）",
+            "Stopped: only the CLIPs already rendered are kept (use Merge output to build the video)",
         )
         return False
     if state == "abort":
         _send_extender_progress(
             node_id, clip_index, total, "aborted",
-            "渲染已中止",
+            "Rendering aborted",
         )
         return False
     return True
@@ -12594,44 +12743,44 @@ class BSAIH3FilmFactory:
         optional["u4k_scale"] = (
             "FLOAT",
             {"default": 0.0, "min": 0.0, "max": 8.0, "step": 0.01,
-             "tooltip": "4K 引擎倍率。0 = 跟随 upscale_factor；>0 时覆盖它（支持 2.67 / 3.0 这类非整数倍率，例如 1080p->2880p）。"},
+             "tooltip": "4K engine scale. 0 = follow upscale_factor; >0 overrides it (non-integer factors such as 2.67 / 3.0 are supported, e.g. 1080p->2880p)."},
         )
         optional["u4k_auto_prefer"] = (
             ["Quality", "Speed", "Portrait", "Anime", "UHD"],
-            {"default": "Quality", "tooltip": "auto_route 的偏好档：Quality = 画质优先；Speed = 速度优先；Portrait = 人像；Anime = 二次元；UHD = 超高分辨率保守档。"},
+            {"default": "Quality", "tooltip": "auto_route preference: Quality = quality first; Speed = speed first; Portrait = faces; Anime = animation; UHD = conservative ultra-high-resolution."},
         )
         optional["u4k_input_adaptive"] = (
             ["Auto", "Off", "UHD Conservative", "HD Enhance"],
-            {"default": "Auto", "tooltip": "输入自适应后处理（4K 插件口径）：Auto = 按输入短边自动选；Off = 关闭；UHD Conservative = 4K 输入保守（少细节、弱柔化）；HD Enhance = HD 输入增强。"},
+            {"default": "Auto", "tooltip": "Input-adaptive post-processing (4K plugin): Auto = choose from the input short side; Off = disabled; UHD Conservative = conservative for 4K input (less detail, gentler softening); HD Enhance = enhance HD input."},
         )
         optional["u4k_detail_amount"] = (
             "FLOAT",
             {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01,
-             "tooltip": "细节重建强度（4K 插件默认 0.50）。输入自适应会按档位再收敛。"},
+             "tooltip": "Detail reconstruction strength (4K plugin default 0.50). Input adaptation tightens it per mode."},
         )
         optional["u4k_softness"] = (
             "FLOAT",
             {"default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01,
-             "tooltip": "柔化强度（4K 插件默认 0.10），用于压掉超分后的锐化过冲/振铃；显存紧时内部自动分块。"},
+             "tooltip": "Softening strength (4K plugin default 0.10) to suppress sharpening overshoot/ringing after upscaling; tiled internally when VRAM is tight."},
         )
         optional["u4k_temporal_strength"] = (
             "FLOAT",
             {"default": 0.20, "min": 0.0, "max": 1.0, "step": 0.01,
-             "tooltip": "时域一致性强度（0.20，论文推荐）。对自带时序的引擎（FlashVSR/SeedVR2/RelayVSR/VOSR）自动归零，避免二次抹动。"},
+             "tooltip": "Temporal consistency strength (0.20, paper default). Automatically zeroed for engines with their own temporal handling (FlashVSR/SeedVR2/RelayVSR/VOSR) to avoid double motion smoothing."},
         )
         optional["u4k_face_restore"] = (
             ["Off", "GFPGANv1.4", "CodeFormer", "Small-Face (CodeFormer)"],
-            {"default": "Off", "tooltip": "超分后逐帧人脸修复（独立于 upscale_face_restore）：GFPGANv1.4 / CodeFormer / Small-Face (CodeFormer) = 小脸档，保留温和 blend 与高 fidelity 防逐帧抖。"},
+            {"default": "Off", "tooltip": "Per-frame face restoration after upscaling (independent of upscale_face_restore): GFPGANv1.4 / CodeFormer / Small-Face (CodeFormer) = small-face mode, keeping a gentle blend and high fidelity to prevent frame-to-frame flicker."},
         )
         optional["u4k_tile_pad"] = (
             "INT",
             {"default": 32, "min": 0, "max": 512, "step": 1,
-             "tooltip": "4K 插件分块处理的 padding（像素），越大接缝越少越慢；默认 32。"},
+             "tooltip": "Tiling padding in pixels for the 4K plugin; larger = fewer seams but slower; default 32."},
         )
         optional["u4k_engine_params"] = (
             "STRING",
             {"default": "", "multiline": True,
-             "tooltip": '引擎长尾参数（JSON，留空=全默认）。例：{"dlss_style":"Cinematic","dlss_detail":1.0,"sv2_steps":12,"rtx_vfx_op":"Denoise","topaz_strength":1.0}。白名单校验，不认识的键会在控制台打印合法键清单。'},
+             "tooltip": 'Engine long-tail parameters (JSON, empty = defaults). Example: {"dlss_style":"Cinematic","dlss_detail":1.0,"sv2_steps":12,"rtx_vfx_op":"Denoise","topaz_strength":1.0}. Whitelist-validated; unknown keys print the allowed key list to the console.'},
         )
         # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
         # 让旧版工作流(71 项)载入时尾部错位/NaN。改为"档位化"：
@@ -12746,9 +12895,10 @@ class BSAIH3FilmFactory:
                 if img_entry is None:
                     print(f"[H3 Extender] @图{tag_num} not found in asset library (has {len(images)} images)")
                     return m.group(0)
-                img_path = img_entry.get("path", img_entry.get("filename", "")) if isinstance(img_entry, dict) else str(img_entry)
+                img_path = _resolve_asset_file(img_entry, "images",
+                                               label=f"@图{tag_num}")
                 if not img_path:
-                    print(f"[H3 Extender] @图{tag_num} found but path is empty")
+                    print(f"[H3 Extender] @图{tag_num} refused: not a file under input/bsai_assets")
                     return m.group(0)
                 if img_path not in resolved_image_paths:
                     resolved_image_paths.append(img_path)
@@ -12757,7 +12907,8 @@ class BSAIH3FilmFactory:
                 # v14.280: @图N 自动查找 @音频N 作为声音参考
                 aud_entry = _find_asset_by_index(audios, tag_num)
                 if aud_entry is not None and tag_num not in speaker_audio_map:
-                    aud_path = aud_entry.get("path", aud_entry.get("filename", "")) if isinstance(aud_entry, dict) else str(aud_entry)
+                    aud_path = _resolve_asset_file(aud_entry, "audios",
+                                                   label=f"@音频{tag_num}")
                     if aud_path:
                         speaker_audio_map[tag_num] = aud_path
                         print(f"[H3 Extender] 🎤 @图{tag_num} ↔ @音频{tag_num} voice ref bound: {aud_path[-60:]}")
@@ -12781,7 +12932,8 @@ class BSAIH3FilmFactory:
                 aud_entry = _find_asset_by_index(audios, tag_num)
                 if aud_entry is None:
                     return m.group(0)
-                aud_path = aud_entry.get("path", aud_entry.get("filename", "")) if isinstance(aud_entry, dict) else str(aud_entry)
+                aud_path = _resolve_asset_file(aud_entry, "audios",
+                                               label=f"@音频{tag_num}")
                 if aud_path and aud_path not in resolved_audio_paths:
                     resolved_audio_paths.append(aud_path)
                 return "<Audio 1>"
@@ -13102,6 +13254,7 @@ class BSAIH3FilmFactory:
         refine_steps = kwargs.get("refine_steps", 2)
         refine_upscale_factor = kwargs.get("refine_upscale_factor", 2.0)
         refine_upscaler_model = kwargs.get("refine_upscaler_model", "(bilinear interpolation, no model)")
+        refine_upscaler_model = _ff_confine_upscaler_model(refine_upscaler_model)
         refine_align_to = int(kwargs.get("refine_align_to", 40))
         refine_audio_denoise = float(kwargs.get("refine_audio_denoise", 0.0))
         # v14.238 MiniMaxH3 Director 极速双采移植参数:
@@ -14960,6 +15113,10 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] 🛒 直播带货({_LIVESTREAM_VOICE_MODE_LABEL.get(_ls_mode, _ls_mode)})档: 上下文强制 clip1=开 / clip2+ 全关 "
                   f"(共 {len(clips)} 个 CLIP, 覆盖 {_forced} 个手动/导入的勾选)")
         owner = str(unique_id if unique_id is not None else "h3_extender")
+        # v14.402 (PR #3497 item 4): the raw node id is still the render-control
+        # key; only the on-disk form is sanitized, and every clip path is
+        # proven inside output/bsai_clips before it is created.
+        owner_fs = _safe_name(owner)
         _register_render_ctl(owner)
 
         # ── v14.159 (2026-10-21): 一镜到底 × 歌曲自动分 CLIP ──────────────
@@ -15192,6 +15349,9 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] Loading {len(resolved_img_paths)} asset images as ref tensors")
             asset_tensors = []
             for img_path in resolved_img_paths:
+                if _unsafe_path_text(img_path) or not _asset_path_allowed(img_path):
+                    print(f"[H3 Extender] asset image refused before open: {img_path}")
+                    continue
                 try:
                     with Image.open(img_path) as image:
                         image = ImageOps.exif_transpose(image).convert("RGB")
@@ -16146,13 +16306,13 @@ class BSAIH3FilmFactory:
 
                 if want_merged and len(segments_out) > 0:
                     temp_root = _ensure_cache_root()
-                    concat_list = temp_root / f"_concat_{owner}_{uuid.uuid4().hex[:8]}.txt"
+                    concat_list = temp_root / f"_concat_{owner_fs}_{uuid.uuid4().hex[:8]}.txt"
                     clip_paths = []
                     for si, seg in enumerate(segments_out):
                         blob = seg.get("decoded_mp4_blob")
                         if blob is None:
                             continue
-                        cp = temp_root / f"_mergeclip_{owner}_{si}_{uuid.uuid4().hex[:8]}.mp4"
+                        cp = temp_root / f"_mergeclip_{owner_fs}_{si}_{uuid.uuid4().hex[:8]}.mp4"
                         try:
                             _copy_blob_to_file(data_path, blob, cp)
                             # v14.340: 复用 per-clip 已修复结果；否则对临时合并片段现场修复
@@ -16566,9 +16726,9 @@ class BSAIH3FilmFactory:
                             if _j < len(_segs):
                                 _blob = _segs[_j].get("decoded_mp4_blob")
                                 if _blob is not None:
-                                    _temp_dir = _clip_output_dir()
-                                    _out_name = f"h3_clip_{owner}_{_gidx + 1}_{int(time.time())}.mp4"
-                                    _out_path = _temp_dir / _out_name
+                                    _out_path = _clip_output_path(
+                                        owner_fs, _gidx, int(time.time()))
+                                    _out_name = _out_path.name
                                     _copy_blob_to_file(data_path, _blob, _out_path)
                                     _clip_video_path = str(_out_path)
                                     print(f"[H3 Extender] per-clip video ready: clip {_gidx + 1} -> {_out_path}")
@@ -18085,7 +18245,7 @@ class BSAIH3FilmFactory:
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
                     owner, i, len(clips), "aborted",
-                    "用户终止：渲染已中止（已保留已生成 CLIP）",
+                    "User interrupted: rendering aborted (CLIPs already rendered were kept)",
                 )
                 print("[H3 Extender] 用户终止渲染，停止后续 CLIP")
                 break
@@ -18456,13 +18616,13 @@ class BSAIH3FilmFactory:
             if want_merged and len(segments_out) > 0:
                 # Build a concat list and merge all clip MP4s into one file
                 temp_root = _ensure_cache_root()
-                concat_list = temp_root / f"_concat_{owner}_{uuid.uuid4().hex[:8]}.txt"
+                concat_list = temp_root / f"_concat_{owner_fs}_{uuid.uuid4().hex[:8]}.txt"
                 clip_paths = []
                 for si, seg in enumerate(segments_out):
                     blob = seg.get("decoded_mp4_blob")
                     if blob is None:
                         continue
-                    cp = temp_root / f"_mergeclip_{owner}_{si}_{uuid.uuid4().hex[:8]}.mp4"
+                    cp = temp_root / f"_mergeclip_{owner_fs}_{si}_{uuid.uuid4().hex[:8]}.mp4"
                     try:
                         _copy_blob_to_file(data_path, blob, cp)
                         # v14.340: 复用 per-clip 已修复结果；否则对临时合并片段现场修复
@@ -18491,7 +18651,7 @@ class BSAIH3FilmFactory:
                         # v14.158: 一镜到底旁支模式 —— 无缝 concat（零转场）。
                         # 段间连续性由 motion context（Add Guide 等效锚点）保证,
                         # 不再叠加 xfade 转场。
-                        merge_log = temp_root / f"_merge_{owner}_{uuid.uuid4().hex[:8]}.log"
+                        merge_log = temp_root / f"_merge_{owner_fs}_{uuid.uuid4().hex[:8]}.log"
                         if one_shot_enabled:
                             _xcmd = [ff, "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                                      "-c:v", "libx264", "-preset", "fast", "-crf", "17",
@@ -18505,7 +18665,7 @@ class BSAIH3FilmFactory:
                         else:
                             # v2.0: 链式 xfade 视频渐变 + acrossfade 音频渐变, N段通用
                             _xcmd, _durs = _ff_build_xfade_merge_cmd(ff, clip_paths, merged_path)
-                            merge_log = temp_root / f"_merge_{owner}_{uuid.uuid4().hex[:8]}.log"
+                            merge_log = temp_root / f"_merge_{owner_fs}_{uuid.uuid4().hex[:8]}.log"
                             if _xcmd is not None:
                                 try:
                                     with open(merge_log, "wb") as lf:
@@ -18647,8 +18807,8 @@ class BSAIH3FilmFactory:
                             print(f"[H3 Extender] clip_videos: segment {si} has no decoded blob, skipping")
                             continue
                         clip_name = clips[si].get("name", f"CLIP{si+1}") if si < len(clips) else f"CLIP{si+1}"
-                        out_name = f"h3_clip_{owner}_{si+1}_{int(time.time())}.mp4"
-                        out_path = temp_dir / out_name
+                        out_path = _clip_output_path(owner_fs, si, int(time.time()))
+                        out_name = out_path.name
                         _copy_blob_to_file(data_path, blob, out_path)
                         trim = int(seg.get("trim_frames", 0)) if si > 0 else 0
                         total_frames = int(seg.get("frames", 0))
