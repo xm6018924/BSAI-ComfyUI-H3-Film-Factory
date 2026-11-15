@@ -7907,6 +7907,65 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
                 }
             } catch (e) {}
         }
+
+    // v14.406: u4k_* 参数按引擎档动态显隐。
+    // legacy(auto/realesr/bicubic) 时这几项完全不参与计算 -> 隐藏，避免占行;
+    // upscale_engine 选到 14 个 BSAI-H3-upscale-4K 引擎 key，或 upscale_model
+    // 选到同名引擎显示名时 -> 显示。切换引擎时立即重算并校正节点高度。
+    try {
+        const _U4K_KEYS = new Set([
+            "auto_route", "flashvsr", "relayvsr", "seedvr2", "seedvr2_int8", "rtx", "rtx_vfx",
+            "dlss5", "vosr2", "vosr_dlss", "vosr_rtx", "topaz_slp26", "topaz_astra", "topaz_wonder35",
+        ]);
+        const _U4K_LABELS = new Set([
+            "Auto Route (content-based)", "FlashVSR-v1.1 (diffusion video SR)",
+            "RelayVSR (one-step Wan VSR)", "SeedVR2 7B (diffusion video SR)",
+            "SeedVR2 7B INT8 (native ComfyUI)", "NVIDIA RTX Video Super Res",
+            "NVIDIA RTX VSR - Denoise/Deblur (VFX)", "DLSS 5 (NVIDIA neural SR)",
+            "VOSR 2.0 (CVPR2026 generative SR)", "VOSR 2.0 + DLSS 5 (dual-engine)",
+            "VOSR 2.0 + RTX (recommended 2-stage)", "Topaz Starlight 2.6 (generative)",
+            "Topaz Astra (generative)", "Topaz Wonder 3.5 (generative)",
+        ]);
+        const _U4K_PARAMS = [
+            "u4k_scale", "u4k_auto_prefer", "u4k_input_adaptive", "u4k_detail_amount",
+            "u4k_softness", "u4k_temporal_strength", "u4k_face_restore", "u4k_tile_pad",
+        ];
+        const _u4kEngineOn = () => {
+            const _ev = String(((node.widgets || []).find(w => w && w.name === "upscale_engine") || {}).value || "");
+            const _mv = String(((node.widgets || []).find(w => w && w.name === "upscale_model") || {}).value || "");
+            return _U4K_KEYS.has(_ev) || _U4K_LABELS.has(_mv);
+        };
+        const _u4kApply = (forceMeasure) => {
+            const _on = _u4kEngineOn();
+            let _changed = false;
+            for (const _nm of _U4K_PARAMS) {
+                const _w = (node.widgets || []).find(x => x && x.name === _nm);
+                if (!_w) continue;
+                const _cur = !!(_w.options && _w.options.hidden);
+                const _want = !_on;
+                if (_cur !== _want) { setWidgetRowHidden(node, _w, _want); _changed = true; }
+            }
+            if (_changed || forceMeasure) {
+                try { syncDomHeight(node, runtime, true); } catch (eM) {}
+                try { app.canvas.setDirty(true, true); } catch (eD) {}
+            }
+        };
+        _u4kApply(true);
+        if (!runtime._h3U4kHook) {
+            runtime._h3U4kHook = true;
+            for (const _nm of ["upscale_engine", "upscale_model"]) {
+                const _w = (node.widgets || []).find(x => x && x.name === _nm);
+                if (!_w || _w.__h3U4kCb) continue;
+                _w.__h3U4kCb = true;
+                const _orig = _w.callback;
+                _w.callback = function () {
+                    const _r = _orig ? _orig.apply(this, arguments) : undefined;
+                    try { _u4kApply(true); } catch (eC) {}
+                    return _r;
+                };
+            }
+        }
+    } catch (eU4k) {}
     } catch (e) {}
     // v2.06 (2026-09-19 fix): 用 Object.defineProperty 定义为非可枚举属性,
     // 这样 ComfyUI 前端另存工作流时序列化会忽略 __h3Extender,
