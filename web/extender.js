@@ -7860,8 +7860,37 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     // （"叠罗汉"）。这些覆写全部撤销 —— hidden=true 之后
     // LGraphNode.getLayoutWidgets() 会直接跳过该行，行是"消失"而不是"塌陷"。
     // 注意只藏内部状态：用户参数（width/height/steps/cfg/sampler 等）保持可见。
+    // v14.403 (2026-11-15): ComfyUI 0.45 的 legacy canvas 只在节点进入视口时
+    // 才把 DOM widget 的 element 挂进 #graph-canvas-container > div.isolate；
+    // 挂载之前 syncDomHeight 会因为 domWidgetRenderMode()==="pending" 在 12 帧
+    // 内放弃，节点高度就停在旧工作流里存的值，CLIP 卡片尾部被 canvas 裁掉。
+    // 这里补一个轻量挂载监视（500ms × 60，最长 30s）：元素一进 DOM 就立刻按
+    // 真实 last_y + root.scrollHeight 校正一次节点高度，然后自行销毁。
+    if (!runtime._h3MountWatch) {
+        let _h3MountTries = 0;
+        runtime._h3MountWatch = setInterval(() => {
+            _h3MountTries += 1;
+            const _el = runtime.domWidget && runtime.domWidget.element;
+            if (_el && _el.isConnected) {
+                clearInterval(runtime._h3MountWatch);
+                runtime._h3MountWatch = null;
+                try { syncDomHeight(node, runtime, true); } catch (eMount) {}
+                return;
+            }
+            if (_h3MountTries >= 60) {
+                clearInterval(runtime._h3MountWatch);
+                runtime._h3MountWatch = null;
+            }
+        }, 500);
+    }
+
     try {
-        const _hideNames = new Set(["clips_json", "refs_json", "h3_extender_timeline"]);
+        // v14.403: u4k_engine_params 是后端 customtext 类型的 DOM widget，
+        // 它的 element 高度恒为 0，但 ComfyUI 0.45 legacy 布局仍给它按 ~2926px 占位，
+        // 把后面 h3_extender_timeline(CLIP 卡片 + 全局提示词区) 推到 last_y=4704，
+        // 卡片因此被挤出节点可视区，表现为"全局提示词和 CLIP 卡片全丢"。
+        // 收进 _hideNames 后走 computeSize=[0,-4] + draw=()=>{} 兜底，卡片回到参数区正下方。
+        const _hideNames = new Set(["clips_json", "refs_json", "u4k_engine_params", "h3_extender_timeline"]);
         scheduleStateJsonHide(node);  // v14.369: Vue 行渲染后按节奏打标记并由 CSS 隐藏
         for (const _w of (node.widgets || [])) {
             if (!_w || _w === domWidget) continue;
