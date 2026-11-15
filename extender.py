@@ -4503,6 +4503,9 @@ _SIGMAS_EXACT = False
 # 拿到的是"6 步 beta", 与 8 步曲线的前 6 段不是同一条路线(切点 σ 整体偏掉,
 # 二采起点也就不再是 SplitSigmas 的切点)。所以这里一次算好再切。
 _BSAI6P2_TOTAL_STEPS = 8
+# v14.408: 源 v1.5.3 #679 SelfLift 档 —— 7 步 σ 表, 切点 5 (1采 5 步 / 2采 2 步)
+_BSAI_SL_TOTAL_STEPS = 7
+_BSAI_SL_TRANSITION_STEP = 5
 _BSAI6P2_SPLIT_STEP = 6
 # 该档运行期间打开: 二采起点就是切点 σ(可以 >0.55), 内容锁的 denoise 夹取与
 # 结构相似度闸门都不适用(闸门基准是一采在切点 σ 处的半噪 latent, 拿它比终图
@@ -4525,6 +4528,71 @@ def _bsai_6plus2_split(model, tag: str = ""):
     print(f"[H3 Extender] v14.401 SplitSigmas{(' ' + tag) if tag else ''}: "
           f"beta {_total} 步在 step={_split} 切开 -> 高噪 {_split} 步 "
           f"σ={[round(float(v), 4) for v in _hi.tolist()]} / 低噪 {_total - _split} 步 "
+          f"σ={[round(float(v), 4) for v in _lo.tolist()]}", flush=True)
+    return _hi, _lo
+
+
+def _bsai_h3_sigma_refiner(sig, extra_steps=1, start_at_sigma=0.7,
+                           end_at_sigma=0.0, spacing="cosine"):
+    """逐行复刻 ComfyUI-YCNodes-MiniMax-H3/py/h3_sigma_refiner.py 的
+    H3SigmaRefiner.refine_sigmas(作者 亦诚)。
+
+    语义: 只在 σ <= start_at_sigma 的低噪尾段按 spacing 曲线加密 extra_steps 步,
+    头部 σ 原样保留 —— 因此**不改变起点 σ**(起点由调度器/denoise 决定),
+    只把低噪段"微雕"得更密, 用来消高速运动边缘的像素颗粒与闪烁。
+    """
+    if int(extra_steps) <= 0:
+        return sig
+    _s = sig.detach().cpu()
+    _idx = -1
+    for _i, _v in enumerate(_s.tolist()):
+        if float(_v) <= float(start_at_sigma):
+            _idx = _i
+            break
+    if _idx < 0 or _idx >= int(_s.shape[0]) - 1:
+        return sig
+    _head = _s[:_idx]
+    _A = float(_s[_idx])
+    _B = max(float(end_at_sigma), float(_s[-1]))
+    _n = (int(_s.shape[0]) - _idx) + int(extra_steps)
+    _t = torch.linspace(0.0, 1.0, steps=_n)
+    if str(spacing) == "cosine":
+        _f = (1.0 - torch.cos(_t * math.pi)) / 2.0
+    elif str(spacing) == "exponential":
+        _a = 3.0
+        _f = (torch.exp(_t * _a) - 1.0) / (math.exp(_a) - 1.0)
+    else:
+        _f = _t
+    _tail = _A + (_B - _A) * _f
+    if float(_s[-1]) == 0.0 and _B > 0.0:
+        _tail = torch.cat([_tail, torch.tensor([0.0], dtype=_tail.dtype)])
+    return torch.cat([_head, _tail]).to(dtype=sig.dtype)
+
+
+def _bsai_selflift_split(model, tag: str = ""):
+    """源 v1.5.3 SelfLift 档的 σ 曲线: #669 BasicScheduler(beta, 6, 0.55) 经
+    #672 H3SigmaRefiner(1, 0.7, 0, cosine) 加密成 7 步, 再按源 #679 的
+    transition_step=5 切成 (一采 5 步高噪, 二采 2 步低噪)。
+
+    返回 (高噪段 σ, 低噪段 σ)。
+    """
+    ms = model.get_model_object("model_sampling")
+    _steps, _dn = 6, 0.55
+    _tot = max(_steps, int(_steps / _dn))          # 原生 BasicScheduler: int(6/0.55)=10
+    _sig = comfy.samplers.calculate_sigmas(ms, "beta", _tot).cpu()
+    if float(_sig[0]) < float(_sig[-1]):
+        _sig = torch.flip(_sig, dims=[0])
+    _sig = _sig[-(_steps + 1):].clone()            # 取末 7 点 = BasicScheduler 原生行为
+    _pre = [round(float(v), 4) for v in _sig.tolist()]
+    _sig = _bsai_h3_sigma_refiner(_sig, 1, 0.7, 0.0, "cosine")
+    _split = max(1, min(int(_sig.shape[0]) - 1, int(_BSAI_SL_TRANSITION_STEP)))
+    _hi = _sig[:_split + 1].clone()
+    _lo = _sig[_split:].clone()
+    print(f"[H3 Extender] v14.408 SelfLift{(' ' + tag) if tag else ''}: "
+          f"beta(6,0.55) σ={_pre} -> H3SigmaRefiner(1,0.7,cosine) σ="
+          f"{[round(float(v), 4) for v in _sig.tolist()]} | transition_step={_split} -> "
+          f"一采 {_split} 步 σ={[round(float(v), 4) for v in _hi.tolist()]} / "
+          f"二采 {int(_sig.shape[0]) - 1 - _split} 步 "
           f"σ={[round(float(v), 4) for v in _lo.tolist()]}", flush=True)
     return _hi, _lo
 
@@ -4727,6 +4795,11 @@ def _sigmas(model, scheduler: str, steps: int, denoise: float):
         # 在 step=6 处切开(等价 BasicScheduler(beta,8,1) + SplitSigmas(step=6))。
         _hi62, _lo62 = _bsai_6plus2_split(model, tag=f"scheduler={scheduler}")
         return _hi62 if str(scheduler) == "bsai6plus2_high" else _lo62
+    if str(scheduler) in ("bsai_selflift_high", "bsai_selflift_low"):
+        # v14.408: 源 v1.5.3 SelfLift 档 —— 一采/二采共用 #669+#672 那条 7 步曲线,
+        # 在 transition_step=5 处切开(1 采 5 步 @0.5 画布 / 2 采 2 步 @2MP)。
+        _slhi, _sllo = _bsai_selflift_split(model, tag=f"scheduler={scheduler}")
+        return _slhi if str(scheduler) == "bsai_selflift_high" else _sllo
     # v14.347: 第 35 档打开 exact 模式 —— denoise 就是真实起点噪声比例
 
     if _SIGMAS_EXACT and denoise < 1.0:
@@ -12348,6 +12421,47 @@ _RENDER_PIPELINE_EN2ZH = {
     # v14.402: Rhythm Music 音乐卡点节奏 —— v1.45.2 卡点舞蹈MV工作流移植,
     # 一采 6+2 高低噪切分 + 极速二采(3D 放大 fp32 权重), 另带 librosa 节拍卡点提示词注入。
     "Rhythm Music": "音乐卡点节奏",
+    # v14.407 (2026-11-15): 第 42-46 档 —— 逐项对齐《卡点舞蹈MV工作流 v1.5.3.json》
+    # 的 1 采与四条二采变体(标准 lms / 极速 4 步 / SelfLift / 分块 n_tiles=2)。
+    # 1 采参数照 #115(0.5MP 低采) #507(beta 8 步) #600/#601(6/2) #604(SplitSigmas step=6)
+    #   #502/#610(euler + BasicGuider CFG1.0) #606(3D latent x2 align32 fp32 权重);
+    # 二采参数照 #639(lms + low sigmas) #676(euler + beta 4 步 denoise 0.55)
+    #   #679(SelfLiftAvatar lcm + SigmaRefiner 0.7 + h3_upscaler_lms 权重)
+    #   #699(GoohaiMinimaxH3TiledSampler n_tiles=2 / pad 128 / batch 4)。
+    "BSAI Ultra-Fast 1st Pass (6+2 split at 6, 0.5MP draft -> 3D latent x2 -> 1080p)": "BSAI极速一采 (6+2高低噪, 0.5MP→3D放大x2→1080p)",
+    "BSAI Standard 2nd Pass (lms low-sigma 2-step)": "BSAI标准二采 (lms 低噪2步)",
+    "BSAI Turbo 2nd Pass (euler beta 4-step denoise 0.55)": "BSAI极速二采 (euler beta 4步 0.55)",
+    "BSAI SelfLift 2nd Pass (lcm + refiner 0.7, global memory)": "BSAI SelfLift二采 (lcm + refiner 0.7)",
+    "BSAI Tiled 2nd Pass (n_tiles 2, pad 128, batch 4)": "BSAI分块二采 (n_tiles=2 pad128 batch4)",
+}
+
+# ============================================================
+# v14.408: 「1采管线」+「2采管线」双下拉 —— 与 render_pipeline 同一套
+# 英文值为准、中文仅作旧工作流/前端显示时的回认映射。
+# ============================================================
+_FP_FOLLOW = "Follow render_pipeline (default)"
+_FP_FAST6 = "BSAI Fast Draft 6-step @0.5MP (euler, beta split)"
+_FP_SELF5 = "BSAI SelfLift 5-step @0.5x (euler, cosine refiner)"
+_FP_FULL6 = "Full-res 6-step (euler, no draft)"
+_FIRST_PASS_EN2ZH = {
+    "Follow render_pipeline (default)": "跟随主档 (默认)",
+    "BSAI Fast Draft 6-step @0.5MP (euler, beta split)": "BSAI 极速草稿 6步 @0.5MP (euler, beta切分)",
+    "BSAI SelfLift 5-step @0.5x (euler, cosine refiner)": "BSAI SelfLift 5步 @0.5倍 (euler, cosine微雕)",
+    "Full-res 6-step (euler, no draft)": "全分辨率 6步 (euler, 无草稿)",
+}
+_SP_FOLLOW = "Follow render_pipeline (default)"
+_SP_OFF = "Off - 1st pass only (single-pass output)"
+_SP_STD = "BSAI Standard 2nd (lms, low-sigma 2-step)"
+_SP_TURBO = "BSAI Turbo 2nd (euler, beta 4-step 0.55)"
+_SP_SELF = "BSAI SelfLift 2nd (lcm + cosine refiner 0.7)"
+_SP_TILED = "BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)"
+_SECOND_PASS_EN2ZH = {
+    "Follow render_pipeline (default)": "跟随主档 (默认)",
+    "Off - 1st pass only (single-pass output)": "关闭 (只跑1采直出)",
+    "BSAI Standard 2nd (lms, low-sigma 2-step)": "BSAI 标准二采 (lms 低噪2步)",
+    "BSAI Turbo 2nd (euler, beta 4-step 0.55)": "BSAI 极速二采 (euler beta 4步 0.55)",
+    "BSAI SelfLift 2nd (lcm + cosine refiner 0.7)": "BSAI SelfLift二采 (lcm + cosine微雕)",
+    "BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)": "BSAI 分块二采 (n_tiles2 pad128 batch4)",
 }
 _VIGGLE_RP_LABEL = "Viggle Remake 视频改写 (6步 换人/增删改)"
 _VIGGLE_RP_FS_LABEL = "Viggle Remake 视频改写+逐帧换脸 (6步 换人)"
@@ -12811,7 +12925,7 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "ACC 8-step SelfLift Dual-Pass (8+4)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Video Remix (no-LoRA character swap + motion transfer)", "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)", "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)", "Rhythm Music"],
+            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "ACC 8-step SelfLift Dual-Pass (8+4)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Video Remix (no-LoRA character swap + motion transfer)", "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)", "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)", "Rhythm Music", "BSAI Ultra-Fast 1st Pass (6+2 split at 6, 0.5MP draft -> 3D latent x2 -> 1080p)", "BSAI Standard 2nd Pass (lms low-sigma 2-step)", "BSAI Turbo 2nd Pass (euler beta 4-step denoise 0.55)", "BSAI SelfLift 2nd Pass (lcm + refiner 0.7, global memory)", "BSAI Tiled 2nd Pass (n_tiles 2, pad 128, batch 4)"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
                 "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 8+2 (v14.386: was 4+2; forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default. (32) Video Recast (H3 V2V character swap, v14.335) = video character replacement: the asset-library video @vidN becomes the V2V source (picture AND soundtrack) while @imgN reference pictures define the new identity; the backend auto-splits the source into <=15s segments (the MiniMax H3 Recast per-shot contract: a 45s video becomes 3 clips), encodes each segment into the H3 AV latent (video = source frames, audio = source soundtrack locked with noise_mask 0), and runs an 8-step euler/simple first pass at denoise 0.65 so the original camera/motion/composition survive and only the person is swapped; refine skipped, motion context chaining disabled between recast clips; mount minimax_h3_*character_swap_v1.5.safetensors in the LoRA stack at 0.6-0.8 for the strongest identity transfer. (34) Video Remix (no-LoRA character swap + motion transfer, v14.341, Bilibili BV1HBWJ6HEkg) = character replacement + motion transfer: the asset-library @vidN source video supplies the action, camera and soundtrack while @imgN reference pictures supply the identity; NO swap LoRA (community test: it pulls the face toward a western look and breaks colour match), only an acceleration LoRA may stay mounted. The backend splits the source into 226-frame (5+17k, ~9.42s) segments with a locked 22-frame overlap (segment k starts at 204*k/24 s, so its head IS the previous segment tail -> continuous action and light), runs a 4-step high-noise first pass plus a 5-step low-noise refine pass on a 1.5x latent (9 NFE total, euler/simple, shift 12/3, denoise 0.62); the whole frame stays redrawable so the prompt decides character replacement (background written from the source shot) versus motion transfer (one brand-new scene only), and the source soundtrack is locked into the audio rows (BSAI_H3_REMIX_LOCK_AUDIO=0 lets the model regenerate audio). (35) ACC 8-step SelfLift Dual-Pass (8+4, v14.387) = the BSAI H3 acceleration adapters under models/loras/H3/H3加速/ACC: MiniMax-H3-Ref2VA-Acc-8Step_comfyui_pdd-T8 (reference-image to AV) and MiniMax-H3-FL2VA-Acc-8Step_comfy (first/last-frame and text); LoRA strength 1.0, euler+simple, shift 12/3, CFG 1.0, and never stack a second acceleration LoRA (both adapters are already 8-step distilled and would fight over the same low-rank subspace); 8 first-pass steps + 4 refine steps, where the refine is pure super-resolution since v14.384 (the 4 steps only really run when BSAI_H3_REFINE_REDRAW=1); the Ref2VA adapter needs a Ref2VA or hybrid b25-49 base model (chained one-shot hops rely on the FL2VA last-frame handoff), so use the FL2VA adapter on a pure FL2VA base. (40) BSAI 6+2 High/Low-Noise Split Sampling (v14.401, parameters taken verbatim from the reference workflow 卡点舞蹈MV工作流_纯音乐版.json) = ONE 8-step beta schedule (denoise 1) split by SplitSigmas at step 6: the first pass runs the 6-step high-noise half and stops at the split sigma, the 3D latent upscaler (minimax_h3_latent_upscaler_3d_fp16, align 32) enlarges the latent (upscaling does not count as a step), then the second pass runs the 2-step low-noise tail from the split sigma; total 8 NFE, euler on both passes with BasicGuider CFG 1.0 and shift 12/3; both halves come from the SAME 8-step curve, so this is a true continuation rather than the usual 'full first pass + re-noised refine', and the 0.45-0.55 denoise clamp plus the structure-similarity gate do not apply to this tier (its first pass legitimately stops at a half-noisy sigma). Mount a DMAD v4 step600-class acceleration LoRA (~0.8) on a hybrid b25-49 base like the reference workflow.",
@@ -12903,6 +13017,16 @@ class BSAIH3FilmFactory:
             "STRING",
             {"default": "", "multiline": True,
              "tooltip": 'Engine long-tail parameters (JSON, empty = defaults). Example: {"dlss_style":"Cinematic","dlss_detail":1.0,"sv2_steps":12,"rtx_vfx_op":"Denoise","topaz_strength":1.0}. Whitelist-validated; unknown keys print the allowed key list to the console.'},
+        )
+        optional["first_pass_pipeline"] = (
+            ["Follow render_pipeline (default)", "BSAI Fast Draft 6-step @0.5MP (euler, beta split)", "BSAI SelfLift 5-step @0.5x (euler, cosine refiner)", "Full-res 6-step (euler, no draft)"],
+            {"default": "Follow render_pipeline (default)",
+             "tooltip": "v14.408: 1st-pass pipeline. Follow = obey the render_pipeline tier (default, zero change). Otherwise only the 1st pass is overridden so you can pair any 1st pass with any 2nd pass below. The sigma curve family follows this choice (Fast/SelfLift use the split curves, Full-res keeps a plain 6-step)."},
+        )
+        optional["second_pass_pipeline"] = (
+            ["Follow render_pipeline (default)", "Off - 1st pass only (single-pass output)", "BSAI Standard 2nd (lms, low-sigma 2-step)", "BSAI Turbo 2nd (euler, beta 4-step 0.55)", "BSAI SelfLift 2nd (lcm + cosine refiner 0.7)", "BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)"],
+            {"default": "Follow render_pipeline (default)",
+             "tooltip": "v14.408: 2nd-pass pipeline. Follow = obey the render_pipeline tier (default, zero change). Off = single-pass output from the 1st pass only. Standard/Turbo/SelfLift/Tiled override the refine pass; the low-noise sigma slice is cut from the same curve family the 1st pass uses, so 1st+2nd stay continuous."},
         )
         # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
         # 让旧版工作流(71 项)载入时尾部错位/NaN。改为"档位化"：
@@ -14491,6 +14615,234 @@ class BSAIH3FilmFactory:
                       f"二采起点 σ={_rh_sig0:.4f}(切点直送), 3D latent 放大 x{float(refine_upscale_factor):.1f} "
                       f"(align {int(refine_align_to)}px, upscaler={refine_upscaler_model}); "
                       "librosa 节拍卡点提示词注入已启用(全曲分析一次)")
+            elif _rp_mode == "BSAI极速一采 (6+2高低噪, 0.5MP→3D放大x2→1080p)":
+                # v14.407 (2026-11-15): 「BSAI极速一采」—— 1 采节点与参数逐项照
+                # 《卡点舞蹈MV工作流 v1.5.3.json》:
+                #   #115 ResolutionSelector 16:9 / 0.5MP / align 32  -> 一采低采画布
+                #   #611 ResolutionSelector 16:9 / 2.0MP / align 32  -> 二采目标画布(=1080p 级)
+                #   #507 BasicScheduler beta / 8 步 / denoise 1
+                #   #600 一采步数 6 -> #604 SplitSigmas step=6 (切高/低噪)
+                #   #601 二采步数 2
+                #   #502 / #610 SamplerCustomAdvanced 都 euler + BasicGuider CFG 1.0
+                #   #606 MinimaxH3LatentUpscaler3D: target dimensions / align 32 /
+                #        时序分块 / force unload / cuda fp16，权重 minimax_h3_latent_upscaler_3d_fp32.pth
+                #   模型侧: hybrid b25-49 int8 + DMAD v4 step600 LoRA(0.8) + SigmaShift 12/3
+                #          + Sol-Attn(sol-attn 1.3 keep 0.2) + ChunkFF(2,4096) + LowVRAM(4)
+                # 本档 = 6 步高噪 + 2 步低噪续采，二采前 3D latent x2.0(align 32)，
+                # 放大不计步 => 总 8 NFE，直接产出 1 采成品(源 #488「AI造梦湿」)。
+                steps, refine_steps = 6, 2
+                tile_count, refine_denoise = 16, 0.45
+                refine_enable = True
+                refine_upscale_factor = 2.0
+                refine_align_to = 32
+                tiled_refine = True
+                tile_overlap = 128
+                _rp_no_temp_chunk = True
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                scheduler = "bsai6plus2_high"
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print("[H3 Extender] v14.407 BSAI极速一采: 一采强制 euler "
+                          "(beta 切分契约, 与源 #506 KSamplerSelect 一致)")
+                refine_sampler = "euler"
+                # 一采 0.5MP 低采 -> 二采 2.0MP 目标(源 #115 / #611):
+                # 复用 Director 画布接管机制(_ff_director_canvas 按面积换算 factor + 32px 对齐)。
+                _dff_first_mp, _dff_target_mp = 0.5, 2.0
+                _director_fast_active = True
+                if refine_sigmas is None:
+                    try:
+                        _uf_hi, _uf_lo = _bsai_6plus2_split(model, tag="极速一采 二采注入")
+                        refine_sigmas = _uf_lo
+                        refine_denoise = float(_uf_lo[0])
+                    except Exception as _uf_err:
+                        print(f"[H3 Extender] v14.407 BSAI极速一采: 切分曲线计算失败"
+                              f"({type(_uf_err).__name__}: {_uf_err}), 回退内部 beta 链路")
+                _FF_SPLIT_SIGMA_MODE = True
+                _uf_pick = ""
+                try:
+                    for _nm in _ff_get_upscaler_models():
+                        if "latent_upscaler_3d_fp32" in str(_nm).lower():
+                            _uf_pick = _nm
+                            break
+                    if not _uf_pick:
+                        for _nm in _ff_get_upscaler_models():
+                            _nml = str(_nm).lower()
+                            if "latent_upscaler_3d" in _nml and ("bf16" in _nml or "fp32" in _nml):
+                                _uf_pick = _nm
+                                break
+                    if not _uf_pick:
+                        for _nm in _ff_get_upscaler_models():
+                            _nml = str(_nm).lower()
+                            if "latent_upscaler_3d" in _nml and "fp16" in _nml:
+                                _uf_pick = _nm
+                                break
+                    if not _uf_pick:
+                        for _nm in _ff_get_upscaler_models():
+                            if "latent_upscaler_3d" in str(_nm).lower():
+                                _uf_pick = _nm
+                                break
+                except Exception:
+                    _uf_pick = ""
+                refine_upscaler_model = _uf_pick or "(bilinear interpolation, no model)"
+                if not _uf_pick:
+                    print("[H3 Extender] ⚠️ v14.407 BSAI极速一采: 未探测到 3D latent upscaler "
+                          "权重(源 #606 用 minimax_h3_latent_upscaler_3d_fp32.pth), "
+                          "二采放大走 bilinear 插值")
+                print("[H3 Extender] ⚡ v14.407 BSAI极速一采 (渲染管道): "
+                      f"1 采画布 0.5MP -> 2 采目标 2.0MP; beta 8 步在 step=6 切开 = "
+                      f"高噪 {steps} 步 + 低噪 {refine_steps} 步 (总 {steps + refine_steps} NFE, 放大不计步); "
+                      f"euler + BasicGuider CFG 1.0, shift 12/3; 3D latent 放大 x2.0 "
+                      f"(align 32, upscaler={refine_upscaler_model}); 照源 v1.5.3 1 采直出")
+            elif _rp_mode == "BSAI标准二采 (lms 低噪2步)":
+                # v14.407: 源 #639「BSAI标准二采」—— 一采 6 步高噪(euler)之后，
+                # 二采用 **lms**(源 #638 KSamplerSelect) 吃同一条 8 步 beta 的
+                # 低噪尾段(2 点)，BasicGuider CFG 1.0。输出对应源 #641。
+                steps, refine_steps = 6, 2
+                tile_count, refine_denoise = 16, 0.45
+                refine_enable = True
+                refine_upscale_factor = 2.0
+                refine_align_to = 32
+                tiled_refine = True
+                tile_overlap = 128
+                _rp_no_temp_chunk = True
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                scheduler = "bsai6plus2_high"
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print("[H3 Extender] v14.407 BSAI标准二采: 一采强制 euler(切分契约)")
+                refine_sampler = "lms"
+                _dff_first_mp, _dff_target_mp = 0.5, 2.0
+                _director_fast_active = True
+                if refine_sigmas is None:
+                    try:
+                        _st_hi, _st_lo = _bsai_6plus2_split(model, tag="标准二采 低噪段")
+                        refine_sigmas = _st_lo
+                        refine_denoise = float(_st_lo[0])
+                    except Exception as _st_err:
+                        print(f"[H3 Extender] v14.407 BSAI标准二采: 切分曲线计算失败"
+                              f"({type(_st_err).__name__}: {_st_err}), 回退内部 beta 链路")
+                _FF_SPLIT_SIGMA_MODE = True
+                print("[H3 Extender] 🧱 v14.407 BSAI标准二采 (渲染管道): "
+                      f"6 步高噪(euler) + {refine_steps} 步低噪(lms, 切点 σ 直送); "
+                      f"3D latent 放大 x{float(refine_upscale_factor):.1f} align {int(refine_align_to)}; "
+                      "照源 v1.5.3 #639/#638 lms 二采链路")
+            elif _rp_mode == "BSAI极速二采 (euler beta 4步 0.55)":
+                # v14.407: 源 #676「BSAI极速二采 4 步」—— 二采不是切分尾段，而是
+                # 独立 BasicScheduler(beta / 4 步 / denoise 0.55)（源 #663），
+                # 采样器复用 euler（源 #676 接 #506）。输出对应源 #678。
+                steps, refine_steps = 6, 4
+                tile_count, refine_denoise = 16, 0.55
+                refine_enable = True
+                refine_upscale_factor = 2.0
+                refine_align_to = 32
+                tiled_refine = True
+                tile_overlap = 128
+                _rp_no_temp_chunk = True
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                scheduler = "bsai6plus2_high"
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print("[H3 Extender] v14.407 BSAI极速二采: 一采强制 euler(切分契约)")
+                refine_sampler = "euler"
+                _dff_first_mp, _dff_target_mp = 0.5, 2.0
+                _director_fast_active = True
+                _FF_SPLIT_SIGMA_MODE = True
+                print("[H3 Extender] 🚀 v14.407 BSAI极速二采 (渲染管道): "
+                      f"6 步高噪(euler) + {refine_steps} 步二采(euler, beta 4 步, denoise {refine_denoise}); "
+                      f"3D latent 放大 x{float(refine_upscale_factor):.1f} align {int(refine_align_to)}; "
+                      "照源 v1.5.3 #663 BasicScheduler(beta,4,0.55) 极速二采链路")
+            elif _rp_mode == "BSAI SelfLift二采 (lcm + refiner 0.7)":
+                # v14.408: 精确还原源 v1.5.3 #679 SelfLiftAvatarH3Sampler（此前 v14.407
+                # 只做了「1 步 lcm + denoise 0.7」近似，且误把 highres_tiling 当成 global）。
+                #   实测 widgets: seed / 1(cfg) / 5(transition_step) / 0.5(lowres_scale) /
+                #   0(rho) / 0.5(w_min) / 1(w_max) / h3_upscaler_lms_v0.1_fp32.safetensors /
+                #   False(highres_tiling 关闭 → global_stream 只是残留值) / auto / 2 /
+                #   auto / global_stream / 4096 / 4
+                #   sampler #673=lcm；sigmas #672 H3SigmaRefiner(1, 0.7, 0, cosine)
+                #   ← #669 BasicScheduler(beta, 6, 0.55)
+                #   实算 beta(6,0.55) = [0.9549 0.9234 0.8724 0.7866 0.6294 0.3391 0]
+                #   + refiner(cosine)  = [0.9549 0.9234 0.8724 0.7866 0.6294 0.4721 0.1574 0]
+                #   transition_step=5 ⇒ 1 采 5 步 @0.5 倍画布 / 2 采 2 步 @2MP。
+                steps = int(_BSAI_SL_TRANSITION_STEP)
+                refine_steps = int(_BSAI_SL_TOTAL_STEPS) - int(_BSAI_SL_TRANSITION_STEP)
+                tile_count = 16
+                refine_enable = True
+                refine_upscale_factor = 2.0
+                refine_align_to = 32
+                tiled_refine = False
+                tile_overlap = 128
+                _rp_no_temp_chunk = True
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                scheduler = "bsai_selflift_high"
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print("[H3 Extender] v14.408 BSAI SelfLift二采: 一采强制 euler(切分契约)")
+                refine_sampler = "lcm"
+                refine_denoise = 0.55
+                _dff_first_mp, _dff_target_mp = 0.5, 2.0
+                _director_fast_active = True
+                _FF_SPLIT_SIGMA_MODE = True
+                if refine_sigmas is None:
+                    try:
+                        _sl_hi2, _sl_lo2 = _bsai_selflift_split(model, tag="SelfLift二采 低噪段")
+                        refine_sigmas = _sl_lo2
+                        refine_steps = max(1, int(_sl_lo2.shape[0]) - 1)
+                        refine_denoise = float(_sl_lo2[0])
+                    except Exception as _sl_err:
+                        print(f"[H3 Extender] v14.408 SelfLift二采: 精确 σ 表计算失败"
+                              f"({type(_sl_err).__name__}: {_sl_err}), 回退 1 步 lcm 近似")
+                        refine_steps, refine_denoise = 1, 0.7
+                _sl2_pick = ""
+                try:
+                    for _nm in _ff_get_upscaler_models():
+                        if "upscaler_lms" in str(_nm).lower():
+                            _sl2_pick = _nm
+                            break
+                except Exception:
+                    _sl2_pick = ""
+                if _sl2_pick:
+                    refine_upscaler_model = _sl2_pick
+                print("[H3 Extender] 🪄 v14.408 BSAI SelfLift二采 (渲染管道, 精确 SigmaRefiner): "
+                      f"一采 {steps} 步 @{_dff_first_mp}MP + 二采 {refine_steps} 步 lcm @{_dff_target_mp}MP "
+                      f"(二采起点 σ={refine_denoise:.4f}, cosine 微雕), 放大权重={refine_upscaler_model}; "
+                      "照源 v1.5.3 #679 SelfLiftAvatarH3Sampler / #672 H3SigmaRefiner / #669 BasicScheduler 契约")
+            elif _rp_mode == "BSAI分块二采 (n_tiles=2 pad128 batch4)":
+                # v14.407: 源 #699 GoohaiMinimaxH3TiledSampler(True, 2, 128, False, 4)
+                #   = 真分块 n_tiles=2 / tile_pad 128 / batch 4；sampler 复用 euler(#506);
+                #   sigmas 吃 #604 的 low 段(2 步); guider #713 CFG 1.0。输出对应源 #705。
+                steps, refine_steps = 6, 2
+                tile_count, refine_denoise = 2, 0.45
+                refine_enable = True
+                refine_upscale_factor = 2.0
+                refine_align_to = 32
+                tiled_refine = True
+                tile_overlap = 128
+                _rp_no_temp_chunk = True
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                scheduler = "bsai6plus2_high"
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print("[H3 Extender] v14.407 BSAI分块二采: 一采强制 euler(切分契约)")
+                refine_sampler = "euler"
+                _dff_first_mp, _dff_target_mp = 0.5, 2.0
+                _director_fast_active = True
+                if refine_sigmas is None:
+                    try:
+                        _td_hi, _td_lo = _bsai_6plus2_split(model, tag="分块二采 低噪段")
+                        refine_sigmas = _td_lo
+                        refine_denoise = float(_td_lo[0])
+                    except Exception as _td_err:
+                        print(f"[H3 Extender] v14.407 BSAI分块二采: 切分曲线计算失败"
+                              f"({type(_td_err).__name__}: {_td_err}), 回退内部 beta 链路")
+                _FF_SPLIT_SIGMA_MODE = True
+                print("[H3 Extender] 🧩 v14.407 BSAI分块二采 (渲染管道): "
+                      f"6 步高噪 + {refine_steps} 步低噪(真分块 n_tiles={tile_count}, "
+                      f"pad {tile_overlap}, batch 4); 照源 v1.5.3 #699 GoohaiMinimaxH3TiledSampler 链路")
             elif _rp_mode == "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)":
                 # v14.310 (2026-11-04): Pika H3 Flex 配方 (B站教程 BV1Dy4u67EJo,
                 # 官方模板 video_pika_h3_flex_ref2va / docs.comfy.org Pika H3 Flex)。
@@ -14914,6 +15266,78 @@ class BSAIH3FilmFactory:
                       "LoRA 必须挂 viggle_remake_swap/edit（只认 FL2VA 基座, 走 bypass 槽）")
             else:
                 _rp_handled = False
+            # ===== v14.408: 「1采管线」+「2采管线」双下拉 =====
+            # 两个下拉默认都是 Follow(跟随主档)。默认值下下面这段一个变量都不碰,
+            # 所以 46 个既有档的行为与 v14.407 逐项一致。只有显式选了非 Follow 值才覆盖。
+            _fp_sel = _FIRST_PASS_EN2ZH.get(
+                str(kwargs.get("first_pass_pipeline", "") or ""),
+                str(kwargs.get("first_pass_pipeline", "") or ""))
+            _sp_sel = _SECOND_PASS_EN2ZH.get(
+                str(kwargs.get("second_pass_pipeline", "") or ""),
+                str(kwargs.get("second_pass_pipeline", "") or ""))
+            if _fp_sel and _fp_sel != _FP_FOLLOW:
+                if _fp_sel == _FP_FAST6:
+                    steps, sampler_name = 6, "euler"
+                    scheduler = "bsai6plus2_high"
+                    _FF_SPLIT_SIGMA_MODE = True
+                    print("[H3 Extender] v14.408 1采管线 = 极速草稿 6 步 @0.5MP "
+                          "(euler + beta 切分曲线)", flush=True)
+                elif _fp_sel == _FP_SELF5:
+                    steps, sampler_name = 5, "euler"
+                    scheduler = "bsai_selflift_high"
+                    _FF_SPLIT_SIGMA_MODE = True
+                    print("[H3 Extender] v14.408 1采管线 = SelfLift 5 步 @0.5 倍 "
+                          "(euler + cosine 微雕曲线)", flush=True)
+                elif _fp_sel == _FP_FULL6:
+                    steps, sampler_name = 6, "euler"
+                    _FF_SPLIT_SIGMA_MODE = False
+                    print("[H3 Extender] v14.408 1采管线 = 全分辨率 6 步 (无草稿接管)", flush=True)
+            if _sp_sel and _sp_sel != _SP_FOLLOW:
+                refine_upscale_factor = max(float(refine_upscale_factor or 0.0), 2.0)
+                refine_align_to = 32
+                _rp_no_temp_chunk = True
+                if _sp_sel == _SP_OFF:
+                    refine_enable = False
+                    print("[H3 Extender] v14.408 2采管线 = 关闭 → 只跑 1 采直出", flush=True)
+                else:
+                    refine_enable = True
+                    _sp_tiled = (_sp_sel == _SP_TILED)
+                    tiled_refine = _sp_tiled
+                    tile_count = 2 if _sp_tiled else tile_count
+                    tile_overlap = 128 if _sp_tiled else tile_overlap
+                    if _sp_sel == _SP_STD:
+                        refine_sampler, refine_steps, refine_denoise = "lms", 2, 0.45
+                        _FF_SPLIT_SIGMA_MODE = True
+                        _sp_sig = "lms 低噪 2 步(同族切分)"
+                    elif _sp_sel == _SP_TURBO:
+                        refine_sampler, refine_steps, refine_denoise = "euler", 4, 0.55
+                        refine_sigmas = None
+                        _FF_SPLIT_SIGMA_MODE = False
+                        _sp_sig = "euler beta 4 步 denoise 0.55(独立曲线)"
+                    elif _sp_sel == _SP_SELF:
+                        refine_sampler, refine_steps, refine_denoise = "lcm", 2, 0.4721
+                        _FF_SPLIT_SIGMA_MODE = True
+                        _sp_sig = "lcm + cosine 微雕低噪段"
+                    elif _sp_sel == _SP_TILED:
+                        refine_sampler, refine_steps, refine_denoise = "euler", 2, 0.45
+                        _FF_SPLIT_SIGMA_MODE = True
+                        _sp_sig = "euler 低噪 2 步 + 真分块 2 tiles/pad 128/batch 4"
+                    # 低噪段从"一采所用的那条曲线"切出来, 保证 1采+2采连续
+                    if _sp_sel != _SP_TURBO and refine_sigmas is None:
+                        try:
+                            if str(scheduler) in ("bsai_selflift_high", "bsai_selflift_low"):
+                                _sp_hi, _sp_lo = _bsai_selflift_split(model, tag="1采+2采 低噪段")
+                            else:
+                                _sp_hi, _sp_lo = _bsai_6plus2_split(model, tag="1采+2采 低噪段")
+                            refine_sigmas = _sp_lo
+                            refine_steps = max(1, int(_sp_lo.shape[0]) - 1)
+                            refine_denoise = float(_sp_lo[0])
+                        except Exception as _sp_err:
+                            print(f"[H3 Extender] v14.408 2采低噪段切分失败"
+                                  f"({type(_sp_err).__name__}: {_sp_err}), 回退内部调度")
+                    print(f"[H3 Extender] v14.408 2采管线 = {_sp_sig}: "
+                          f"{refine_sampler} {refine_steps} 步, 起点 σ={float(refine_denoise):.4f}, "
+                          f"放大 x{refine_upscale_factor}", flush=True)
             if _rp_handled:
                 print(f"[H3 Extender] v14.172 渲染管道: {_rp_mode} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (速度档不叠加)")
                 speed_preset = "custom"  # 防下方 speed_preset 分支再覆盖配方档参数

@@ -4,6 +4,65 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.408 (2026-11-15) — 档 45 精确还原 SigmaRefiner + 新增「1采管线 / 2采管线」双下拉 / Exact SigmaRefiner for tier 45 + separate 1st-pass / 2nd-pass selectors
+
+**一、档 45 从近似改为精确还原**
+
+v14.407 把档 45 写成「1 步 lcm + denoise 0.7 + 全局省显存」，这是近似，且有两处与源不符。查 `selflift-Avatar/nodes.py` 的 `INPUT_TYPES` 对位源 widgets 后确认实际参数是：`cfg=1.0` / `transition_step=5` / `lowres_scale=0.5` / `rho=0` / `w_min=0.5` / `w_max=1.0` / `upscaler_model=h3_upscaler_lms_v0.1_fp32` / **`highres_tiling=False`**（`global_stream` 只是关闭后的残留值，不生效）。
+
+σ 曲线按 YCNodes `py/h3_sigma_refiner.py` 逐行复刻（新增 `_bsai_h3_sigma_refiner` + `_bsai_selflift_split`）：
+
+```
+#669 BasicScheduler(beta,6,0.55)     : 0.9549 0.9234 0.8724 0.7866 0.6294 0.3391 0.0
+#672 H3SigmaRefiner(1,0.7,cosine)    : 0.9549 0.9234 0.8724 0.7866 0.6294 0.4721 0.1574 0.0  (7 步)
+transition_step=5                    : 1采 5 步 [0.9549..0.6294 0.472] / 2采 2 步 [0.4721 0.1574 0]
+```
+
+新增调度族 `bsai_selflift_high/low`，档 45 改用它；二采采样器 `lcm`（源 `#673`），二采 σ 通过 `refine_sigmas` 直送，绕开 0.45–0.55 内容锁，完全按源曲线执行。
+
+**二、新增两个下拉（1 采 / 2 采 可自由组合）**
+
+源工作流的 1 采与 5 条 2 采本来就可以独立换配方，单枚 `render_pipeline` 表达不了。新增（**追加在 `optional` 最末尾**，前面 index 一个不动）：
+
+- `first_pass_pipeline`：`Follow`（默认）/ `Fast Draft 6-step @0.5MP` / `SelfLift 5-step @0.5x` / `Full-res 6-step`
+- `second_pass_pipeline`：`Follow`（默认）/ `Off`（只跑 1 采直出）/ `Standard (lms 2步)` / `Turbo (beta 4步 0.55)` / `SelfLift (lcm + cosine 微雕)` / `Tiled (n_tiles 2)`
+
+低噪 σ 段从 1 采所用那条曲线切出，保证两段连续；`Turbo` 例外，按源独立 beta 曲线走。
+
+**兼容性**：默认 `Follow`，默认值下覆盖分支不碰任何变量 → 46 个既有档行为与 v14.407 逐项一致；新 widget 在末尾，旧工作流 `widgets_values`(80) 载入时新项取默认值，零 NaN。
+
+**Part 1**: tier 45 now replays the source exactly — `_bsai_h3_sigma_refiner` mirrors YCNodes `h3_sigma_refiner.py` line by line, `_bsai_selflift_split` rebuilds the `beta(6,0.55)` → `H3SigmaRefiner(1,0.7,cosine)` 7-step curve and cuts at `transition_step=5` (5-steps draft @0.5x + 2-steps refine @2MP). The earlier "global memory" claim was wrong: the source has `highres_tiling=False`.
+
+**Part 2**: two new optional-end dropdowns separate the passes so any 1st pass can pair with any 2nd pass. `Follow` is the default for both and changes nothing, so all 46 existing tiers stay byte-for-byte identical in behaviour.
+
+**校验**：`py_compile` rc=0；`node --check`（.mjs）rc=0；`check_frontend_guard.py` → 语法 OK ×3 + 枚举 SYNC OK + GUARD OK；optional 末尾确认为 `…u4k_engine_params → first_pass_pipeline → second_pass_pipeline`；σ 复算 7 步、切点 5 → 一采 6 点/二采 3 点全部命中。
+
+### v14.407 (2026-11-15) — 按《卡点舞蹈MV工作流 v1.5.3.json》新增 1 采档 + 4 条二采档（第 42–46 档）/ Five new tiers cloned from the v1.5.3 rhythm-MV workflow
+
+**用户口径**：按该工作流「1 采所有节点参数」新加一个 BSAI 极速 1 采渲染管线；「5 条 2 采链路」先查现有档是否有相同/接近的，有就对齐参数，没有就按链路名称新增。
+
+**逐节点对齐（源 88 节点 / 160 连线）**
+| 源节点 | 内容 | 落到的档 |
+|---|---|---|
+| `#115` 16:9 / 0.5MP / align 32 | 一采低采画布 | 42–46（`_director_fast_active` 画布接管） |
+| `#507` beta / 8 步 / denoise 1 + `#600`=6 + `#604` SplitSigmas(6) | 一条 8 步曲线在 step=6 切开 | 42–46（`bsai6plus2_high` + `_bsai_6plus2_split`） |
+| `#502`/`#610` euler + BasicGuider CFG 1.0 | 两段采样器 | 42–46 |
+| `#606` 3D latent target dimensions / align 32 / cuda fp16 / `minimax_h3_latent_upscaler_3d_fp32.pth` | 二采放大 | 42–46（fp32 优先探测） |
+| `#611` 16:9 / 2.0MP / align 32 | 二采目标画布 | 42–46 |
+| `#639`(lms) → `#641` | 标准二采 | **43** |
+| `#676`(euler + `#663` beta 4 / 0.55) → `#678` | 极速二采 4 步 | **44** |
+| `#679` SelfLiftAvatar(lcm + `#672` refiner 0.7 + `h3_upscaler_lms_v0.1_fp32`) → `#682` | SelfLift 二采 | **45** |
+| `#699` GoohaiMinimaxH3TiledSampler(true,2,128,false,4) → `#705` | 分块二采 | **46** |
+| UNET hybrid b25-49 int8 → DMAD v4 step600(0.8) → SigmaShift 12/3 → Sol-Attn(1.3/0.2) → ChunkFF(2,4096) → LowVRAM(4) | 五档共用模型侧 | 42–46 日志提示 |
+
+**现有档比对**：档 40「BSAI6+2高低噪采样」与档 41「音乐卡点节奏」是该工作流采样段的既有移植（euler 两段 + 3D 放大），当时只采纳 euler 二采，其余四条链路明确「不采用」。本次据此**新增** 5 档，未改动 40/41 既有行为。
+
+**兼容性**：只追加枚举值与新分支，未新增任何 widget，`optional` 顺序与 `widgets_values` 下标全部不变 → 旧工作流零 NaN、零错位。
+
+**Two new parts**: (a) a 1st-pass tier cloned node-by-node from v1.5.3 (0.5MP draft → beta 8-step split at 6 → 3D latent x2 → 2MP); (b) four 2nd-pass variants (lms / beta-4-step 0.55 / SelfLift lcm+refiner 0.7 / tiled n_tiles=2). Tiers 40 and 41 stay byte-identical; only enum values and branches are appended, so legacy workflows keep their widget indices.
+
+**校验**：`py_compile` rc=0；`node --check`（.mjs）rc=0；`check_frontend_guard.py` → 语法 OK ×3 + 枚举 SYNC OK + GUARD OK；AST 提取后端 46 档，前端 cycle/labels/tints 各 46，`cycle == options` 为 True，5 档中英别名在 `cycleAliases` 与 `ALIAS_CANON` 双向齐备。
+
 ### v14.406 (2026-11-15) — `u4k_*` 参数按引擎档动态显隐 / Conditional visibility of the u4k_* parameters
 
 **问题**：v14.394 起的 8 个 `u4k_*` 参数（scale / auto_prefer / input_adaptive / detail_amount / softness / temporal_strength / face_restore / tile_pad）只在 `engine_eff in _FF_U4K_ENGINE_LABELS`（`extender.py:5598`）的分支被读取。选 `auto` / `realesr` / `bicubic` 时它们是死参数，却一直占着 8 行。

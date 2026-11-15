@@ -767,3 +767,34 @@ Each CLIP card has per-card controls; left border color shows status. Card butto
 ## 许可证 / License
 
 MIT
+
+---
+
+## 1采管线 / 2采管线 双下拉（v14.408 / v14.408 dual pass selectors）
+
+电影工厂的采样由两段组成，v14.408 起可以分别选择，自由组合成任何「1采 + 2采」链路。
+The sampling chain has two passes; from v14.408 each can be selected separately and combined freely.
+
+| 下拉 / Dropdown | 说明 / Description |
+| --- | --- |
+| `first_pass_pipeline`<br>1采管线 | 默认 `Follow render_pipeline`（跟随主档，零影响）。其余选项覆盖 1 采的步数 / 采样器 / 调度曲线族。<br>Default `Follow render_pipeline` (obeys the tier, zero change). Other options override only the 1st pass steps / sampler / sigma family. |
+| `second_pass_pipeline`<br>2采管线 | 默认 `Follow render_pipeline`。`Off` = 只跑 1 采直出；其余覆盖 2 采的步数 / 采样器 / 低噪 σ 段 / 分块策略。<br>Default `Follow render_pipeline`. `Off` = single-pass output; the rest override the refine steps / sampler / low-noise sigma slice / tiling. |
+
+**规则 / Rules**
+
+1. 两个下拉默认都是 `Follow`，默认值下行为与改动前完全一致（46 档全不受影响）。<br>Both default to `Follow`; behaviour is identical to before for all 46 tiers.
+2. 2 采的低噪 σ 段从 1 采所用的那条曲线切出来，起点连续、不跳段。<br>The 2nd pass slices its low-noise sigma from the same curve the 1st pass used, so the hand-off stays continuous.
+3. 例外：`BSAI Turbo 2nd` 按源 `BasicScheduler(beta,4,0.55)` 走独立曲线。<br>Exception: `BSAI Turbo 2nd` follows the source's standalone `beta(4, 0.55)` curve.
+
+**组合示例 / Pairing examples**
+
+| 目标 / Target | 1采 / 1st | 2采 / 2nd | 步数 / NFE |
+| --- | --- | --- | --- |
+| 一采直出 / single-pass output | `BSAI Fast Draft 6-step @0.5MP` | `Off` | 6 |
+| 标准二采 / standard refine | `Follow` | `BSAI Standard 2nd (lms)` | 6+2 |
+| 极速二采 / turbo refine | `Follow` | `BSAI Turbo 2nd` | 6+4 |
+| SelfLift 二采 / selflift refine | `BSAI SelfLift 5-step @0.5x` | `BSAI SelfLift 2nd (lcm)` | 5+2 = 7 |
+| 分块二采 / tiled refine | `Follow` | `BSAI Tiled 2nd` | 6+2（2 tiles / pad 128 / batch 4） |
+
+> 兼容性：两个下拉追加在 `optional` 最末尾，既有参数位置一个不动；旧版工作流载入时新项取默认值，不会错位或产生 NaN。<br>
+> Compatibility: both dropdowns are appended at the very end of `optional`; existing widget positions are untouched, and legacy workflows simply pick up the defaults.

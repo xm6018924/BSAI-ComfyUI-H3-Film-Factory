@@ -127,12 +127,17 @@
 
 **权重选择**：纯文生/首帧/首尾帧 → `fl2va_gguf/`；参考图 Ref2VA（电影工厂 `@图N` 链路）→ `ref2va_gguf/`。二采在官方四套模板中均不存在，本档保持单采。
 
-### H. 高低噪切分采样（v14.401，SplitSigmas 6+2）
+### H. 高低噪切分采样（v14.401 SplitSigmas 6+2；v14.407 追加 42–46 五档源工作流对齐）
 
 | # | 管道 | 一采+二采 | 关键参数 | 配套 | 适用 |
 |---|---|---|---|---|---|
 | 40 | **BSAI6+2高低噪采样**<br>`BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)` | 6+2=8（放大不计步） | **同一条** 8 步 beta 曲线（denoise 1）在 step=6 处 SplitSigmas 切开；两段都 euler + BasicGuider(CFG 1.0)；shift 12/3；二采起点 σ = 切点直送（不做 0.45~0.55 夹取）；二采前 3D latent x2.0 / align 32 / tiled 16x128 | 模型侧照参考工作流：hybrid b25-49 int8 基模 + `DMAD full_dareties_v4_step600` 类加速 LoRA(0.8) + Sol-Attn；权重名以本机目录为准 | 一采只跑到切点、二采续算低噪段的高/低噪分档路线 |
 | 41 | **音乐卡点节奏**<br>`Rhythm Music` | 6+2=8（放大不计步） | 采样段同档 40：同一条 8 步 beta 在 step=6 切开，两段 euler + BasicGuider(CFG 1.0)，shift 12/3，二采切点 σ 直送；二采走源工作流极速链路：分离 AV 潜空间 → 3D latent 放大（`minimax_h3_latent_upscaler_3d_fp32.pth`，target dimensions，align 32，时序分块 / force unload / cuda fp16）→ 合并 AV → 低噪 2 步续采；**另带 librosa 全曲节拍分析一次 + 每段卡点指令前置注入**（强拍定点造型 / 跨段流动 / 手持呼吸运镜） | 模型侧同档 40：hybrid b25-49 int8 + DMAD v4 step600 LoRA(0.8) + Sol-Attn；卡点参数照源 #513：Bai Lin / 4 拍小节 / 仅强拍 / grid 14.0 / cycle 6.0 / sway 2.5 / roll 2.0 / offset 0 / 呼吸运镜 | 卡点舞蹈 MV：按强拍定点造型 + 手持呼吸运镜；源工作流其余四条二采链路（标准 4 步 / SelfLift-Avatar / BSAI 极速 4 步 / 分块 2 采）不采用 |
+| 42 | **BSAI极速一采**<br>`BSAI Ultra-Fast 1st Pass (6+2 split at 6, 0.5MP draft -> 3D latent x2 -> 1080p)` | 6+2=8（放大不计步） | 逐项照 v1.5.3 1 采：`#115` 16:9/0.5MP/align32 低采 → `#507` beta 8 步 denoise 1 → `#604` SplitSigmas step=6 → `#502` 高噪 6 步 + `#610` 低噪 2 步，两段 euler + BasicGuider CFG 1.0，shift 12/3；3D latent target dimensions / align 32 / 时序分块，权重 `minimax_h3_latent_upscaler_3d_fp32.pth`；`#611` 2.0MP 目标画布 | 模型侧照源：hybrid b25-49 int8 + DMAD v4 step600 LoRA(0.8) + SigmaShift 12/3 + Sol-Attn(1.3/0.2) + ChunkFF(2,4096) + LowVRAM(4) | 1 采直出（源 #488） |
+| 43 | **BSAI标准二采 (lms 低噪2步)**<br>`BSAI Standard 2nd Pass (lms low-sigma 2-step)` | 6+2 | 一采 euler 跑切点；二采 **lms**（源 `#638`）吃同一条 8 步 beta 的低噪尾段（2 点），CFG 1.0；3D latent x2.0/align 32 | 同档 42 模型侧；对应源链路 `#639 → #640 → #641` | 源「BSAI标准二采」 |
+| 44 | **BSAI极速二采 (euler beta 4步 0.55)**<br>`BSAI Turbo 2nd Pass (euler beta 4-step denoise 0.55)` | 6+4=10 | 一采 euler 跑切点；二采独立 `BasicScheduler(beta, 4, 0.55)`（源 `#663`）+ 采样器 euler（源 `#676`）；3D latent x2.0/align 32 | 同档 42 模型侧；对应源链路 `#676 → #677 → #678` | 源「BSAI极速二采4步」 |
+| 45 | **BSAI SelfLift二采 (lcm + cosine 微雕)**<br>`BSAI SelfLift 2nd Pass (lcm + refiner 0.7, global memory)` | 5+2=7 | 精确还原源 `#679`（widgets 实测 `cfg=1 / transition_step=5 / lowres_scale=0.5 / rho=0 / w_min=0.5 / w_max=1.0 / upscaler=h3_upscaler_lms_v0.1_fp32 / highres_tiling=False`，`global_stream` 是关闭后的残留值）：σ 曲线 = `#669 BasicScheduler(beta,6,0.55)` → `#672 H3SigmaRefiner(1,0.7,0,cosine)`，实算 7 步 `[0.9549 0.9234 0.8724 0.7866 0.6294 0.4721 0.1574 0]`，在 `transition_step=5` 切开 = 1 采 5 步 @0.5 倍画布 / 2 采 2 步 @2MP；二采采样器 lcm（源 `#673`） | 同档 42 模型侧；对照源链路 `#679 → #681 → #682`，σ 变换在 `_bsai_selflift_split` 内逐行复刻 YCNodes `h3_sigma_refiner.py` | 源「极速 SelfLift 二采」 |
+| 46 | **BSAI分块二采 (n_tiles=2 pad128 batch4)**<br>`BSAI Tiled 2nd Pass (n_tiles 2, pad 128, batch 4)` | 6+2 | 一采 euler 跑切点；二采 euler 吃低噪 2 点 + **真分块 n_tiles=2 / pad 128 / batch 4**（源 `#699`）；3D latent x2.0/align 32 | 同档 42 模型侧；对应源链路 `#699 → #704 → #705` | 源「极速分块 2 采」 |
 
 **参数出处**：用户参考工作流 `卡点舞蹈MV工作流_纯音乐版.json` 的采样段，逐节点核对过（节点号见 `extender.py` 该分支注释）：
 
@@ -242,3 +247,37 @@
 ---
 
 *本表由 extender.py 源码自动提取整理，如管道参数在后续版本变更请以源码为准。*
+
+---
+
+## I. 「1采管线」+「2采管线」双下拉（v14.408）
+
+源工作流 `v1.5.3` 的采样是**两段可独立换配方**的：1 采（`#502` 高噪段，低分辨率草稿）
+与 2 采（`#610`/`#639`/`#676`/`#679`/`#699` 各自的低噪精修，高分辨率）。
+单枚 `render_pipeline` 只能表达整链，无法组合；因此追加两个下拉（**都在 `optional` 最末尾**，
+前面的 widget index 一个都不动，旧工作流零 NaN）：
+
+| 下拉 | 选项 | 作用 |
+|---|---|---|
+| `first_pass_pipeline`<br>1采管线 | `Follow render_pipeline (default)`<br>`BSAI Fast Draft 6-step @0.5MP (euler, beta split)`<br>`BSAI SelfLift 5-step @0.5x (euler, cosine refiner)`<br>`Full-res 6-step (euler, no draft)` | 只覆盖 1 采的 步数/采样器/调度族（`bsai6plus2_high` 或 `bsai_selflift_high` 或保持原调度） |
+| `second_pass_pipeline`<br>2采管线 | `Follow render_pipeline (default)`<br>`Off - 1st pass only (single-pass output)`<br>`BSAI Standard 2nd (lms, low-sigma 2-step)`<br>`BSAI Turbo 2nd (euler, beta 4-step 0.55)`<br>`BSAI SelfLift 2nd (lcm + cosine refiner 0.7)`<br>`BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)` | 只覆盖 2 采的 步数/采样器/低噪 σ 段/分块/显存策略；`Off` 直接出 1 采结果 |
+
+**规则**
+
+1. 两个下拉默认都是 `Follow render_pipeline (default)` —— 默认值下这段覆盖逻辑一个变量都不碰，
+   46 个既有档（含 42–46）行为与 v14.407 逐项一致。
+2. 低噪 σ 段**从 1 采所用的那条曲线切出来**（`_bsai_selflift_split` 或 `_bsai_6plus2_split`），
+   保证 1采→2采 起点连续、不跳段。
+3. 只有 `BSAI Turbo 2nd` 例外：它按源 `#663 BasicScheduler(beta,4,0.55)` 走独立曲线，不复用切分段。
+4. `Off` 只在 `refine_enable` 上生效，画布与放大策略保持主档值，便于做"一采直出"试稿。
+
+**组合示例**
+
+| 想要的链路 | 1采下拉 | 2采下拉 | 总步数 |
+|---|---|---|---|
+| 源 `#488` 一采直出 | `BSAI Fast Draft 6-step @0.5MP` | `Off - 1st pass only` | 6（+低噪 2 段随族） |
+| 源「BSAI标准二采」 | `Follow` | `BSAI Standard 2nd (lms)` | 6+2 |
+| 源「BSAI极速二采4步」 | `Follow` | `BSAI Turbo 2nd` | 6+4 |
+| 源「极速 SelfLift 二采」 | `BSAI SelfLift 5-step @0.5x` | `BSAI SelfLift 2nd (lcm)` | 5+2=7 |
+| 源「极速分块 2 采」 | `Follow` | `BSAI Tiled 2nd` | 6+2（2 tiles/pad128/batch4） |
+
