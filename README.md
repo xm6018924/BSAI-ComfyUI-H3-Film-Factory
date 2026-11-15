@@ -188,6 +188,22 @@
 
 ---
 
+## 配套：分镜拆段与顺序渲染节点（storyboard_nodes）/ Storyboard nodes
+
+`storyboard_nodes/` 归档了两个独立插件（安装时各自剪切到 `ComfyUI/custom_nodes/`，详见该目录 README）：
+
+- **`A_MiniMaxH3StoryboardDuration`**
+  - `[A] MiniMax H3 官方提示词时长解析`：按分段标记切分提示词，取第 N 段的时长与累计起始时间。
+  - `[A] MiniMax H3 分镜段数统计`（2026-11-15 新增）：统计实际段数，替代工作流里写死的 12。
+  - `[A] 全段自动续排（一次运行跑完全部分镜）`（2026-11-15 新增）：当前段跑完后自动排下一段（seed+1），末段自停；运行次数填 1 即可跑完全部分镜。
+- **`A_MiniMaxH3StoryboardRefVideo`**
+  - `[A] MiniMax H3 官方参考提示词逐段提取` / `[A] MiniMax H3 官方参考生视频 (Full Ref2VA)` / `[A] MiniMax H3 官方参考提示词预览看板`。
+
+> 一镜到底多段时，`SeedNode` 既当噪声种子又当片段选择器，用 `(a - 1) % 段数 + 1` 回绕可避免 `clip_index` 越界报错；配合「全段自动续排」实现点一次跑完全部段。
+> For one-shot multi-segment runs, wrap the seed with `(a - 1) % segment_count + 1` so `clip_index` never goes out of range, and let the auto-chain node queue the remaining segments by itself.
+
+---
+
 ## 节点清单 / Node List
 
 全部位于 `BSAI/H3 Film Factory` 相关分类 / All under BSAI/H3 Film Factory categories:
