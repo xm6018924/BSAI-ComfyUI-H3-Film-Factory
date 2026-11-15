@@ -4,6 +4,39 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.409 (2026-11-15) — 分镜脚本格式兼容：`===== prompt_NN =====` 自动分 clip / Storyboard compat: auto split on `===== prompt_NN =====`
+
+**问题**
+
+「卡点舞蹈MV v1.5.3」式脚本用 `===== prompt_01 =====` … `===== prompt_12 =====` 分段，段内正文用 `[Shot 1]`…`[Shot 6]` 表示**镜内切点**。原解析器只认 `[分镜N]` / `[Shot N]` 作段标记 —— 遇到这份脚本会把 12 段切成 72 条 clip，且时长全部回退成 15 秒。
+
+**改动**
+
+1. 新增 `h3SplitSource(fullText)`，统一决定「全局提示词 / 分镜正文」的分界：
+   - 先认 `===== prompt_NN =====`（正则 `^=====\s*prompt[-_ ]?(\d+)\s*=====$`，忽略大小写与首尾空白）或 `===== 分镜列表开始 =====`；
+   - 命中即进入 **v2 模式**，`[Shot N]` 一律不参与分段；
+   - 未命中才回退旧逻辑 `[分镜N]` / `[Shot N]`，行为逐字不变。
+   - 全局提示词自动剔除 `[卡点总表]` 整块（制作参考表格，不是提示词），保留「全局资产档案 `@图1–@图N`」与「音乐卡点基准」。
+2. `parseStoryboard(text)` 增加 v2 分支：
+   - 一段 = 每两个 `===== prompt_NN =====` 之间；
+   - 段 prompt = 该段全文，原样保留五段式 `subject_definitions / summary / retention_analysis / detailed_description / overall_soundscape / non_diegetic_music`；
+   - 时长优先级：`This clip is N.NNN seconds` → `N.NNN seconds of screen time` → 中文「本段时长 N.NNN 秒」→ 回退 15。
+3. 5 处「切全局提示词 / 分镜正文」调用点（`prompt_source` 轮询、统一刷新按钮、`global_prompt` widget 回调、onConfigure 轮询、外部输入同步）全部改走 `h3SplitSource`，不再各写一份 `[分镜N]` 正则。
+
+**实测**（输入 60,273 B / 12 段脚本）
+
+| 项 | 结果 |
+|---|---|
+| 识别格式 | version=2 |
+| 全局提示词 | 1,579 字符，含 `@图1 柳香如`，不含 `[卡点总表]` |
+| 分 clip | **12 条**（P01–P12），全部含 `subject_definitions` 与 `[Shot 6]`，无 `=====` 残留 |
+| 时长 | 13.589 / 14.999 / 13.135 / 13.129 / 14.999 / 13.135 / 13.129 / 14.999 / 13.135 / 13.130 / 14.999 / 14.571，与脚本 `[卡点总表]` 逐行一致 |
+| 旧格式回归 | `[分镜1]`/`[分镜2]` 仍 version=1、2 段、时长 3/6 秒、全局提示词正确 |
+
+校验：`node --check`（.mjs）rc=0；`check_frontend_guard.py` 语法 OK ×3 + 枚举 SYNC OK。
+
+**用法**：整份脚本贴进上游文本节点 → 连 `prompt_source` 端口 → 轮询自动建 12 条 CLIP，`duration` 已填好；段内 `@图N` 沿用既有内联缩略图机制绑资产。
+
 ### v14.408 (2026-11-15) — 档 45 精确还原 SigmaRefiner + 新增「1采管线 / 2采管线」双下拉 / Exact SigmaRefiner for tier 45 + separate 1st-pass / 2nd-pass selectors
 
 **一、档 45 从近似改为精确还原**

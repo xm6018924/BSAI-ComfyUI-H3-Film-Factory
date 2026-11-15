@@ -770,6 +770,60 @@ MIT
 
 ---
 
+## 分镜脚本格式兼容（v14.409 / Storyboard format compatibility）
+
+电影工厂的自动分镜现在同时支持两种脚本格式，判据只看文本内容，不需要任何开关。
+
+### 格式 A：`===== prompt_NN =====`（卡点舞蹈MV v1.5.3 式）
+
+```
+## 全局资产档案（@图1–@图10）        ← 进「全局提示词」
+[音乐卡点基准]：BPM / 拍长 / 小节
+[卡点总表]：段 | 绝对起止(s) | …     ← 自动剔除，不进提示词
+===== 分镜列表开始 =====
+===== prompt_01 =====
+subject_definitions: @图1 identifies … / @图4 identifies … / @图7 identifies …
+summary: [reference generation + audio reference] … This clip is 13.589 seconds of screen time …
+retention_analysis: @图1 (appears in [Shot 1] to [Shot 6]): fully_preserved - …
+detailed_description: 画面风格总述 / [Shot 1] A close-up opens on … / [Shot 6] At 00:12.651, …
+overall_soundscape: All audio is supplied externally by the user's audio workflow; …
+non_diegetic_music: N/A
+===== prompt_02 =====
+…
+===== prompt_12 =====
+```
+
+- **一条 `prompt_NN` 块 = 一条 CLIP**
+- 块内 `[Shot N]` 是**镜内切点**，绝不拆 clip
+- 时长取 summary 里的 `This clip is N.NNN seconds`（14.999 s 这类压到 H3 上限的值原样沿用）
+- 段内 `@图N` 沿用既有内联缩略图机制绑定 `refs_json` 资产
+
+### 格式 B：`[分镜N]`（原有，逐字未变）
+
+```
+全局提示：电影级写实风格
+[分镜1]
+0-3秒 她推开门
+[分镜2]
+3-6秒 她走向窗前
+```
+
+### 判据优先级
+
+| 文本特征 | 走哪套逻辑 |
+|---|---|
+| 含 `===== prompt_NN =====` 或 `===== 分镜列表开始 =====` | 格式 A（`[Shot N]` 不参与分段） |
+| 否则含 `[分镜N]` / `[Shot N]` | 格式 B（与 v14.408 完全一致） |
+| 都没有 | 整段进「全局提示词」，不建 CLIP |
+
+### 实测结果（12 段脚本）
+
+| 项 | 结果 |
+|---|---|
+| 段数 | 12 |
+| 时长 | 13.589 / 14.999 / 13.135 / 13.129 / 14.999 / 13.135 / 13.129 / 14.999 / 13.135 / 13.130 / 14.999 / 14.571 |
+| 全局提示词 | 1,579 字符（含 `@图1–@图10` 资产档案，不含 `[卡点总表]`） |
+
 ## 1采管线 / 2采管线 双下拉（v14.408 / v14.408 dual pass selectors）
 
 电影工厂的采样由两段组成，v14.408 起可以分别选择，自由组合成任何「1采 + 2采」链路。

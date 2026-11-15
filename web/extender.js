@@ -1860,6 +1860,52 @@ function invalidateFrom(state, index) {
 }
 
 /**
+ * v14.409: 统一的分镜切点探测 —— 兼容「卡点舞蹈MV v1.5.3」式分镜脚本。
+ *
+ * 新版格式（优先识别）:
+ *   ===== 分镜列表开始 =====
+ *   ===== prompt_01 =====
+ *   subject_definitions: ... / summary: ... / detailed_description: [Shot 1] ...
+ *   ===== prompt_02 =====
+ *   ...
+ *   这种格式里的 [Shot N] 表示 **段内镜内切点**（一条 clip 内部的镜头切换），
+ *   绝不能当成新分镜的段标记 —— 否则 12 段会被切成 72 段。
+ *
+ * 旧版格式（回退）: 直接以 [分镜N] / [Shot N] 作为段标记（原有行为逐字不变）。
+ *
+ * 返回 { version, cut, globalText, storyboardText }；cut = -1 表示没有分镜。
+ */
+function h3SplitSource(fullText) {
+    const t = String(fullText == null ? "" : fullText);
+    const promptMarks = [];
+    const pmRe = /^[ \t]*=====[ \t]*prompt[-_ ]?(\d+)[ \t]*=====[ \t]*$/gim;
+    let m;
+    while ((m = pmRe.exec(t)) !== null) {
+        promptMarks.push({ num: parseInt(m[1], 10), pos: m.index });
+    }
+    const startRe = /^[ \t]*=====[ \t]*分镜列表开始[ \t]*=====[ \t]*$/im;
+    const sm = startRe.exec(t);
+    if (promptMarks.length > 0 || sm) {
+        const cut = promptMarks.length > 0 ? promptMarks[0].pos : sm.index;
+        let globalText = t.slice(0, cut).trim();
+        // [卡点总表] 是制作参考用的表格，不是提示词内容，从全局提示词里剔出去
+        const beatIdx = globalText.search(/^[ \t]*\[卡点总表\]/m);
+        if (beatIdx >= 0) globalText = globalText.slice(0, beatIdx).trim();
+        return { version: 2, cut, globalText, storyboardText: t.slice(cut).trim() };
+    }
+    const legacy = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/.exec(t);
+    if (legacy) {
+        return {
+            version: 1,
+            cut: legacy.index,
+            globalText: t.slice(0, legacy.index).trim(),
+            storyboardText: t.slice(legacy.index).trim(),
+        };
+    }
+    return { version: 0, cut: -1, globalText: t.trim(), storyboardText: "" };
+}
+
+/**
  * Parse storyboard text into segments.
  * Looks for [分镜N] markers and splits text accordingly.
  * For each segment, extracts the full prompt text and the last time range
@@ -1870,6 +1916,44 @@ function invalidateFrom(state, index) {
 function parseStoryboard(text) {
     if (!text || !String(text).trim()) return [];
     const raw = String(text);
+
+    // v14.409: 新版 ===== prompt_NN ===== 逐段解析。
+    // 段内 [Shot N] 是镜内切点，这里完全忽略它，绝不当段标记。
+    const pmRe = /^[ \t]*=====[ \t]*prompt[-_ ]?(\d+)[ \t]*=====[ \t]*$/gim;
+    const marks = [];
+    let pm;
+    while ((pm = pmRe.exec(raw)) !== null) {
+        marks.push({ num: parseInt(pm[1], 10), pos: pm.index, len: pm[0].length });
+    }
+    if (marks.length > 0) {
+        const segmentsV2 = [];
+        for (let i = 0; i < marks.length; i++) {
+            const segStart = marks[i].pos + marks[i].len;
+            const segEnd = i + 1 < marks.length ? marks[i + 1].pos : raw.length;
+            const body = raw.slice(segStart, segEnd).trim();
+            // 时长来源优先级:
+            //   1) "This clip is N.NNN seconds"
+            //   2) "N.NNN seconds of screen time"
+            //   3) 中文「本段时长 N.NNN 秒」
+            //   4) 回退 15（与旧格式默认一致）
+            let duration = 15;
+            const dEn = /This clip is\s*(\d+(?:\.\d+)?)\s*seconds/i.exec(body);
+            const dEn2 = /(\d+(?:\.\d+)?)\s*seconds of screen time/i.exec(body);
+            const dCn = /(?:本段时长|时长)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(?:秒|s\b)/.exec(body);
+            if (dEn) duration = parseFloat(dEn[1]);
+            else if (dEn2) duration = parseFloat(dEn2[1]);
+            else if (dCn) duration = parseFloat(dCn[1]);
+            segmentsV2.push({
+                num: marks[i].num,
+                prompt: body,
+                duration: duration,
+                format: "prompt_block",
+            });
+        }
+        return segmentsV2;
+    }
+
+    // 旧格式（原有行为，逐字不变）
     // Match [分镜1], [分镜2], etc. (also support [Shot1], [shot1])
     const markerRe = /\[(?:分镜|Shot|shot|SHOT)\s*(\d+)\]/g;
     const segments = [];
@@ -3744,10 +3828,9 @@ function syncGlobalPromptFromInput(node, runtime) {
         if (text != null) {
             const fullText = String(text);
             // Split at first [分镜N] marker: before → global prompt
-            const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
-            const sbMatch = fullText.match(sbMarkerRe);
-            const globalText = sbMatch ? fullText.slice(0, sbMatch.index).trim() : fullText.trim();
-            const storyboardText = sbMatch ? fullText.slice(sbMatch.index).trim() : "";
+            const _h3src = h3SplitSource(fullText);
+            const globalText = _h3src.globalText;
+            const storyboardText = _h3src.storyboardText;
 
             // v2.14: 源文本变化时实时解析 [分镜N], 自动建/改/删 CLIP (等同点"统一刷新"),
             // 由 poller 在外层做 render+autoGrow, 这里只改 state 并打脏标记, 避免 render 递归.
@@ -6007,10 +6090,9 @@ const mergeOutputBtn = document.createElement("button");
             }
             const newText = String(text);
             runtime._lastPromptSourceText = newText;
-            const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
-            const sbMatch = newText.match(sbMarkerRe);
-            const globalText = sbMatch ? newText.slice(0, sbMatch.index).trim() : newText.trim();
-            const storyboardText = sbMatch ? newText.slice(sbMatch.index).trim() : "";
+            const _h3src = h3SplitSource(newText);
+            const globalText = _h3src.globalText;
+            const storyboardText = _h3src.storyboardText;
             const keepGlobal = !globalText && newText.trim().length > 0;
             if (globalText !== undefined && !keepGlobal) {
                 runtime.state.global_prompt = globalText;
@@ -6701,9 +6783,9 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         gpWidget.callback = function(v) {
             if (v !== undefined && v !== null) {
                 const fullText = String(v);
-                const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
-                const sbMatch = fullText.match(sbMarkerRe);
-                const globalText = sbMatch ? fullText.slice(0, sbMatch.index).trim() : fullText.trim();
+                const _h3src = h3SplitSource(fullText);
+                const globalText = _h3src.globalText;
+                const storyboardText = _h3src.storyboardText;
                 // Preserve a manually-entered / auto-referenced global prompt when
                 // the source carries no archive section but is not empty.
                 const keepGlobal = !globalText && fullText.trim().length > 0;
@@ -7634,10 +7716,9 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             runtime._lastPromptSourceText = newText;
 
             // Split at first [分镜N] marker
-            const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
-            const sbMatch = newText.match(sbMarkerRe);
-            const globalText = sbMatch ? newText.slice(0, sbMatch.index).trim() : newText.trim();
-            const storyboardText = sbMatch ? newText.slice(sbMatch.index).trim() : "";
+            const _h3src = h3SplitSource(newText);
+            const globalText = _h3src.globalText;
+            const storyboardText = _h3src.storyboardText;
 
             let changed = false;
 
@@ -8529,10 +8610,9 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
                             return;
                         }
                         runtime._lastPromptSourceText = newText;
-                        const sbMarkerRe = /\[(?:分镜|Shot|shot|SHOT)\s*\d+\]/;
-                        const sbMatch = newText.match(sbMarkerRe);
-                        const globalText = sbMatch ? newText.slice(0, sbMatch.index).trim() : newText.trim();
-                        const storyboardText = sbMatch ? newText.slice(sbMatch.index).trim() : "";
+                        const _h3src = h3SplitSource(newText);
+                        const globalText = _h3src.globalText;
+                        const storyboardText = _h3src.storyboardText;
                         if (globalText) {
                             runtime.state.global_prompt = globalText;
                             if (runtime.globalPromptTextarea) {
