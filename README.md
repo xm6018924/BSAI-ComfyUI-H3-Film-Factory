@@ -335,6 +335,99 @@
 | `upscale_fp16` | 超分 FP16 | `true` | 半精度加速 |
 | `upscale_face_restore` | 超分人脸修复 | `false` | FaceRestore 预留（需权重+耗时）|
 
+### 超分引擎对齐 BSAI UPSCALE 4K（v14.405–406）/ Upscale Alignment with BSAI UPSCALE 4K
+
+本节点的超分下拉、引擎档与调参控件，与独立插件 `BSAI-H3-upscale-4K` 的 `model_name` 及同名参数**逐项对齐**。
+The upscale dropdown, engine tiers and tuning controls of this node are **aligned item-for-item** with the standalone `BSAI-H3-upscale-4K` plugin (`model_name` plus its same-named parameters).
+
+#### 1. `upscale_model` 下拉 = 33 项，与 4K 的 `model_name` 逐项同序 / 33 entries, identical order
+
+| 序号 / # | 值 / Value | 类型 / Kind |
+|---|---|---|
+| 1 | Auto Route (content-based) | 引擎 Engine |
+| 2 | FlashVSR-v1.1 (diffusion video SR) | 引擎 Engine |
+| 3 | RelayVSR (one-step Wan VSR) | 引擎 Engine |
+| 4 | SeedVR2 7B (diffusion video SR) | 引擎 Engine |
+| 5 | SeedVR2 7B INT8 (native ComfyUI) | 引擎 Engine |
+| 6 | NVIDIA RTX Video Super Res | 引擎 Engine |
+| 7 | NVIDIA RTX VSR - Denoise/Deblur (VFX) | 引擎 Engine |
+| 8 | DLSS 5 (NVIDIA neural SR) | 引擎 Engine |
+| 9 | VOSR 2.0 (CVPR2026 generative SR) | 引擎 Engine |
+| 10 | VOSR 2.0 + DLSS 5 (dual-engine) | 引擎 Engine |
+| 11 | VOSR 2.0 + RTX (recommended 2-stage) | 引擎 Engine |
+| 12 | Topaz Starlight 2.6 (generative) | 引擎 Engine |
+| 13 | Topaz Astra (generative) | 引擎 Engine |
+| 14 | Topaz Wonder 3.5 (generative) | 引擎 Engine |
+| 15–33 | 1xDeJPG_realplksr_otf.pth … realesr-general-x4v3.pth（19 个） | 模型 Model |
+
+**选择规则 / Selection rule**
+- 选**引擎名**（1–14）→ 运行时把 `upscale_engine` 切到对应引擎，模型项忽略。/ Picking an **engine name** switches `upscale_engine` to that engine; the model slot is ignored.
+- 选**模型文件名**（15–33）→ 走 Real-ESRGAN 通道加载该 `.pth`/`.safetensors`。/ Picking a **model file** runs Real-ESRGAN with that weight file.
+
+**兼容性 / Compatibility**：旧工作流存的 `realesr-general-x4v3.pth` 仍在列表内，取值不变，无需迁移。/ The legacy value `realesr-general-x4v3.pth` is still in the list, so existing workflows need no migration.
+
+> `upscale_mode`（Balanced / Quality first / Speed first / Custom）是本节点自有预设，4K 节点没有对应项，二者不冲突。
+> `upscale_mode` (Balanced / Quality first / Speed first / Custom) is a preset unique to this node; the 4K plugin has no equivalent, so the two coexist.
+
+#### 2. `u4k_*` 参数按引擎档自动显隐（v14.406）/ Conditional visibility
+
+`upscale_engine` 为 `auto` / `realesr` / `bicubic`（legacy 三档）时，下面 8 个参数行**自动隐藏**；选到 14 个 4K 引擎（或 `upscale_model` 选引擎名）时**自动显示**。切换下拉即刻生效并重算节点高度。
+When `upscale_engine` is `auto` / `realesr` / `bicubic`, the 8 rows below are **hidden**; they appear as soon as one of the 14 4K engines is selected. The toggle is instant and re-measures the node height.
+
+#### 3. 8 个可见参数详解 / The 8 visible parameters
+
+| 参数 / Param | 范围 · 默认 / Range · Default | 中文说明 | English |
+|---|---|---|---|
+| `u4k_scale` | 0.00–8.00（步长 0.01）· **0.00** | `0`=跟随 `upscale_factor`；>0.5 时覆盖它，支持 2.67、3.0 这类非整数倍（内部先超分到最近整数档再重采样到目标，偶数像素对齐）。超过 4.0 基本只增体积 | `0` follows `upscale_factor`; `>0.5` overrides it, non-integer ratios supported. Above 4.0 adds size, not quality |
+| `u4k_auto_prefer` | Quality / Speed / Portrait / Anime / UHD · **Quality** | **只对 Auto Route 生效**。Quality=重模型最慢；Speed=general-x4v3，约快 8 倍；Portrait=优先人脸通道；Anime=动画向；UHD=保守不动模型 | **Auto Route only.** Quality = heaviest/slowest; Speed = general-x4v3 (~8× faster); Portrait = face channel; Anime = anime-tuned; UHD = conservative |
+| `u4k_input_adaptive` | Auto / Off / UHD Conservative / HD Enhance · **Auto** | 按输入短边自动调后处理强度。Auto=≤720p 走加强、≥1080p 走保守；Off=固定强度；UHD Conservative=4K 输入更克制；HD Enhance=低清素材更激进 | Auto tunes by input short side (≤720p enhance, ≥1080p conservative); Off = fixed; UHD Conservative / HD Enhance force either end |
+| `u4k_detail_amount` | 0.00–1.00（步长 0.01）· **0.50** | USM 细节重建强度。0=关闭最干净；0.5=边缘清晰不过火；1.0=很强易出白边光晕。真人 0.40–0.60，动画 0.30–0.45，老片 0.25 | Unsharp-mask detail strength. 0.5 = crisp without halos; 1.0 = strong (ringing risk). Live action 0.40–0.60, anime 0.30–0.45, archival 0.25 |
+| `u4k_softness` | 0.00–1.00（步长 0.01）· **0.10** | 锐化后混回少量高斯模糊副本，抑制过冲与振铃。经验值≈`detail_amount×0.2`（detail 0.8 → 0.15–0.2） | Blends back a blurred copy to tame overshoot/ringing. Rule of thumb ≈ `detail_amount × 0.2` |
+| `u4k_temporal_strength` | 0.00–1.00（步长 0.01）· **0.20** | 光流运动补偿的跨帧时域稳定。0=每帧独立（快，快速运镜易闪）；0.2=默认；0.5=更稳但快动可能糊；0.8=近似拖影。FlashVSR/RelayVSR/SeedVR2/SeedVR2-INT8/VOSR 2.0 会被强制归零（自带时域建模，避免双重平滑） | Optical-flow temporal blend. 0 = per-frame (fast, may flicker); 0.2 default; 0.5 steadier but softer on motion; 0.8 smear-like. Auto-zeroed for FlashVSR / RelayVSR / SeedVR2 / SeedVR2-INT8 / VOSR 2.0 |
+| `u4k_face_restore` | Off / GFPGANv1.4 / CodeFormer / Small-Face (CodeFormer) · **Off** | 逐帧人脸修复，与 `upscale_face_restore` 独立可叠加。GFPGAN=快、皮肤柔和但五官略失个性；CodeFormer=保真可调；Small-Face=远景小脸专用（2× 预放大+更强重建）。1080p 约增 20–40% 耗时 | Per-frame face restoration, stacks with `upscale_face_restore`. GFPGAN = fast/soft; CodeFormer = high fidelity; Small-Face = distant tiny faces. ~20–40% slower at 1080p |
+| `u4k_tile_pad` | 0–512（步长 1）· **32** | 分块超分时每块向外扩张的像素量，消接缝。只在显存不足触发分块时有意义；出现条状接缝就加到 64 | Tiling overlap in pixels to remove seams. Only matters when tiling is engaged; raise to 64 if seams appear |
+
+#### 4. 长尾参数走 `u4k_engine_params`（JSON）/ Long-tail via JSON
+
+其余 21 项不占参数行，直接在该 JSON 框内写键值（未知键会在控制台打印允许键名）。
+The remaining 21 knobs stay inside the `u4k_engine_params` JSON field (unknown keys print the allowed list to console).
+
+| 键 / Key | 范围 · 默认 / Range · Default | 作用 / Effect |
+|---|---|---|
+| `detail_mode` | classic / smart · **smart** | smart 额外做局部对比度重建，纹理更像 Topaz |
+| `detail_radius` | 0.3–8.0 · **1.8** | USM 半径，小=细纹大=轮廓 |
+| `face_det_backend` | Auto / NPU Offload / GPU1 · **Auto** | 人脸检测跑在哪块芯片 |
+| `face_det_conf` | 0.05–0.95 · **0.15** | 越低检出越多小脸，也越多误检 |
+| `face_blend` | 0.1–1.0 · **0.70** | 修复脸盖回原图的比例 |
+| `face_fidelity` | 0.0–1.0 · **0.60** | 0=大改重建 1=保留原结构 |
+| `face_temporal` | 0.0–1.0 · **0.50** | 跨帧强度 EMA，消闪烁 |
+| `dlss_style` | Cinematic / Default / Natural · **Cinematic** | DLSS 5 风格 |
+| `dlss_intensity` / `dlss_detail` | 0.0–2.0 · **1.0** | DLSS 神经渲染叠加强度 / 细节强度 |
+| `dlss_motion` | true / false · **true** | 用运动矢量做时序 |
+| `rtx_vfx_op` | Denoise / Deblur · **Denoise** | RTX VFX 做什么 |
+| `rtx_vfx_level` | LOW / MEDIUM / HIGH / ULTRA · **ULTRA** | VFX 档位 |
+| `rtx_strength` | 0.0–1.0 · **1.0** | VFX 效果强度 |
+| `vosr_cfg` / `vosr_steps` / `vosr_scale` | -2.0–2.0 · 1–25 · 2–4 · **0.5 / 1 / 2** | VOSR 引导强度 / 采样步数 / 自身倍率 |
+| `dlss_chain_scale` / `rtx_chain_scale` | 1–3 · **2** | VOSR+DLSS / VOSR+RTX 串联时第二段倍率 |
+| `sv2_steps` / `sv2_cfg` | 1–100 · 0.0–10.0 · **12 / 1.2** | SeedVR2-INT8 采样步数 / CFG |
+| `sv2_sampler` / `sv2_scheduler` / `sv2_color` | euler… / normal… / lab… · **euler / normal / lab** | SeedVR2-INT8 采样链与色彩校正 |
+| `flashvsr_anti_ghost` | 0.0–1.0 · **0.40** | FlashVSR 抗鬼影，越高细节越少 |
+| `relay_weights` / `relay_detail` | Auto-x2-x4 · 0.0–1.0 · **Auto / 1.0** | RelayVSR 权重档 / 细节强度 |
+
+#### 5. 三套现成组合 / Three ready-made presets
+
+| 场景 / Scenario | 引擎 / Engine | scale | auto_prefer | input_adaptive | detail | softness | temporal | face_restore | tile_pad |
+|---|---|---|---|---|---|---|---|---|---|
+| 真人成片（默认） / Live action | RelayVSR / SeedVR2 | 0 | Quality | Auto | 0.50 | 0.10 | 0.20 | Off | 32 |
+| MV 特写多 / Many close-ups | SeedVR2 7B | 2.0 | Portrait | Auto | 0.60 | 0.15 | 0.20 | Small-Face | 64 |
+| 低成本批量 / Fast batch | realesr / auto | 0 | Speed | Off | 0.35 | 0.10 | 0.20 | GFPGANv1.4 | 32 |
+
+#### 6. 变更记录 / Change log
+
+- **v14.406**：8 个 `u4k_*` 参数按引擎档动态显隐（legacy 三档隐藏，4K 引擎显示），切换即时重算高度。
+- **v14.405**：`upscale_model` 下拉并入 4K 的完整引擎表，得到与 `model_name` 逐项相同的 33 项；运行时按引擎名反查覆盖 `upscale_engine`。
+- **v14.404（已撤销）**：曾把 9 个模式型下拉做成独立 widget 行，因违反"新增控件只能追加在 optional 末尾、不占用户参数行"的约束被整体回滚。
+
 ### 环境音与保脸（v14.83）/ Env Audio & Face Lock
 | 参数 | 中文说明 | 默认 | 说明 |
 |---|---|---|---|

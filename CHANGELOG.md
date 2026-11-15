@@ -4,6 +4,39 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.406 (2026-11-15) — `u4k_*` 参数按引擎档动态显隐 / Conditional visibility of the u4k_* parameters
+
+**问题**：v14.394 起的 8 个 `u4k_*` 参数（scale / auto_prefer / input_adaptive / detail_amount / softness / temporal_strength / face_restore / tile_pad）只在 `engine_eff in _FF_U4K_ENGINE_LABELS`（`extender.py:5598`）的分支被读取。选 `auto` / `realesr` / `bicubic` 时它们是死参数，却一直占着 8 行。
+
+**改动（仅前端 `web/extender.js`）**
+- 新增 `_U4K_KEYS`（14 个内部 key）、`_U4K_LABELS`（14 个显示名）、`_U4K_PARAMS`（8 个参数名）三组常量与 `_u4kEngineOn()` 判定；
+- `_u4kApply(forceMeasure)`：值变化时调用 `setWidgetRowHidden(node, w, want)`，再 `syncDomHeight(node, runtime, true)` + `app.canvas.setDirty(true, true)`；
+- setup 时执行一次（打开旧工作流即按存值判定），并给 `upscale_engine` / `upscale_model` 挂 `callback`（`__h3U4kCb` 防重复），切换即生效；
+- `u4k_engine_params` 保持永久隐藏，避免 v14.403 修过的 2926px 占位把 CLIP 卡片挤出可视区的问题复发。
+
+**Issue**: the eight u4k_* widgets added in v14.394 are only consumed when the engine resolves into `_FF_U4K_ENGINE_LABELS`. With the legacy tiers (auto / realesr / bicubic) they are dead knobs that still occupy eight rows.
+**Fix (front-end only)**: engine-name sets plus an `_u4kEngineOn()` check decide visibility through the existing `setWidgetRowHidden()`; `_u4kApply()` re-runs on every dropdown change and re-measures the node height. `u4k_engine_params` stays permanently hidden to keep the v14.403 layout fix intact.
+
+**校验 / Verification**：`node --check`（.mjs）rc=0；`check_frontend_guard.py` → 语法 OK ×3 + 枚举 SYNC OK + GUARD OK；C/G 两盘 `web/extender.js` SHA256 一致。
+
+### v14.405 (2026-11-15) — 超分下拉并入 BSAI UPSCALE 4K 的完整引擎表（33 项逐字一致）/ Upscale dropdown merged with the BSAI UPSCALE 4K engine table (33 identical entries)
+
+**用户口径**：超分放大引擎和模式没对齐 `BSAI-H3-upscale-4K` 的 `model_name` 下拉，"这个下拉菜单就是 BSAI upscale 4k 的功能和下拉菜单一模一样就可以"。
+
+**改动**
+- 新增 `_bsai_u4k_model_name_choices()`（紧随 `_bsai_list_upscale_models`），返回 `list(_FF_U4K_ENGINE_LABELS.values()) + _bsai_list_upscale_models()`；
+- `upscale_model` 枚举由 19 个 .pth 变为 **33 项** = 11 个 `ENGINE_OPTIONS` + 3 个 `TOPAZ_OPTIONS` + 19 个本地模型，与 4K 节点 `model_name` **逐项同序**；
+- `extend()` 读到 `upscale_model` 后：值命中引擎显示名 → 反查 key 覆盖 `upscale_engine` 并把模型位复位为默认 .pth；命中模型文件 → 走 Real-ESRGAN 通道；
+- 旧工作流存的 `realesr-general-x4v3.pth` 仍在列表内，取值不变，无需迁移。
+
+**Requested**: align the upscale engine/model lists with the standalone `BSAI-H3-upscale-4K` node's `model_name` dropdown, item-for-item.
+**Change**: `upscale_model` now exposes 33 entries (11 engines + 3 Topaz tiers + 19 local models) in the exact same order as the 4K plugin; picking an engine name re-maps `upscale_engine` at runtime, picking a model file runs Real-ESRGAN with that weight.
+
+**撤销说明**：v14.404 曾把 9 个模式型下拉做成独立 widget 行追加在 `optional` 末尾，因违反"新增控件只能追加、不占用户参数行"的约束被整体回滚（`*.bak_pre_u4kmodes_20261115`）。
+**Rollback note**: v14.404 turned nine mode dropdowns into standalone widget rows; it was fully reverted because added rows must not occupy the user-facing parameter area.
+
+**校验 / Verification**：33 vs 33、`ours == theirs : True`（逐项同序）；`py_compile` rc=0；GUARD OK；提交 `ae61a52`。
+
 ### v14.401 (2026-11-13) — 新增「BSAI6+2高低噪采样」渲染管道：一条 8 步 beta 曲线在 step=6 切开，一采 6 步 + 二采 2 步续算 / New "BSAI6+2 High/Low-Noise Split Sampling" tier: one 8-step beta schedule split at step 6, 6-step first pass + 2-step continuation
 
 **用户口径**：把「一采 6 步、同时作 SplitSigmas 切点；二采 2 步；两者相加 8 进 BasicScheduler(beta, denoise 1)，切成高噪 6 步 / 低噪 2 步分别交给两个 SamplerCustomAdvanced；二采前用 MinimaxH3LatentUpscaler3D 放大，放大不算采样步」这条路线加成第 40 档渲染管道，命名为「BSAI6+2高低噪采样」，参数以参考工作流为准。
