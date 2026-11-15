@@ -189,6 +189,17 @@ try:
 except Exception as e:
     print(f"[H3 Film Factory] voice_clone_node.py import failed: {e}")
 
+# === 分镜拆段 / 顺序渲染节点（原两个独立插件并入本插件，只装一个插件即可）===
+try:
+    from .storyboard_nodes import (
+        NODE_CLASS_MAPPINGS as STORYBOARD_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as STORYBOARD_DISPLAY,
+    )
+    NODE_CLASS_MAPPINGS.update(STORYBOARD_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(STORYBOARD_DISPLAY)
+except Exception as e:
+    print(f"[H3 Film Factory] storyboard_nodes import failed: {e}")
+
 # === Server-side API endpoints ===
 try:
     from . import server

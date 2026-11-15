@@ -1,27 +1,16 @@
 # 分镜拆段与顺序渲染节点 / Storyboard segmentation nodes
 
-这两个插件原本独立放在 `custom_nodes/` 下，现随电影工厂仓库一起归档，位置：`storyboard_nodes/`。
+这两个插件原本独立放在 `custom_nodes/` 下，现已**并入宿主插件 `BSAI-ComfyUI-H3-Film-Factory`**：宿主 `__init__.py` 通过
+`from .storyboard_nodes import ...` 把这里的节点一并注册，前端脚本上收到宿主 `web/js/storyboard_ref.js`。
 
-## 安装：用目录联接消灭双副本（推荐）
+## 安装：只装一个插件
 
-直接复制会让“运行副本”和“仓库副本”变成两份独立文件，改了运行副本而不提交，GitHub 上会静默落后。本机做法是用
-**目录联接（junction）**把 `custom_nodes/` 下的目录名指向本仓库里的源码，从此物理上只有一份：
+**`custom_nodes/` 里只需要 `BSAI-ComfyUI-H3-Film-Factory` 这一个目录**，不要再单独放
+`A_MiniMaxH3StoryboardDuration` / `A_MiniMaxH3StoryboardRefVideo`（放进去会和内置节点重复注册）。装好后重启 ComfyUI，
+节点出现在 `BSAI/…` 分类下，`/extensions` 里会自动带上 `js/storyboard_ref.js`（宿主 `WEB_DIRECTORY = "./web"` 递归扫描）。
 
-```powershell
-# 两个插件各做一次；GIT_DEST 换成你本仓库的实际路径
-$repo = "C:\BSAI\ComfyUI-BSAI_pro_v43\ComfyUI\custom_nodes\BSAI-ComfyUI-H3-Film-Factory\storyboard_nodes"
-$live = "C:\BSAI\ComfyUI-BSAI_pro_v43\ComfyUI\custom_nodes"
-foreach ($n in "A_MiniMaxH3StoryboardDuration","A_MiniMaxH3StoryboardRefVideo") {
-  Move-Item -LiteralPath (Join-Path $live $n) -Destination "C:\BSAI\_node_backups\${n}_pre_junction"
-  New-Item -ItemType Junction -Path (Join-Path $live $n) -Target (Join-Path $repo $n) | Out-Null
-}
-```
-
-这样 ComfyUI 加载的就是 Git 跟踪的文件，改完 `git status` 立刻可见，`commit` 即发布。
-
-> 注意：联接损坏（目录被删、仓库被移动）会让插件“消失”，重建联接即可；`__pycache__`、`*.bak` 已在仓库 `.gitignore`
-> 里忽略，落在仓库目录里也不会进提交。
-> 若不用联接，也可以把两个目录直接复制到 `custom_nodes/`，但每次改动都要手动拷回仓库再提交。
+升级或改动 `node.py` 后：宿主插件目录里改文件 → 重启 ComfyUI 即可。宿主插件本身是个 git 仓库，`git status` 能看见改动，
+`commit` 即发布，不会出现“运行副本与仓库副本各一份”的静默漂移。
 
 | 目录 | 节点 | 作用 |
 |---|---|---|

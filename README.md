@@ -188,9 +188,11 @@
 
 ---
 
-## 配套：分镜拆段与顺序渲染节点（storyboard_nodes）/ Storyboard nodes
+## 内置：分镜拆段与顺序渲染节点（storyboard_nodes）/ Storyboard nodes
 
-`storyboard_nodes/` 归档了两个独立插件（安装时各自剪切到 `ComfyUI/custom_nodes/`，详见该目录 README）：
+`storyboard_nodes/` 已**并入本插件**：宿主 `__init__.py` 里 `from .storyboard_nodes import ...`，节点随本插件一起注册，
+`custom_nodes/` 里只需要装这一个插件目录；前端脚本在 `web/js/storyboard_ref.js`（随 `WEB_DIRECTORY = "./web"` 加载）。
+详见 [storyboard_nodes/README.md](storyboard_nodes/README.md)。
 
 - **`A_MiniMaxH3StoryboardDuration`**
   - `[A] MiniMax H3 官方提示词时长解析`：按分段标记切分提示词，取第 N 段的时长与累计起始时间。
