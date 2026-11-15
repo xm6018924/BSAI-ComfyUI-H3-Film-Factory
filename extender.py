@@ -4529,6 +4529,109 @@ def _bsai_6plus2_split(model, tag: str = ""):
     return _hi, _lo
 
 
+# ============================================================
+# Rhythm Music 档: 音乐卡点节奏(移植自 A_LibrosaBeatCue / A_TextInjectCue)。
+# 完整歌曲在后端用 librosa 分析一次并缓存; 每段按其起止秒数生成卡点指令,
+# 前置到该段提示词开头。算法与源节点逐句对齐, 仅去掉源工作流的
+# `= prompt 0N =` / `[Shot 1]` 段标记正则(电影工厂每段已是独立 prompt)。
+# ============================================================
+_RHYTHM_CUE_GUARD = "Rhythm guide"
+_RHYTHM_ANALYSIS_CACHE = {}
+_RHYTHM_DEFAULTS = {
+    "performer_name": "Bai Lin",
+    "beats_per_bar": 4,
+    "cue_mode": "downbeats_only",
+    "grid_duration": 14.0,
+    "motion_cycle_sec": 6.0,
+    "sway_percent": 2.5,
+    "roll_degrees": 2.0,
+    "time_offset": 0.0,
+    "camera_breathing": True,
+}
+
+
+def _rhythm_analyze_audio(lip_audio):
+    """对完整歌曲做一次 librosa 节拍分析并缓存; 返回 (tempo, beat_times ndarray)。"""
+    import librosa
+    waveform = lip_audio["waveform"]
+    sr = int(lip_audio["sample_rate"])
+    key = (sr, tuple(waveform.shape),
+           float(waveform.float().sum()), float(waveform.float().abs().max()))
+    if key in _RHYTHM_ANALYSIS_CACHE:
+        return _RHYTHM_ANALYSIS_CACHE[key]
+    # collapse to mono [samples], ComfyUI AUDIO is [batch, channels, samples]
+    mono = waveform.mean(dim=1).squeeze(0).detach().cpu().numpy().astype("float32")
+    tempo, beat_frames = librosa.beat.beat_track(y=mono, sr=sr)
+    tempo = float(np.atleast_1d(tempo)[0])
+    beat_times = librosa.frames_to_time(beat_frames, sr=sr).astype("float64")
+    result = (tempo, beat_times)
+    _RHYTHM_ANALYSIS_CACHE[key] = result
+    return result
+
+
+def _rhythm_fmt(values):
+    return ", ".join(f"{v:.2f}" for v in values)
+
+
+def _rhythm_build_cue(tempo, beat_times, start, duration, params):
+    """照搬 A_LibrosaBeatCue.build_cue 的卡点文本; 段窗口 start ~ start+duration。"""
+    beats_per_bar = max(1, int(params.get("beats_per_bar", 4)))
+    cue_mode = str(params.get("cue_mode", "downbeats_only"))
+    cycle = float(params.get("motion_cycle_sec", 6.0))
+    sway = float(params.get("sway_percent", 2.5))
+    roll = float(params.get("roll_degrees", 2.0))
+    offset = float(params.get("time_offset", 0.0))
+    breathing = bool(params.get("camera_breathing", True))
+    name = str(params.get("performer_name", "Bai Lin")).strip() or "the performer"
+    start = float(start)
+    end = start + float(duration)
+
+    inside = (beat_times >= start - 0.02) & (beat_times < end + 0.02)
+    local_idx = np.where(inside)[0]
+    local_rel = np.maximum(beat_times[local_idx] - start + offset, 0.0)
+    is_down = (local_idx % beats_per_bar == 0)
+    local_down = local_rel[is_down]
+    local_all = local_rel
+
+    parts = [f"{_RHYTHM_CUE_GUARD}, tempo {tempo:.2f} BPM."]
+    if len(local_down):
+        parts.append(
+            "Downbeat accents within this clip land at " + _rhythm_fmt(local_down) +
+            f"; on each downbeat {name} snaps into a sharp hit pose and freezes for a beat, "
+            "then flows through the off-beats so every accent lands exactly on the beat."
+        )
+    else:
+        parts.append(
+            f"No downbeat falls inside this clip; {name} keeps a continuous flowing motion "
+            "and carries the rhythm across the clip boundary."
+        )
+    if cue_mode == "all_beats" and len(local_all):
+        parts.append("Beat positions within this clip are " + _rhythm_fmt(local_all) + ".")
+    if breathing:
+        motion_bits = []
+        if sway > 0.0:
+            motion_bits.append(
+                f"the handheld camera gently sways and drifts left and right by about {sway:.1f} percent of frame width"
+            )
+        if roll > 0.0:
+            motion_bits.append(
+                f"a handheld roll that tilts the horizon left and right by about {roll:.1f} degrees"
+            )
+        if motion_bits:
+            parts.append(
+                "The camera is handheld; " + ", combined with ".join(motion_bits) +
+                f"; the drift and tilt share one smooth cycle of about {cycle:.1f} seconds per full left-right-left sweep, "
+                "and move together around the subject while the subject stays centered; "
+                "the camera movement is a continuous breathing drift and never snaps on the beat."
+            )
+        else:
+            parts.append(
+                "The camera stays nearly static with only a faint handheld breathing; "
+                "the subject stays centered and the camera never moves on the beat."
+            )
+    return " ".join(parts)
+
+
 def _sigmas_exact(model, scheduler: str, steps: int, denoise: float, tag: str = ""):
     """从 σ = denoise·σmax 起步、按给定步数走到 0 的 sigma 表（denoise 为真实噪声比例）。"""
     steps = max(1, int(steps))
@@ -12226,6 +12329,9 @@ _RENDER_PIPELINE_EN2ZH = {
     # v14.401 (2026-11-13): 第 40 档「BSAI6+2高低噪采样」—— 一条 8 步 beta 曲线
     # 在 step=6 处 SplitSigmas 切开: 高噪 6 步 + 低噪 2 步, 二采前 3D latent 放大。
     "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)": "BSAI6+2高低噪采样",
+    # v14.402: Rhythm Music 音乐卡点节奏 —— v1.45.2 卡点舞蹈MV工作流移植,
+    # 一采 6+2 高低噪切分 + 极速二采(3D 放大 fp32 权重), 另带 librosa 节拍卡点提示词注入。
+    "Rhythm Music": "音乐卡点节奏",
 }
 _VIGGLE_RP_LABEL = "Viggle Remake 视频改写 (6步 换人/增删改)"
 _VIGGLE_RP_FS_LABEL = "Viggle Remake 视频改写+逐帧换脸 (6步 换人)"
@@ -12689,7 +12795,7 @@ class BSAIH3FilmFactory:
         # 注意: 必须排在 optional 全部 widget 的最末尾 (index 65 = 老工作流空槽,
         # 现有 66 键工作流 w65=''), 追加在 tts_model 端口之后不挤占任何既有 index。
         optional["render_pipeline"] = (
-            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "ACC 8-step SelfLift Dual-Pass (8+4)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Video Remix (no-LoRA character swap + motion transfer)", "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)", "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)"],
+            ["Sol-H3 Self-Lift Dual-Pass (default)", "MV Dual-Pass (Film Factory v3.2 original)", "Live Dub HD (audio 12+ steps)", "FastH3-Trim", "FastH3 4-step VSA", "Turbo-v4", "DMAD 4-step", "Action Combo", "4K Direct Secret Sauce", "FastH3 Omni 8-step Single-Pass", "Dual-Pass 2K (HyperVAE 2x decode)", "QAD-v2 8-step", "Live Commerce 01 Text Dubbing (no audio inputs)", "Live Commerce 02 ref_audio Voice Reference", "Live Commerce 03 lip_voice Lip-Sync", "Live Commerce (fully automatic)", "FastH3 Omni x SelfLift Upscale", "H25 Hybrid 8-step Multi-Ref Single-Pass", "4K Regenerate OpenH3Regenerate2K (768P draft to 2560)", "PRISM 10-step Motion Single-Pass (Singularity v2 x 10Eros-Max)", "Transparent Video Single-Pass Keying (H3 Transparent)", "4-in-1 Ultimate Speedup (DMAD 8-step + SelfLift 6+2 + half-res refs + SegAttention)", "SolarRenderer Structure Control (control LoRA + 4-step LoRA)", "Director Turbo Dual-Pass (MiniMaxH3 Director port)", "Dual-Pass 2K (official condition upscale)", "PDMD 4-step SelfLift Dual-Pass (4+2)", "PDMD 2-step Turbo Draft (single-pass)", "PTD 4-step Ref2VA Single-Pass (reference accel)", "ACC 8-step SelfLift Dual-Pass (8+4)", "PIKA H3 Flex 6+2 SelfLift Dual-Pass (Ref2VA face-lock)", "PIKA H3 Flex 8+2 SelfLift Dual-Pass (Ref2VA face-lock)", "TaoMate HD 3-Step Progressive Lift Dual-Pass (2+1, 1080p direct)", "TaoMate HD 8+4 Progressive Lift Dual-Pass (8+4, 1080p direct)", "Singularity V2 + Pika H3 8-step High-Motion (Director/SelfLift/Context)", "Video Recast (H3 V2V character swap)", "HyperFlow H3 Flash 14B Single-Pass (4/6/8-step GGUF)", "Video Remix (no-LoRA character swap + motion transfer)", "Viggle Remake Video Edit (6-step swap/edit LoRA, FL2VA)", "Viggle Remake Video Edit + FaceSwap (6-step swap/edit LoRA + 128 face swap)", "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)", "Rhythm Music"],
             {
                 "default": "Sol-H3 Self-Lift Dual-Pass (default)",
                 "tooltip": "v14.184 render pipeline (all model recipes are selected here; Speed keeps only the 7 basic tiers): (1) Sol-H3 Self-Lift Dual-Pass (default, HD refine); (2) Live Dub HD = live-commerce ref_audio dubbing: 12 first-pass steps + 4 refine steps + audio redraw 0.7 (needs a non-8-step distilled model such as minimax_h3_ref2va_int8_convrot); (3) FastH3-Trim = nvfp4 pruned model, 8+4 dual-pass; (4) FastH3 4-step VSA = 4-step distillation + VSA LoRA, 4+2; (5) Turbo-v4 = Turbo LoRA v4 step600 EMA, 6+4 (shift 12/3); (6) DMAD 4-step = DMAD 4-step distillation LoRA, 8+2 (v14.386: was 4+2; forced lcm, shift 12/2); (7) Action Combo = 8+4 (euler; action/DMAD LoRAs injected by H3LoraStack); (8) 4K Direct Secret Sauce = self-lift progressive sampling (6-step low-res pass + boost x2 / 3-step detail pass + DLSS5 4K pixel upscale); (9) FastH3 Omni 8-step Single-Pass = skip refine, 8-step distilled first pass (guidance 1.0, shift 12/3; Loader must use fasth3_omniref_8step_pruned_int8_convrot + BlockSparseAttention VSA keep_percent=10); (10) Dual-Pass 2K (HyperVAE 2x decode) = 8+4, latent factor 1.0 (~4x faster refine) + HyperVAE 2x decoded pixels for direct 2K (weights auto-detected from models/vae as hyper*2x*.safetensors); (11) QAD-v2 8-step = quantization-aware distillation NVFP4 set (118GB -> 30GB), 8-step single pass (shift 10/3), refine skipped, Loader switches to the full QAD-v2 NVFP4 set; (12-14) Live Commerce voice modes (v14.220): 01 Text Dubbing = no audio ports connected, the model reads the storyboard lines in its default voice; 02 ref_audio Voice Reference = voice follows ref_audio; 03 lip_voice Lip-Sync = the model generates no audio, sound comes entirely from lip_voice driving @img1 lip-sync; all three share the 12+4 recipe and auto-ignore miswired audio ports; (15) Live Commerce (fully automatic) = one-click tier, every parameter is taken over (12+4, denoise 0.55, 3D latent upscaler x2.0, audio redraw 0.7, shift 12/3, TST 0.2, tiled 4x128, audio_context_length=0, motion context off from clip2); (16) FastH3 Omni x SelfLift Upscale = Omni 8-step distill + SelfLift progressive upscale (4-step ~0.4x skeleton -> 3D latent upscale -> 4-step hi-res refine, 8 NFE); (17) H25 Hybrid 8-step Multi-Ref Single-Pass = FL2VA base + Ref2VA overlay (Block Range Additive 25-49) + LightX2V 8-step FL2V accel LoRA, 8-step single-pass (euler+simple, shift 12/3); (18) 4K Regenerate OpenH3Regenerate2K = 768P draft -> 3-step regenerate -> 2560x1440 (merged LoRA: OpenH3 Refiner 0.7 + fl2v turbo 1.0 + lms sharp 1.0; license excludes EU/UK/KR/US); (19) PRISM 10-step Motion Single-Pass = Singularity v2 x 10Eros-Max merged model, euler+simple 10 steps, no LoRA; (20) Transparent Video Single-Pass Keying = generate on a flat solid backdrop (green/blue/pure black), 10-step single-pass, refine skipped so the backdrop stays uniform for clean keying; pair with BSAI_H3_TransparentKey + BSAI_H3_SaveTransparentVideo; (21) 4-in-1 Ultimate Speedup = DMAD 4-step LoRA + SegAttention 2.2.0 + half-res reference input + SelfLift dual-pass (6+2, latent x2.0); (22) SolarRenderer Structure Control = control LoRA reads a structure video frame-by-frame (3D greybox/normal/pose/depth, a video ControlNet) + 4-step LoRA, 4+4 = 8 NFE, ref_image_size forced max; (23) Director Turbo Dual-Pass = MiniMaxH3 Director port: 8-step low-res first pass + 4-step refine (latent x2.0, denoise 0.45), the second pass follows a Director control video instead of ref2va refs; (24) Dual-Pass 2K (official condition upscale) = latent 2x via the official MiniMaxH3LatentUpscaleCombined path with ref2va condition latents upscaled in sync, native VAE outputs 2K directly (8+4, denoise 0.45, euler, shift 12/3); (25) PDMD 4-step SelfLift Dual-Pass = PDMD 4-step distillation LoRA, 4+2 = 6 NFE (shift 12/3); (26) PDMD 2-step Turbo Draft = 2 NFE single-pass for rapid drafting only, not for final footage; (27) PTD 4-step Ref2VA Single-Pass = per-hop Ref2VA acceleration LoRA, requires a Ref2VA base model; (28) PIKA H3 Flex 6+2 SelfLift Dual-Pass (v14.310, Bilibili BV1Dy4u67EJo / Pika-Labs Pika-H3-Flex adapters, 6-step distilled, strength 1.0, no second accel LoRA stacked) = 6-step single pass with lcm + ManualSigmas fixed knots 1000/750/500/250/100/40 (official distilled schedule, NOT simple linspace), shift 12/3, cfg 1.0; refine SKIPPED because per-step SelfLift on a 587k-token 10s clip costs 287s/step = 6 NFE direct to 960x544 latent, H3 VAE decodes natively to 1920x1088; keep the hybrid b25-49 base (chained hops need the FL2VA last-frame handoff - a pure ref2va base makes hop-2+ render the reference sheet); Ref2VA @image refs lock the face; pair with SegAttention / Sol-Attn / Sol VAE for the full speed stack; (29) TaoMate HD 3-Step Progressive Lift Dual-Pass (v14.303, Bilibili BV1Ui4G6nEXs, slmonker/TaoMate-HD-preview-comfy 3-step distilled progressive-lift LoRA, strength 1.0, no second accel LoRA) = 2-step low-res first pass on a 0.625x canvas (1200x680 for 1080p) + bislerp coupled lift (latent x1.6, no upscaler model) + 1-step hi-res refine = 3 NFE direct to 1920x1088 1080p; cfg 1.0 distilled contract, euler+simple, shift 12/3; (30) TaoMate HD 8+4 Progressive Lift Dual-Pass (v14.323) = the same TaoMate HD recipe as (29) with 8 first-pass steps + 4 refine steps (denoise 0.45, latent x2.0, 3D latent upscaler, tiled 16x128) = 12 NFE; same LoRA contract (strength 1.0, never stack a second accel LoRA); (31) Singularity V2 + Pika H3 8-step High-Motion (v14.322, Bilibili BV1y8446DExi) = Singularity v2 base + 8-step turbo LoRA (pika_h3_flex_turbo_8step_hd_ref2va, official contract: 8 steps/CFG 1.0/euler-simple/shift 12/3, Flex style 0.6 baked; or LightX2V 8-step 768p) + 8-step first pass + SelfLift progressive 3-step refine (denoise 0.40, latent x2.0, 3D upscaler, tiled 4x128) = 11 NFE; two-stage LoRA discipline: stage-1 carries one high-motion LoRA (Motion_Repair_V2 / H3_Fight_Flow_V1 / H3_Combat_V2, pick ONE, never stack all), stage-2 keeps it at 0.3-0.4; audio stays locked in refine (8 first-pass steps clear the ~6-step H3 audio floor); pair with one_shot_mode=on + motion context for 27s/30s chained long takes, optional +6-step audio LoRA off by default. (32) Video Recast (H3 V2V character swap, v14.335) = video character replacement: the asset-library video @vidN becomes the V2V source (picture AND soundtrack) while @imgN reference pictures define the new identity; the backend auto-splits the source into <=15s segments (the MiniMax H3 Recast per-shot contract: a 45s video becomes 3 clips), encodes each segment into the H3 AV latent (video = source frames, audio = source soundtrack locked with noise_mask 0), and runs an 8-step euler/simple first pass at denoise 0.65 so the original camera/motion/composition survive and only the person is swapped; refine skipped, motion context chaining disabled between recast clips; mount minimax_h3_*character_swap_v1.5.safetensors in the LoRA stack at 0.6-0.8 for the strongest identity transfer. (34) Video Remix (no-LoRA character swap + motion transfer, v14.341, Bilibili BV1HBWJ6HEkg) = character replacement + motion transfer: the asset-library @vidN source video supplies the action, camera and soundtrack while @imgN reference pictures supply the identity; NO swap LoRA (community test: it pulls the face toward a western look and breaks colour match), only an acceleration LoRA may stay mounted. The backend splits the source into 226-frame (5+17k, ~9.42s) segments with a locked 22-frame overlap (segment k starts at 204*k/24 s, so its head IS the previous segment tail -> continuous action and light), runs a 4-step high-noise first pass plus a 5-step low-noise refine pass on a 1.5x latent (9 NFE total, euler/simple, shift 12/3, denoise 0.62); the whole frame stays redrawable so the prompt decides character replacement (background written from the source shot) versus motion transfer (one brand-new scene only), and the source soundtrack is locked into the audio rows (BSAI_H3_REMIX_LOCK_AUDIO=0 lets the model regenerate audio). (35) ACC 8-step SelfLift Dual-Pass (8+4, v14.387) = the BSAI H3 acceleration adapters under models/loras/H3/H3加速/ACC: MiniMax-H3-Ref2VA-Acc-8Step_comfyui_pdd-T8 (reference-image to AV) and MiniMax-H3-FL2VA-Acc-8Step_comfy (first/last-frame and text); LoRA strength 1.0, euler+simple, shift 12/3, CFG 1.0, and never stack a second acceleration LoRA (both adapters are already 8-step distilled and would fight over the same low-rank subspace); 8 first-pass steps + 4 refine steps, where the refine is pure super-resolution since v14.384 (the 4 steps only really run when BSAI_H3_REFINE_REDRAW=1); the Ref2VA adapter needs a Ref2VA or hybrid b25-49 base model (chained one-shot hops rely on the FL2VA last-frame handoff), so use the FL2VA adapter on a pure FL2VA base. (40) BSAI 6+2 High/Low-Noise Split Sampling (v14.401, parameters taken verbatim from the reference workflow 卡点舞蹈MV工作流_纯音乐版.json) = ONE 8-step beta schedule (denoise 1) split by SplitSigmas at step 6: the first pass runs the 6-step high-noise half and stops at the split sigma, the 3D latent upscaler (minimax_h3_latent_upscaler_3d_fp16, align 32) enlarges the latent (upscaling does not count as a step), then the second pass runs the 2-step low-noise tail from the split sigma; total 8 NFE, euler on both passes with BasicGuider CFG 1.0 and shift 12/3; both halves come from the SAME 8-step curve, so this is a true continuation rather than the usual 'full first pass + re-noised refine', and the 0.45-0.55 denoise clamp plus the structure-similarity gate do not apply to this tier (its first pass legitimately stops at a half-noisy sigma). Mount a DMAD v4 step600-class acceleration LoRA (~0.8) on a hybrid b25-49 base like the reference workflow.",
@@ -13193,6 +13299,8 @@ class BSAIH3FilmFactory:
         # 上一轮跑了该档之后, 别的档位不许继承"二采起点不受 0.55 夹取"的手感。
         global _FF_SPLIT_SIGMA_MODE
         _FF_SPLIT_SIGMA_MODE = False
+        # v14.402: Rhythm Music 卡点注入标志, 每轮复位(仅该档置 True)。
+        _rhythm_cue_on = False
         # v1.21: keys are pure English now, direct kwargs.get()
         run_mode = kwargs.get("run_mode")
         width = kwargs.get("width")
@@ -14269,6 +14377,93 @@ class BSAIH3FilmFactory:
                       f"3D latent 放大 x{float(refine_upscale_factor):.1f} "
                       f"(align {int(refine_align_to)}px, upscaler={refine_upscaler_model}); "
                       "模型侧照参考工作流挂 DMAD v4 step600 类加速 LoRA(0.8) + hybrid b25-49")
+            elif _rp_mode == "音乐卡点节奏":
+                # v14.402 (2026-11-15): 「Rhythm Music 音乐卡点节奏」—— 移植自
+                # 《卡点舞蹈MV工作流 v1.45.2.json》。采样段与第40档 BSAI6+2 同源:
+                #   一采 6 步高噪段 + 二采 2 步低噪尾段, 同一条 8 步 beta 曲线
+                #   SplitSigmas step=6 切开; 两个采样器都是 euler + BasicGuider CFG1.0;
+                #   shift 12/3; denoise 1.0 全生成。
+                # 二采走源工作流截图2 的「极速二采」链路: 分离 AV 潜空间 ->
+                #   MinimaxH3LatentUpscaler3D(权重 minimax_h3_latent_upscaler_3d_fp32.pth,
+                #   target dimensions, align 32, 时序分块, force unload, cuda/fp16) ->
+                #   合并 AV -> 低噪 2 步续采。源工作流其余四条二采链路(标准4步 /
+                #   SelfLift-Avatar / BSAI极速4步 / 分块2采)一律不采用。
+                # 卡点节奏: 全曲 librosa 节拍分析一次, 每段按起止秒数生成卡点指令
+                #   前置到该段提示词(参数照源 #513: Bai Lin / 4 拍小节 / 强拍 /
+                #   grid 14.0 / cycle 6.0 / sway 2.5 / roll 2.0 / offset 0 / 呼吸运镜)。
+                steps, refine_steps = 6, 2
+                tile_count, refine_denoise = 16, 0.45
+                refine_enable = True
+                refine_upscale_factor = 2.0
+                refine_align_to = 32
+                tiled_refine = True
+                tile_overlap = 128
+                _rp_no_temp_chunk = True
+                shift_video, shift_audio = 12.0, 3.0
+                denoise = 1.0
+                scheduler = "bsai6plus2_high"
+                if str(sampler_name) != "euler":
+                    sampler_name = "euler"
+                    print("[H3 Extender] v14.402 Rhythm Music(渲染管道): 一采强制 euler "
+                          "(beta 切分契约, 与参考工作流 KSamplerSelect 一致)")
+                refine_sampler = "euler"
+                if refine_sigmas is None:
+                    try:
+                        _rh_hi, _rh_lo = _bsai_6plus2_split(model, tag="Rhythm Music 二采注入")
+                        refine_sigmas = _rh_lo
+                        refine_denoise = float(_rh_lo[0])
+                    except Exception as _srh_err:
+                        print(f"[H3 Extender] v14.402 Rhythm Music: 切分曲线计算失败"
+                              f"({type(_srh_err).__name__}: {_srh_err}), 回退内部 beta 链路")
+                _FF_SPLIT_SIGMA_MODE = True
+                # 二采 3D 放大: 照源工作流 #606 优先 fp32.pth 权重; 缺失再退 bf16/fp32 / fp16 / 其他 3D。
+                _rh_pick = ""
+                try:
+                    for _nm in _ff_get_upscaler_models():
+                        if "latent_upscaler_3d_fp32" in str(_nm).lower():
+                            _rh_pick = _nm
+                            break
+                    if not _rh_pick:
+                        for _nm in _ff_get_upscaler_models():
+                            _nml = str(_nm).lower()
+                            if "latent_upscaler_3d" in _nml and ("bf16" in _nml or "fp32" in _nml):
+                                _rh_pick = _nm
+                                break
+                    if not _rh_pick:
+                        for _nm in _ff_get_upscaler_models():
+                            _nml = str(_nm).lower()
+                            if "latent_upscaler_3d" in _nml and "fp16" in _nml:
+                                _rh_pick = _nm
+                                break
+                    if not _rh_pick:
+                        for _nm in _ff_get_upscaler_models():
+                            if "latent_upscaler_3d" in str(_nm).lower():
+                                _rh_pick = _nm
+                                break
+                except Exception:
+                    _rh_pick = ""
+                if _rh_pick:
+                    refine_upscaler_model = _rh_pick
+                else:
+                    refine_upscaler_model = "(bilinear interpolation, no model)"
+                    print("[H3 Extender] ⚠️ v14.402 Rhythm Music: 未探测到 Minimax H3 3D latent "
+                          "upscaler 权重(参考工作流用 minimax_h3_latent_upscaler_3d_fp32.pth), "
+                          "二采放大走 bilinear 插值(画质略降)")
+                # 开启每段卡点指令注入(分析/生成在渲染循环前完成)。
+                _rhythm_cue_on = True
+                _rh_sig0 = 0.0
+                try:
+                    if refine_sigmas is not None:
+                        _rh_sig0 = float(refine_sigmas[0])
+                except Exception:
+                    _rh_sig0 = 0.0
+                print("[H3 Extender] 🎵 v14.402 Rhythm Music 音乐卡点节奏 (渲染管道): "
+                      f"beta 8 步在 step=6 切开 = 高噪 {steps} 步 + 低噪 {refine_steps} 步 "
+                      f"(总 {steps + refine_steps} NFE, 放大不计步); "
+                      f"euler + BasicGuider CFG 1.0, shift 12/3; "
+                      f"二采起点 σ={_rh_sig0:.4f}(切点直送), 3D latent 放大 x{float(refine_upscale_factor):.1f} "
+                      f"(align {int(refine_align_to)}px, upscaler={refine_upscaler_model}); "
+                      "librosa 节拍卡点提示词注入已启用(全曲分析一次)")
             elif _rp_mode == "PIKA H3 Flex 6+2 双采 (Ref2VA 锁脸)":
                 # v14.310 (2026-11-04): Pika H3 Flex 配方 (B站教程 BV1Dy4u67EJo,
                 # 官方模板 video_pika_h3_flex_ref2va / docs.comfy.org Pika H3 Flex)。
@@ -16874,6 +17069,33 @@ class BSAIH3FilmFactory:
                 if _va_ov:
                     _va_src = str(_va_ov)
             _va_auto_states.append(_extract_visual_state(_va_src))
+        # v14.402 Rhythm Music: 全曲节拍分析一次, 按各段起止秒数预生成卡点指令。
+        _rhythm_cues = []
+        if _rhythm_cue_on:
+            try:
+                if lip_audio is not None:
+                    _rtempo, _rbeats = _rhythm_analyze_audio(lip_audio)
+                    _rcursor = 0.0
+                    for _r_cfg in clips:
+                        try:
+                            _rdur = max(0.25, float(_r_cfg.get("duration", _RHYTHM_DEFAULTS["grid_duration"])
+                                                 or _RHYTHM_DEFAULTS["grid_duration"]))
+                        except Exception:
+                            _rdur = float(_RHYTHM_DEFAULTS["grid_duration"])
+                        _rhythm_cues.append(_rhythm_build_cue(_rtempo, _rbeats, _rcursor, _rdur, _RHYTHM_DEFAULTS))
+                        _rcursor += _rdur
+                    print(f"[H3 Extender] v14.402 Rhythm Music: 全曲节拍分析完成 "
+                          f"tempo={_rtempo:.2f} BPM, {len(_rbeats)} 拍, "
+                          f"已为 {len(_rhythm_cues)} 段生成卡点指令")
+                else:
+                    _rhythm_cue_on = False
+                    print("[H3 Extender] ⚠️ v14.402 Rhythm Music: lip_audio 未接入, "
+                          "跳过卡点指令注入(采样配方不变)")
+            except Exception as _rcue_err:
+                _rhythm_cue_on = False
+                _rhythm_cues = []
+                print(f"[H3 Extender] ⚠️ v14.402 Rhythm Music: 节拍分析失败"
+                      f"({type(_rcue_err).__name__}: {_rcue_err}), 跳过卡点指令注入")
         for i, cfg in enumerate(clips[:loop_end]):
             # v2.68 fix: 渲染本 CLIP 之前先消费已完成的 async encode（预览实时推送）。
             _flush_pending_enc(paused_break)
@@ -17567,6 +17789,14 @@ class BSAIH3FilmFactory:
                     (_viggle_prompt if _viggle_this
                      else (_remix_prompt if _remix_this else _recast_prompt))
                     (effective_prompt))
+
+            # v14.402 Rhythm Music: 本段卡点指令前置到提示词开头(幂等: 已含守卫则不重复)。
+            if _rhythm_cue_on and i < len(_rhythm_cues) and _rhythm_cues[i]:
+                _rh_cue = str(_rhythm_cues[i])
+                if _RHYTHM_CUE_GUARD not in str(effective_prompt):
+                    effective_prompt = _rh_cue + "\n" + str(effective_prompt)
+                    print(f"[H3 Extender] v14.402 Rhythm Music clip[{i + 1}]: 卡点指令已注入 "
+                          f"(段内强拍/呼吸运镜, guard={_RHYTHM_CUE_GUARD})")
 
             positive, latent = _make_ref2va_conditioning(
                 clip,

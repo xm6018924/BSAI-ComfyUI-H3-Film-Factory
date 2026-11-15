@@ -1,6 +1,6 @@
 # BSAI-H3-Film-Factory 渲染管道 / 模式 / LoRA 搭配速查表
 
-> 基于 `extender.py` v14.339 源码整理（2026-11-08；v14.322 起整理，新增第 33 档「视频替换」，v14.337 起该档改为人物区域掩码重绘；v14.339 新增第 34 档 HyperFlow H3 Flash 14B）。
+> 基于 `extender.py` v14.339 源码整理（2026-11-08；v14.322 起整理，新增第 33 档「视频替换」，v14.337 起该档改为人物区域掩码重绘；v14.339 新增第 34 档 HyperFlow H3 Flash 14B；v14.402 新增第 41 档 Rhythm Music 音乐卡点节奏）。
 > LoRA 一律挂在 H3 Loader 的标准 LoRA 槽，强度按各档推荐。
 
 ---
@@ -37,7 +37,7 @@
 
 ---
 
-## 三、渲染管道（render_pipeline）全 40 档
+## 三、渲染管道（render_pipeline）全 41 档
 
 ### A. 默认/通用
 
@@ -132,6 +132,7 @@
 | # | 管道 | 一采+二采 | 关键参数 | 配套 | 适用 |
 |---|---|---|---|---|---|
 | 40 | **BSAI6+2高低噪采样**<br>`BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)` | 6+2=8（放大不计步） | **同一条** 8 步 beta 曲线（denoise 1）在 step=6 处 SplitSigmas 切开；两段都 euler + BasicGuider(CFG 1.0)；shift 12/3；二采起点 σ = 切点直送（不做 0.45~0.55 夹取）；二采前 3D latent x2.0 / align 32 / tiled 16x128 | 模型侧照参考工作流：hybrid b25-49 int8 基模 + `DMAD full_dareties_v4_step600` 类加速 LoRA(0.8) + Sol-Attn；权重名以本机目录为准 | 一采只跑到切点、二采续算低噪段的高/低噪分档路线 |
+| 41 | **音乐卡点节奏**<br>`Rhythm Music` | 6+2=8（放大不计步） | 采样段同档 40：同一条 8 步 beta 在 step=6 切开，两段 euler + BasicGuider(CFG 1.0)，shift 12/3，二采切点 σ 直送；二采走源工作流极速链路：分离 AV 潜空间 → 3D latent 放大（`minimax_h3_latent_upscaler_3d_fp32.pth`，target dimensions，align 32，时序分块 / force unload / cuda fp16）→ 合并 AV → 低噪 2 步续采；**另带 librosa 全曲节拍分析一次 + 每段卡点指令前置注入**（强拍定点造型 / 跨段流动 / 手持呼吸运镜） | 模型侧同档 40：hybrid b25-49 int8 + DMAD v4 step600 LoRA(0.8) + Sol-Attn；卡点参数照源 #513：Bai Lin / 4 拍小节 / 仅强拍 / grid 14.0 / cycle 6.0 / sway 2.5 / roll 2.0 / offset 0 / 呼吸运镜 | 卡点舞蹈 MV：按强拍定点造型 + 手持呼吸运镜；源工作流其余四条二采链路（标准 4 步 / SelfLift-Avatar / BSAI 极速 4 步 / 分块 2 采）不采用 |
 
 **参数出处**：用户参考工作流 `卡点舞蹈MV工作流_纯音乐版.json` 的采样段，逐节点核对过（节点号见 `extender.py` 该分支注释）：
 
@@ -211,7 +212,7 @@
 | 8 | 旧值兼容表-白名单 | `extender.js` `H3LegacyCompat.OPTIONS.render_pipeline` | 值不在白名单会被 `norm()` 静默回落默认档 |
 | 9 | 旧值兼容表-别名 | `extender.js` `H3LegacyCompat.ALIAS_CANON.render_pipeline` | 中文旧标签 → 英文规范值 |
 | 10 | DEFAULTS | `extender.js` `H3LegacyCompat.DEFAULTS` 第 65 位 | 仅在改默认档时才动 |
-| 11 | 跑自检 | `node --check web/extender.js`、`py_compile extender.py`、三表逐字比对、重启后 `/object_info/BSAIH3FilmFactory` 计 40 项（档数随版本递增，以 combo 长度为准） | 全通过才算改完 |
+| 11 | 跑自检 | `node --check web/extender.js`、`py_compile extender.py`、三表逐字比对、重启后 `/object_info/BSAIH3FilmFactory` 计 41 项（档数随版本递增，以 combo 长度为准） | 全通过才算改完 |
 
 两条硬约束：任何新 widget 只能追加在 `optional` 最末尾（现役最后一项是 `refine_sigmas`），不得挤占既有 widget index；只改后端不改前端的效果是"UI 里选不到新档 + 含新档的旧工作流加载被打回默认档"。
 

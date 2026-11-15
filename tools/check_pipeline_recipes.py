@@ -151,6 +151,36 @@ def main():
           "if _FF_SPLIT_SIGMA_MODE:\n                _use_temporal = False" in src
           and "_tc_override390 = False" in src)
 
+    # ── Rhythm Music 音乐卡点节奏 (v14.402) ──────────────────────────────
+    # 移植自《卡点舞蹈MV工作流 v1.45.2.json》: 采样段复用 BSAI6+2 的 6+2 高低噪
+    # 切分(一采 6 步高噪 / 二采 2 步低噪尾段), 二采走截图2 的极速链路(3D 放大
+    # fp32 权重); 另带 librosa 节拍分析 + 每段卡点指令前置注入。
+    rh_en = "Rhythm Music"
+    rh_zh = "音乐卡点节奏"
+    check("Rhythm Music: 英文标签进了渲染管道 combo 列表", f'"{rh_en}"' in src, rh_en)
+    check("Rhythm Music: EN2ZH 映射存在且指向中文内部值", f'"{rh_en}": "{rh_zh}"' in src, rh_en)
+    check("Rhythm Music: 中文内部值有对应的 elif 分支", f'_rp_mode == "{rh_zh}"' in src, rh_zh)
+
+    rh = section(src, rf'e(?:l)?if _rp_mode == "{re.escape(rh_zh)}"', span=6000)
+    check("Rhythm Music: 一采 6 步 + 二采 2 步", "steps, refine_steps = 6, 2" in rh)
+    check("Rhythm Music: 一采走 8 步 beta 曲线高噪段(切点在 6)",
+          'scheduler = "bsai6plus2_high"' in rh)
+    check("Rhythm Music: 二采 sigma 由同一条切分曲线切出并直送",
+          "_bsai_6plus2_split(" in rh and "refine_sigmas = _rh_lo" in rh)
+    check("Rhythm Music: denoise 1.0 全生成 + 二采 x2.0 align 32",
+          "denoise = 1.0" in rh and "refine_upscale_factor = 2.0" in rh
+          and "refine_align_to = 32" in rh)
+    check("Rhythm Music: 两段采样器都是 euler",
+          'refine_sampler = "euler"' in rh and "sampler_name = \"euler\"" in rh)
+    check("Rhythm Music: shift 双轨迹 12/3", "shift_video, shift_audio = 12.0, 3.0" in rh)
+    check("Rhythm Music: 打开切分采样标志(免 denoise 夹取/免结构闸门)",
+          "_FF_SPLIT_SIGMA_MODE = True" in rh)
+    check("Rhythm Music: 二采放大优先 fp32 权重(源 #606 minimax_h3_latent_upscaler_3d_fp32.pth)",
+          "latent_upscaler_3d_fp32" in rh)
+    check("Rhythm Music: 开启卡点注入标志", "_rhythm_cue_on = True" in rh)
+    check("Rhythm Music: 后端卡点分析/构造辅助函数存在",
+          "def _rhythm_analyze_audio(" in src and "def _rhythm_build_cue(" in src)
+
     # ── 共同前提 ────────────────────────────────────────────────────────
     # v14.389: 默认从「二采一律不重绘」翻成「二采一律重绘 + 内容锁」。
     check("二采重绘默认开(env 需显式 NO_REDRAW=1 才回到纯超分)",
@@ -216,12 +246,12 @@ def main():
             check("前端 cycleAliases / ALIAS_CANON 都带 ACC 中文别名",
                   js.count(f'"ACC 8步 SelfLift 双采 (8+4)": "ACC 8-step SelfLift Dual-Pass (8+4)"') == 2,
                   str(js.count('"ACC 8步 SelfLift 双采 (8+4)"')))
-            # v14.401: 新档追加在两张表的最末尾(不动既有档位序号)
-            check("前端 cycle 末位是 BSAI6+2 且与后端同名",
-                  bool(cyc) and cyc[-1] == "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)",
+            # v14.402: 最新档 Rhythm Music 追加在两张表的最末尾(不动既有档位序号)
+            check("前端 cycle 末位是 Rhythm Music 且与后端同名",
+                  bool(cyc) and cyc[-1] == rh_en,
                   cyc[-1] if cyc else "")
             check("前端 cycleLabels 末位同序号同步",
-                  bool(labs) and labs[-1] == "BSAI 6+2 High/Low-Noise Split (6+2, beta SplitSigmas)",
+                  bool(labs) and labs[-1] == rh_en,
                   labs[-1] if labs else "")
             check("前端 cycleAliases / ALIAS_CANON 都带 BSAI6+2 中文别名",
                   js.count('"BSAI6+2高低噪采样": "BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)"') == 2,
@@ -229,10 +259,16 @@ def main():
             check("前端 OPTIONS 白名单含 BSAI6+2(否则含新档的工作流会被静默回落)",
                   js.count('"BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)"') == 4,
                   str(js.count('"BSAI 6+2 High/Low-Noise Split Sampling (beta 8-step split at 6, 3D latent upscale)"')))
+            check("前端 cycleAliases / ALIAS_CANON 都带 Rhythm Music 中文别名",
+                  js.count(f'"{rh_zh}": "{rh_en}"') == 2,
+                  str(js.count(rh_zh)))
+            check("前端 OPTIONS 白名单含 Rhythm Music(否则含新档的工作流会被静默回落)",
+                  js.count(f'"{rh_en}"') == 5,
+                  str(js.count(f'"{rh_en}"')))
 
     print()
     if ok:
-        print("全部通过 (v14.386 DMAD 8+2 / v14.387 ACC 8+4 / v14.388 PDMD 训练边界 / v14.389 二采重绘+内容锁 / v14.401 BSAI6+2 高低噪切分 渲染管道自检)")
+        print("全部通过 (v14.386 DMAD 8+2 / v14.387 ACC 8+4 / v14.388 PDMD 训练边界 / v14.389 二采重绘+内容锁 / v14.401 BSAI6+2 高低噪切分 / v14.402 Rhythm Music 卡点节奏 渲染管道自检)")
         return 0
     print(f"失败 {len(fails)} 项: {fails}")
     return 1
