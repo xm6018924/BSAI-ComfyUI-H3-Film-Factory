@@ -5959,16 +5959,6 @@ def _ff_u4k_collect_opts(kwargs):
         "face_restore": str(kwargs.get("u4k_face_restore", "Off")),
         "tile_pad": int(kwargs.get("u4k_tile_pad", 32) or 0),
         "batch_frames": int(kwargs.get("upscale_batch", 4) or 4),
-        # v14.404: 与 BSAI_H3_Upscale4K 的 9 个模式型下拉逐字对齐
-        "detail_mode": str(kwargs.get("u4k_detail_mode", "smart")),
-        "face_det_backend": str(kwargs.get("u4k_face_det_backend", "Auto")),
-        "dlss_style": str(kwargs.get("u4k_dlss_style", "Cinematic")),
-        "rtx_vfx_op": str(kwargs.get("u4k_rtx_vfx_op", "Denoise")),
-        "rtx_vfx_level": str(kwargs.get("u4k_rtx_vfx_level", "ULTRA")),
-        "sv2_sampler": str(kwargs.get("u4k_sv2_sampler", "euler")),
-        "sv2_scheduler": str(kwargs.get("u4k_sv2_scheduler", "normal")),
-        "sv2_color": str(kwargs.get("u4k_sv2_color", "lab")),
-        "relay_weights": str(kwargs.get("u4k_relay_weights", "Auto (by scale)")),
     }
     raw = kwargs.get("u4k_engine_params", "") or ""
     if isinstance(raw, str) and raw.strip():
@@ -11973,6 +11963,22 @@ def _bsai_list_upscale_models():
         return ["realesr-general-x4v3.pth"]
 
 
+
+def _bsai_u4k_model_name_choices():
+    """v14.405: upscale_model 下拉 = BSAI_H3_Upscale4K.model_name 的完整列表。
+
+    4K 节点的下拉 = ENGINE_OPTIONS(11) + TOPAZ_OPTIONS(3) + list_available_models()，
+    这里用 _FF_U4K_ENGINE_LABELS 的 14 个显示名（与 ENGINE_OPTIONS/TOPAZ_OPTIONS
+    逐字同序）拼上本地扫描到的模型文件，得到完全一致的一份列表。
+    选中引擎名 -> 运行时切换到该引擎；选中模型文件 -> 走 upscale_engine（realesr 时用该模型）。
+    """
+    try:
+        return list(_FF_U4K_ENGINE_LABELS.values()) + _bsai_list_upscale_models()
+    except Exception as _e:
+        print(f"[H3 Extender] v14.405 upscale_model 列表构造失败({_e})，回退模型列表", flush=True)
+        return _bsai_list_upscale_models()
+
+
 # ---------------------------------------------------------------------------
 # v14.221 保脸-小脸修复：复用本机 BSAI-ComfyUI-FaceRefine 引擎。
 # 视频(BV133nh6fEMm)方案 = H3 FaceRefine 局部人脸重绘：检测裁剪人脸 -> H3 潜空间
@@ -12607,7 +12613,7 @@ class BSAIH3FilmFactory:
                 {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5, "tooltip": "Pixel upscale factor (relative to the refine output resolution). Default 2.0x."},
             ),
             "upscale_model": (
-                _bsai_list_upscale_models(),
+                _bsai_u4k_model_name_choices(),
                 {"default": "realesr-general-x4v3.pth", "tooltip": "REALESR upscale model (models/upscale_models/). Only used when upscale_engine=realesr."},
             ),
             "upscale_tile": (
@@ -12897,45 +12903,6 @@ class BSAIH3FilmFactory:
             "STRING",
             {"default": "", "multiline": True,
              "tooltip": 'Engine long-tail parameters (JSON, empty = defaults). Example: {"dlss_style":"Cinematic","dlss_detail":1.0,"sv2_steps":12,"rtx_vfx_op":"Denoise","topaz_strength":1.0}. Whitelist-validated; unknown keys print the allowed key list to the console.'},
-        )
-        # ===== v14.404: 与 BSAI_H3_Upscale4K 的 9 个模式型下拉逐字对齐 =====
-        # 选项字面取自 bsai_h3_upscale_4k.py 的 INPUT_TYPES（BSAI_H3_Upscale4K.required），
-        # 全部追加在 optional 最末尾（u4k_engine_params 之后），不挤占任何既有 index。
-        optional["u4k_detail_mode"] = (
-            ["classic", "smart"],
-            {"default": "smart", "tooltip": "Detail rebuild mode (4K plugin): classic = pure unsharp mask; smart = unsharp + light local-contrast texture rebuild (reads closer to Topaz / FlashVSR). Default smart."},
-        )
-        optional["u4k_face_det_backend"] = (
-            ["Auto", "NPU Offload", "GPU1 (YOLOv8)"],
-            {"default": "Auto", "tooltip": "Face-detection backend for u4k_face_restore (4K plugin): Auto = pick by hardware; NPU Offload = run the detector on the NPU; GPU1 (YOLOv8) = force GPU1."},
-        )
-        optional["u4k_dlss_style"] = (
-            ["Cinematic", "Default", "Natural"],
-            {"default": "Cinematic", "tooltip": "DLSS 5 NR style (4K plugin): Cinematic = cleanest (default); Default = NVIDIA baseline; Natural = less neural rendering."},
-        )
-        optional["u4k_rtx_vfx_op"] = (
-            ["Denoise", "Deblur"],
-            {"default": "Denoise", "tooltip": "RTX VFX operation (4K plugin; only for the RTX Denoise/Deblur engine): Denoise or Deblur at the same resolution."},
-        )
-        optional["u4k_rtx_vfx_level"] = (
-            ["LOW", "MEDIUM", "HIGH", "ULTRA"],
-            {"default": "ULTRA", "tooltip": "RTX VFX strength level (4K plugin): LOW / MEDIUM / HIGH / ULTRA; default ULTRA matches the official RTXVideoSuperResolution node."},
-        )
-        optional["u4k_sv2_sampler"] = (
-            ["euler", "dpmpp_2m", "dpmpp_2m_sde", "ddim", "uni_pc"],
-            {"default": "euler", "tooltip": "SeedVR2 7B INT8 sampler (4K plugin, native ComfyUI chain). Default euler."},
-        )
-        optional["u4k_sv2_scheduler"] = (
-            ["normal", "karras", "simple", "sgm_uniform"],
-            {"default": "normal", "tooltip": "SeedVR2 7B INT8 scheduler (4K plugin). Default normal."},
-        )
-        optional["u4k_sv2_color"] = (
-            ["lab", "wavelet", "adain", "none"],
-            {"default": "lab", "tooltip": "SeedVR2 7B INT8 colour correction (4K plugin): lab / wavelet / adain / none. Default lab."},
-        )
-        optional["u4k_relay_weights"] = (
-            ["Auto (by scale)", "x2 (LightX2V)", "x4"],
-            {"default": "Auto (by scale)", "tooltip": "RelayVSR weight pair (4K plugin): Auto picks x4 when scale >= 3 else x2; can be locked to x2 (LightX2V) or x4."},
         )
         # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
         # 让旧版工作流(71 项)载入时尾部错位/NaN。改为"档位化"：
@@ -13469,6 +13436,17 @@ class BSAIH3FilmFactory:
         upscale_engine = str(kwargs.get("upscale_engine", "auto"))
         upscale_factor = float(kwargs.get("upscale_factor", 2.0))
         upscale_model = str(kwargs.get("upscale_model", "realesr-general-x4v3.pth"))
+        # v14.405: upscale_model 与 BSAI_H3_Upscale4K.model_name 同一份列表（引擎 + 模型）。
+        # 选到引擎显示名时直接切换引擎，选到模型文件时保持 upscale_engine 不动。
+        _u4k_sel_lbl = str(upscale_model or "").strip()
+        if _u4k_sel_lbl in _FF_U4K_ENGINE_LABELS.values():
+            _u4k_sel_key = {_v: _k for _k, _v in _FF_U4K_ENGINE_LABELS.items()}.get(_u4k_sel_lbl)
+            if _u4k_sel_key:
+                if _u4k_sel_key != upscale_engine:
+                    print(f"[H3 Extender] v14.405 upscale_model 选中引擎「{_u4k_sel_lbl}」"
+                          f" -> 引擎 {upscale_engine} 改为 {_u4k_sel_key}", flush=True)
+                upscale_engine = _u4k_sel_key
+                upscale_model = "realesr-general-x4v3.pth"
         upscale_tile = int(kwargs.get("upscale_tile", 0))
         upscale_batch = int(kwargs.get("upscale_batch", 4))
         upscale_fp16 = bool(kwargs.get("upscale_fp16", True))
