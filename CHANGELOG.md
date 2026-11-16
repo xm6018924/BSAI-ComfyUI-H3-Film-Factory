@@ -4,6 +4,24 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.414 (2026-11-16) — 二采不重绘时关闭高低噪切分，一采归一完整 beta 8 步全曲线，杜绝半噪骨架被超分解码成马赛克 / When second pass is no-redraw, disable high/low split; first pass runs a full beta 8-step curve to σ=0, preventing the half-noise skeleton from being upscaled and decoded as mosaic
+
+**问题**
+
+Rhythm Music v15-4090 在 `BSAI_H3_REFINE_NO_REDRAW=1`（二采只做 3D 潜空间超分、不跑 DiT 续算）口径下，一采走 SelfLift / 6+2 高低噪切分腿：高噪腿止于切点 σ≈0.47（半噪草稿），本应由二采 DiT 续算的低噪收尾腿（σ→0）随二采跳采一起丢失。半噪草稿被 3D 超分 + VAE 解码成逐令牌彩色方块马赛克；既有塌陷健康检测只查近零 std / 灰场，半噪草稿 std 偏高反而被判健康，骨架被当成品解码。
+
+**改动**
+
+1. 在全部管道 / 速度档覆盖之后、权威配方日志之前新增守卫：`_FF_REFINE_NO_REDRAW` 为真且调度器属于四条切分腿（`bsai_selflift_high/low`、`bsai6plus2_high/low`）时，关闭 `_FF_SPLIT_SIGMA_MODE`，调度器归一为 `beta`、`steps=8`、`refine_sigmas=None`。
+2. 不重绘前提下一采自己跑完整 beta 8 步全曲线去噪到 σ=0（对照干净参考 BasicScheduler beta / 8 / denoise=1 / euler），二采仅 3D 超分放大，不喂低噪段 σ 表。守卫仅在 NO_REDRAW 口径下触发，默认重绘配方档行为不变。
+
+**验证**
+
+- `py_compile` / AST 通过；自检基线失败计数未抬高（no_redraw 3、pipeline_recipes 2、timing 2、recast 2、remix 1；sigma_start 18、chunking 15、ref_sheet_crop 11、frontend_guard 全绿）。
+- 8181 实跑 v15-4090：EFFECTIVE-RECIPE 一采 steps=8 scheduler=beta denoise=1.0，二采 v14.384 纯超分跳采；clip0 抽帧（f20 脸部特写 / f160 厚底鞋白袜反光地面）结构清晰、无方块马赛克。
+
+**备注**：本守卫由 `BSAI_H3_REFINE_NO_REDRAW=1` 环境变量门控；其余 8182 / 8183 / 8184 启动器未同步该 env，跨实例同步需另行明确指令。
+
 ### v14.413 (2026-11-16) — 默认双采档拦截静默提升的 global dense；SplitSigmas 半噪骨架禁止当成品解码 / Default dual-pass tier blocks silent promotion to global dense; split-sigma half-noise skeleton must not be decoded as final footage
 
 **问题**

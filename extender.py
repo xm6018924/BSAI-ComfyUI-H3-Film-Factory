@@ -15707,6 +15707,24 @@ class BSAIH3FilmFactory:
             refine_mem_mode = "spatial (tiled, compatible)"
             print("[H3 Extender] v14.413 内存档复位: 默认双采档 widget 为 spatial, "
                   "撤销被静默提升的 global 全上下文 dense, 恢复 spatial 空间分块", flush=True)
+        # v14.414: 二采不重绘(纯超分) 与 高低噪切分腿 互斥。
+        # 根因: SelfLift / 6+2 切分档把一条去噪曲线劈成「一采高噪腿(止于切点 σ≈0.47)
+        # + 二采低噪收尾腿(σ→0)」。二采既然按 BSAI_H3_REFINE_NO_REDRAW 只做 3D 超分、
+        # 不再跑 DiT 续算, 低噪收尾腿就丢了 —— 半噪草稿被超分+VAE 解码成彩色方块马赛克
+        # (本轮 v15-4090 实测; 健康检测因 std 偏高未触发塌陷兜底)。
+        # 不重绘前提下, 一采必须自己跑完整曲线去噪到 σ=0: 这里把残留的切分高噪调度归一
+        # 为完整 beta 8 步全曲线(对照干净参考 BasicScheduler beta 8 步 denoise=1),
+        # 二采仅超分放大, 不喂低噪段 σ 表。
+        if _FF_REFINE_NO_REDRAW and str(scheduler) in (
+                "bsai_selflift_high", "bsai_selflift_low",
+                "bsai6plus2_high", "bsai6plus2_low"):
+            _FF_SPLIT_SIGMA_MODE = False
+            scheduler = "beta"
+            steps = 8
+            refine_sigmas = None
+            print("[H3 Extender] v14.414 二采不重绘: 关闭高低噪切分, 一采归一为完整 beta 8 步 "
+                  "全曲线去噪到 σ=0(二采仅 3D 超分放大, 不跑低噪收尾腿), 避免半噪草稿被超分解码成马赛克",
+                  flush=True)
         # v14.279: 唯一权威配方日志 —— 打印在所有管道/速度档覆盖之后, 保证
         # "日志声明 == 实际实跑", 不再出现渲染管道档声明 12/6 实跑 8/4 的分歧。
         print(f"[H3 Extender] v14.279 EFFECTIVE-RECIPE: pipeline={_rp_mode or '(none)'} "
