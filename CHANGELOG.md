@@ -4,6 +4,24 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.416 (2026-11-16) — 修复逆缩放补步 sigma 被包成 Python float 致 nelement AttributeError、补步被静默跳过 / Fix inverse-noise rescale step: sigma wrapped as Python float caused nelement AttributeError, the compensating step was silently skipped
+
+**问题**
+
+SplitSigmas 分腿续算分支（`_sample_h3` 内 `_FF_SPLIT_SIGMA_MODE` 高噪/低噪腿）在低噪补步前调 `model_sampling.inverse_noise_scaling(...)`，把当前 latent 逆缩放回对应 σ。传入的起点 σ 被包成 Python `float(_r_sigmas[0])`；本机 `model_sampling.reshape_sigma` 首行即 `sigma.nelement()`，该方法只有张量具备，float 抛 `AttributeError: 'float' object has no attribute 'nelement'`。异常被下方 except 兜住后按原样喂入，逆缩放补步实际未执行，低噪腿起点 latent 与 σ 不匹配。
+
+**改动**
+
+- 逆缩放调用改为直接传 sigmas 张量的 0 维标量元素 `_r_sigmas[0]`（对照核心 `comfy/samplers.py:1006` 的 `inverse_noise_scaling(sigmas[-1], samples)`），不再 `float()` 包裹；三条 `_r_sigmas` 来源路径均为 torch 张量。仅打印日志处保留 `float(_r_sigmas[0])`。
+
+**验证**
+
+- `py_compile` 通过；离线复现：张量标量前向成功且输出有限，float 复现原始 `AttributeError`。
+- `check_refine_sigma_start.py` 18/18、`check_refine_redraw_chunking.py` 15/15 全绿，其余自检基线失败计数未抬高。
+- 该分腿重绘分支在 `BSAI_H3_REFINE_NO_REDRAW=1` 纯超分口径下被旁路（v14.414 守卫关闭高低噪切分），8181 实跑日志未命中属预期；修复在重绘档恢复时生效。
+
+**备注**：同批 clean 因子化注意力 upscaler 的分派适配器与权重架构文件位于第三方包 `Comfyui_Minimax_h3_latent_Upscaler`（fork `xm6018924/BSAI-Comfyui_Minimax_h3_latent_Upscaler` 已在 `abe42b1` 跟踪），不在本仓库；8181 实跑日志确认 `Loaded clean latent upscaler: h3_clean_latent_upscaler_film_epoch200.safetensors`，Adapter 14.75M 参数，前向空间 2x、T 保持，未回退 3d fp16。
+
 ### v14.415 (2026-11-16) — 6 个独立插件节点并入电影工厂（本地改动，未推送）/ Absorb 6 standalone node packs into Film Factory (local-only, not pushed)
 
 **背景**

@@ -7876,7 +7876,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         _ms401 = model.get_model_object("model_sampling")
                         _sm401, _sn401 = _ff_extract_members(samples)
                         if hasattr(_ms401, "inverse_noise_scaling"):
-                            _inv401 = [_ms401.inverse_noise_scaling(float(_r_sigmas[0]), _t)
+                            # v14.416: 必须传 sigmas 张量的 0 维标量元素(对照核心
+                            # comfy/samplers.py:1006 的 inverse_noise_scaling(sigmas[-1], samples)),
+                            # 不能包成 Python float —— model_sampling.reshape_sigma 首行
+                            # 调用 sigma.nelement(), float 无该属性会抛 AttributeError,
+                            # 被下方 except 兜住后按原样喂入, 逆缩放补步实际未执行。
+                            _inv401 = [_ms401.inverse_noise_scaling(_r_sigmas[0], _t)
                                        for _t in _sm401]
                         else:
                             _inv401 = _sm401
