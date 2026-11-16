@@ -2861,6 +2861,50 @@ function setWidgetValue(node, name, value) {
     return true;
 }
 
+// v14.410: 数字控件空串归一。
+// 背景：旧工作流按位置还原 widgets_values 时，历史 STRING 位留下的 "" 会错位落到
+// 后加的 FLOAT/INT 控件上（实测 u4k_scale 收到 ""）；核心校验直接 float("") 失败，
+// 整条 prompt 被拒（Output will be ignored）。核心在节点代码之前做类型转换，后端
+// 兜底接不住，必须在前端把空串在序列化之前清掉。
+// 新建节点时先把核心给的默认值快照到 __h3Default；configure 还原后若数字控件变成
+// 空串 / 纯空白 / 非数字，回退到快照默认（再缺则 options.default，最后 0）。
+function snapshotNumberDefaults(node) {
+    try {
+        if (!node || !Array.isArray(node.widgets)) return;
+        for (const w of node.widgets) {
+            if (!w || w.type !== "number") continue;
+            if (w.__h3Default === undefined) w.__h3Default = w.value;
+        }
+    } catch (e) {}
+}
+
+function sanitizeNumberWidgets(node) {
+    try {
+        if (!node || !Array.isArray(node.widgets)) return;
+        for (const w of node.widgets) {
+            if (!w || w.type !== "number") continue;
+            const v = w.value;
+            let bad = (v === null || v === undefined);
+            if (typeof v === "string") {
+                const s = v.trim();
+                if (s === "" || Number.isNaN(Number(s))) {
+                    bad = true;
+                } else {
+                    w.value = Number(s);
+                    bad = false;
+                }
+            }
+            if (!bad) continue;
+            let d = w.__h3Default;
+            if (d === undefined || d === null || d === "") d = (w.options && w.options.default);
+            if (d === undefined || d === null || d === "") d = 0;
+            w.value = d;
+        }
+    } catch (e) {
+        console.warn("[H3] number widget sanitize failed", e);
+    }
+}
+
 function applyProjectPayload(node, runtime, projectPayload) {
     const extender = projectPayload?.extender || {};
     const settings = extender?.settings || {};
@@ -8382,6 +8426,10 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 原型级代理已在外层调用原始 prototype.onConfigure。
         if (oldConfigure && !this.__h3InProxy) oldConfigure.apply(this, arguments);
 
+        // v14.410: 核心已把历史 widgets_values 按位置还原；数字控件若被错位灌入
+        // 空串/非数字，回退快照默认，避免后端 float("") 校验拒绝整条 prompt。
+        sanitizeNumberWidgets(this);
+
         // Force-update the node title to the new display name（重排异常也不影响标题/渲染）
         try { this.title = "BSAI ComfyUI H3 Film Factory v2.131·v14.171"; } catch (e) {}
 
@@ -9081,6 +9129,9 @@ app.registerExtension({
         const oldCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = oldCreated ? oldCreated.apply(this, arguments) : undefined;
+
+            // v14.410: 核心给数字控件的初始默认值先快照，供 onConfigure 空串归一使用。
+            snapshotNumberDefaults(this);
 
             // Force-update the node title to the new display name
             this.title = "BSAI ComfyUI H3 Film Factory v2.131·v14.171";

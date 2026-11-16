@@ -4,6 +4,26 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.410 (2026-11-16) — 修复旧工作流 FLOAT/INT 控件错位空串导致整条 prompt 校验失败 / Fix blank string misaligned into FLOAT/INT widgets rejecting the whole prompt
+
+**问题**
+
+打开早期保存的工作流（节点 250）提交时，后端校验报 `Failed to convert an input value to a FLOAT value: u4k_scale, could not convert string to float: ''`，节点 250 与下游节点 7 被忽略、整条 prompt 不执行。
+
+根因：v14.394 起在节点尾部追加了 u4k 引擎参数控件（`u4k_scale` 等 FLOAT/INT）。旧工作流的 `widgets_values` 按位置还原时，历史 STRING 位留下的空串 `""` 错位落到新 FLOAT 控件上；ComfyUI 核心在节点代码之前直接 `float("")` 转换并拒绝，后端 `or 0.0` 兜底接不住。
+
+**改动**
+
+1. 前端新增 `snapshotNumberDefaults(node)`：节点创建时把核心给数字控件的初始默认值快照到 `__h3Default`。
+2. 前端新增 `sanitizeNumberWidgets(node)`：`onConfigure` 核心还原历史值之后，遍历所有 `number` 控件；空串 / 纯空白 / 非数字一律回退快照默认（缺省 `options.default`，再缺 0），纯数字字符串归一为 `Number(...)`。STRING / combo / toggle 控件不动。
+3. 挂载点：`onNodeCreated` 快照默认；实例级 `onConfigure` 在核心 `oldConfigure` 之后归一。
+
+**验证**
+
+- `tools/check_frontend_guard.py`：3 个 JS 语法 OK，前后端枚举同步 OK。
+- 离线遍历第077期 22 份含节点 250 的工作流：唯一错位的数字槽位即 `u4k_scale`（`""` → 默认 0.0，跟随 `upscale_factor`）；其余 FLOAT/INT 槽位无空串 / 非数字。
+- 节点 7（Final Decode）的两个空槽是未连接的 VAE 输入与 combo 位，非数值类型，不受影响。
+
 ### v14.409 (2026-11-15) — 分镜脚本格式兼容：`===== prompt_NN =====` 自动分 clip / Storyboard compat: auto split on `===== prompt_NN =====`
 
 **问题**
