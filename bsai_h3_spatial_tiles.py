@@ -412,6 +412,83 @@ def _invoke_model(model_k, x, sigma, denoise_mask, call_kw: dict):
     return type(model_k).__call__(model_k, x, sigma, denoise_mask, **kwargs)
 
 
+def _resolve_blocks(obj, depth=6):
+    """沿 diffusion_model / model / inner_model 链找到带 blocks[*].attn 的扩散模型。"""
+    seen = set()
+
+    def walk(o, d):
+        if o is None or d < 0 or id(o) in seen:
+            return None
+        seen.add(id(o))
+        blocks = getattr(o, "blocks", None)
+        try:
+            # ModuleList 不是 list/tuple, 统一按「可索引且非空」判断
+            if blocks is not None and len(blocks) > 0 and hasattr(blocks[0], "attn"):
+                return o
+        except Exception:
+            pass
+        for attr in ("diffusion_model", "model", "inner_model"):
+            try:
+                child = getattr(o, attr, None)
+            except Exception:
+                child = None
+            if child is not None and child is not o:
+                hit = walk(child, d - 1)
+                if hit is not None:
+                    return hit
+        return None
+
+    return walk(obj, depth)
+
+
+def _reside_attn_norms(model_k, device):
+    """v14.417: 把每个 block 的 attn.q_norm / k_norm 参数常驻计算设备。
+
+    KJNodes 的 minimax_attn_lowmem_forward 每次 attention 都要
+    mm.cast_to(self.q_norm.weight, device=device)。权重留在 CPU 时这一步是
+    **阻塞式** H2D（comfy/model_management.py:1598 的 r.copy_(weight,
+    non_blocking=False)），等于每个 block 都把 GPU 流水线整体排空一次：
+    本机 py-spy 20Hz × 30s 采样 599/600 次落在这一句上。
+    norm 权重只有 head_dim 量级（每块几十 KB），搬上卡常驻后 cast_to 命中
+    「device 已相同」的早返回分支，阻塞拷贝与流水线排空一起消失。
+    数学完全不变（同一份权重、同一 dtype）。
+    """
+    if device is None:
+        return 0
+    dm = _resolve_blocks(model_k)
+    if dm is None:
+        return 0
+    moved = 0
+    for blk in getattr(dm, "blocks", []) or []:
+        attn = getattr(blk, "attn", None)
+        if attn is None:
+            continue
+        for norm_name in ("q_norm", "k_norm"):
+            norm = getattr(attn, norm_name, None)
+            if norm is None:
+                continue
+            for p_name in ("weight", "bias"):
+                p = getattr(norm, p_name, None)
+                if not isinstance(p, torch.Tensor):
+                    continue
+                # device 无 index 时(如 torch.device("cuda"))与 cuda:0 不算相等,
+                # 这里按 type(+index) 比较, 避免每次 forward 重复搬同一份权重
+                if p.device == device or (device.index is None and p.device.type == device.type):
+                    continue
+                try:
+                    with torch.no_grad():
+                        new = p.detach().to(device)
+                        if isinstance(p, torch.nn.Parameter):
+                            setattr(norm, p_name,
+                                    torch.nn.Parameter(new, requires_grad=False))
+                        else:
+                            setattr(norm, p_name, new)
+                    moved += 1
+                except Exception:
+                    continue
+    return moved
+
+
 def _tiled_model_call(
     model_k,
     x,
@@ -475,6 +552,17 @@ def _tiled_model_call(
     full_h = int(video.shape[-2])
     full_w = int(video.shape[-1])
     device = video.device
+    # v14.417: 分块前把 attention 的 q_norm/k_norm 权重常驻计算设备。
+    # 否则每块每个 block 都要做一次阻塞式 H2D 把流水线排空（见 _reside_attn_norms）。
+    try:
+        _moved_norms = _reside_attn_norms(model_k, device)
+        if _moved_norms:
+            log.warning("v14.417 attention norm 权重常驻 GPU: %d 个参数"
+                        "（消除每个 block 的阻塞式 H2D 排空）", _moved_norms)
+            print(f"[H3 Extender] v14.417 attention norm 权重常驻 GPU: {_moved_norms} 个参数"
+                  "（消除每个 block 的阻塞式 H2D 排空）", flush=True)
+    except Exception:
+        pass
     dtype = torch.float32
     video_acc = torch.zeros_like(video, dtype=dtype)
     weight_shape = (1, 1, 1, full_h if axis == "H" else 1, full_w if axis == "W" else 1)
@@ -598,12 +686,13 @@ def _tiled_model_call(
                 model_k.noise = saved_noise
             # v14.379: 每块耗时落日志 —— 二采此前 16~90 分钟"无动静"就是因为
             # 块内没有任何进度输出, 分不清是在算还是卡死。
-            log.info(
-                "v14.380 分块二采: tile %d/%d 用时 %.1fs",
-                _ti + 1,
-                len(plan["regions"]),
-                time.perf_counter() - _t_tile,
-            )
+            _tile_dt = time.perf_counter() - _t_tile
+            log.info("v14.380 分块二采: tile %d/%d 用时 %.1fs",
+                     _ti + 1, len(plan["regions"]), _tile_dt)
+            # v14.417: 同一条也打到 stdout —— ComfyUI 常以 --verbose WARNING 启动,
+            # log.info 会被过滤掉, 于是用户只能看到 tqdm 停在 0/2, 无法判断快慢。
+            print(f"[H3 Extender] v14.417 分块二采: tile {_ti + 1}/{len(plan['regions'])} "
+                  f"用时 {_tile_dt:.1f}s (tokens≈{_tok_ti or '-'})", flush=True)
             try:
                 _ftj, _ = torch.cuda.mem_get_info()
                 log.info("v14.383 分块二采: tile %d/%d 收尾 free=%.1fGB",

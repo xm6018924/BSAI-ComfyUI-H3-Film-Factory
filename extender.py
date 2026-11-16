@@ -5316,6 +5316,26 @@ def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
             _per_req = _t164 * _minhw * _axis
         # 请求值每块未达病态边缘 -> 尊重请求(分块越少 forward/搬运/重叠越少)
         if _per_req <= _target:
+            # v14.417 (2026-11-17): 「块太碎」也要合并。
+            # 实测代价模型: 每块 forward 都要把整份 int8 权重(本片 19.5GB)在 GPU 上
+            # 重新流一遍, 所以块数直接乘在搬运成本上; 而每块 tokens 只按块内面积算。
+            # 请求 4 块(100k/块)在 200k/块 以内的安全区里纯属浪费:
+            # 2 块(165k/块)把 forward 数与权重流次数直接砍半, 重叠重复计算也少。
+            # 200k/块 上限依据: v14.149 实机 334k/块 可跑(399s/步), 200k 仍留余量。
+            _soft = 200000
+            _den_soft = _soft / float(_t164 * _minhw) - 2 * _ov
+            _merge_on = str(os.environ.get("BSAI_H3_TILE_MERGE", "1")).strip().lower() not in (
+                "0", "false", "off", "no")
+            if _den_soft > 0 and _req > 2 and _merge_on:
+                _n_soft = max(2, int(math.ceil(_axis / _den_soft)))
+                _n_soft = min(_n_soft, _req)
+                if _n_soft < _req:
+                    _per_soft = _t164 * _minhw * (_axis // _n_soft + 2 * _ov)
+                    print(f"[H3 Extender] v14.417 分块合并: 请求 n_tiles={_req}({_per_req:,}/块) "
+                          f"-> {_n_soft} 块({_per_soft:,}/块 <= 200k) —— "
+                          f"forward 与权重流次数 -{(_req - _n_soft) / _req * 100:.0f}%, 缩短二采墙钟",
+                          flush=True)
+                    return _n_soft
             print(f"[H3 Extender] v14.179 分块粒度: 请求 n_tiles={requested} -> {_req} "
                   f"(每块约 {_per_req:,} tokens <= 450k 安全区, 尊重请求不扩块)")
             return _req
@@ -7881,7 +7901,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             # 不能包成 Python float —— model_sampling.reshape_sigma 首行
                             # 调用 sigma.nelement(), float 无该属性会抛 AttributeError,
                             # 被下方 except 兜住后按原样喂入, 逆缩放补步实际未执行。
-                            _inv401 = [_ms401.inverse_noise_scaling(_r_sigmas[0], _t)
+                            # v14.417: 传张量标量后, 结果 dtype 会被 sigma(float32) 提升;
+                            # 这里落回原 latent dtype, 否则整段 latent 升 fp32, 24GB 上显存翻倍。
+                            _inv401 = [_ms401.inverse_noise_scaling(_r_sigmas[0], _t).to(_t.dtype)
                                        for _t in _sm401]
                         else:
                             _inv401 = _sm401

@@ -4,6 +4,28 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.417 (2026-11-17) — 二采提速：分块合并 + attention norm 权重常驻 GPU + 每块耗时常显 / Refine speedup: tile merge, resident attention norms, always-on per-tile timing
+
+**问题（实测定位，非推测）**
+
+二采（Sol-H3 Self-Lift 的 2 步分块重绘）长时间停在 `0/2 Model Initializing`。对运行中的进程做 py-spy 20Hz × 30s 采样：600 个栈样本里 **599 个**停在 `comfy/model_management.py:1598` 的 `r.copy_(weight, non_blocking=False)`，调用链为 KJNodes `minimax_attn_lowmem_forward:108` → `mm.cast_to(self.q_norm.weight, device=device)`。即 `q_norm/k_norm` 权重留在 CPU 时，**每个 block 的 attention 都要做一次阻塞式 H2D 并把 GPU 流水线整体排空**（40 block × 2 权重 × 每步 4 块 × 2 步 ≈ 640 次）。同期 GPU 利用率 99%、SM 2805–2827MHz、功耗仅 77–88W，说明在算但在等排空，不是卡死。
+
+**改动**
+
+- `_ff_auto_refine_tile_count()` 新增「块太碎就合并」：每块 ≤ 200k tokens 时取最少块数（原 v14.179 对 ≤450k 一律尊重请求值）。本片几何（T=32, 68×120）请求 4 块（100,096/块）→ 2 块（165,376/块），**forward 与权重流次数 −50%**，总 token −17%，接缝 3→1。环境变量 `BSAI_H3_TILE_MERGE=0` 可回退。
+- `bsai_h3_spatial_tiles.py` 新增 `_resolve_blocks()` / `_reside_attn_norms()`：分块前把每个 block 的 `attn.q_norm/k_norm` 的 weight/bias（每块几十 KB）一次搬上计算设备常驻，使 `cast_to` 命中「device 已相同」早返回，阻塞拷贝与排空全部消失（数值/dtype 不变，数学等价）。
+- 分块耗时从仅 `log.info`（被 `--verbose WARNING` 过滤）改为**同时打印到 stdout**：`v14.417 分块二采: tile i/N 用时 X.Xs`。
+- 逆缩放在 v14.416 传张量标量的基础上补 `.to(_t.dtype)` 回落，避免结果被 sigma(float32) 提升导致 latent 升 fp32、显存翻倍。
+
+**验证**
+
+- 两文件 `py_compile` 通过。
+- norm 常驻单测（合成 4 block 模型树）：首调搬 8 个参数 → cuda:0，二次调用搬 0（幂等）。
+- 逆缩放单测（真 `comfy.model_sampling.CONST`）：bf16/fp16/fp32 输出 dtype 均保持，与 `x/(1-σ)` 参考最大误差 0.000000。
+- 分块合并纯计算校验：4 种几何 × 4 种请求，总 token −0%~−48%，forward 数与预期一致。
+
+**备注**：本机 py-spy 采样时二采正在旧代码进程中运行，加速倍数待重启后由新的每块耗时输出实测确认。
+
 ### v14.416 (2026-11-16) — 修复逆缩放补步 sigma 被包成 Python float 致 nelement AttributeError、补步被静默跳过 / Fix inverse-noise rescale step: sigma wrapped as Python float caused nelement AttributeError, the compensating step was silently skipped
 
 **问题**
