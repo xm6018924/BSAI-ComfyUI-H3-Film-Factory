@@ -4,6 +4,40 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.415 (2026-11-16) — 6 个独立插件节点并入电影工厂（本地改动，未推送）/ Absorb 6 standalone node packs into Film Factory (local-only, not pushed)
+
+**背景**
+
+「卡点舞蹈MV v2.0」工作流依赖 6 个只注册了少量节点的独立插件，单装电影工厂跑不起来。
+把这 6 个插件的节点整体搬进本插件，节点类名与显示名保持不变，旧工作流免改。
+
+| 源插件 | 并入后的节点 |
+|---|---|
+| `A_LibrosaBeatCue` | `A_LibrosaBeatCue`、`A_TextInjectCue` |
+| `H3ContextContinuationPro` | `H3ContextInjectPro`、`H3ContextTrimPro` |
+| `ComfyUI-VideoCombineCustomPath` | `VHS_VideoCombineCustomPath`、`VHS_LoadVideoCustomLatest` |
+| `selflift-Avatar` | `SelfLiftAvatarH3Sampler`、`SelfLiftAvatarH3SpatialAnchoredSampler`、`SelfLiftAvatarH3TST`、`SelfLiftAvatarImageSampler` |
+| `VRGDG_VideoCompare` | `VRGDG_VideoCompareSlider` |
+| `ComfyUI-YCNodes-MiniMax-H3` | `H3SigmaRefiner`、`H3DynamicCFGScheduler` |
+
+**改动**
+
+1. 新增子包 `ported/`（`__init__.py` 逐个子模块 try/except 注册，单个失败不拖垮其余节点）：
+   `librosa_beat_cue.py`、`h3_context_pro/`、`vhs_custom_path.py`、`selflift_avatar/`、
+   `vrgdg_video_compare.py`、`h3_sigma_refiner.py`、`h3_dynamic_cfg_scheduler.py`。
+2. `vhs_custom_path.py` 的 `_VHS_DIR` 改为「上溯三层」定位 custom_nodes
+   （源插件在上溯两层处，移植后层级变深）。
+3. 三个前端 JS 复制到插件根 `web/`：`ported_vrgdg_video_compare.js`、
+   `ported_selflift_model_input_order.js`、`ported_selflift_tiling_controls.js`
+   （保持一层目录深度，`../../..` 相对 import 继续有效）。
+4. 源插件不再随本插件单独安装（本机原本未装，无需备份）。
+5. 兼容性之外的代码零改动：参数默认值、`output/H3-Mubu` 落盘、HTTP 路由
+   （`/yuan_h3_motion_upload_latent`、`/vrgdg/video_compare/*`）全部照旧。
+
+**验证**
+
+13 个节点类全部注册成功（2+2+2+4+1+1+1）；`ComfyUI-VideoHelperSuite` 依赖仍在原位。
+
 ### v14.414 (2026-11-16) — 二采不重绘时关闭高低噪切分，一采归一完整 beta 8 步全曲线，杜绝半噪骨架被超分解码成马赛克 / When second pass is no-redraw, disable high/low split; first pass runs a full beta 8-step curve to σ=0, preventing the half-noise skeleton from being upscaled and decoded as mosaic
 
 **问题**

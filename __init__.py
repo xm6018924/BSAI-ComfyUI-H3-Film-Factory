@@ -211,6 +211,19 @@ try:
 except Exception as e:
     print(f"[H3 Film Factory] bsai_h3_cond_guard.py import failed: {e}")
 
+# === 移植节点（原 5 个独立插件并入本插件，删除原目录后旧工作流仍可直接运行）===
+#   librosa_beat_cue      <- A_LibrosaBeatCue（节奏卡点 / 卡点注入）
+#   h3_context_pro        <- H3ContextContinuationPro（上下文注入 / 输出裁剪 Pro）
+#   vhs_custom_path       <- ComfyUI-VideoCombineCustomPath（Video Combine+ 自定义路径）
+#   selflift_avatar       <- selflift-Avatar（SelfLiftAvatarH3Sampler 等）
+#   vrgdg_video_compare   <- VRGDG_VideoCompare（一二采对比滑块）
+try:
+    from . import ported as PORTED_MAPPINGS
+    NODE_CLASS_MAPPINGS.update(PORTED_MAPPINGS.NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(PORTED_MAPPINGS.NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as e:
+    print(f"[H3 Film Factory] ported package import failed: {e}")
+
 # === Server-side API endpoints ===
 try:
     from . import server
