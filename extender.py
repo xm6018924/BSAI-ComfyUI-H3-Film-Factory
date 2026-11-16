@@ -7884,37 +7884,36 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 参与二采重绘。锁定会上游 v14.196 已按步数条件处理。
             if not _use_temporal:
                 if _FF_SPLIT_SIGMA_MODE:
-                    # v14.401: 「BSAI6+2高低噪采样」—— 一采在切点 σ 收工, samples 本身
-                    # 已经是 σ·ε+(1-σ)·x0 的半噪 latent。再走 CONST 加噪(σ·ε+(1-σ)·x)
-                    # 会把等效噪声叠到 σ≈0.92(切点 0.721), 2 步二采等于从零重画 →
-                    # 必须沿用一采的噪声状态直接进低噪段(DisableNoise 续算口径)。
-                    # 但 guider.sample 内部还会做一次 CONST noise_scaling
-                    # = (1-σ)·x(空噪声项为 0), 所以只补 CONST 的逆缩放
-                    # (x -> x/(1-σ)), 由采样器内部乘回 (1-σ), 净结果是"原样喂入"。
+                    # v14.401: 「BSAI6+2高低噪采样」—— 一采在切点 σ 收工, 输出的 latent
+                    # 就是 σ·ε+(1-σ)·x0 的半噪底。再走 CONST 加噪会把等效噪声叠到
+                    # σ≈0.92(切点 0.721), 2 步二采等于从零重画 → 必须沿用一采的噪声
+                    # 状态直接进低噪段(DisableNoise 续算口径)。
+                    #
+                    # v14.418 (2026-11-17, 修复整屏 latent 格彩色马赛克): 一采这条腿交出来的
+                    # samples 已经被上游 KSAMPLER 逆缩放一次 —— comfy/samplers.py:1006 在采样
+                    # 收尾执行 inverse_noise_scaling(sigmas[-1], samples), MiniMaxH3FlowSampling
+                    # 继承 CONST, 其实现是 x -> x/(1-σ); 本档高噪腿止于切点 σ=0.7207 而不是 0,
+                    # 所以这里的 samples ≈ 3.58·x_t, 不再是 x_t 本身。
+                    # 二采 guider -> KSAMPLER 入口又执行 noise_scaling(σ_cut, 空噪声, latent)
+                    # = (1-σ_cut)·latent, 正好把它乘回 1 倍, 还原成真正的半噪 x_t。
+                    # v14.416 曾在这一步再补一次 x/(1-σ)(传张量标量避开 nelement 报错), 于是全程
+                    # 变成 1/(1-σ)², 乘回后仍偏大 3.58 倍 —— DiT 在超幅 latent 上出图, 解码即整屏
+                    # 8-16px latent 格彩色马赛克(实测 h3cache std 2.249, 同管线健康档 1.042)。
+                    # 故此处只做"原样承接", 逆缩放由二采采样器入口的一次乘回抵消, 不再重复补。
                     _r_noise = None
+                    _r_latent = {"samples": samples}
                     try:
-                        _ms401 = model.get_model_object("model_sampling")
-                        _sm401, _sn401 = _ff_extract_members(samples)
-                        if hasattr(_ms401, "inverse_noise_scaling"):
-                            # v14.416: 必须传 sigmas 张量的 0 维标量元素(对照核心
-                            # comfy/samplers.py:1006 的 inverse_noise_scaling(sigmas[-1], samples)),
-                            # 不能包成 Python float —— model_sampling.reshape_sigma 首行
-                            # 调用 sigma.nelement(), float 无该属性会抛 AttributeError,
-                            # 被下方 except 兜住后按原样喂入, 逆缩放补步实际未执行。
-                            # v14.417: 传张量标量后, 结果 dtype 会被 sigma(float32) 提升;
-                            # 这里落回原 latent dtype, 否则整段 latent 升 fp32, 24GB 上显存翻倍。
-                            _inv401 = [_ms401.inverse_noise_scaling(_r_sigmas[0], _t).to(_t.dtype)
-                                       for _t in _sm401]
-                        else:
-                            _inv401 = _sm401
-                        _r_latent = {"samples": _ff_wrap_members(_inv401, _sn401)}
-                    except Exception as _inv401e:
-                        _r_latent = {"samples": samples}
-                        print(f"[H3 Extender] v14.401 BSAI6+2: 逆缩放补步失败"
-                              f"({type(_inv401e).__name__}: {_inv401e}), 按原样喂入", flush=True)
-                    print("[H3 Extender] v14.401 BSAI6+2: 二采续算(不加噪) —— "
-                          f"沿用一采切点 σ={float(_r_sigmas[0]):.4f} 的半噪 latent, "
-                          "保证与 8 步 beta 曲线后半段严格衔接", flush=True)
+                        _sm418, _ = _ff_extract_members(samples)
+                        _std418 = float(_sm418[0].float().std())
+                        _cut418 = float(_r_sigmas[0])
+                        print("[H3 Extender] v14.418 BSAI6+2: 二采续算(不加噪) —— "
+                              f"承接一采切点 σ={_cut418:.4f} 的断点 latent "
+                              f"(断点 std={_std418:.3f}, 二采入口乘回 (1-σ) 后 ≈"
+                              f"{_std418 * (1.0 - _cut418):.3f}), 不重复逆缩放", flush=True)
+                    except Exception:
+                        print("[H3 Extender] v14.418 BSAI6+2: 二采续算(不加噪) —— "
+                              f"承接一采切点 σ={float(_r_sigmas[0]):.4f} 的断点 latent, 不重复逆缩放",
+                              flush=True)
                 else:
                     _r_noise = comfy.sample.prepare_noise(samples, int(seed) + 1, None)
                     _r_latent = _ff_const_add_noise(model, _r_noise, _r_sigmas, {"samples": samples}, _r_audio)
@@ -8999,6 +8998,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
                         seed=int(seed) + 1,
                     )
+                # v14.418: 二采成品 latent 幅值自检 —— 健康的去噪终态 std 应在 1 附近
+                # (同管线历史健康档 1.042); 明显超幅(如 2.2+)说明又被重复逆缩放,
+                # 这时 VAE 解码必成整屏 latent 格马赛克, 提前用日志暴露而不是等成片。
+                try:
+                    _fm418, _ = _ff_extract_members(_r_samples if "_r_samples" in locals() else samples)
+                    _ostd418 = float(_fm418[0].float().std())
+                    _flag418 = " ⚠️超幅, 疑似重复逆缩放" if _ostd418 > 1.8 else ""
+                    print(f"[H3 Extender] v14.418 二采成品 latent 自检: std={_ostd418:.3f}{_flag418}",
+                          flush=True)
+                except Exception as _chk418e:
+                    print(f"[H3 Extender] v14.418 二采成品 latent 自检失败(可忽略): {_chk418e}", flush=True)
             finally:
                 try:
                     _sh59._prepare_sampling = _bsai_orig_prepare

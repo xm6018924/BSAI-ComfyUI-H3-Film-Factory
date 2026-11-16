@@ -4,6 +4,36 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.418 (2026-11-17) — 回退二采“重复逆缩放”，修复 SplitSigmas 分腿档成片整屏 latent 格彩色马赛克 / Revert the double inverse-noise rescale in the split-sigma refine handoff: fixes the full-frame latent-grid mosaic
+
+**问题（实测定位，非推测）**
+
+`h3_clip_250_1_1794851108.mp4`（01:45 写出）整屏 8–16px 彩色马赛克。取证：从 `bsai_h3_chain_cache\chain_extender_250.latest.snapshot.h3cache` 直接读该段二采成品 latent（shape `[1,24,97,34,60]` float32）：
+
+- 本次：`std=2.249`、`max|z|=11.53`、相邻格高频比 `|Δ|/std=0.463`
+- 同一管线历史健康档（`disabled_20261111_0152` 快照）：`std=1.042`、`max|z|=4.86`、高频比 `0.342`
+
+latent 幅值 ≈2.16× 超幅且高频占比翻倍 —— 是“解码了一块超幅、没去噪干净的 latent”，不是编码/解码参数问题。
+
+**成因（链条完整）**
+
+`MiniMaxH3FlowSampling = ModelSamplingDiscreteFlow + CONST`，其 `inverse_noise_scaling = x/(1-σ)`；`comfy/samplers.py:1006` 在**每次** `KSAMPLER.sample` 收尾都执行 `inverse_noise_scaling(sigmas[-1], samples)`。一采高噪腿止于切点 σ=0.7207（**不是 0**），所以交到二采的 `samples` 已经被除过一次 `1-σ`：`F = x_t/(1-σ) ≈ 3.58·x_t`。
+
+二采 guider → `KSAMPLER.sample` 入口又会做 `noise_scaling(σ_cut, 空噪声, latent) = (1-σ)·latent`，正好把 `F` 乘回 1 倍还原成真 `x_t` —— 也就是说**上游已经预补偿过了**。v14.416 把“被异常静默跳过的逆缩放补步”真跑起来，于是这里再除一次 `1-σ`，全程变成 `1/(1-σ)²`：入口乘回后仍偏大 **3.58 倍**（数值复算：健康 `x_t` std 0.774 → `F` 2.772 → v14.416 入口 2.772 → 修复后入口 0.774）。DiT 在超幅 latent 上出图，VAE 一解码就是整屏 latent 格马赛克。
+
+v14.416 之前该补步因 `float sigma` 抛 `AttributeError` 被 except 兜住、实际按原样喂入 —— 那个“失败”恰好是对的，所以历史成片正常；v14.416 修好异常反而把管线带偏（本次回归的责任在本轮改动）。
+
+**改动**
+
+- `extender.py` `_FF_SPLIT_SIGMA_MODE` 分支：删除重复的 `inverse_noise_scaling` 预补偿，改为**原样承接** `samples`（逆缩放由二采采样器入口那一次 `(1-σ)·latent` 抵消）。注释重写为完整推导，避免后人再补回去。
+- 新增两处幅值自检日志：`v14.418 BSAI6+2 … 断点 std=X（乘回 (1-σ) 后 ≈Y）`、`v14.418 二采成品 latent 自检: std=Z`（>1.8 直接打 ⚠️超幅），让下一轮重启后能从日志一眼确认修复生效。
+
+**验证**
+
+- `py_compile` 通过。
+- 缩放恒等式复算（真 `CONST.inverse_noise_scaling` 语义）：`x_t`(0.774) → 上游 `F`(2.772) → 入口 `noise_scaling` → **0.774**（回到真 x_t）；v14.416 路径入口为 2.772（3.58× 超幅）。
+- 端到端待重启后由新自检日志确认（期望成品 std ≈1.0，而非 2.25）。
+
 ### v14.417 (2026-11-17) — 二采提速：分块合并 + attention norm 权重常驻 GPU + 每块耗时常显 / Refine speedup: tile merge, resident attention norms, always-on per-tile timing
 
 **问题（实测定位，非推测）**
