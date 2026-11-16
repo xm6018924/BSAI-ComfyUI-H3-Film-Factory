@@ -12463,6 +12463,9 @@ _SECOND_PASS_EN2ZH = {
     "BSAI SelfLift 2nd (lcm + cosine refiner 0.7)": "BSAI SelfLift二采 (lcm + cosine微雕)",
     "BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)": "BSAI 分块二采 (n_tiles2 pad128 batch4)",
 }
+# v14.411: 后端分支比对以英文枚举为准; 旧工作流/前端若存中文标签, 反向映射回英文 canonical。
+_FIRST_PASS_ZH2EN = {v: k for k, v in _FIRST_PASS_EN2ZH.items()}
+_SECOND_PASS_ZH2EN = {v: k for k, v in _SECOND_PASS_EN2ZH.items()}
 _VIGGLE_RP_LABEL = "Viggle Remake 视频改写 (6步 换人/增删改)"
 _VIGGLE_RP_FS_LABEL = "Viggle Remake 视频改写+逐帧换脸 (6步 换人)"
 _VIGGLE_RP_LABELS = (_VIGGLE_RP_LABEL, _VIGGLE_RP_FS_LABEL)
@@ -15269,12 +15272,10 @@ class BSAIH3FilmFactory:
             # ===== v14.408: 「1采管线」+「2采管线」双下拉 =====
             # 两个下拉默认都是 Follow(跟随主档)。默认值下下面这段一个变量都不碰,
             # 所以 46 个既有档的行为与 v14.407 逐项一致。只有显式选了非 Follow 值才覆盖。
-            _fp_sel = _FIRST_PASS_EN2ZH.get(
-                str(kwargs.get("first_pass_pipeline", "") or ""),
-                str(kwargs.get("first_pass_pipeline", "") or ""))
-            _sp_sel = _SECOND_PASS_EN2ZH.get(
-                str(kwargs.get("second_pass_pipeline", "") or ""),
-                str(kwargs.get("second_pass_pipeline", "") or ""))
+            _fp_raw = str(kwargs.get("first_pass_pipeline", "") or "")
+            _fp_sel = _FIRST_PASS_ZH2EN.get(_fp_raw, _fp_raw)
+            _sp_raw = str(kwargs.get("second_pass_pipeline", "") or "")
+            _sp_sel = _SECOND_PASS_ZH2EN.get(_sp_raw, _sp_raw)
             if _fp_sel and _fp_sel != _FP_FOLLOW:
                 if _fp_sel == _FP_FAST6:
                     steps, sampler_name = 6, "euler"
@@ -15292,6 +15293,9 @@ class BSAIH3FilmFactory:
                     steps, sampler_name = 6, "euler"
                     _FF_SPLIT_SIGMA_MODE = False
                     print("[H3 Extender] v14.408 1采管线 = 全分辨率 6 步 (无草稿接管)", flush=True)
+                else:
+                    # v14.411: 未识别档位不静默落空, 播报后沿用主档一采配方
+                    print(f"[H3 Extender] v14.408 1采管线: 未识别档位 {_fp_sel!r}, 沿用主档一采配方", flush=True)
             if _sp_sel and _sp_sel != _SP_FOLLOW:
                 refine_upscale_factor = max(float(refine_upscale_factor or 0.0), 2.0)
                 refine_align_to = 32
@@ -15305,6 +15309,7 @@ class BSAIH3FilmFactory:
                     tiled_refine = _sp_tiled
                     tile_count = 2 if _sp_tiled else tile_count
                     tile_overlap = 128 if _sp_tiled else tile_overlap
+                    _sp_sig = None
                     if _sp_sel == _SP_STD:
                         refine_sampler, refine_steps, refine_denoise = "lms", 2, 0.45
                         _FF_SPLIT_SIGMA_MODE = True
@@ -15322,6 +15327,10 @@ class BSAIH3FilmFactory:
                         refine_sampler, refine_steps, refine_denoise = "euler", 2, 0.45
                         _FF_SPLIT_SIGMA_MODE = True
                         _sp_sig = "euler 低噪 2 步 + 真分块 2 tiles/pad 128/batch 4"
+                    if _sp_sig is None:
+                        # v14.411: 未知/未映射档位不再抛 UnboundLocalError, 沿用主档二采配方并播报
+                        print(f"[H3 Extender] v14.408 2采管线: 未识别档位 {_sp_sel!r}, 沿用主档二采配方", flush=True)
+                        _sp_sig = "未识别档位 (沿用主档)"
                     # 低噪段从"一采所用的那条曲线"切出来, 保证 1采+2采连续
                     if _sp_sel != _SP_TURBO and refine_sigmas is None:
                         try:

@@ -4,6 +4,26 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.411 (2026-11-16) — 修复 1采/2采管线下拉被误译成中文导致分支落空、二采播报 UnboundLocalError / Fix pass selectors mis-normalized to Chinese: dispatch fell through and crashed on unbound `_sp_sig`
+
+**问题**
+
+工作流显式选了一采「BSAI Fast Draft 6-step …」与二采「BSAI Standard 2nd …」，提交后日志却仍是「默认管道 Sol-H3 Self-Lift 双采」，两段覆盖都没生效；二采分支末尾播报 `v14.408 2采管线 = {_sp_sig}` 时抛 `UnboundLocalError: cannot access local variable '_sp_sig' where it is not associated with a value`，整条 prompt 在 6.80s 内中断。
+
+根因：v14.408 双下拉的后端分支比对以**英文枚举常量**为准（`_FP_FAST6` / `_SP_STD` 等均为英文），但取值时误用了 `_EN2ZH`（英文→中文）映射 `.get()`，把工作流里存的英文值转成了中文标签；中文与英文常量全部不等，四个二采分支一个都没进，`_sp_sig` 从未赋值。一采分支同样落空（静默沿用主档配方，无报错但覆盖失效）。
+
+**改动**
+
+1. 由现有 `_FIRST_PASS_EN2ZH` / `_SECOND_PASS_EN2ZH` 派生反向 `_ZH2EN` 映射；取值先经反向映射归一到英文 canonical——英文原值原样保留，旧工作流/前端若存中文标签也能回认。
+2. 一采/二采未识别档位新增兜底播报，不再静默落空；二采 `_sp_sig` 预初始化为 `None`，未命中任何已知档位时回填「未识别档位 (沿用主档)」，杜绝 `UnboundLocalError`。
+
+**验证**
+
+- `py_compile` extender.py 通过；AST 离线核对中英文映射双向闭合、后端枚举与常量一一对应。
+- 桩件模拟：四个二采档位（Standard / Turbo / SelfLift / Tiled）英文、中文入站均正确命中并绑定 `_sp_sig`；本工作流一采=极速草稿 6 步、二采=标准 lms 低噪 2 步，归一后正确识别。
+- `tools/check_frontend_guard.py`：3 个 JS 语法 OK，前后端枚举同步 OK。
+- 既有自检中 `check_pipeline_recipes.py` / `check_refine_no_redraw.py` / `check_refine_timing_guards.py` 的失败项在改动前基线（`660145c`）上即已存在，与本次改动无关。
+
 ### v14.410 (2026-11-16) — 修复旧工作流 FLOAT/INT 控件错位空串导致整条 prompt 校验失败 / Fix blank string misaligned into FLOAT/INT widgets rejecting the whole prompt
 
 **问题**
