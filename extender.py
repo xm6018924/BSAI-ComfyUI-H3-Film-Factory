@@ -869,6 +869,23 @@ def _asset_path_allowed(path):
     return False
 
 
+def _resolved_path_allowed(path):
+    """Containment-only proof for paths already returned by `_resolve_asset_file`.
+
+    v14.412: the v14.402 text check (`_unsafe_path_text`) rejects any drive-rooted
+    /network-share/`..` text; that check guards raw widget strings *before*
+    resolution. Re-running it on the resolver's absolute realpath rejects every
+    asset-library image before `Image.open`, so conditioning ends up with zero
+    `minimax_refs` and the ref2va model samples near-noise (mosaic decode).
+    The resolver already proved containment; here we only re-prove the realpath
+    still sits under an asset/input base (TOCTOU), without the rooted-text ban.
+    """
+    for kind in _ASSET_KIND_DIRS:
+        if _stays_under(path, _asset_path_bases(kind)):
+            return True
+    return False
+
+
 def _resolve_asset_file(entry, kind, log=print, label=""):
     """Resolve an asset-library entry to a path proven inside bsai_assets/<kind>
     or the input root. The entry NAME is authoritative; a bare path is only
@@ -16004,7 +16021,10 @@ class BSAIH3FilmFactory:
             print(f"[H3 Extender] Loading {len(resolved_img_paths)} asset images as ref tensors")
             asset_tensors = []
             for img_path in resolved_img_paths:
-                if _unsafe_path_text(img_path) or not _asset_path_allowed(img_path):
+                # v14.412: 这些路径来自 _resolve_asset_file 的已证 realpath, 只做
+                # 目录包含复核; 不能再用 _unsafe_path_text 的"拒绝根路径"规则(会把
+                # 每个绝对 realpath 都挡在 open 之前, 参考图全部落空)。
+                if not _resolved_path_allowed(img_path):
                     print(f"[H3 Extender] asset image refused before open: {img_path}")
                     continue
                 try:

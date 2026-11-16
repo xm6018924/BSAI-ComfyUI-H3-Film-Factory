@@ -4,6 +4,31 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.412 (2026-11-16) — 修复资产库参考图被路径门禁误拒、条件无 minimax_refs 致成片马赛克噪点 / Fix asset-library reference images wrongly rejected by path gate: conditioning had zero minimax_refs, decode came out as mosaic noise
+
+**问题**
+
+Rhythm Music v15-4090 工作流出片整段为彩色方块马赛克噪点。日志链路：
+
+- 资产库 10 张参考图全部 `asset image refused before open` → `resolved_img_paths was non-empty but no tensors were loaded!`；
+- 采样时 `ref_items=0, ref_blocks=0`，`WARNING: no ref_blocks, conditioning has NO minimax_refs!`；
+- ref2va 模型在无参考图条件下一采近纯噪声，VAE 解码即方块马赛克；二采两次 OOM 后回退一采 latent，噪点随一采 latent 直出成片。
+
+根因：v14.402 资产路径隔离把原始控件字符串的文本级检查 `_unsafe_path_text`（拒绝盘符根路径 / 网络共享 / `..`）又套用到了 `_resolve_asset_file` 已经证明安全、返回的绝对 realpath 上。绝对路径必然被判为 rooted → 每张参考图在 `Image.open` 之前被拒；包含性证明（realpath 落在 `input/bsai_assets` 之下）这道真正的边界反而没起作用。
+
+**改动**
+
+1. 新增 `_resolved_path_allowed(path)`：对解析器已返回的 realpath 只做目录包含复核（TOCTOU），不再套用根路径文本禁令；图片加载循环改用该门禁。
+2. 原始控件字符串仍走 `_asset_path_allowed`（文本检查 + 包含证明）：`\\host\share`、盘符根路径、`..`、URL、空串依旧拒绝；目录外真实文件与不存在文件同样被包含复核拒绝。
+
+**验证**
+
+- `py_compile` 通过；AST 抽取真实函数体在真实 `folder_paths` 下实测：工作流 10 张参考图 realpath 全部通过新门禁；恶意原始字符串、目录外文件、幽灵文件全部拒绝。
+- `check_frontend_guard.py` 全绿；`check_ref_sheet_crop.py` 11 条全过。
+- `check_pipeline_recipes.py` / `check_refine_no_redraw.py` / `check_refine_timing_guards.py` / `check_recast_pipeline.py` / `check_remix_pipeline.py` 的失败项在改动前基线（`aa1b539`）上即已存在，与本次改动无关。
+
+**备注**：二采 OOM（24GB 显存，tile 1/4 前向分配失败）为独立显存问题，本次未改；回退链路已按既有保护解码一采 latent。后端改动需重启 ComfyUI 后生效。
+
 ### v14.411 (2026-11-16) — 修复 1采/2采管线下拉被误译成中文导致分支落空、二采播报 UnboundLocalError / Fix pass selectors mis-normalized to Chinese: dispatch fell through and crashed on unbound `_sp_sig`
 
 **问题**
