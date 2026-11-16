@@ -6540,6 +6540,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     # 的马赛克玻璃条纹(实机一镜到底 clip2+ 复现, 条纹周期 = latent cell)。记下
     # 一采几何, 交给 Disk Cache 解码时先缩回一采再像素放大。
     _refine_fallback_hw = None
+    # v14.413: 二采回退到一采 latent 时, 若当前是 SplitSigmas 高低噪切分档
+    # (`_FF_SPLIT_SIGMA_MODE`), 一采只是停在切点 σ(半噪)的骨架, 不是完整图像;
+    # 这种半噪 latent 直接 VAE 解码就是逐令牌方块马赛克。该标记带出 _sample_h3,
+    # 由调用处禁止把这段当成品校验/解码/合并。
+    _refine_fallback_half_noise = False
 
     # v14.195: 音频渲染质量保护（渲染环节治本, 非渲染后处理）——
     # 诊断(h3_clip_250 样本 + 5 个历史渲染): 所有电影工厂渲染输出均带恒定
@@ -9272,6 +9277,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if _samples_pre_upscale is not None:
                     samples = _samples_pre_upscale
                     _refine_fallback_hw = _ff_video_hw(samples)
+                    if _FF_SPLIT_SIGMA_MODE:
+                        _refine_fallback_half_noise = True
                     print(f"[H3 Extender] 已回退到一采 latent; 建议手动把 "
                           f"refine_upscale_factor 改成 1.0 重新跑")
             except Exception as _fb_err:
@@ -9287,6 +9294,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if _samples_pre_upscale is not None:
                     samples = _samples_pre_upscale
                     _refine_fallback_hw = _ff_video_hw(samples)
+                    if _FF_SPLIT_SIGMA_MODE:
+                        _refine_fallback_half_noise = True
                     print(f"[H3 Extender] 已回退到一采 latent (fallback 异常)")
             finally:
                 # v1.65: 恢复 prepare_sampling, 防污染后续采样(下一 clip / 其它工作流)
@@ -9392,6 +9401,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         _pre_hw = tuple(_pre_v[0].shape[-2:])
                         samples = _ff_wrap_members(list(_pre_v), _pre_nst)
                         _refine_fallback_hw = (int(_pre_hw[0]), int(_pre_hw[1]))
+                        if _FF_SPLIT_SIGMA_MODE:
+                            _refine_fallback_half_noise = True
                         print(f"[H3 Extender] ⚠ 二采 latent 塌陷"
                               f"({'网格灰场' if _grid_gray else '整体塌陷'}, clip={clip_index} "
                               f"通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}), "
@@ -9499,6 +9510,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     out.pop("downscale_ratio_spacial", None)
     out.pop("downscale_ratio_temporal", None)
     out["samples"] = samples
+    out["refine_fallback_half_noise"] = bool(_refine_fallback_half_noise)
     if _refine_fallback_hw:
         _fbh, _fbw = int(_refine_fallback_hw[0]), int(_refine_fallback_hw[1])
         if _fbh > 0 and _fbw > 0:
@@ -13699,6 +13711,10 @@ class BSAIH3FilmFactory:
         # v14.153: 二采省显存模式（spatial=v14.149 分块路径 / global=全上下文省显存）
         refine_mem_mode = str(kwargs.get("refine_mem_mode", "spatial (tiled, compatible)") or "spatial (tiled, compatible)")
         refine_mem_global = refine_mem_mode.startswith("global")
+        # v14.413: 固化用户在 widget 上的显式内存档选择。后续配方分支若在默认双采档
+        # 静默把 spatial 提升成 global 全上下文 dense(24GB 上整段 ~791k tokens 两次
+        # OOM 回退半噪骨架出马赛克), 配方覆盖结束后按此原始意图复位(见 v14.413 守卫)。
+        _widget_wanted_global = refine_mem_global
         # v2.02 (2026-09-19): 时间分块(沿 T 轴)二采, 区别于上面的空间分块(沿 H/W)。
         # chunk_tokens<=0 关闭(默认), 整段一次性二采; >0 时沿 T 切块逐段走已有(空间分块)采样器。
         # v2.56 (2026-09-21): 兼容旧工作流，新增参数空值容错
@@ -15678,6 +15694,19 @@ class BSAIH3FilmFactory:
                 print(f"[H3 Extender] v14.201 QAD-v2-8步(旧速度档遗留值兼容): 渲染管道已切 QAD-v2, 跳过二采, 一采 8 步蒸馏直出, shift 10/3 (官方 QAD-v2 NVFP4 schedule)")
         if speed_preset != "custom":
             print(f"[H3 Extender] v1.83 速度预设: {speed_preset} -> 一采steps={steps} 二采steps={refine_steps} tile={tile_count} denoise={refine_denoise} (原={_sp_old})")
+        # v14.413: 默认双采档尊重 widget 的 spatial 选择, 拦截被静默提升的 global dense。
+        # 已核对: 仅 DMAD-4步 / PIKA 8+2 / 直播带货(全自动) / 一镜到底·2K后备 等显式配方档
+        # 允许把二采切成 global 全上下文; 默认 Sol-H3 Self-Lift 双采档(含 v14.408 STD/SELF/
+        # TILED 低噪续跑)若 widget 选了 spatial, 不得被任何旁支逻辑提升成 global 全序列 dense ——
+        # 整段 ~791k tokens dense attention 在 24GB 上两次 OOM, 回退后把停在半噪 σ 的一采骨架
+        # 当成品解码, 成片即逐令牌方块马赛克。widget 显式选 global 时不干预。
+        if (not _widget_wanted_global
+                and refine_mem_global
+                and _rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)")):
+            refine_mem_global = False
+            refine_mem_mode = "spatial (tiled, compatible)"
+            print("[H3 Extender] v14.413 内存档复位: 默认双采档 widget 为 spatial, "
+                  "撤销被静默提升的 global 全上下文 dense, 恢复 spatial 空间分块", flush=True)
         # v14.279: 唯一权威配方日志 —— 打印在所有管道/速度档覆盖之后, 保证
         # "日志声明 == 实际实跑", 不再出现渲染管道档声明 12/6 实跑 8/4 的分歧。
         print(f"[H3 Extender] v14.279 EFFECTIVE-RECIPE: pipeline={_rp_mode or '(none)'} "
@@ -15686,6 +15715,8 @@ class BSAIH3FilmFactory:
               f"| 二采 enable={refine_enable} steps={refine_steps} "
               f"denoise={refine_denoise} factor={refine_upscale_factor} "
               f"tile={tile_count} mem={refine_mem_mode} "
+              f"mem_global={refine_mem_global} widget_wanted_global={_widget_wanted_global} "
+              f"tiled_refine={tiled_refine} "
               f"temp_chunk={'off(原版)' if _rp_no_temp_chunk else 'auto'}")
         print(f"[H3 Extender] REFINE-PARAMS: enable={refine_enable!r} denoise={refine_denoise!r} steps={refine_steps!r} factor={refine_upscale_factor!r} model={refine_upscaler_model!r} align={refine_align_to!r} audio={refine_audio_denoise!r}")
         unique_id = kwargs.get("unique_id", None)
@@ -18961,18 +18992,40 @@ class BSAIH3FilmFactory:
                 break
 
             _decode_native_hw = None
+            _half_noise_fallback = False
             if isinstance(sampled, dict):
                 _decode_native_hw = sampled.pop("decode_native_hw", None)
+                _half_noise_fallback = bool(sampled.pop("refine_fallback_half_noise", False))
+            # v14.413 (B 项): SplitSigmas 切分档二采 OOM/塌陷回退到一采时, 一采只是停在
+            # 切点 σ 的半噪骨架, 不是完整图像 —— 直接解码/合并就是逐令牌方块马赛克。
+            # 这种段不得校验成成品: join 以 validated=False 落盘(断点续跑会重渲),
+            # 不进最终合并, 也跳过本段预览解码, 并推送明确告警。
+            if _half_noise_fallback:
+                if i < len(clips):
+                    clips[i]["validated"] = False
+                print(f"[H3 Extender] ⛔ v14.413 二采回退半噪骨架(clip={i + 1}): 本段为 SplitSigmas "
+                      f"高低噪切分的一采半噪 latent, 禁止当成品解码/合并; 已标记未校验, 待二采显存/分块恢复后重渲",
+                      flush=True)
+                try:
+                    _send_extender_warning(
+                        owner,
+                        f"Clip {i + 1}: second-pass refine fell back to the half-noise first-pass "
+                        f"skeleton (split-sigma tier); segment kept UNVALIDATED and excluded from "
+                        f"final merge. Reduce refine token/VRAM pressure (spatial tiling) and re-render this clip.",
+                        clip_index=i,
+                    )
+                except Exception:
+                    pass
             # v14.283 (2026-11-03): 每段 join 后立即 validated=True ——
             # 崩溃重跑时 extender 才能识别哪些段已采样、直接跳过。此前全部段
             # validated=False, 崩溃后重跑会从 clip1 重新采样所有 N 段(24min/段
             # × 9 段 = 216min 白费)。现在 join 成功即 commit validated:True,
             # 重跑 manifest 里每个有 latent 的段都会被识别为已完成 → 自动续渲
-            # 只采剩下的段。
+            # 只采剩下的段。半噪回退段(v14.413)强制 validated=False, 不参与续渲跳过。
             result = disk_join.join(
                 samples=sampled,
                 trim_frames=trim_frames,
-                validated=True,  # v14.283: 每段采完立即 commit
+                validated=(not _half_noise_fallback),  # v14.283 / v14.413
                 run_mode=str(run_mode),
                 fps=float(FPS),
                 previous_cache=previous_handle,
@@ -18982,7 +19035,8 @@ class BSAIH3FilmFactory:
             previous_handle = result[0]
             previous_proxy = result[1]
             statuses.append(result[4])
-            generated.append(i)
+            if not _half_noise_fallback:
+                generated.append(i)
 
             # v2.66: 每段 commit 后滚动快照——崩溃/误删后最多丢最后一段，
             # 用户点「♻️ 恢复缓存」即可从 latest.snapshot 恢复并续渲。
@@ -19014,8 +19068,8 @@ class BSAIH3FilmFactory:
             # v1.19: 暂停停止（paused_break）或单独生成（render_partial）时静默——跳过 preview 解码，
             # 只保留 latent 缓存，等待用户下一步（合并输出 / 全量渲染）。
             _preview_error = None
-            print(f"[H3 Extender] DEBUG clip={i} paused_break={paused_break} render_partial={render_partial} output_image_audio={output_image_audio} loop_end={loop_end}")
-            if not paused_break:
+            print(f"[H3 Extender] DEBUG clip={i} paused_break={paused_break} render_partial={render_partial} output_image_audio={output_image_audio} loop_end={loop_end} half_noise_fallback={_half_noise_fallback}")
+            if not paused_break and not _half_noise_fallback:
                 try:
                     _send_extender_progress(
                         owner, i, len(clips), "decoding_preview",

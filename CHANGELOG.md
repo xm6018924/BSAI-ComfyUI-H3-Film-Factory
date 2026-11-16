@@ -4,6 +4,29 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.413 (2026-11-16) — 默认双采档拦截静默提升的 global dense；SplitSigmas 半噪骨架禁止当成品解码 / Default dual-pass tier blocks silent promotion to global dense; split-sigma half-noise skeleton must not be decoded as final footage
+
+**问题**
+
+Rhythm Music v15-4090 6+2 档二采在 24GB 上两次 OOM（整段 ~791k tokens 全序列 dense attention），回退后把停在切点 σ≈0.7207 的一采半噪骨架直接 VAE 解码放大，成片为逐令牌方块马赛克。工作流按名 widget 实测 `refine_mem_mode=spatial`、`tiled_refine=False`，但运行时二采被切成 global 全上下文；且 SplitSigmas 切分档的一采本就不是完整图像，回退链路却把它当成品 latent 提交、解码、合并。
+
+**改动（A：二采误切 global）**
+
+1. 入口固化 widget 的显式内存档选择 `_widget_wanted_global`；全部配方覆盖结束后，默认 Sol-H3 Self-Lift 双采档（含 v14.408 STD/SELF/TILED 低噪续跑）若 widget 选的是 spatial，撤销被静默提升的 global，复位回 spatial 空间分块。显式 global 配方档（DMAD-4步 / PIKA 8+2 / 直播带货全自动 / 一镜到底·2K后备）不受影响；widget 显式选 global 时不干预。
+2. v14.279 权威配方日志补打 `mem_global / widget_wanted_global / tiled_refine`，便于下一次复跑定位内存档究竟由 widget 还是哪条分支决定。
+
+**改动（B：半噪骨架不得当成品）**
+
+1. `_sample_h3` 内新增 `_refine_fallback_half_noise` 标记：SplitSigmas 高低噪切分档下，二采 OOM / 非 OOM 异常 / 塌陷检测任一兜底回退到一采 latent 时置位。
+2. 该段带出采样器后：以 `validated=False` 落盘（断点续跑会重渲，不被跳过）、不进最终合并、跳过本段预览解码，并推送明确告警；不再把半噪一采骨架解码放大成马赛克成片。非切分档回退到完整一采 latent 的既有行为不变。
+
+**验证**
+
+- `py_compile` 通过；`check_refine_sigma_start.py` / `check_refine_redraw_chunking.py` / `check_ref_sheet_crop.py` / `check_frontend_guard.py` 全绿。
+- `check_pipeline_recipes.py` / `check_refine_no_redraw.py` / `check_refine_timing_guards.py` / `check_recast_pipeline.py` / `check_remix_pipeline.py` 的失败项在改动前基线即已存在，数量与本次改动前一致，无新增失败。
+
+**备注**：默认档内存档被提升成 global 的具体分支仍需一次重启复跑，凭配方日志新增的 `mem_global / widget_wanted_global` 字段钉死；后端改动需重启 ComfyUI 后生效。二采 24GB 显存/分块驻留调参为独立问题，本次未改。
+
 ### v14.412 (2026-11-16) — 修复资产库参考图被路径门禁误拒、条件无 minimax_refs 致成片马赛克噪点 / Fix asset-library reference images wrongly rejected by path gate: conditioning had zero minimax_refs, decode came out as mosaic noise
 
 **问题**
