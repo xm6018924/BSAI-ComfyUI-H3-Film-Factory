@@ -5023,8 +5023,8 @@ _BSAI_PROG_PKG_NAME = "bsai_selflift_prog"
 # 移植包子模块按依赖顺序逐个按文件加载(相对导入以独立包名前缀解析)。
 _BSAI_PROG_SUBMODULES = [
     "diagnostics", "avatar_masks", "selflift", "h3_upscaler", "avatar_sampling",
-    "h3_tiling", "h3_global_tiling", "h3_stream_attention", "h3_ram_attention",
-    "h3_prepared_weights", "h3_output_chunking", "spatial_anchor", "tiling_ui",
+    "h3_prepared_weights", "h3_tiling", "h3_global_tiling", "h3_stream_attention",
+    "h3_ram_attention", "h3_output_chunking", "spatial_anchor", "tiling_ui",
     "h3_tst", "nodes",
 ]
 
@@ -5076,6 +5076,33 @@ def _bsai_load_progressive_engine():
         print(f"[H3 Extender] v14.404 渐进引擎加载失败(二采将回退普通路径): "
               f"{_BSAI_PROG_LOAD_ERR}", flush=True)
         return None
+
+
+def _bsai_zero_out_conditioning(conditioning):
+    """复刻原生 ConditioningZeroOut: 把 cond 向量/嵌入/歌词/上下文/尺度全部置零。
+
+    参考流 #671 给 679 的 negative 就是一份零化后的空负向; 工厂 CFG=1.0 单前向,
+    原生 encode_model_conds 对 negative=None 也会跳过, 但移植 progressive_sample
+    直接把 positive/negative 两条 CONDITIONING 透传给 comfy.samplers.sample, 故这里
+    显式构造零负向, 与参考流口径一致。
+    """
+    import copy as _copy_zo
+    if not conditioning:
+        return conditioning
+    out = []
+    for t in conditioning:
+        if not isinstance(t, (list, tuple)) or len(t) < 2:
+            out.append(t)
+            continue
+        d = _copy_zo.deepcopy(t[1]) if isinstance(t[1], dict) else {}
+        for _k in ("pooled_output", "conditioning_lyrics",
+                    "conditioning_scale", "direct_context"):
+            _v = d.get(_k, None)
+            if _v is not None:
+                d[_k] = torch.zeros_like(_v)
+        n = [torch.zeros_like(t[0]), d]
+        out.append(n)
+    return out
 
 # v14.250: 官方 ComfyUI-MiniMaxH3_LatentUpscaler 的 conditioning 放大函数
 # (upscale_minimax_conditioning) —— 在二采 latent 放大到 2x 时, 必须同步
@@ -7479,6 +7506,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     # v14.389: 内容闸门的一采快照在 refine 段内赋值, 这里先占位 —— 二采未启用时
     # 闸门必须看到 None 而不是 NameError。
     _refine_base_snapshot = None
+    # v14.404: 渐进低分辨率腿旁路开关, 由双下拉 v2.0 SelfLift 档置 True;
+    # 普通二采路径保持 False。二采段头先占位, 避免非渐进档 NameError。
+    _prog_enabled = False
+    _prog_transition = 0
     if refine_enable:
         try:
             _r_factor = float(refine_upscale_factor)
@@ -7681,7 +7712,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # 分块二采把 attention workspace 从 x2.0 的 4.5GB 压到 ~1.1GB,
                 # 24GB 卡足以原地跑满原倍率; 只有分块也放不下时才真正降档。
                 _auto_tiled = False
-                if (not tiled_refine) and (_chosen2 is None or _chosen2 < _orig_f - 1e-6):
+                if (not tiled_refine) and (not _prog_enabled) and (_chosen2 is None or _chosen2 < _orig_f - 1e-6):
                     _ws_tiled_tbl = {1.0: 0.8, 1.5: 0.9, 2.0: 1.1}
                     _ws_tiled = _ws_tiled_tbl.get(round(_orig_f, 1), 1.1)
                     if min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tiled - 3.0 >= 10.0:
@@ -7898,7 +7929,20 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # ManualSigmas 直连)优先, 二采完全按外部 sigma 曲线执行 —— 与参考
             # 插件 Refine 节点原版行为一致; 未接时回退内部 beta 调度。
             _r_sigmas_ext = _ff_sigmas_override_tensor(refine_sigmas)
-            if _r_sigmas_ext is not None:
+            if _prog_enabled:
+                # v14.404: 渐进低清腿档 —— 整条 v2.0 4 步曲线(含 transition_step 切点),
+                # 交给 progressive_sample 内部按切点切低清/高清腿, 不再切低噪段。
+                try:
+                    _r_sigmas, _prog_transition = _bsai_selflift20_split(
+                        model, tag="渐进二采")
+                    print(f"[H3 Extender] v14.404 渐进二采: 整条 σ 表 "
+                          f"({int(_r_sigmas.shape[0])} 段), transition_step={_prog_transition}",
+                          flush=True)
+                except Exception as _prog_sig_err:
+                    print(f"[H3 Extender] v14.404 渐进 σ 曲线生成失败, 回退内部调度: "
+                          f"{type(_prog_sig_err).__name__}: {_prog_sig_err}", flush=True)
+                    _r_sigmas = None
+            elif _r_sigmas_ext is not None:
                 _r_sigmas = _r_sigmas_ext
                 print(f"[H3 Extender] v14.238 Director极速二采: 使用外接 SIGMAS "
                       f"({int(_r_sigmas_ext.shape[0])} 段), 覆盖内部 beta "
@@ -7936,7 +7980,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # prepare_noise + CONST 加噪, 把"从切点续算"变成"逐段重画", 且段间各带
             # 一套独立噪声, 直接毁掉这条 8 步曲线的连续性。该档的 token 压力由空间
             # 分块(tile 16 + overlap 128)消化。
-            if _FF_SPLIT_SIGMA_MODE:
+            if _FF_SPLIT_SIGMA_MODE or _prog_enabled:
                 _use_temporal = False
                 temporal_chunk_tokens = 0
             # v2.02b: chunk 过小(如当开关填 1)会切成大量单 token 段, 每段都要完整跑
@@ -8110,7 +8154,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 不再把 N 块相位不一致的预测求平均 → 没有低频轰鸣, 音频也能照常
             # 参与二采重绘。锁定会上游 v14.196 已按步数条件处理。
             if not _use_temporal:
-                if _FF_SPLIT_SIGMA_MODE:
+                if _FF_SPLIT_SIGMA_MODE or _prog_enabled:
                     # v14.401: 「BSAI6+2高低噪采样」—— 一采在切点 σ 收工, 输出的 latent
                     # 就是 σ·ε+(1-σ)·x0 的半噪底。再走 CONST 加噪会把等效噪声叠到
                     # σ≈0.92(切点 0.721), 2 步二采等于从零重画 → 必须沿用一采的噪声
@@ -8224,430 +8268,431 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # load_model_gpu 同步加载, OOM 抛异常可走下方 fallback, 不静默卡死.
             _refine_model = model  # v14.142: 二采用模型（DynamicVRAM 时替换为 non-dynamic delegate）
             _ext_resv_orig = None  # v14.142: delegate 路径进入前的 EXTRA_RESERVED_VRAM 原值
-            try:
-                import torch as _torch3
-                import comfy.model_management as _mm3
-                # v1.54: 一采后 allocated≈3.7GB(显存碎片/cache) 不代表模型驻留——原判断
-                # `allocated<1.0` 会漏判(3.75>1.0 跳过加载), 二采 0 驻留全流式,
-                # 每步 21.8GB 换页 → 实测 209s/it. 改以 model.loaded_size() 判断
-                # 实际权重驻留, <12GB 即主动重驻留(reserve 5.5GB 预算: 驻留 ~11-16GB,
-                # 尾部 offload, 比全流式少换一半以上权重).
-                _res_gb = 0.0
+            if not _prog_enabled:
                 try:
-                    _res_gb = model.loaded_size() / 1024 ** 3
-                except Exception:
-                    pass
-                if _res_gb < 12.0:
-                    # v1.89: DynamicVRAM 模式检测——模型 is_dynamic() 时 load_models_gpu
-                    # 只重新 staged(不真正驻留), 且 staged ~20GB 分配占满显存, 分块
-                    # 初始化死等 staged 完成 -> 死锁(4090 实测: resident=0.0GB,
-                    # 卡 0/6 Model Initializing)。dynamic 模式跳过手动重驻留,
-                    # 交 DynamicVRAM 自身调度(一采同路径实测正常)。
-                    # v1.89b: is_dynamic() 是 ModelPatcher 方法(model_patcher.py L403),
-                    # 直接调 model.is_dynamic(), 不要取 model.model(v1.89 误写导致检测失效)。
+                    import torch as _torch3
+                    import comfy.model_management as _mm3
+                    # v1.54: 一采后 allocated≈3.7GB(显存碎片/cache) 不代表模型驻留——原判断
+                    # `allocated<1.0` 会漏判(3.75>1.0 跳过加载), 二采 0 驻留全流式,
+                    # 每步 21.8GB 换页 → 实测 209s/it. 改以 model.loaded_size() 判断
+                    # 实际权重驻留, <12GB 即主动重驻留(reserve 5.5GB 预算: 驻留 ~11-16GB,
+                    # 尾部 offload, 比全流式少换一半以上权重).
+                    _res_gb = 0.0
                     try:
-                        _is_dyn = bool(model.is_dynamic())
+                        _res_gb = model.loaded_size() / 1024 ** 3
                     except Exception:
-                        _is_dyn = False
-                    if _is_dyn:
-                        # v14.142 (2026-10-13): DynamicVRAM 二采 0 驻留全流式换页根治。
-                        # 根因: DynamicVRAM 开启时一采后模型被完全卸载(allocated≈0GB),
-                        # 二采交 staged 调度 = 每步 21.8GB CPU↔GPU 逐层换页 → 实测 637s/it
-                        # (历史同根因: v1.54 209s、v1.87 313s、v1.90 分块 900s/步)。
-                        # 修复: 用官方 get_non_dynamic_delegate()/clone(disable_dynamic=True)
-                        # 生成非 dynamic delegate, 对 delegate 走标准 load_models_gpu 部分驻留
-                        # (reserve 预算内驻留 + offload 尾部, 换页量减 2/3, 提速 2-3 倍)。
-                        # delegate 与原 model 共享底层权重(模型缓存命中), 采样语义不变;
-                        # 失败回退原路径(维持现状, 不会更糟)。
+                        pass
+                    if _res_gb < 12.0:
+                        # v1.89: DynamicVRAM 模式检测——模型 is_dynamic() 时 load_models_gpu
+                        # 只重新 staged(不真正驻留), 且 staged ~20GB 分配占满显存, 分块
+                        # 初始化死等 staged 完成 -> 死锁(4090 实测: resident=0.0GB,
+                        # 卡 0/6 Model Initializing)。dynamic 模式跳过手动重驻留,
+                        # 交 DynamicVRAM 自身调度(一采同路径实测正常)。
+                        # v1.89b: is_dynamic() 是 ModelPatcher 方法(model_patcher.py L403),
+                        # 直接调 model.is_dynamic(), 不要取 model.model(v1.89 误写导致检测失效)。
                         try:
-                            _r_ws_dyn = _ws_tbl.get(round(_r_factor, 1), 2.6)
-                            _r_resv_dyn = _model_gb2 - (_gpu_total_gb2 - _r_ws_dyn - 3.0 - 1.5)
-                            _r_resv_dyn = max(3.0, min(8.0, _r_resv_dyn))
-                            if tiled_refine:
-                                _r_resv_dyn = max(_r_resv_dyn, 7.5)
-                            _r_delegate_dyn = None
+                            _is_dyn = bool(model.is_dynamic())
+                        except Exception:
+                            _is_dyn = False
+                        if _is_dyn:
+                            # v14.142 (2026-10-13): DynamicVRAM 二采 0 驻留全流式换页根治。
+                            # 根因: DynamicVRAM 开启时一采后模型被完全卸载(allocated≈0GB),
+                            # 二采交 staged 调度 = 每步 21.8GB CPU↔GPU 逐层换页 → 实测 637s/it
+                            # (历史同根因: v1.54 209s、v1.87 313s、v1.90 分块 900s/步)。
+                            # 修复: 用官方 get_non_dynamic_delegate()/clone(disable_dynamic=True)
+                            # 生成非 dynamic delegate, 对 delegate 走标准 load_models_gpu 部分驻留
+                            # (reserve 预算内驻留 + offload 尾部, 换页量减 2/3, 提速 2-3 倍)。
+                            # delegate 与原 model 共享底层权重(模型缓存命中), 采样语义不变;
+                            # 失败回退原路径(维持现状, 不会更糟)。
                             try:
-                                if hasattr(model, "get_non_dynamic_delegate"):
-                                    _r_delegate_dyn = model.get_non_dynamic_delegate()
-                            except Exception:
+                                _r_ws_dyn = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                                _r_resv_dyn = _model_gb2 - (_gpu_total_gb2 - _r_ws_dyn - 3.0 - 1.5)
+                                _r_resv_dyn = max(3.0, min(8.0, _r_resv_dyn))
+                                if tiled_refine:
+                                    _r_resv_dyn = max(_r_resv_dyn, 7.5)
                                 _r_delegate_dyn = None
-                            if _r_delegate_dyn is None:
-                                _r_delegate_dyn = model.clone(disable_dynamic=True)
-                            # v14.143 (2026-10-13): 曾以为 delegate 是 cached_patcher_init 重新
-                            # 加载的全新模型对象, KJNodes 补丁(MethodType 绑定原模型 block 实例)
-                            # 被 clone 复制后必然错位 -> 删掉补丁走原生 forward。实机证明这是
-                            # 错误方向(v14.144 实测): 全幅 latent 中间激活暴涨到 6.35GB
-                            # (allocated 18.05GB = 驻留 11.7 + 中间 6.35), Sol-Attn workspace
-                            # 6.33GB 挤不下(24.38 > 23.86, 差 0.5GB), 连 sage 3.03GB 也失败,
-                            # 依次降级到 pytorch attention, 二采失去稀疏加速。
-                            # 参考插件(v14.82, 用户实测二采 240s/步 无雪花)恰恰是【保留
-                            # KJNodes lowmem 分块 + Sol-Attn 的原 model 重驻留】: qkv GEMM 后
-                            # 立即释放 h/qkv 缓冲 + minimax_head_chunks 按 head 分组, 中间
-                            # 激活被压到 ~1GB 级, Sol-Attn workspace 才有空间。
-                            # v14.145 正确修法: 不是删除补丁, 而是在 delegate 上【重新绑定】
-                            # KJNodes 补丁到 delegate 自己的 block/attn 实例(MethodType 的
-                            # self 指向 delegate 对象, 消除 clone 复制导致的错位), 并从原
-                            # model 恢复 minimax_head_chunks / sol_take_forward。
-                            try:
-                                import sys as _sys_kn145
-                                import types as _types_kn145
-                                _kj_mod145 = None
-                                for _m145 in list(_sys_kn145.modules.values()):
-                                    _mf145 = getattr(_m145, "__file__", "") or ""
-                                    if _mf145.replace("\\", "/").endswith("nodes/minimax_nodes.py"):
-                                        _kj_mod145 = _m145
-                                        break
-                                if _kj_mod145 is None:
-                                    import importlib.util as _ilu_kn145
-                                    _kj_path145 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                                                "..", "ComfyUI-KJNodes", "nodes", "minimax_nodes.py")
-                                    if os.path.exists(_kj_path145):
-                                        _kj_spec145 = _ilu_kn145.spec_from_file_location("bsai_kj_minimax145", _kj_path145)
-                                        _kj_mod145 = _ilu_kn145.module_from_spec(_kj_spec145)
-                                        _kj_spec145.loader.exec_module(_kj_mod145)
-                                _r_deleg_diff145 = _r_delegate_dyn.get_model_object("diffusion_model")
-                                _r_deleg_blocks145 = getattr(_r_deleg_diff145, "blocks", None)
-                                if (_kj_mod145 is not None
-                                        and getattr(_kj_mod145, "minimax_block_lowmem_forward", None)
-                                        and _r_deleg_blocks145):
-                                    for _bi145, _blk145 in enumerate(_r_deleg_blocks145):
-                                        _r_delegate_dyn.object_patches[f"diffusion_model.blocks.{_bi145}.forward"] = \
-                                            _types_kn145.MethodType(_kj_mod145.minimax_block_lowmem_forward, _blk145)
-                                        _attn145 = getattr(_blk145, "attn", None)
-                                        if _attn145 is not None and hasattr(_attn145, "qkv_proj"):
-                                            _r_delegate_dyn.object_patches[f"diffusion_model.blocks.{_bi145}.attn.forward"] = \
-                                                _types_kn145.MethodType(_kj_mod145.minimax_attn_lowmem_forward, _attn145)
-                                    # 从原 model 恢复 KJNodes 写入的 transformer_options 键
-                                    _r_to145 = _r_delegate_dyn.model_options.get("transformer_options", {})
-                                    _r_to_orig145 = model.model_options.get("transformer_options", {})
-                                    if isinstance(_r_to145, dict) and isinstance(_r_to_orig145, dict):
-                                        if "minimax_head_chunks" in _r_to_orig145:
-                                            _r_to145["minimax_head_chunks"] = _r_to_orig145["minimax_head_chunks"]
-                                        if "sol_take_forward" in _r_to_orig145:
-                                            _r_to145["sol_take_forward"] = _r_to_orig145["sol_take_forward"]
-                                        # v14.179 (2026-10-23): 回退 v14.166 的 head_chunks 4->1。
-                                        # 实测: v14.166 把 delegate head 分组 4->1 后, 每块走
-                                        # KJNodes 分组稀疏的注意力退化成全 head dense 路径,
-                                        # 8 块二采 545s/步 > v14.149(4块+head4) 399s/步。
-                                        # 恢复 head 分组 4, 让 KJNodes 低显存分组生效。
-                                        # (v14.166 注释称"单次并行 kernel 注意力减半"与实机不符)
-                                        _r_hc166 = int(_r_to145.get("minimax_head_chunks", 4))
-                                        _r_to145["minimax_head_chunks"] = 4
-                                        if _r_hc166 != 4:
-                                            print(f"[H3 Extender] v14.179 二采 delegate head_chunks "
-                                                  f"{_r_hc166}->4 (回退 v14.166, 恢复 KJNodes 分组稀疏)")
-                                    print(f"[H3 Extender] v14.145 KJNodes 低显存补丁已重建绑定到 delegate({len(_r_deleg_blocks145)} blocks)")
-                                else:
-                                    print(f"[H3 Extender] v14.145 KJNodes 补丁重建跳过(模块/blocks 不可用), 走原生 forward")
-                            except Exception as _re145:
-                                print(f"[H3 Extender] v14.145 KJNodes 补丁重建失败(回退原生 forward): {_re145}")
-                            # v14.144 (2026-10-13): Sol-Attn workspace 让位——曾因原生 forward
-                            # 中间激活 6.35GB 挤爆, 临时把 reserve 上调 2.5GB。v14.145 恢复
-                            # KJNodes lowmem 分块(head 分组)后中间激活与 Sol-Attn workspace
-                            # 同步缩小(minimax_head_chunks 使 kernel 内部暂存随 head 组缩水),
-                            # 还原为参考插件标准 reserve 公式(与 v14.82 逐行一致, 实测 240s/步)。
-                            # 检测 Sol-Attn 挂载键仅用于日志提示, 不再额外让位。
-                            try:
-                                _r_to3 = _r_delegate_dyn.model_options.get("transformer_options", {})
-                                if isinstance(_r_to3, dict) and (
-                                        _r_to3.get("optimized_attention_override") or _r_to3.get("sol_compose")):
-                                    print(f"[H3 Extender] v14.145 Sol-Attn 已挂载, 走 KJNodes head 分组稀疏路径")
-                            except Exception:
-                                pass
-                            try:
-                                _ext_resv_orig = _mm3.EXTRA_RESERVED_VRAM
-                            except Exception:
-                                _ext_resv_orig = None
-                            _mm3.EXTRA_RESERVED_VRAM = int(_r_resv_dyn * 1024 ** 3)
-                            _mm3.load_models_gpu([_r_delegate_dyn])
-                            _torch3.cuda.synchronize()
-                            try:
-                                _res2d = _r_delegate_dyn.loaded_size() / 1024 ** 3
-                                print(f"[H3 Extender] v14.145 DynamicVRAM 二采改用 non-dynamic delegate 驻留(KJNodes补丁重建): "
-                                      f"resident={_res2d:.1f}GB / total={_r_delegate_dyn.model_size()/1024**3:.1f}GB "
-                                      f"reserve={_r_resv_dyn:.1f}GB")
-                            except Exception:
-                                pass
-                            _refine_model = _r_delegate_dyn
-                        except Exception as _de142:
-                            _refine_model = model
-                            print(f"[H3 Extender] v14.145 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
-                        if _refine_model is model:
-                            print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
-                        else:
-                            print(f"[H3 Extender] v14.145 delegate 已接管二采采样模型(非 DynamicVRAM 驻留路径)")
-                    else:
-                        # v1.87: 分块二采也走重驻留。v1.68 曾对 tile_count>1 跳过重载
-                        # 导致二采 0 loaded + 20GB 全流式换页(实测 313s/it, 极速-VDN
-                        # 二采 3步x4tile ≈ 60min)。实测 reserve 8.0 预算下 19.5GB 基座
-                        # 可驻留 ~13.6GB + offload ~6GB, 换页量减少 2/3, 分块采样提速
-                        # 2-3 倍。prepare(CONST加噪)在 load 之前已完成, 不会被卸。
-                        # v1.65: 二采前驻留控制——先卸载再按 reserve 重载, 让加载器按
-                        # reserve 预算重新平衡驻留量, 给 Sol-Attn workspace 让位.
-                        # 实测 19:34 x2.0: 直接 load_models_gpu 全量驻留 21.72GB,
-                        # Sol-Attn kernel 603MB workspace 分不出 → OOM.
-                        # reserve = 模型 - (total - ws - 3GB 余量 - 1.5GB conds):
-                        #   x2.0(ws4.5): ~6.8GB -> 驻留 ~15GB
-                        #   x1.5(ws2.6): ~4.9GB -> 驻留 ~17GB
-                        #   x1.0(ws1.5): ~4.2GB -> 驻留 ~17.5GB
-                        try:
-                            _ws_need2 = _ws_tbl.get(round(_r_factor, 1), 2.6)
-                            _r_reserve_gb = _model_gb2 - (_gpu_total_gb2 - _ws_need2 - 3.0 - 1.5)
-                            _r_reserve_gb = max(3.0, min(8.0, _r_reserve_gb))
-                            # v1.88: 分块二采时 ComfyUI 按全幅估算 workspace(ws_need2)并判断
-                            # free < ws+2GB 就卸载驻留模型(实测: reserve5.0->驻留16.3GB free5.2GB
-                            # <6.5GB -> Unloaded到0 loaded -> 分块forward死锁0/3)。
-                            # v14.341 分块下限 7.5 -> v14.377 5.0: 分块后每 tile 只跑
-                            # ~1/n tokens, per-tile Sol-Attn workspace 远小于全幅
-                            # ws_need2。7.5GB 下限让模型只驻留 13.5GB / offload 6.2GB,
-                            # 每 tile 每层都要过 PCIe 搬权重(实机 py-spy: ~33% 主机
-                            # 时间在 cast_bias_weight/cast_to, GPU 仅 ~100W/450W)。
-                            # v14.224 empty_cache 已解决 cached 池误判; 本段下方的
-                            # v14.250 探针(py-spy 版 v14.377: 分块时按 per-tile 判定)
-                            # 会在 free 真不够时自适应让位抬 reserve, 不会 OOM。
-                            # 下限 5.0GB: 模型驻留 ~17GB / offload ~2.5GB。
-                            # v14.396: 折减条件从仅空间分块(tiled_refine)扩展到时间分块
-                            # (_use_temporal)。纯时间分块段每前向只跑 1/n 帧, 用不着全帧
-                            # workspace; 旧路径仍按全帧 ws 公式给高 reserve, resident 被压到
-                            # ~14.4GB / offload ~6.3GB, 每段都过 PCIe 搬权重换页。真不够时
-                            # 下方 v14.381 per-tile 探针会自适应把 reserve 抬回, 不会 OOM。
-                            if tiled_refine or locals().get("_use_temporal", False):
-                                _r_reserve_gb = max(_r_reserve_gb, 5.0)
-                                # v14.382 (2026-11-12): 分块段按 per-tile workspace
-                                # 定预算。v14.240 的「上次实测 reserve 提示」是**全帧**
-                                # 二采测出来的(6.8GB), 复用到分块段会把 resident 压到
-                                # 14.4GB / offload 6.3GB —— 实机 py-spy 常驻
-                                # cast_bias_weight, 每块 >150s; 而一采 17.4GB /
-                                # offload 3.2GB 时 710k tokens 只要 65s/步。分块段
-                                # 单块只有 1/n tokens, 用不着全帧 workspace, 因此
-                                # 这里把上限压到 5.5GB(驻留 ~17GB), 真不够时下方
-                                # v14.381 per-tile 探针会自适应抬回。
-                                _r_reserve_gb = min(_r_reserve_gb, 5.5)
-                            # v14.240: 用上次实测的 reserve(见本文件下方 workspace 探针)。
-                            # 链式渲染 clip>=2 直接命中, 省一次全卸重驻留。
-                            # v14.382: 分块段不复用全帧测出来的提示(见上)。
-                            _hint240 = None if (tiled_refine or locals().get("_use_temporal", False)) else _REFINE_WS_RESERVE_HINT.get(round(_r_factor, 2))
-                            if _hint240:
-                                _r_reserve_gb = max(_r_reserve_gb, min(8.0, _hint240))
-                                print(f"[H3 Extender] v14.240 复用上次实测 reserve "
-                                      f"{_r_reserve_gb:.1f}GB (x{_r_factor}), 免重驻留")
-                            _ff_unregister_model(model, label="二采-reserve-branch")
-                            _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
-                        except Exception:
-                            _r_reserve_gb = 5.5
-                            _ff_unregister_model(model, label="二采-reserve-fallback")
-                            _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
-                        print(f"[H3 Extender] Refine 二采前 DiT 驻留 {_res_gb:.1f}GB < 12GB, 重新驻留到 VRAM (reserve->{_r_reserve_gb:.1f}GB) ...")
-                        _mm3.load_models_gpu([model])
-                        _torch3.cuda.synchronize()
-                        try:
-                            _res2 = model.loaded_size() / 1024 ** 3
-                            print(f"[H3 Extender] Refine 二采前 DiT 驻留: resident={_res2:.1f}GB / total={model.model_size()/1024**3:.1f}GB")
-                        except Exception:
-                            _res2 = 0.0
-                            pass
-                        # v14.383 (2026-11-12): 分块二采的 reserve 改成**按实测空闲
-                        # 显存闭环定档**, 不再用任何经验常数。
-                        # 实机两次对照(同一张卡 24GB, x2.0 264k/块):
-                        #   reserve 8.9 -> resident 10.9GB / free ~3.5GB -> 每块 108.4s
-                        #   reserve 6.8 -> resident 14.4GB / free 0.2GB  -> 单块 forward
-                        #     内部反复腾挪权重, py-spy 全命中 cast_bias_weight, tile 1
-                        #     >20min 未结束(GPU 99W)
-                        # 结论: 决定速度的不是「驻留多少」, 而是**还剩多少空闲显存** ——
-                        # free≈0 时每个 block 的中间张量都逼出一次权重换页, 比驻留少
-                        # 3GB 还糟。目标带: free 3.0-6.2GB(定档 3.8GB), 迭代 3 次收敛。
-                        _tiled383 = bool(tiled_refine)
-                        _tok383 = 0
-                        try:
-                            _m383, _ = _ff_extract_members(samples)
-                            if _m383 is not None and getattr(_m383[0], "ndim", 0) >= 4:
-                                _tok383 = (int(_m383[0].shape[2]) * int(_m383[0].shape[-2])
-                                           * int(_m383[0].shape[-1]))
-                                if _tok383 > 130000:
-                                    _tiled383 = True
-                        except Exception:
-                            _tok383 = 0
-                        if _tiled383:
-                            try:
-                                import gc as _gc383
-                                _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
-                                _it383 = 0
-                                _floor383 = _FF_REFINE_FREE_FLOOR_GB
-                                _tgt383 = _FF_REFINE_FREE_TARGET_GB
-                                _ceiling383 = max(6.2, _tgt383 + 2.2)
-                                _starved383 = _free383 < _floor383
-                                while _it383 < _FF_REFINE_FREE_ITERS and (_free383 < _floor383 or _free383 > _ceiling383):
-                                    _it383 += 1
-                                    if _free383 < _floor383:
-                                        # 低于安全下限: 单调抬 reserve(多卸 DiT), 本回合不再降回,
-                                        # 避免旧版在 1.9<->7.5GB 间振荡后停在 free=2.7GB 触发 GPU 复位。
-                                        _d383 = (_tgt383 - _free383)
-                                        _starved383 = True
-                                    else:
-                                        if _starved383:
-                                            break
-                                        _d383 = -min(_free383 - _tgt383, 2.5)
-                                    _new383 = max(2.5, min(10.0, _r_reserve_gb + _d383))
-                                    if abs(_new383 - _r_reserve_gb) < 0.2:
-                                        break
-                                    _ff_unregister_model(model, label="二采-free-vram-loop")
-                                    _mm3.EXTRA_RESERVED_VRAM = int(_new383 * 1024 ** 3)
-                                    _mm3.load_models_gpu([model])
-                                    _torch3.cuda.synchronize()
-                                    _gc383.collect()
-                                    _torch3.cuda.empty_cache()
-                                    _r_reserve_gb = _new383
-                                    _res383 = model.loaded_size() / 1024 ** 3
-                                    _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
-                                    print(f"[H3 Extender] v14.383 二采自由显存闭环 {_it383}/{_FF_REFINE_FREE_ITERS}: "
-                                          f"reserve={_r_reserve_gb:.1f}GB resident={_res383:.1f}GB "
-                                          f"free={_free383:.1f}GB (目标 {_tgt383:.1f}GB, 下限 {_floor383:.1f}GB)")
-                                # 定档后再回收一次 cached 池并重测; 仍低于下限则醒目告警, 避免前向触发 GPU 复位。
-                                _gc383.collect()
-                                _torch3.cuda.empty_cache()
-                                _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
-                                if _free383 < _floor383:
-                                    print(f"[H3 Extender] v14.421 二采显存头告警: 定档后 free={_free383:.1f}GB "
-                                          f"< 下限 {_floor383:.1f}GB, 前向存在 GPU 复位风险; 可再降 "
-                                          f"BSAI_H3_REFINE_FACTOR 或开启 NO_REDRAW 纯超分", flush=True)
-                                print(f"[H3 Extender] v14.383 二采驻留定档: reserve={_r_reserve_gb:.1f}GB "
-                                      f"resident={model.loaded_size()/1024**3:.1f}GB "
-                                      f"free={_free383:.1f}GB (分块 {_tok383//1000}k tokens/块几何, "
-                                      f"迭代 {_it383} 次)")
-                            except Exception as _e383:
-                                print(f"[H3 Extender] v14.383 二采自由显存闭环失败, 沿用 reserve="
-                                      f"{_r_reserve_gb:.1f}GB: {_e383}")
-                        # v1.65: 验证 Sol-Attn workspace 空间, 不足时醒目提示(采样走
-                        # lowvram 换页兜底, 不会静默 OOM; 下次跑会在预算区提前降级).
-                        # v14.224: free=0 多为 torch caching allocator 的 cached 池未释放
-                        # (驻留 17.5GB + cached 4.5GB 后驱动 free≈0), 先主动 empty_cache
-                        # 回收, 重查仍不足才提示——避免 Sol-Attn kernel workspace 分配
-                        # 失败导致每步 1401s 的全量换页风暴.
-                        try:
-                            import torch as _torch65
-                            _f65, _t65 = _torch65.cuda.mem_get_info()
-                            _free65 = _f65 / 1024 ** 3
-                            _ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)
-                            _probe_ok240 = True
-                            if _free65 < _ws65 + 2.0:
-                                _fixed65 = False
                                 try:
-                                    import gc as _gc65b
-                                    _gc65b.collect()
-                                    _torch65.cuda.synchronize()
-                                    _torch65.cuda.empty_cache()
-                                    _f65b, _ = _torch65.cuda.mem_get_info()
-                                    _free65 = _f65b / 1024 ** 3
-                                    _fixed65 = _free65 >= _ws65 + 2.0
+                                    if hasattr(model, "get_non_dynamic_delegate"):
+                                        _r_delegate_dyn = model.get_non_dynamic_delegate()
+                                except Exception:
+                                    _r_delegate_dyn = None
+                                if _r_delegate_dyn is None:
+                                    _r_delegate_dyn = model.clone(disable_dynamic=True)
+                                # v14.143 (2026-10-13): 曾以为 delegate 是 cached_patcher_init 重新
+                                # 加载的全新模型对象, KJNodes 补丁(MethodType 绑定原模型 block 实例)
+                                # 被 clone 复制后必然错位 -> 删掉补丁走原生 forward。实机证明这是
+                                # 错误方向(v14.144 实测): 全幅 latent 中间激活暴涨到 6.35GB
+                                # (allocated 18.05GB = 驻留 11.7 + 中间 6.35), Sol-Attn workspace
+                                # 6.33GB 挤不下(24.38 > 23.86, 差 0.5GB), 连 sage 3.03GB 也失败,
+                                # 依次降级到 pytorch attention, 二采失去稀疏加速。
+                                # 参考插件(v14.82, 用户实测二采 240s/步 无雪花)恰恰是【保留
+                                # KJNodes lowmem 分块 + Sol-Attn 的原 model 重驻留】: qkv GEMM 后
+                                # 立即释放 h/qkv 缓冲 + minimax_head_chunks 按 head 分组, 中间
+                                # 激活被压到 ~1GB 级, Sol-Attn workspace 才有空间。
+                                # v14.145 正确修法: 不是删除补丁, 而是在 delegate 上【重新绑定】
+                                # KJNodes 补丁到 delegate 自己的 block/attn 实例(MethodType 的
+                                # self 指向 delegate 对象, 消除 clone 复制导致的错位), 并从原
+                                # model 恢复 minimax_head_chunks / sol_take_forward。
+                                try:
+                                    import sys as _sys_kn145
+                                    import types as _types_kn145
+                                    _kj_mod145 = None
+                                    for _m145 in list(_sys_kn145.modules.values()):
+                                        _mf145 = getattr(_m145, "__file__", "") or ""
+                                        if _mf145.replace("\\", "/").endswith("nodes/minimax_nodes.py"):
+                                            _kj_mod145 = _m145
+                                            break
+                                    if _kj_mod145 is None:
+                                        import importlib.util as _ilu_kn145
+                                        _kj_path145 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                                    "..", "ComfyUI-KJNodes", "nodes", "minimax_nodes.py")
+                                        if os.path.exists(_kj_path145):
+                                            _kj_spec145 = _ilu_kn145.spec_from_file_location("bsai_kj_minimax145", _kj_path145)
+                                            _kj_mod145 = _ilu_kn145.module_from_spec(_kj_spec145)
+                                            _kj_spec145.loader.exec_module(_kj_mod145)
+                                    _r_deleg_diff145 = _r_delegate_dyn.get_model_object("diffusion_model")
+                                    _r_deleg_blocks145 = getattr(_r_deleg_diff145, "blocks", None)
+                                    if (_kj_mod145 is not None
+                                            and getattr(_kj_mod145, "minimax_block_lowmem_forward", None)
+                                            and _r_deleg_blocks145):
+                                        for _bi145, _blk145 in enumerate(_r_deleg_blocks145):
+                                            _r_delegate_dyn.object_patches[f"diffusion_model.blocks.{_bi145}.forward"] = \
+                                                _types_kn145.MethodType(_kj_mod145.minimax_block_lowmem_forward, _blk145)
+                                            _attn145 = getattr(_blk145, "attn", None)
+                                            if _attn145 is not None and hasattr(_attn145, "qkv_proj"):
+                                                _r_delegate_dyn.object_patches[f"diffusion_model.blocks.{_bi145}.attn.forward"] = \
+                                                    _types_kn145.MethodType(_kj_mod145.minimax_attn_lowmem_forward, _attn145)
+                                        # 从原 model 恢复 KJNodes 写入的 transformer_options 键
+                                        _r_to145 = _r_delegate_dyn.model_options.get("transformer_options", {})
+                                        _r_to_orig145 = model.model_options.get("transformer_options", {})
+                                        if isinstance(_r_to145, dict) and isinstance(_r_to_orig145, dict):
+                                            if "minimax_head_chunks" in _r_to_orig145:
+                                                _r_to145["minimax_head_chunks"] = _r_to_orig145["minimax_head_chunks"]
+                                            if "sol_take_forward" in _r_to_orig145:
+                                                _r_to145["sol_take_forward"] = _r_to_orig145["sol_take_forward"]
+                                            # v14.179 (2026-10-23): 回退 v14.166 的 head_chunks 4->1。
+                                            # 实测: v14.166 把 delegate head 分组 4->1 后, 每块走
+                                            # KJNodes 分组稀疏的注意力退化成全 head dense 路径,
+                                            # 8 块二采 545s/步 > v14.149(4块+head4) 399s/步。
+                                            # 恢复 head 分组 4, 让 KJNodes 低显存分组生效。
+                                            # (v14.166 注释称"单次并行 kernel 注意力减半"与实机不符)
+                                            _r_hc166 = int(_r_to145.get("minimax_head_chunks", 4))
+                                            _r_to145["minimax_head_chunks"] = 4
+                                            if _r_hc166 != 4:
+                                                print(f"[H3 Extender] v14.179 二采 delegate head_chunks "
+                                                      f"{_r_hc166}->4 (回退 v14.166, 恢复 KJNodes 分组稀疏)")
+                                        print(f"[H3 Extender] v14.145 KJNodes 低显存补丁已重建绑定到 delegate({len(_r_deleg_blocks145)} blocks)")
+                                    else:
+                                        print(f"[H3 Extender] v14.145 KJNodes 补丁重建跳过(模块/blocks 不可用), 走原生 forward")
+                                except Exception as _re145:
+                                    print(f"[H3 Extender] v14.145 KJNodes 补丁重建失败(回退原生 forward): {_re145}")
+                                # v14.144 (2026-10-13): Sol-Attn workspace 让位——曾因原生 forward
+                                # 中间激活 6.35GB 挤爆, 临时把 reserve 上调 2.5GB。v14.145 恢复
+                                # KJNodes lowmem 分块(head 分组)后中间激活与 Sol-Attn workspace
+                                # 同步缩小(minimax_head_chunks 使 kernel 内部暂存随 head 组缩水),
+                                # 还原为参考插件标准 reserve 公式(与 v14.82 逐行一致, 实测 240s/步)。
+                                # 检测 Sol-Attn 挂载键仅用于日志提示, 不再额外让位。
+                                try:
+                                    _r_to3 = _r_delegate_dyn.model_options.get("transformer_options", {})
+                                    if isinstance(_r_to3, dict) and (
+                                            _r_to3.get("optimized_attention_override") or _r_to3.get("sol_compose")):
+                                        print(f"[H3 Extender] v14.145 Sol-Attn 已挂载, 走 KJNodes head 分组稀疏路径")
                                 except Exception:
                                     pass
-                                if _fixed65:
-                                    print(f"[H3 Extender] v14.224 workspace 修复: "
-                                          f"empty_cache 回收 cached 池后 free={_free65:.1f}GB "
-                                          f">= ws {_ws65:.1f}GB+2GB, Sol-Attn workspace 可分配")
-                                else:
-                                    # v14.250 (2026-10-29): 探针改为「tokens > 130k 时
-                                    # 强制让位, 不试分配」。v14.240 的试分配探针在
-                                    # x1.0 218k 场景下"通过"了, 但实测 992~1339s/it —
-                                    # 因为探针的 2GB 是在采样开始前试分配, 采样起来
-                                    # latent/conds/VAE 中间缓冲挤占后, kernel 被迫走
-                                    # 慢速备用路径。218k > 130k 已触发自动分块, 故
-                                    # 探针直接判定为"不可信", 无条件走让位路径,
-                                    # 保持满驻留不降倍率, 分块后每块 ~55k 在健康区。
-                                    _probe_ok240 = False
-                                    _r_tok_probe250 = 0
+                                try:
+                                    _ext_resv_orig = _mm3.EXTRA_RESERVED_VRAM
+                                except Exception:
+                                    _ext_resv_orig = None
+                                _mm3.EXTRA_RESERVED_VRAM = int(_r_resv_dyn * 1024 ** 3)
+                                _mm3.load_models_gpu([_r_delegate_dyn])
+                                _torch3.cuda.synchronize()
+                                try:
+                                    _res2d = _r_delegate_dyn.loaded_size() / 1024 ** 3
+                                    print(f"[H3 Extender] v14.145 DynamicVRAM 二采改用 non-dynamic delegate 驻留(KJNodes补丁重建): "
+                                          f"resident={_res2d:.1f}GB / total={_r_delegate_dyn.model_size()/1024**3:.1f}GB "
+                                          f"reserve={_r_resv_dyn:.1f}GB")
+                                except Exception:
+                                    pass
+                                _refine_model = _r_delegate_dyn
+                            except Exception as _de142:
+                                _refine_model = model
+                                print(f"[H3 Extender] v14.145 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
+                            if _refine_model is model:
+                                print(f"[H3 Extender] DynamicVRAM 模式: 跳过手动重驻留, 交 DynamicVRAM staged 调度")
+                            else:
+                                print(f"[H3 Extender] v14.145 delegate 已接管二采采样模型(非 DynamicVRAM 驻留路径)")
+                        else:
+                            # v1.87: 分块二采也走重驻留。v1.68 曾对 tile_count>1 跳过重载
+                            # 导致二采 0 loaded + 20GB 全流式换页(实测 313s/it, 极速-VDN
+                            # 二采 3步x4tile ≈ 60min)。实测 reserve 8.0 预算下 19.5GB 基座
+                            # 可驻留 ~13.6GB + offload ~6GB, 换页量减少 2/3, 分块采样提速
+                            # 2-3 倍。prepare(CONST加噪)在 load 之前已完成, 不会被卸。
+                            # v1.65: 二采前驻留控制——先卸载再按 reserve 重载, 让加载器按
+                            # reserve 预算重新平衡驻留量, 给 Sol-Attn workspace 让位.
+                            # 实测 19:34 x2.0: 直接 load_models_gpu 全量驻留 21.72GB,
+                            # Sol-Attn kernel 603MB workspace 分不出 → OOM.
+                            # reserve = 模型 - (total - ws - 3GB 余量 - 1.5GB conds):
+                            #   x2.0(ws4.5): ~6.8GB -> 驻留 ~15GB
+                            #   x1.5(ws2.6): ~4.9GB -> 驻留 ~17GB
+                            #   x1.0(ws1.5): ~4.2GB -> 驻留 ~17.5GB
+                            try:
+                                _ws_need2 = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                                _r_reserve_gb = _model_gb2 - (_gpu_total_gb2 - _ws_need2 - 3.0 - 1.5)
+                                _r_reserve_gb = max(3.0, min(8.0, _r_reserve_gb))
+                                # v1.88: 分块二采时 ComfyUI 按全幅估算 workspace(ws_need2)并判断
+                                # free < ws+2GB 就卸载驻留模型(实测: reserve5.0->驻留16.3GB free5.2GB
+                                # <6.5GB -> Unloaded到0 loaded -> 分块forward死锁0/3)。
+                                # v14.341 分块下限 7.5 -> v14.377 5.0: 分块后每 tile 只跑
+                                # ~1/n tokens, per-tile Sol-Attn workspace 远小于全幅
+                                # ws_need2。7.5GB 下限让模型只驻留 13.5GB / offload 6.2GB,
+                                # 每 tile 每层都要过 PCIe 搬权重(实机 py-spy: ~33% 主机
+                                # 时间在 cast_bias_weight/cast_to, GPU 仅 ~100W/450W)。
+                                # v14.224 empty_cache 已解决 cached 池误判; 本段下方的
+                                # v14.250 探针(py-spy 版 v14.377: 分块时按 per-tile 判定)
+                                # 会在 free 真不够时自适应让位抬 reserve, 不会 OOM。
+                                # 下限 5.0GB: 模型驻留 ~17GB / offload ~2.5GB。
+                                # v14.396: 折减条件从仅空间分块(tiled_refine)扩展到时间分块
+                                # (_use_temporal)。纯时间分块段每前向只跑 1/n 帧, 用不着全帧
+                                # workspace; 旧路径仍按全帧 ws 公式给高 reserve, resident 被压到
+                                # ~14.4GB / offload ~6.3GB, 每段都过 PCIe 搬权重换页。真不够时
+                                # 下方 v14.381 per-tile 探针会自适应把 reserve 抬回, 不会 OOM。
+                                if tiled_refine or locals().get("_use_temporal", False):
+                                    _r_reserve_gb = max(_r_reserve_gb, 5.0)
+                                    # v14.382 (2026-11-12): 分块段按 per-tile workspace
+                                    # 定预算。v14.240 的「上次实测 reserve 提示」是**全帧**
+                                    # 二采测出来的(6.8GB), 复用到分块段会把 resident 压到
+                                    # 14.4GB / offload 6.3GB —— 实机 py-spy 常驻
+                                    # cast_bias_weight, 每块 >150s; 而一采 17.4GB /
+                                    # offload 3.2GB 时 710k tokens 只要 65s/步。分块段
+                                    # 单块只有 1/n tokens, 用不着全帧 workspace, 因此
+                                    # 这里把上限压到 5.5GB(驻留 ~17GB), 真不够时下方
+                                    # v14.381 per-tile 探针会自适应抬回。
+                                    _r_reserve_gb = min(_r_reserve_gb, 5.5)
+                                # v14.240: 用上次实测的 reserve(见本文件下方 workspace 探针)。
+                                # 链式渲染 clip>=2 直接命中, 省一次全卸重驻留。
+                                # v14.382: 分块段不复用全帧测出来的提示(见上)。
+                                _hint240 = None if (tiled_refine or locals().get("_use_temporal", False)) else _REFINE_WS_RESERVE_HINT.get(round(_r_factor, 2))
+                                if _hint240:
+                                    _r_reserve_gb = max(_r_reserve_gb, min(8.0, _hint240))
+                                    print(f"[H3 Extender] v14.240 复用上次实测 reserve "
+                                          f"{_r_reserve_gb:.1f}GB (x{_r_factor}), 免重驻留")
+                                _ff_unregister_model(model, label="二采-reserve-branch")
+                                _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
+                            except Exception:
+                                _r_reserve_gb = 5.5
+                                _ff_unregister_model(model, label="二采-reserve-fallback")
+                                _mm3.EXTRA_RESERVED_VRAM = int(_r_reserve_gb * 1024 ** 3)
+                            print(f"[H3 Extender] Refine 二采前 DiT 驻留 {_res_gb:.1f}GB < 12GB, 重新驻留到 VRAM (reserve->{_r_reserve_gb:.1f}GB) ...")
+                            _mm3.load_models_gpu([model])
+                            _torch3.cuda.synchronize()
+                            try:
+                                _res2 = model.loaded_size() / 1024 ** 3
+                                print(f"[H3 Extender] Refine 二采前 DiT 驻留: resident={_res2:.1f}GB / total={model.model_size()/1024**3:.1f}GB")
+                            except Exception:
+                                _res2 = 0.0
+                                pass
+                            # v14.383 (2026-11-12): 分块二采的 reserve 改成**按实测空闲
+                            # 显存闭环定档**, 不再用任何经验常数。
+                            # 实机两次对照(同一张卡 24GB, x2.0 264k/块):
+                            #   reserve 8.9 -> resident 10.9GB / free ~3.5GB -> 每块 108.4s
+                            #   reserve 6.8 -> resident 14.4GB / free 0.2GB  -> 单块 forward
+                            #     内部反复腾挪权重, py-spy 全命中 cast_bias_weight, tile 1
+                            #     >20min 未结束(GPU 99W)
+                            # 结论: 决定速度的不是「驻留多少」, 而是**还剩多少空闲显存** ——
+                            # free≈0 时每个 block 的中间张量都逼出一次权重换页, 比驻留少
+                            # 3GB 还糟。目标带: free 3.0-6.2GB(定档 3.8GB), 迭代 3 次收敛。
+                            _tiled383 = bool(tiled_refine)
+                            _tok383 = 0
+                            try:
+                                _m383, _ = _ff_extract_members(samples)
+                                if _m383 is not None and getattr(_m383[0], "ndim", 0) >= 4:
+                                    _tok383 = (int(_m383[0].shape[2]) * int(_m383[0].shape[-2])
+                                               * int(_m383[0].shape[-1]))
+                                    if _tok383 > 130000:
+                                        _tiled383 = True
+                            except Exception:
+                                _tok383 = 0
+                            if _tiled383:
+                                try:
+                                    import gc as _gc383
+                                    _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                                    _it383 = 0
+                                    _floor383 = _FF_REFINE_FREE_FLOOR_GB
+                                    _tgt383 = _FF_REFINE_FREE_TARGET_GB
+                                    _ceiling383 = max(6.2, _tgt383 + 2.2)
+                                    _starved383 = _free383 < _floor383
+                                    while _it383 < _FF_REFINE_FREE_ITERS and (_free383 < _floor383 or _free383 > _ceiling383):
+                                        _it383 += 1
+                                        if _free383 < _floor383:
+                                            # 低于安全下限: 单调抬 reserve(多卸 DiT), 本回合不再降回,
+                                            # 避免旧版在 1.9<->7.5GB 间振荡后停在 free=2.7GB 触发 GPU 复位。
+                                            _d383 = (_tgt383 - _free383)
+                                            _starved383 = True
+                                        else:
+                                            if _starved383:
+                                                break
+                                            _d383 = -min(_free383 - _tgt383, 2.5)
+                                        _new383 = max(2.5, min(10.0, _r_reserve_gb + _d383))
+                                        if abs(_new383 - _r_reserve_gb) < 0.2:
+                                            break
+                                        _ff_unregister_model(model, label="二采-free-vram-loop")
+                                        _mm3.EXTRA_RESERVED_VRAM = int(_new383 * 1024 ** 3)
+                                        _mm3.load_models_gpu([model])
+                                        _torch3.cuda.synchronize()
+                                        _gc383.collect()
+                                        _torch3.cuda.empty_cache()
+                                        _r_reserve_gb = _new383
+                                        _res383 = model.loaded_size() / 1024 ** 3
+                                        _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                                        print(f"[H3 Extender] v14.383 二采自由显存闭环 {_it383}/{_FF_REFINE_FREE_ITERS}: "
+                                              f"reserve={_r_reserve_gb:.1f}GB resident={_res383:.1f}GB "
+                                              f"free={_free383:.1f}GB (目标 {_tgt383:.1f}GB, 下限 {_floor383:.1f}GB)")
+                                    # 定档后再回收一次 cached 池并重测; 仍低于下限则醒目告警, 避免前向触发 GPU 复位。
+                                    _gc383.collect()
+                                    _torch3.cuda.empty_cache()
+                                    _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                                    if _free383 < _floor383:
+                                        print(f"[H3 Extender] v14.421 二采显存头告警: 定档后 free={_free383:.1f}GB "
+                                              f"< 下限 {_floor383:.1f}GB, 前向存在 GPU 复位风险; 可再降 "
+                                              f"BSAI_H3_REFINE_FACTOR 或开启 NO_REDRAW 纯超分", flush=True)
+                                    print(f"[H3 Extender] v14.383 二采驻留定档: reserve={_r_reserve_gb:.1f}GB "
+                                          f"resident={model.loaded_size()/1024**3:.1f}GB "
+                                          f"free={_free383:.1f}GB (分块 {_tok383//1000}k tokens/块几何, "
+                                          f"迭代 {_it383} 次)")
+                                except Exception as _e383:
+                                    print(f"[H3 Extender] v14.383 二采自由显存闭环失败, 沿用 reserve="
+                                          f"{_r_reserve_gb:.1f}GB: {_e383}")
+                            # v1.65: 验证 Sol-Attn workspace 空间, 不足时醒目提示(采样走
+                            # lowvram 换页兜底, 不会静默 OOM; 下次跑会在预算区提前降级).
+                            # v14.224: free=0 多为 torch caching allocator 的 cached 池未释放
+                            # (驻留 17.5GB + cached 4.5GB 后驱动 free≈0), 先主动 empty_cache
+                            # 回收, 重查仍不足才提示——避免 Sol-Attn kernel workspace 分配
+                            # 失败导致每步 1401s 的全量换页风暴.
+                            try:
+                                import torch as _torch65
+                                _f65, _t65 = _torch65.cuda.mem_get_info()
+                                _free65 = _f65 / 1024 ** 3
+                                _ws65 = _ws_tbl.get(round(_r_factor, 1), 2.6)
+                                _probe_ok240 = True
+                                if _free65 < _ws65 + 2.0:
+                                    _fixed65 = False
                                     try:
-                                        _r_m_gate250, _ = _ff_extract_members(samples)
-                                        if _r_m_gate250 is not None and getattr(_r_m_gate250[0], "ndim", 0) >= 4:
-                                            _r_tok_probe250 = int(_r_m_gate250[0].shape[2]) * int(_r_m_gate250[0].shape[-2]) * int(_r_m_gate250[0].shape[-1])
+                                        import gc as _gc65b
+                                        _gc65b.collect()
+                                        _torch65.cuda.synchronize()
+                                        _torch65.cuda.empty_cache()
+                                        _f65b, _ = _torch65.cuda.mem_get_info()
+                                        _free65 = _f65b / 1024 ** 3
+                                        _fixed65 = _free65 >= _ws65 + 2.0
                                     except Exception:
                                         pass
-                                    # v14.377: 「>130k 无条件让位」这条门是对**全帧未分块**
-                                    # 的病态规模(n>=440k 时 Sol-Attn 超线性恶化)判的。
-                                    # 分块二采单块只有全帧的 1/5~1/8(实测 709,920 -> 每块
-                                    # 136,068), 继续套这条门会把 per-tile 够用的 workspace
-                                    # 误判成不够, 把刚降下来的 reserve 又弹回 7GB 档。
-                                    # 分块时改走真实试分配: 分配得到就保持满驻留, 分配不到
-                                    # 才让位 —— 不掺任何经验常数。
-                                    # v14.381 (2026-11-12): 这段探针跑在 v14.181 自动分块
-                                    # 决策之前，用的是本函数早先拿到的 tiled_refine 旗标；
-                                    # 而 v14.181 的真判据是「tokens > 130k 就分块」。实测
-                                    # 709,920 tokens 明明走自动分块(每块 272k)，这里却还是
-                                    # False，于是落回「>130k 无条件让位」：reserve 6.8->8.9GB、
-                                    # resident 14.4->10.9GB，每条 forward 多搬 3.4GB 权重，
-                                    # v14.380 实机二采每块 108.4s。改为按**块几何**判 workspace:
-                                    # 单块序列约为全帧的 1/n，workspace 随序列长度缩放。
-                                    _will_tile381 = bool(tiled_refine) or _r_tok_probe250 > 130000
-                                    _ws381 = _ws65
-                                    _ntile381 = 1
-                                    if _will_tile381 and _r_tok_probe250 > 0:
-                                        try:
-                                            _ntile381 = max(1, int(_ff_auto_refine_tile_count(
-                                                samples, 4, tile_overlap)))
-                                        except Exception:
-                                            _ntile381 = 4
-                                        _ws381 = max(2.0, _ws65 * (1.0 / float(_ntile381)) * 1.5)
-                                    _tiled_probe377 = _will_tile381
-                                    if (not _tiled_probe377) and _r_tok_probe250 > 130000:
-                                        print(f"[H3 Extender] v14.250 workspace 探针: tokens={_r_tok_probe250:,} > 130k "
-                                              f"(已触发自动分块), 不试分配直接判定让位 — "
-                                              f"保持满驻留 x{_r_factor}(不降倍率), "
-                                              f"分块后每块 ~{_r_tok_probe250 // 4 // 1000}k 在健康区")
+                                    if _fixed65:
+                                        print(f"[H3 Extender] v14.224 workspace 修复: "
+                                              f"empty_cache 回收 cached 池后 free={_free65:.1f}GB "
+                                              f">= ws {_ws65:.1f}GB+2GB, Sol-Attn workspace 可分配")
+                                    else:
+                                        # v14.250 (2026-10-29): 探针改为「tokens > 130k 时
+                                        # 强制让位, 不试分配」。v14.240 的试分配探针在
+                                        # x1.0 218k 场景下"通过"了, 但实测 992~1339s/it —
+                                        # 因为探针的 2GB 是在采样开始前试分配, 采样起来
+                                        # latent/conds/VAE 中间缓冲挤占后, kernel 被迫走
+                                        # 慢速备用路径。218k > 130k 已触发自动分块, 故
+                                        # 探针直接判定为"不可信", 无条件走让位路径,
+                                        # 保持满驻留不降倍率, 分块后每块 ~55k 在健康区。
                                         _probe_ok240 = False
-                                    else:
+                                        _r_tok_probe250 = 0
                                         try:
-                                            _pb240 = int((_ws381 + 0.5) * 1024 ** 3)
-                                            _pt240 = _torch65.empty(_pb240 // 4, dtype=_torch65.float32,
-                                                                    device="cuda")
-                                            del _pt240
-                                            _torch65.cuda.synchronize()
-                                            _torch65.cuda.empty_cache()
-                                            _probe_ok240 = True
-                                        except Exception as _pe240:
+                                            _r_m_gate250, _ = _ff_extract_members(samples)
+                                            if _r_m_gate250 is not None and getattr(_r_m_gate250[0], "ndim", 0) >= 4:
+                                                _r_tok_probe250 = int(_r_m_gate250[0].shape[2]) * int(_r_m_gate250[0].shape[-2]) * int(_r_m_gate250[0].shape[-1])
+                                        except Exception:
+                                            pass
+                                        # v14.377: 「>130k 无条件让位」这条门是对**全帧未分块**
+                                        # 的病态规模(n>=440k 时 Sol-Attn 超线性恶化)判的。
+                                        # 分块二采单块只有全帧的 1/5~1/8(实测 709,920 -> 每块
+                                        # 136,068), 继续套这条门会把 per-tile 够用的 workspace
+                                        # 误判成不够, 把刚降下来的 reserve 又弹回 7GB 档。
+                                        # 分块时改走真实试分配: 分配得到就保持满驻留, 分配不到
+                                        # 才让位 —— 不掺任何经验常数。
+                                        # v14.381 (2026-11-12): 这段探针跑在 v14.181 自动分块
+                                        # 决策之前，用的是本函数早先拿到的 tiled_refine 旗标；
+                                        # 而 v14.181 的真判据是「tokens > 130k 就分块」。实测
+                                        # 709,920 tokens 明明走自动分块(每块 272k)，这里却还是
+                                        # False，于是落回「>130k 无条件让位」：reserve 6.8->8.9GB、
+                                        # resident 14.4->10.9GB，每条 forward 多搬 3.4GB 权重，
+                                        # v14.380 实机二采每块 108.4s。改为按**块几何**判 workspace:
+                                        # 单块序列约为全帧的 1/n，workspace 随序列长度缩放。
+                                        _will_tile381 = bool(tiled_refine) or _r_tok_probe250 > 130000
+                                        _ws381 = _ws65
+                                        _ntile381 = 1
+                                        if _will_tile381 and _r_tok_probe250 > 0:
+                                            try:
+                                                _ntile381 = max(1, int(_ff_auto_refine_tile_count(
+                                                    samples, 4, tile_overlap)))
+                                            except Exception:
+                                                _ntile381 = 4
+                                            _ws381 = max(2.0, _ws65 * (1.0 / float(_ntile381)) * 1.5)
+                                        _tiled_probe377 = _will_tile381
+                                        if (not _tiled_probe377) and _r_tok_probe250 > 130000:
+                                            print(f"[H3 Extender] v14.250 workspace 探针: tokens={_r_tok_probe250:,} > 130k "
+                                                  f"(已触发自动分块), 不试分配直接判定让位 — "
+                                                  f"保持满驻留 x{_r_factor}(不降倍率), "
+                                                  f"分块后每块 ~{_r_tok_probe250 // 4 // 1000}k 在健康区")
                                             _probe_ok240 = False
-                                            print(f"[H3 Extender] v14.381 分块 workspace 探针失败: "
-                                                  f"ws_tile≈{_ws381:.1f}GB 试分配 "
-                                                  f"{_ws381 + 0.5:.1f}GB 失败({_pe240})")
-                                    if _probe_ok240:
-                                        if _tiled_probe377:
-                                            print(f"[H3 Extender] v14.381 分块 workspace 探针通过: "
-                                                  f"ws_tile≈{_ws381:.1f}GB(全帧 {_ws65:.1f}GB, "
-                                                  f"{_ntile381} 块), 试分配 {_ws381 + 0.5:.1f}GB 成功 "
-                                                  f"→ 保持满驻留 reserve={_r_reserve_gb:.1f}GB"
-                                                  f"(不为全帧 workspace 让位)")
                                         else:
-                                            print(f"[H3 Extender] v14.250 workspace 探针通过: "
-                                                  f"free={_free65:.1f}GB 低于阈值 ws {_ws65:.1f}GB+2GB, "
-                                                  f"但真实试分配 {_ws65 + 0.5:.1f}GB 成功(池内空闲块可复用), "
-                                                  f"Sol-Attn workspace 可用 → 保持满驻留 x{_r_factor}(不降倍率)")
-                                    else:
-                                        _resv_old240 = float(locals().get('_r_reserve_gb', 5.5))
-                                        _deficit240 = (_ws65 + 2.0) - _free65
-                                        _resv240 = min(14.0, _resv_old240 + _deficit240 + 0.5)
-                                        try:
-                                            import gc as _gc240
-                                            _ff_unregister_model(model, label="二采-workspace-adaptive")
-                                            _mm3.EXTRA_RESERVED_VRAM = int(_resv240 * 1024 ** 3)
-                                            _mm3.load_models_gpu([model])
-                                            _torch65.cuda.synchronize()
-                                            _gc240.collect()
-                                            _torch65.cuda.empty_cache()
-                                            _f240b, _ = _torch65.cuda.mem_get_info()
-                                            _res240 = model.loaded_size() / 1024 ** 3
-                                            _r_reserve_gb = _resv240
-                                            _REFINE_WS_RESERVE_HINT[round(_r_factor, 2)] = _resv240
-                                            print(f"[H3 Extender] v14.250 workspace 自适应让位: "
-                                                  f"reserve {_resv_old240:.1f}->{_resv240:.1f}GB, "
-                                                  f"resident={_res240:.1f}GB, "
-                                                  f"free={_f240b / 1024 ** 3:.1f}GB "
-                                                  f"(目标 ws {_ws65:.1f}GB+2GB), 倍率保持 x{_r_factor}")
-                                        except Exception as _er240:
-                                            print(f"[H3 Extender] v14.250 workspace 让位失败, "
-                                                  f"走 lowvram 换页兜底(可忽略): {_er240}")
-                        except Exception:
-                            pass
-            except Exception as _lg2:
-                print(f"[H3 Extender] Refine 主动加载模型失败, 走 DynamicVRAM 按需流式: {_lg2}")
+                                            try:
+                                                _pb240 = int((_ws381 + 0.5) * 1024 ** 3)
+                                                _pt240 = _torch65.empty(_pb240 // 4, dtype=_torch65.float32,
+                                                                        device="cuda")
+                                                del _pt240
+                                                _torch65.cuda.synchronize()
+                                                _torch65.cuda.empty_cache()
+                                                _probe_ok240 = True
+                                            except Exception as _pe240:
+                                                _probe_ok240 = False
+                                                print(f"[H3 Extender] v14.381 分块 workspace 探针失败: "
+                                                      f"ws_tile≈{_ws381:.1f}GB 试分配 "
+                                                      f"{_ws381 + 0.5:.1f}GB 失败({_pe240})")
+                                        if _probe_ok240:
+                                            if _tiled_probe377:
+                                                print(f"[H3 Extender] v14.381 分块 workspace 探针通过: "
+                                                      f"ws_tile≈{_ws381:.1f}GB(全帧 {_ws65:.1f}GB, "
+                                                      f"{_ntile381} 块), 试分配 {_ws381 + 0.5:.1f}GB 成功 "
+                                                      f"→ 保持满驻留 reserve={_r_reserve_gb:.1f}GB"
+                                                      f"(不为全帧 workspace 让位)")
+                                            else:
+                                                print(f"[H3 Extender] v14.250 workspace 探针通过: "
+                                                      f"free={_free65:.1f}GB 低于阈值 ws {_ws65:.1f}GB+2GB, "
+                                                      f"但真实试分配 {_ws65 + 0.5:.1f}GB 成功(池内空闲块可复用), "
+                                                      f"Sol-Attn workspace 可用 → 保持满驻留 x{_r_factor}(不降倍率)")
+                                        else:
+                                            _resv_old240 = float(locals().get('_r_reserve_gb', 5.5))
+                                            _deficit240 = (_ws65 + 2.0) - _free65
+                                            _resv240 = min(14.0, _resv_old240 + _deficit240 + 0.5)
+                                            try:
+                                                import gc as _gc240
+                                                _ff_unregister_model(model, label="二采-workspace-adaptive")
+                                                _mm3.EXTRA_RESERVED_VRAM = int(_resv240 * 1024 ** 3)
+                                                _mm3.load_models_gpu([model])
+                                                _torch65.cuda.synchronize()
+                                                _gc240.collect()
+                                                _torch65.cuda.empty_cache()
+                                                _f240b, _ = _torch65.cuda.mem_get_info()
+                                                _res240 = model.loaded_size() / 1024 ** 3
+                                                _r_reserve_gb = _resv240
+                                                _REFINE_WS_RESERVE_HINT[round(_r_factor, 2)] = _resv240
+                                                print(f"[H3 Extender] v14.250 workspace 自适应让位: "
+                                                      f"reserve {_resv_old240:.1f}->{_resv240:.1f}GB, "
+                                                      f"resident={_res240:.1f}GB, "
+                                                      f"free={_f240b / 1024 ** 3:.1f}GB "
+                                                      f"(目标 ws {_ws65:.1f}GB+2GB), 倍率保持 x{_r_factor}")
+                                            except Exception as _er240:
+                                                print(f"[H3 Extender] v14.250 workspace 让位失败, "
+                                                      f"走 lowvram 换页兜底(可忽略): {_er240}")
+                            except Exception:
+                                pass
+                except Exception as _lg2:
+                    print(f"[H3 Extender] Refine 主动加载模型失败, 走 DynamicVRAM 按需流式: {_lg2}")
             # v14.238 Director 移植: 二采采样器独立选择(参考插件 Refine 节点
             # 一采 res_multistep / 二采 euler 分离设计)。inherit 时跟随一采。
             _r_sam_name = str(refine_sampler or sampler_name)
@@ -8661,7 +8706,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 线性下降. 算法移植自 MiniMaxH3 Director spatial_tiled_sampling.py (Apache-2.0).
             # 包装器对非 packed latent / 小尺寸自动回退全帧, 不破坏既有流程.
             _r_restore_tiles = None
-            if tiled_refine and refine_mem_mode != "global":
+            if tiled_refine and refine_mem_mode != "global" and not _prog_enabled:
                 try:
                     import os as _os_t, importlib.util as _ilu_t
                     _tiles_path = _os_t.path.join(_os_t.path.dirname(_os_t.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -8830,7 +8875,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] v14.225 二采单次调用 tokens={_r_call_tok:,} 在 Sol-Attn 健康区, "
                       f"跳过 global 包装(避免 attention override 回退 dense + 切 8 块), "
                       f"稀疏 Sol-Attn 直接跑全帧(基准 0.97s/步, 不分块无 overlap 重复)")
-            if refine_mem_mode == "global" and not _skip_global_healthy:
+            if refine_mem_mode == "global" and not _skip_global_healthy and not _prog_enabled:
                 try:
                     import os as _os_g, importlib as _ilg
                     import sys as _sys_g
@@ -8975,287 +9020,367 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] v14.279 二采条件几何对齐跳过(可忽略): "
                           f"{_e_cond_up}")
 
-            _r_guider = _BasicGuider(_refine_model)
-            _r_guider.set_conds(conditioning)
+            # v14.404: SelfLift v2.0 渐进低分辨率腿旁路 —— 对齐参考流 #679
+            # SelfLiftAvatarH3Sampler: 低清腿在 0.5x 低清 latent 跑 transition_step 步,
+            # 端点一致性提升(learned latent lift + 像素锚点 + artifact-aware 融合)得到
+            # 高清干净 z0_high, 重做噪声缩放 + 一步 Euler 得 resume latent, 高清腿在目标
+            # 分辨率跑剩余步数。复用已驻留的 _refine_model 与已对齐的 conditioning;
+            # 绕过工厂普通二采的 CONST 重加噪 / delegate 驻留 / 空间分块 / 时间分块。
+            if _prog_enabled:
+                try:
+                    _prog_mod = _bsai_load_progressive_engine()
+                    if _prog_mod is None:
+                        raise RuntimeError(f"渐进引擎不可用: {_BSAI_PROG_LOAD_ERR}")
+                    import sys as _sys_prog
+                    _prog_up = _sys_prog.modules.get(f"{_BSAI_PROG_PKG_NAME}.h3_upscaler")
+                    if _prog_up is None or not hasattr(_prog_up, "learned_latent_lift"):
+                        raise RuntimeError("渐进引擎 h3_upscaler.learned_latent_lift 未加载")
+
+                    # 参考流 #679 口径: cfg=1, transition_step=2, lowres_scale=0.5,
+                    # rho=0(纯 learned latent lift, 无像素混合), w_min=0.5, w_max=1,
+                    # lifter=h3_upscaler_lms_v0.1_fp32.safetensors, highres_tiling=false
+                    # (高清腿整段一次, 省显存靠低清腿 + 一致性提升端点)。
+                    _prog_lifter_name = "h3_upscaler_lms_v0.1_fp32.safetensors"
+
+                    def _prog_lifter(_z0_low, _hw, _lifter_name=_prog_lifter_name):
+                        return _prog_up.learned_latent_lift(_z0_low, _hw, _lifter_name)
+
+                    _prog_pos = conditioning
+                    _prog_neg = _bsai_zero_out_conditioning(conditioning)
+                    _prog_latent = {"samples": samples}
+                    # 段头锁 mask 若已构造, 透传给渐进引擎(参考流无 mask; 工厂一镜到底
+                    # 段头锁场景保留 keep 区)。普通续算档无 mask 键, progressive 内部按 None 处理。
+                    if isinstance(_r_latent, dict) and "noise_mask" in _r_latent:
+                        _prog_latent["noise_mask"] = _r_latent["noise_mask"]
+
+                    print(f"[H3 Extender] v14.404 渐进二采启动: lowres_scale=0.5 "
+                          f"transition_step={_prog_transition} cfg=1.0 "
+                          f"lifter={_prog_lifter_name} "
+                          f"σ={[round(float(v), 4) for v in _r_sigmas.tolist()]}", flush=True)
+
+                    with _aimdo_disabled():
+                        _prog_out = _prog_mod.progressive_sample(
+                            low_res_model=_refine_model,
+                            positive=_prog_pos,
+                            negative=_prog_neg,
+                            vae=vae,
+                            latent_image=_prog_latent,
+                            sampler=_r_sampler,
+                            sigmas=_r_sigmas,
+                            seed=int(seed) + 1,
+                            cfg=1.0,
+                            transition_step=int(_prog_transition),
+                            lowres_scale=0.5,
+                            rho=0.0,
+                            w_min=0.5,
+                            w_max=1.0,
+                            latent_upsample="nearest",
+                            latent_lifter=_prog_lifter,
+                            highres_tiling=False,
+                            high_res_model=None,
+                            tiling_mode="auto",
+                            tiling_tiles=2,
+                            tiling_axis="auto",
+                            highres_tiling_mode="spatial",
+                            highres_token_chunk=4096,
+                            highres_weight_cache_gb=4.0,
+                            spatial_anchor_mode="off",
+                            tiling_overlap=None,
+                            diagnostics_out=None,
+                        )
+                    _r_samples = _prog_out["samples"]
+                    print(f"[H3 Extender] v14.404 渐进二采完成: 低清腿 {_prog_transition} 步 + "
+                          f"高清腿 {int(_r_sigmas.shape[0]) - 1 - _prog_transition} 步", flush=True)
+                except Exception as _prog_err:
+                    import traceback as _tb_prog
+                    print(f"[H3 Extender] v14.404 渐进二采失败, 回退普通二采路径: "
+                          f"{type(_prog_err).__name__}: {_prog_err}", flush=True)
+                    _tb_prog.print_exc()
+                    _prog_enabled = False
+
+            if not _prog_enabled:
+                _r_guider = _BasicGuider(_refine_model)
+                _r_guider.set_conds(conditioning)
             # v1.64: 恢复 v1.59 驻留补丁(v1.61 改诊断时误删)——二采采样前
             # 跳过 sampler_helpers._prepare_sampling 的 load_models_gpu/free_memory,
             # 防止 prepare 按全幅 latent 估算把刚驻留的模型全卸(0.00 MB remains,
             # 全流式换页 21.8GB/步). v1.63 已修分块+refs mismatch, 分块重新启用.
             # 驻留量由 reserve(分块 8GB/非分块 5.5GB) 决定, 换页只限 offload 尾部.
-            import comfy.sampler_helpers as _sh59
-            _bsai_orig_prepare = _sh59._prepare_sampling
-            def _bsai_refine_prepare(model, noise_shape, conds, model_options=None, force_full_load=False, force_offload=False):
-                try:
-                    # 模型已驻留, 跳过 load_models_gpu 防 free_memory 全卸
-                    return model.model, conds, []
-                except Exception as _pe59:
-                    print(f"[H3 Extender] v1.64 跳过prepare-load失败, 回退原路径: {_pe59}")
-                    return _bsai_orig_prepare(model, noise_shape, conds, model_options=model_options,
-                                              force_full_load=force_full_load, force_offload=force_offload)
-            # v14.209: 总是安装驻留补丁, 包括分块/spatial fallback.
-            # v1.65 曾因 DynamicVRAM 分块驻留 OOM 跳过分块路径——但 v14.142
-            # 已用 clone(disable_dynamic=True) 生成 non-dynamic delegate,
-            # 彻底消除 DynamicVRAM staged 全量加载根因.
-            # 原 guard `if not (tile_count and int(tile_count) > 1)` 还有两个 bug:
-            #   a) tile_count 默认就是 4(函数签名), 导致非分块场景补丁也装不上;
-            #   b) 即使 tiled_refine=False 且 tile_count=4, 用户走 v14.208 spatial
-            #      fallback 装了 _r_restore_tiles 但驻留仍被跳过, 每 step 从 0MB
-            #      全流式换页 21GB -> 797s/it.
-            # 修复后: 跳过原生 prepare 的 load_models_gpu/free_memory, 保持已驻留
-            # 的 13.8GB 在 GPU, 仅 offload 尾部 6.8GB 换页 -> 预计 200-300s/it.
-            _sh59._prepare_sampling = _bsai_refine_prepare
-            print(f"[H3 Extender] v14.209 驻留补丁已安装 (tile_count={tile_count}, "
-                  f"跳过原生 prepare 的全卸, 保持已驻留权重在 GPU)")
-            # v1.91: 解除 torch allocator 人为 16GB fraction 限制——运行中
-            # 某库调用过 set_per_process_memory_fraction, 使 torch 可用上限
-            # 仅 16GB, 二采全帧 staged 15.25GB + 4K workspace 3.05GB = 18.3GB
-            # 被判 OOM 回退一采. reset 1.0 后 torch 用满物理 23.86GB,
-            # 全帧二采不再 OOM. LLM 全在 CPU, 无其他显存用户, reset 安全.
-            # v1.93 (2026-09-16): 释放 aimdo VRAMBuffer(cast buffer, 一采加载期
-            # 累积至 ~8.5GB 后常驻不释放). 主二采全程 _aimdo_disabled(), 该缓冲
-            # 在二采阶段纯占显存——释放后 factor 2.0 全帧二采账本:
-            # staged 15.4GB + workspace 3.08GB = 18.5GB < 23.86GB, 不再 OOM.
-            try:
-                import comfy.model_management as _mm93
-                _released93 = 0
-                for _k93 in list(_mm93.STREAM_AIMDO_CAST_BUFFERS):
+            if not _prog_enabled:
+                import comfy.sampler_helpers as _sh59
+                _bsai_orig_prepare = _sh59._prepare_sampling
+                def _bsai_refine_prepare(model, noise_shape, conds, model_options=None, force_full_load=False, force_offload=False):
                     try:
-                        _buf93 = _mm93.STREAM_AIMDO_CAST_BUFFERS.pop(_k93)
-                        del _buf93
-                        _released93 += 1
-                    except Exception:
-                        pass
-                if _released93:
-                    import gc as _gc93
-                    import torch as _torch93
-                    _gc93.collect()
-                    _torch93.cuda.synchronize()
-                    _torch93.cuda.empty_cache()
-                    print(f"[H3 Extender] v1.93 已释放 aimdo cast buffer x{_released93} (~8GB VRAM 回归可用)")
-                else:
-                    print(f"[H3 Extender] v1.93 无 aimdo cast buffer 需释放")
-            except Exception as _e93:
-                print(f"[H3 Extender] v1.93 释放 aimdo cast buffer 失败: {_e93}")
-            try:
-                import torch as _t91
-                _cur_frac91 = _t91.cuda.get_per_process_memory_fraction()
-                _t91.cuda.set_per_process_memory_fraction(1.0)
-                if _cur_frac91 < 1.0:
-                    print(f"[H3 Extender] v1.91 解除 fraction 限制: {_cur_frac91:.3f} -> 1.0 (二采可用 23.86GB)")
-                else:
-                    print(f"[H3 Extender] v1.91 fraction 已是 1.0, 无需解除")
-            except Exception as _e91:
-                print(f"[H3 Extender] v1.91 fraction reset 失败: {_e91}")
-            # v14.251 (2026-10-29): 二采首步预热 —— 第 1 大步的"初始化税"
-            # (Sol-Attn workspace 首次分配 4.5GB、KJNodes head 分组首触发、
-            # tiled proxy 首次调度、keyframes/PackedLayout 首次构建) 全部移到
-            # 真实进度条(0/4)之前: 用 1/8 空间小块 + 独立 seed 空跑最后一段
-            # sigma 一步, 不污染真实采样状态, 失败则静默跳过。
-            try:
-                import comfy.utils as _cu_w, comfy.sample as _cs_w, comfy.nested_tensor as _cnt_w
-                # v14.263: 分块二采/AV 双成员下 samples 可能是 NestedTensor, 也可能是
-                # 裸 list/tuple/dict 的嵌套结构。旧实现只展平一层就取 [0] 当视频张量,
-                # 只要真实结构再深一层就 `.shape` 报 "list object has no attribute
-                # shape" 而整段预热被静默跳过。这里改成"深度优先展平 + 按维度挑成员",
-                # 并且每个阶段单独打标, 万一仍失败能直接看出是卡在哪一步。
-                _stage_w = "flatten"
-                # v14.270 (2026-10-31 fix): 时间分块二采路径下 _r_latent 不会被创建
-                # (它只在 `if not _use_temporal` 分支里构造), 旧实现直接取
-                # _r_latent["samples"] 会 NameError -> 整段预热静默跳过 -> 第 1 大步
-                # 独自扛下全部初始化税, 加剧 0/4 假死。这里加 fallback 到 samples。
-                _w_lat_src = locals().get("_r_latent")
-                if not (isinstance(_w_lat_src, dict) and "samples" in _w_lat_src):
-                    _w_lat_src = {"samples": samples}
-                _wflat_w, _wstack_w = [], list(_ff_extract_members(_w_lat_src["samples"])[0])
-                while _wstack_w:
-                    _mw = _wstack_w.pop(0)
-                    if isinstance(_mw, torch.Tensor):
-                        _wflat_w.append(_mw)
-                    elif isinstance(_mw, dict):
-                        _wstack_w[:0] = list(_mw.values())
-                    elif isinstance(_mw, (list, tuple)):
-                        _wstack_w[:0] = list(_mw)
-                _wv_w = next((m for m in _wflat_w if m.dim() == 5), None)
-                if _wv_w is None:
-                    raise RuntimeError(
-                        "samples 里没有 5 维视频成员: type=%s shapes=%s"
-                        % (type(_w_lat_src.get("samples")).__name__,
-                           [tuple(m.shape) for m in _wflat_w]))
-                _wa_w = next((m for m in _wflat_w
-                              if m is not _wv_w and m.dim() >= 3), None)
-
-                _stage_w = "crop"
-                # v14.282 (2026-11-04 fix): 预热 dummy 必须与 conditioning 保持
-                # 相同空间几何 —— v14.279 已把 ref/keyframe latent 对齐到二采
-                # 实际 120x68，旧 v14.251 又把 dummy 空间裁到 1/8(8x15)，sample
-                # 时 PackedLayout 索引广播 shape mismatch([36720,96] vs
-                # [8608,96])，预热失败后真实二采进入死循环(GPU 满载但 0/2 卡死、
-                # 无 step 日志)。改为只裁剪时间轴帧数省开销，空间保持完整。
-                _wh_w = int(_wv_w.shape[-2])
-                _ww_w = int(_wv_w.shape[-1])
-                _wt_w = max(2, int(_wv_w.shape[2]) // 16)
-                _wv_s = _wv_w[:, :, :_wt_w, :, :].contiguous()
-                _wa_s = _wa_w[..., :2048].contiguous() if _wa_w is not None else None
-                _w_streams = [_wv_s] + ([_wa_s] if _wa_s is not None else [])
-
-                _stage_w = "NestedTensor"
-                _wbase = _cnt_w.NestedTensor(tuple(_w_streams))
-                _stage_w = "set_conds"
-                _w_guider_w = _BasicGuider(_refine_model)
-                _w_guider_w.set_conds(conditioning)
-                _stage_w = "prepare_noise"
-                _w_noise_w = _cs_w.prepare_noise(_wbase, int(seed) + 999, None)
-                # v14.279: NestedTensor.prepare_noise 在部分版本返回 list ->
-                # 采样器对 noise 调 .shape 时抛 "'list' object has no attribute
-                # 'shape'", 预热每次都被静默跳过(第 1 大步独自扛初始化税)。
-                if isinstance(_w_noise_w, (list, tuple)):
-                    _w_noise_w = _cnt_w.NestedTensor(tuple(_w_noise_w))
-                # v14.279: sigmas 必须保持 tensor —— 旧实现 list(_r_sigmas)[-2:]
-                # 把 tensor 变成 python list, sampler 对 sigmas 调 .shape 直接崩。
-                _w_sig_w = _r_sigmas[-2:]
-                _stage_w = "sample"
-                with _aimdo_disabled():
-                    _w_guider_w.sample(
-                        _w_noise_w, _wbase, _r_sampler, _w_sig_w,
-                        denoise_mask=None,
-                        callback=None,
-                        disable_pbar=True,
-                        seed=int(seed) + 999,
-                    )
-                _stage_w = "sync"
-                torch.cuda.synchronize()
-                print(f"[H3 Extender] v14.251 二采首步预热完成 (dummy {_wh_w}x{_ww_w}, "
-                      f"首次初始化已移出第 1 大步)", flush=True)
-            except Exception as _we_w:
-                print(f"[H3 Extender] v14.251 二采首步预热跳过[{locals().get('_stage_w', '?')}]: "
-                      f"{type(_we_w).__name__}: {_we_w}", flush=True)
-            try:
-                if _use_temporal:
-                    # v2.02 时间分块二采: 沿 T 切段, 逐段走已有(空间分块)采样器,
-                    # 重叠区 denoise_mask 冻结 + smoothstep 接管. 见 bsai_h3_temporal_chunks.py
-                    import os as _os_tc, importlib.util as _ilu_tc
-                    _tc_path = _os_tc.path.join(_os_tc.path.dirname(_os_tc.path.abspath(__file__)), "bsai_h3_temporal_chunks.py")
-                    _tc_spec = _ilu_tc.spec_from_file_location("bsai_h3_temporal_chunks", _tc_path)
-                    _tc = _ilu_tc.module_from_spec(_tc_spec)
-                    _tc_spec.loader.exec_module(_tc)
-                    _mem_full, _was_nested_tc = _ff_extract_members(samples)
-                    _vid_full = _mem_full[0]
-                    _aud_full = _mem_full[1]
-                    _T_full = int(_vid_full.shape[2])
-                    _segs = _tc.plan_temporal_segments(_T_full, int(temporal_chunk_tokens), int(temporal_overlap_tokens))
-                    if len(_segs) <= 1:
-                        print(f"[H3 Extender] v2.02 时间分块: T={_T_full} <= chunk, 退化为整段二采")
-                    else:
-                        print(f"[H3 Extender] v2.02 时间分块二采: T={_T_full} chunk={temporal_chunk_tokens} "
-                              f"overlap={temporal_overlap_tokens} -> {len(_segs)} 段 {_segs}", flush=True)
-                    _acc_v = None
-                    for _ki, (_st, _et) in enumerate(_segs):
-                        _cv, _ca = _tc.slice_nested_temporal(_mem_full, _st, _et)
-                        _ov_here = 0
-                        _mask_ki = None
-                        if _acc_v is not None:
-                            _ov_here = max(0, int(_acc_v.shape[2]) - _st)
-                            _ov_here = min(_ov_here, int(_cv.shape[2]))
-                        if _ov_here > 0:
-                            _cv = _cv.clone()
-                            _cv[:, :, :_ov_here] = _acc_v[:, :, _st:_st + _ov_here]
-                            _mask_ki, _lock_n, _ = _tc.build_temporal_mask(
-                                int(_cv.shape[2]), _ov_here, dtype=_cv.dtype, device=_cv.device)
-                        else:
-                            _lock_n = 0
-                        _chunk_base = comfy.nested_tensor.NestedTensor((_cv, _ca))
-                        _chunk_noise = comfy.sample.prepare_noise(_chunk_base, int(seed) + 1 + _ki, None)
-                        _chunk_latent = _ff_const_add_noise(_refine_model, _chunk_noise, _r_sigmas,
-                                                            {"samples": _chunk_base}, _r_audio)
-                        # 加噪后把整个重叠区重填为上一段干净结果:
-                        # 锁区(mask=0)采样器原样保留; 过渡区(0<mask<1) KSamplerX0Inpaint
-                        # 按 out*m + latent_image*(1-m) 混合, 若保留加噪底则高比例噪声
-                        # 直接混进发布结果(VAE 解码后=马赛克横带), 必须同为干净内容。
-                        if _lock_n > 0:
-                            _cl_members, _ = _ff_extract_members(_chunk_latent["samples"])
-                            _cl_members[0][:, :, :_ov_here] = _acc_v[:, :, _st:_st + _ov_here]
-                            _chunk_latent["samples"] = _ff_wrap_members(_cl_members, _was_nested_tc)
-                            _a_part = _chunk_latent["samples"].tensors[1]
-                            # v14.179 (2026-10-23): 音频掩码跟随 refine_audio_denoise,
-                            # 不再无条件锁定。旧代码此处永远 mask=0(保持一采音频), 会
-                            # 把"直播配音高清"档(音频≥12步+音频重绘0.7)的二采音频精修
-                            # 覆盖回锁定, 导致分块二采下配音仍乱/含混。audio_denoise>=0.5
-                            # 时音频参与二采重绘(mask=1), <0.5 时锁定(mask=0)。
-                            if float(_r_audio) >= 0.5:
-                                _amask = torch.ones((1, 1, 1, int(_a_part.shape[-1])),
-                                                    dtype=_mask_ki.dtype, device=_a_part.device)
-                            else:
-                                _amask = torch.zeros((1, 1, 1, int(_a_part.shape[-1])),
-                                                    dtype=_mask_ki.dtype, device=_a_part.device)
-                            _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_ki, _amask))
-                        # v14.240 (fix): 分块二采·首块段头锁 keep —— 首块无前块
-                        # 重叠(_ov_here=0), 原逻辑全重绘会把 clip 段头(一采已锁的
-                        # 延续区)二次重画 → 段间跳帧。这里把首块段头 _os_head_rows
-                        # 行锁为一采输出(samples)的干净延续画面, mask=0 不二次重绘。
-                        if _ki == 0 and _os_head_rows >= 1 and _lock_n == 0:
-                            try:
-                                _cl_m0, _cl_n0 = _ff_extract_members(_chunk_latent["samples"])
-                                _cv_os = _cl_m0[0]
-                                _hrows_os = min(_os_head_rows, int(_cv_os.shape[2]))
-                                if _hrows_os >= 1:
-                                    _s_v_os = _mem_full[0]
-                                    if _st == 0 and tuple(_s_v_os.shape[-2:]) == tuple(_cv_os.shape[-2:]):
-                                        _cv_os = _cv_os.clone()
-                                        _cv_os[:, :, :_hrows_os] = _s_v_os[:, :, :_hrows_os]
-                                        _cl_m0[0] = _cv_os
-                                        _chunk_latent["samples"] = _ff_wrap_members(_cl_m0, _cl_n0)
-                                        _mask_h0 = torch.ones_like(_cv_os)
-                                        _mask_h0[:, :, :_hrows_os] = 0.0
-                                        _a_h0 = _cl_m0[1]
-                                        if float(_r_audio) >= 0.5:
-                                            _amask_h0 = torch.ones((1, 1, 1, int(_a_h0.shape[-1])),
-                                                                   dtype=_cv_os.dtype, device=_cv_os.device)
-                                        else:
-                                            _amask_h0 = torch.zeros((1, 1, 1, int(_a_h0.shape[-1])),
-                                                                    dtype=_cv_os.dtype, device=_cv_os.device)
-                                        _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_h0, _amask_h0))
-                                        print(f"[H3 Extender] v14.240 分块首块段头锁 keep: {_hrows_os} 行锁定为一采延续画面(接缝零二次重绘)")
-                            except Exception as _h0_err:
-                                print(f"[H3 Extender] v14.240 分块首块段头锁失败(可忽略): {_h0_err}")
-                        with _aimdo_disabled():
-                            _chunk_out = _r_guider.sample(
-                                comfy.sample.prepare_empty_noise(_chunk_latent["samples"]),
-                                _chunk_latent["samples"],
-                                _r_sampler,
-                                _r_sigmas,
-                                denoise_mask=_chunk_latent.get("noise_mask"),
-                                callback=_r_step_cb,
-                                disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
-                                seed=int(seed) + 1 + _ki,
-                            )
-                        _out_mem, _ = _ff_extract_members(_chunk_out)
-                        _acc_v = _tc.merge_guarded(_acc_v, _out_mem[0], _st, _lock_n)
-                        print(f"[H3 Extender] v2.02 时间分块: 段 {_ki+1}/{len(_segs)} "
-                              f"[{_st},{_et}) 完成, 累计 T={_acc_v.shape[2]}", flush=True)
-                    _r_samples = _ff_wrap_members([_acc_v, _aud_full], _was_nested_tc)
-                else:
-                    with _aimdo_disabled():
-                        _r_samples = _r_guider.sample(
-                        comfy.sample.prepare_empty_noise(samples),
-                        _r_latent["samples"],
-                        _r_sampler,
-                        _r_sigmas,
-                        denoise_mask=_r_latent.get("noise_mask"),
-                        callback=_r_step_cb,
-                        disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
-                        seed=int(seed) + 1,
-                    )
-                # v14.418: 二采成品 latent 幅值自检 —— 健康的去噪终态 std 应在 1 附近
-                # (同管线历史健康档 1.042); 明显超幅(如 2.2+)说明又被重复逆缩放,
-                # 这时 VAE 解码必成整屏 latent 格马赛克, 提前用日志暴露而不是等成片。
+                        # 模型已驻留, 跳过 load_models_gpu 防 free_memory 全卸
+                        return model.model, conds, []
+                    except Exception as _pe59:
+                        print(f"[H3 Extender] v1.64 跳过prepare-load失败, 回退原路径: {_pe59}")
+                        return _bsai_orig_prepare(model, noise_shape, conds, model_options=model_options,
+                                                  force_full_load=force_full_load, force_offload=force_offload)
+                # v14.209: 总是安装驻留补丁, 包括分块/spatial fallback.
+                # v1.65 曾因 DynamicVRAM 分块驻留 OOM 跳过分块路径——但 v14.142
+                # 已用 clone(disable_dynamic=True) 生成 non-dynamic delegate,
+                # 彻底消除 DynamicVRAM staged 全量加载根因.
+                # 原 guard `if not (tile_count and int(tile_count) > 1)` 还有两个 bug:
+                #   a) tile_count 默认就是 4(函数签名), 导致非分块场景补丁也装不上;
+                #   b) 即使 tiled_refine=False 且 tile_count=4, 用户走 v14.208 spatial
+                #      fallback 装了 _r_restore_tiles 但驻留仍被跳过, 每 step 从 0MB
+                #      全流式换页 21GB -> 797s/it.
+                # 修复后: 跳过原生 prepare 的 load_models_gpu/free_memory, 保持已驻留
+                # 的 13.8GB 在 GPU, 仅 offload 尾部 6.8GB 换页 -> 预计 200-300s/it.
+                _sh59._prepare_sampling = _bsai_refine_prepare
+                print(f"[H3 Extender] v14.209 驻留补丁已安装 (tile_count={tile_count}, "
+                      f"跳过原生 prepare 的全卸, 保持已驻留权重在 GPU)")
+                # v1.91: 解除 torch allocator 人为 16GB fraction 限制——运行中
+                # 某库调用过 set_per_process_memory_fraction, 使 torch 可用上限
+                # 仅 16GB, 二采全帧 staged 15.25GB + 4K workspace 3.05GB = 18.3GB
+                # 被判 OOM 回退一采. reset 1.0 后 torch 用满物理 23.86GB,
+                # 全帧二采不再 OOM. LLM 全在 CPU, 无其他显存用户, reset 安全.
+                # v1.93 (2026-09-16): 释放 aimdo VRAMBuffer(cast buffer, 一采加载期
+                # 累积至 ~8.5GB 后常驻不释放). 主二采全程 _aimdo_disabled(), 该缓冲
+                # 在二采阶段纯占显存——释放后 factor 2.0 全帧二采账本:
+                # staged 15.4GB + workspace 3.08GB = 18.5GB < 23.86GB, 不再 OOM.
                 try:
-                    _fm418, _ = _ff_extract_members(_r_samples if "_r_samples" in locals() else samples)
-                    _ostd418 = float(_fm418[0].float().std())
-                    _flag418 = " ⚠️超幅, 疑似重复逆缩放" if _ostd418 > 1.8 else ""
-                    print(f"[H3 Extender] v14.418 二采成品 latent 自检: std={_ostd418:.3f}{_flag418}",
-                          flush=True)
-                except Exception as _chk418e:
-                    print(f"[H3 Extender] v14.418 二采成品 latent 自检失败(可忽略): {_chk418e}", flush=True)
+                    import comfy.model_management as _mm93
+                    _released93 = 0
+                    for _k93 in list(_mm93.STREAM_AIMDO_CAST_BUFFERS):
+                        try:
+                            _buf93 = _mm93.STREAM_AIMDO_CAST_BUFFERS.pop(_k93)
+                            del _buf93
+                            _released93 += 1
+                        except Exception:
+                            pass
+                    if _released93:
+                        import gc as _gc93
+                        import torch as _torch93
+                        _gc93.collect()
+                        _torch93.cuda.synchronize()
+                        _torch93.cuda.empty_cache()
+                        print(f"[H3 Extender] v1.93 已释放 aimdo cast buffer x{_released93} (~8GB VRAM 回归可用)")
+                    else:
+                        print(f"[H3 Extender] v1.93 无 aimdo cast buffer 需释放")
+                except Exception as _e93:
+                    print(f"[H3 Extender] v1.93 释放 aimdo cast buffer 失败: {_e93}")
+                try:
+                    import torch as _t91
+                    _cur_frac91 = _t91.cuda.get_per_process_memory_fraction()
+                    _t91.cuda.set_per_process_memory_fraction(1.0)
+                    if _cur_frac91 < 1.0:
+                        print(f"[H3 Extender] v1.91 解除 fraction 限制: {_cur_frac91:.3f} -> 1.0 (二采可用 23.86GB)")
+                    else:
+                        print(f"[H3 Extender] v1.91 fraction 已是 1.0, 无需解除")
+                except Exception as _e91:
+                    print(f"[H3 Extender] v1.91 fraction reset 失败: {_e91}")
+                # v14.251 (2026-10-29): 二采首步预热 —— 第 1 大步的"初始化税"
+                # (Sol-Attn workspace 首次分配 4.5GB、KJNodes head 分组首触发、
+                # tiled proxy 首次调度、keyframes/PackedLayout 首次构建) 全部移到
+                # 真实进度条(0/4)之前: 用 1/8 空间小块 + 独立 seed 空跑最后一段
+                # sigma 一步, 不污染真实采样状态, 失败则静默跳过。
+                try:
+                    import comfy.utils as _cu_w, comfy.sample as _cs_w, comfy.nested_tensor as _cnt_w
+                    # v14.263: 分块二采/AV 双成员下 samples 可能是 NestedTensor, 也可能是
+                    # 裸 list/tuple/dict 的嵌套结构。旧实现只展平一层就取 [0] 当视频张量,
+                    # 只要真实结构再深一层就 `.shape` 报 "list object has no attribute
+                    # shape" 而整段预热被静默跳过。这里改成"深度优先展平 + 按维度挑成员",
+                    # 并且每个阶段单独打标, 万一仍失败能直接看出是卡在哪一步。
+                    _stage_w = "flatten"
+                    # v14.270 (2026-10-31 fix): 时间分块二采路径下 _r_latent 不会被创建
+                    # (它只在 `if not _use_temporal` 分支里构造), 旧实现直接取
+                    # _r_latent["samples"] 会 NameError -> 整段预热静默跳过 -> 第 1 大步
+                    # 独自扛下全部初始化税, 加剧 0/4 假死。这里加 fallback 到 samples。
+                    _w_lat_src = locals().get("_r_latent")
+                    if not (isinstance(_w_lat_src, dict) and "samples" in _w_lat_src):
+                        _w_lat_src = {"samples": samples}
+                    _wflat_w, _wstack_w = [], list(_ff_extract_members(_w_lat_src["samples"])[0])
+                    while _wstack_w:
+                        _mw = _wstack_w.pop(0)
+                        if isinstance(_mw, torch.Tensor):
+                            _wflat_w.append(_mw)
+                        elif isinstance(_mw, dict):
+                            _wstack_w[:0] = list(_mw.values())
+                        elif isinstance(_mw, (list, tuple)):
+                            _wstack_w[:0] = list(_mw)
+                    _wv_w = next((m for m in _wflat_w if m.dim() == 5), None)
+                    if _wv_w is None:
+                        raise RuntimeError(
+                            "samples 里没有 5 维视频成员: type=%s shapes=%s"
+                            % (type(_w_lat_src.get("samples")).__name__,
+                               [tuple(m.shape) for m in _wflat_w]))
+                    _wa_w = next((m for m in _wflat_w
+                                  if m is not _wv_w and m.dim() >= 3), None)
+
+                    _stage_w = "crop"
+                    # v14.282 (2026-11-04 fix): 预热 dummy 必须与 conditioning 保持
+                    # 相同空间几何 —— v14.279 已把 ref/keyframe latent 对齐到二采
+                    # 实际 120x68，旧 v14.251 又把 dummy 空间裁到 1/8(8x15)，sample
+                    # 时 PackedLayout 索引广播 shape mismatch([36720,96] vs
+                    # [8608,96])，预热失败后真实二采进入死循环(GPU 满载但 0/2 卡死、
+                    # 无 step 日志)。改为只裁剪时间轴帧数省开销，空间保持完整。
+                    _wh_w = int(_wv_w.shape[-2])
+                    _ww_w = int(_wv_w.shape[-1])
+                    _wt_w = max(2, int(_wv_w.shape[2]) // 16)
+                    _wv_s = _wv_w[:, :, :_wt_w, :, :].contiguous()
+                    _wa_s = _wa_w[..., :2048].contiguous() if _wa_w is not None else None
+                    _w_streams = [_wv_s] + ([_wa_s] if _wa_s is not None else [])
+
+                    _stage_w = "NestedTensor"
+                    _wbase = _cnt_w.NestedTensor(tuple(_w_streams))
+                    _stage_w = "set_conds"
+                    _w_guider_w = _BasicGuider(_refine_model)
+                    _w_guider_w.set_conds(conditioning)
+                    _stage_w = "prepare_noise"
+                    _w_noise_w = _cs_w.prepare_noise(_wbase, int(seed) + 999, None)
+                    # v14.279: NestedTensor.prepare_noise 在部分版本返回 list ->
+                    # 采样器对 noise 调 .shape 时抛 "'list' object has no attribute
+                    # 'shape'", 预热每次都被静默跳过(第 1 大步独自扛初始化税)。
+                    if isinstance(_w_noise_w, (list, tuple)):
+                        _w_noise_w = _cnt_w.NestedTensor(tuple(_w_noise_w))
+                    # v14.279: sigmas 必须保持 tensor —— 旧实现 list(_r_sigmas)[-2:]
+                    # 把 tensor 变成 python list, sampler 对 sigmas 调 .shape 直接崩。
+                    _w_sig_w = _r_sigmas[-2:]
+                    _stage_w = "sample"
+                    with _aimdo_disabled():
+                        _w_guider_w.sample(
+                            _w_noise_w, _wbase, _r_sampler, _w_sig_w,
+                            denoise_mask=None,
+                            callback=None,
+                            disable_pbar=True,
+                            seed=int(seed) + 999,
+                        )
+                    _stage_w = "sync"
+                    torch.cuda.synchronize()
+                    print(f"[H3 Extender] v14.251 二采首步预热完成 (dummy {_wh_w}x{_ww_w}, "
+                          f"首次初始化已移出第 1 大步)", flush=True)
+                except Exception as _we_w:
+                    print(f"[H3 Extender] v14.251 二采首步预热跳过[{locals().get('_stage_w', '?')}]: "
+                          f"{type(_we_w).__name__}: {_we_w}", flush=True)
+            if not _prog_enabled:
+                    if _use_temporal:
+                        # v2.02 时间分块二采: 沿 T 切段, 逐段走已有(空间分块)采样器,
+                        # 重叠区 denoise_mask 冻结 + smoothstep 接管. 见 bsai_h3_temporal_chunks.py
+                        import os as _os_tc, importlib.util as _ilu_tc
+                        _tc_path = _os_tc.path.join(_os_tc.path.dirname(_os_tc.path.abspath(__file__)), "bsai_h3_temporal_chunks.py")
+                        _tc_spec = _ilu_tc.spec_from_file_location("bsai_h3_temporal_chunks", _tc_path)
+                        _tc = _ilu_tc.module_from_spec(_tc_spec)
+                        _tc_spec.loader.exec_module(_tc)
+                        _mem_full, _was_nested_tc = _ff_extract_members(samples)
+                        _vid_full = _mem_full[0]
+                        _aud_full = _mem_full[1]
+                        _T_full = int(_vid_full.shape[2])
+                        _segs = _tc.plan_temporal_segments(_T_full, int(temporal_chunk_tokens), int(temporal_overlap_tokens))
+                        if len(_segs) <= 1:
+                            print(f"[H3 Extender] v2.02 时间分块: T={_T_full} <= chunk, 退化为整段二采")
+                        else:
+                            print(f"[H3 Extender] v2.02 时间分块二采: T={_T_full} chunk={temporal_chunk_tokens} "
+                                  f"overlap={temporal_overlap_tokens} -> {len(_segs)} 段 {_segs}", flush=True)
+                        _acc_v = None
+                        for _ki, (_st, _et) in enumerate(_segs):
+                            _cv, _ca = _tc.slice_nested_temporal(_mem_full, _st, _et)
+                            _ov_here = 0
+                            _mask_ki = None
+                            if _acc_v is not None:
+                                _ov_here = max(0, int(_acc_v.shape[2]) - _st)
+                                _ov_here = min(_ov_here, int(_cv.shape[2]))
+                            if _ov_here > 0:
+                                _cv = _cv.clone()
+                                _cv[:, :, :_ov_here] = _acc_v[:, :, _st:_st + _ov_here]
+                                _mask_ki, _lock_n, _ = _tc.build_temporal_mask(
+                                    int(_cv.shape[2]), _ov_here, dtype=_cv.dtype, device=_cv.device)
+                            else:
+                                _lock_n = 0
+                            _chunk_base = comfy.nested_tensor.NestedTensor((_cv, _ca))
+                            _chunk_noise = comfy.sample.prepare_noise(_chunk_base, int(seed) + 1 + _ki, None)
+                            _chunk_latent = _ff_const_add_noise(_refine_model, _chunk_noise, _r_sigmas,
+                                                                {"samples": _chunk_base}, _r_audio)
+                            # 加噪后把整个重叠区重填为上一段干净结果:
+                            # 锁区(mask=0)采样器原样保留; 过渡区(0<mask<1) KSamplerX0Inpaint
+                            # 按 out*m + latent_image*(1-m) 混合, 若保留加噪底则高比例噪声
+                            # 直接混进发布结果(VAE 解码后=马赛克横带), 必须同为干净内容。
+                            if _lock_n > 0:
+                                _cl_members, _ = _ff_extract_members(_chunk_latent["samples"])
+                                _cl_members[0][:, :, :_ov_here] = _acc_v[:, :, _st:_st + _ov_here]
+                                _chunk_latent["samples"] = _ff_wrap_members(_cl_members, _was_nested_tc)
+                                _a_part = _chunk_latent["samples"].tensors[1]
+                                # v14.179 (2026-10-23): 音频掩码跟随 refine_audio_denoise,
+                                # 不再无条件锁定。旧代码此处永远 mask=0(保持一采音频), 会
+                                # 把"直播配音高清"档(音频≥12步+音频重绘0.7)的二采音频精修
+                                # 覆盖回锁定, 导致分块二采下配音仍乱/含混。audio_denoise>=0.5
+                                # 时音频参与二采重绘(mask=1), <0.5 时锁定(mask=0)。
+                                if float(_r_audio) >= 0.5:
+                                    _amask = torch.ones((1, 1, 1, int(_a_part.shape[-1])),
+                                                        dtype=_mask_ki.dtype, device=_a_part.device)
+                                else:
+                                    _amask = torch.zeros((1, 1, 1, int(_a_part.shape[-1])),
+                                                        dtype=_mask_ki.dtype, device=_a_part.device)
+                                _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_ki, _amask))
+                            # v14.240 (fix): 分块二采·首块段头锁 keep —— 首块无前块
+                            # 重叠(_ov_here=0), 原逻辑全重绘会把 clip 段头(一采已锁的
+                            # 延续区)二次重画 → 段间跳帧。这里把首块段头 _os_head_rows
+                            # 行锁为一采输出(samples)的干净延续画面, mask=0 不二次重绘。
+                            if _ki == 0 and _os_head_rows >= 1 and _lock_n == 0:
+                                try:
+                                    _cl_m0, _cl_n0 = _ff_extract_members(_chunk_latent["samples"])
+                                    _cv_os = _cl_m0[0]
+                                    _hrows_os = min(_os_head_rows, int(_cv_os.shape[2]))
+                                    if _hrows_os >= 1:
+                                        _s_v_os = _mem_full[0]
+                                        if _st == 0 and tuple(_s_v_os.shape[-2:]) == tuple(_cv_os.shape[-2:]):
+                                            _cv_os = _cv_os.clone()
+                                            _cv_os[:, :, :_hrows_os] = _s_v_os[:, :, :_hrows_os]
+                                            _cl_m0[0] = _cv_os
+                                            _chunk_latent["samples"] = _ff_wrap_members(_cl_m0, _cl_n0)
+                                            _mask_h0 = torch.ones_like(_cv_os)
+                                            _mask_h0[:, :, :_hrows_os] = 0.0
+                                            _a_h0 = _cl_m0[1]
+                                            if float(_r_audio) >= 0.5:
+                                                _amask_h0 = torch.ones((1, 1, 1, int(_a_h0.shape[-1])),
+                                                                       dtype=_cv_os.dtype, device=_cv_os.device)
+                                            else:
+                                                _amask_h0 = torch.zeros((1, 1, 1, int(_a_h0.shape[-1])),
+                                                                        dtype=_cv_os.dtype, device=_cv_os.device)
+                                            _chunk_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mask_h0, _amask_h0))
+                                            print(f"[H3 Extender] v14.240 分块首块段头锁 keep: {_hrows_os} 行锁定为一采延续画面(接缝零二次重绘)")
+                                except Exception as _h0_err:
+                                    print(f"[H3 Extender] v14.240 分块首块段头锁失败(可忽略): {_h0_err}")
+                            with _aimdo_disabled():
+                                _chunk_out = _r_guider.sample(
+                                    comfy.sample.prepare_empty_noise(_chunk_latent["samples"]),
+                                    _chunk_latent["samples"],
+                                    _r_sampler,
+                                    _r_sigmas,
+                                    denoise_mask=_chunk_latent.get("noise_mask"),
+                                    callback=_r_step_cb,
+                                    disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+                                    seed=int(seed) + 1 + _ki,
+                                )
+                            _out_mem, _ = _ff_extract_members(_chunk_out)
+                            _acc_v = _tc.merge_guarded(_acc_v, _out_mem[0], _st, _lock_n)
+                            print(f"[H3 Extender] v2.02 时间分块: 段 {_ki+1}/{len(_segs)} "
+                                  f"[{_st},{_et}) 完成, 累计 T={_acc_v.shape[2]}", flush=True)
+                        _r_samples = _ff_wrap_members([_acc_v, _aud_full], _was_nested_tc)
+                    else:
+                        with _aimdo_disabled():
+                            _r_samples = _r_guider.sample(
+                            comfy.sample.prepare_empty_noise(samples),
+                            _r_latent["samples"],
+                            _r_sampler,
+                            _r_sigmas,
+                            denoise_mask=_r_latent.get("noise_mask"),
+                            callback=_r_step_cb,
+                            disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+                            seed=int(seed) + 1,
+                        )
+            # v14.418: 二采成品 latent 幅值自检 —— 健康的去噪终态 std 应在 1 附近
+            # (同管线历史健康档 1.042); 明显超幅(如 2.2+)说明又被重复逆缩放,
+            # 这时 VAE 解码必成整屏 latent 格马赛克, 提前用日志暴露而不是等成片。
+            try:
+                _fm418, _ = _ff_extract_members(_r_samples if "_r_samples" in locals() else samples)
+                _ostd418 = float(_fm418[0].float().std())
+                _flag418 = " ⚠️超幅, 疑似重复逆缩放" if _ostd418 > 1.8 else ""
+                print(f"[H3 Extender] v14.418 二采成品 latent 自检: std={_ostd418:.3f}{_flag418}",
+                      flush=True)
+            except Exception as _chk418e:
+                print(f"[H3 Extender] v14.418 二采成品 latent 自检失败(可忽略): {_chk418e}", flush=True)
             finally:
                 try:
                     _sh59._prepare_sampling = _bsai_orig_prepare
@@ -12767,6 +12892,7 @@ _SP_OFF = "Off - 1st pass only (single-pass output)"
 _SP_STD = "BSAI Standard 2nd (lms, low-sigma 2-step)"
 _SP_TURBO = "BSAI Turbo 2nd (euler, beta 4-step 0.55)"
 _SP_SELF = "BSAI SelfLift 2nd (lcm + cosine refiner 0.7)"
+_SP_SELF20 = "BSAI SelfLift v2.0 2nd (progressive low-res leg, euler 2+2)"
 _SP_TILED = "BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)"
 _SECOND_PASS_EN2ZH = {
     "Follow render_pipeline (default)": "跟随主档 (默认)",
@@ -12774,6 +12900,7 @@ _SECOND_PASS_EN2ZH = {
     "BSAI Standard 2nd (lms, low-sigma 2-step)": "BSAI 标准二采 (lms 低噪2步)",
     "BSAI Turbo 2nd (euler, beta 4-step 0.55)": "BSAI 极速二采 (euler beta 4步 0.55)",
     "BSAI SelfLift 2nd (lcm + cosine refiner 0.7)": "BSAI SelfLift二采 (lcm + cosine微雕)",
+    "BSAI SelfLift v2.0 2nd (progressive low-res leg, euler 2+2)": "BSAI SelfLift v2.0 渐进二采 (低清腿 euler 2+2)",
     "BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)": "BSAI 分块二采 (n_tiles2 pad128 batch4)",
 }
 # v14.411: 后端分支比对以英文枚举为准; 旧工作流/前端若存中文标签, 反向映射回英文 canonical。
@@ -13340,9 +13467,9 @@ class BSAIH3FilmFactory:
              "tooltip": "v14.408: 1st-pass pipeline. Follow = obey the render_pipeline tier (default, zero change). Otherwise only the 1st pass is overridden so you can pair any 1st pass with any 2nd pass below. The sigma curve family follows this choice (Fast/SelfLift use the split curves, Full-res keeps a plain 6-step)."},
         )
         optional["second_pass_pipeline"] = (
-            ["Follow render_pipeline (default)", "Off - 1st pass only (single-pass output)", "BSAI Standard 2nd (lms, low-sigma 2-step)", "BSAI Turbo 2nd (euler, beta 4-step 0.55)", "BSAI SelfLift 2nd (lcm + cosine refiner 0.7)", "BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)"],
+            ["Follow render_pipeline (default)", "Off - 1st pass only (single-pass output)", "BSAI Standard 2nd (lms, low-sigma 2-step)", "BSAI Turbo 2nd (euler, beta 4-step 0.55)", "BSAI SelfLift 2nd (lcm + cosine refiner 0.7)", "BSAI SelfLift v2.0 2nd (progressive low-res leg, euler 2+2)", "BSAI Tiled 2nd (n_tiles 2, pad 128, batch 4)"],
             {"default": "Follow render_pipeline (default)",
-             "tooltip": "v14.408: 2nd-pass pipeline. Follow = obey the render_pipeline tier (default, zero change). Off = single-pass output from the 1st pass only. Standard/Turbo/SelfLift/Tiled override the refine pass; the low-noise sigma slice is cut from the same curve family the 1st pass uses, so 1st+2nd stay continuous."},
+             "tooltip": "v14.408: 2nd-pass pipeline. Follow = obey the render_pipeline tier (default, zero change). Off = single-pass output from the 1st pass only. Standard/Turbo/SelfLift/Tiled override the refine pass; the low-noise sigma slice is cut from the same curve family the 1st pass uses, so 1st+2nd stay continuous. v2.0 SelfLift = ported progressive_sample low-res leg + consistency-lift endpoint (reference flow #679), euler 2+2."},
         )
         # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
         # 让旧版工作流(71 项)载入时尾部错位/NaN。改为"档位化"：
@@ -15640,6 +15767,17 @@ class BSAIH3FilmFactory:
                         refine_sampler, refine_steps, refine_denoise = "lcm", 2, 0.4721
                         _FF_SPLIT_SIGMA_MODE = True
                         _sp_sig = "lcm + cosine 微雕低噪段"
+                    elif _sp_sel == _SP_SELF20:
+                        # v14.404: 参考流 v2.0 #679 SelfLiftAvatarH3Sampler 渐进档 ——
+                        # euler, beta(3,0.55)+refiner(1,0.7,cosine) 整条 4 步曲线,
+                        # transition_step=2 (低清腿 2 步 / 高清腿 2 步), 低清腿在 0.5x
+                        # 低清 latent 跑, 端点一致性提升后高清腿续算。整段 σ 表交给
+                        # progressive_sample 内部按切点切低清/高清腿, 不再切低噪段。
+                        refine_sampler, refine_steps, refine_denoise = "euler", 4, 0.55
+                        refine_sigmas = None
+                        _FF_SPLIT_SIGMA_MODE = False
+                        _prog_enabled = True
+                        _sp_sig = "euler 渐进低清腿 2+2 (progressive_sample, 一致性提升端点)"
                     elif _sp_sel == _SP_TILED:
                         refine_sampler, refine_steps, refine_denoise = "euler", 2, 0.45
                         _FF_SPLIT_SIGMA_MODE = True
@@ -15649,7 +15787,7 @@ class BSAIH3FilmFactory:
                         print(f"[H3 Extender] v14.408 2采管线: 未识别档位 {_sp_sel!r}, 沿用主档二采配方", flush=True)
                         _sp_sig = "未识别档位 (沿用主档)"
                     # 低噪段从"一采所用的那条曲线"切出来, 保证 1采+2采连续
-                    if _sp_sel != _SP_TURBO and refine_sigmas is None:
+                    if _sp_sel not in (_SP_TURBO, _SP_SELF20) and refine_sigmas is None:
                         try:
                             if str(scheduler) in ("bsai_selflift_high", "bsai_selflift_low"):
                                 _sp_hi, _sp_lo = _bsai_selflift_split(model, tag="1采+2采 低噪段")
@@ -15806,12 +15944,45 @@ class BSAIH3FilmFactory:
         # 像素仍是 2K 不缩水(声明尺寸经 _hv2x_decl 翻倍)。仅对"默认双采"档
         # 且有 HyperVAE 权重时生效, 其余档位/无权重机器完全不受影响。
         # 用环境变量 BSAI_H3_AUTO_HV2X=0 可关闭该自动降级。
+        # v14.28x 马赛克根治: HyperVAE 2x 只做 pixel_shuffle 像素翻倍, 无法补回
+        # latent 里缺失的空间 token。若一采是真实低清草稿(latent 网格 < 目标 latent
+        # 网格), 必须先在潜空间放大到目标几何再解码; 此时若被自动护栏降成
+        # factor=1.0 + HV2X 解码, 草稿 latent 会被 32x 解码成整幅规则方块
+        # 马赛克(实测 60x34 草稿 latent -> 32px 硬边方块铺满 1920x1088)。
+        # 只认真实低清画布接管, 不按一采预设名误判; 命中下列任一几何条件即视为
+        # 草稿/半分辨率 latent 管道, 不允许自动走 HV2X:
+        #   ① Director/极速一采: 一采 MP 明显小于目标 MP;
+        #   ② auto 模式下 MP 预算真正接管画布, 且草稿 MP 明显小于目标画布面积。
+        def _ff_is_draft_latent_pipeline():
+            try:
+                if (_director_fast_active
+                        and float(_dff_first_mp) < float(_dff_target_mp) - 1e-6):
+                    return True
+            except Exception:
+                pass
+            try:
+                if (str(resolution_mode) != "manual"
+                        and float(refine_upscale_factor or 1.0) > 1.0
+                        and width and height and float(megapixels) > 0):
+                    _draft_target_mp = float(width) * float(height) / 1.0e6
+                    if _draft_target_mp > 0 and float(megapixels) < 0.85 * _draft_target_mp:
+                        return True
+            except Exception:
+                pass
+            return False
+
+        _ff_draft_latent = _ff_is_draft_latent_pipeline()
+        if _ff_draft_latent:
+            print("[H3 Extender] v14.28x 草稿 latent 保护: 检测到真实低清画布接管"
+                  "(一采 latent 网格 < 目标 latent 网格), 跳过自动 HyperVAE 2x 提速;"
+                  "保留二采潜空间放大倍率与原生 VAE, 避免草稿 latent 被 2x 解码铺成方块马赛克")
         _auto_hv2x = False
         try:
             if (os.environ.get("BSAI_H3_AUTO_HV2X", "1") != "0"
                     and not one_shot_dual_2k
                     and bool(refine_enable)
                     and float(refine_upscale_factor or 1.0) > 1.0
+                    and not _ff_draft_latent
                     and (_rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)")
                          or _rp_mode == "直播带货（全自动）")):
                 # 覆盖默认双采档 + 直播带货(全自动)档。直播带货档原本强制
