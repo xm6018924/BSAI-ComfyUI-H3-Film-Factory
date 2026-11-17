@@ -4634,6 +4634,37 @@ def _bsai_selflift_split(model, tag: str = ""):
     return _hi, _lo
 
 
+# v14.404: 参考流 v2.0 #679 SelfLift 渐进档 σ 曲线 —— #669 BasicScheduler
+# (beta, 3, 0.55) 经 #672 H3SigmaRefiner(extra_steps=1, start=0.7, end=0,
+# cosine) 加密成 4 步, 切点 transition_step=2 (低清腿 2 步 / 高清腿 2 步)。
+_BSAI_SL20_TOTAL_STEPS = 4
+_BSAI_SL20_TRANSITION_STEP = 2
+
+
+def _bsai_selflift20_split(model, tag: str = ""):
+    """v2.0 SelfLift 渐进档 σ 曲线: beta(3,0.55) + refiner(1,0.7,0,cosine),
+    transition_step=2 切成 (低清腿 2 步高噪, 高清腿 2 步低噪)。
+
+    返回 (整条 σ 表, transition_step)。progressive_sample 内部按
+    sigmas[:transition_step+1] / sigmas[transition_step:] 切低清/高清腿。
+    """
+    ms = model.get_model_object("model_sampling")
+    _steps, _dn = 3, 0.55
+    _tot = max(_steps, int(_steps / _dn))          # 原生 BasicScheduler: int(3/0.55)=5
+    _sig = comfy.samplers.calculate_sigmas(ms, "beta", _tot).cpu()
+    if float(_sig[0]) < float(_sig[-1]):
+        _sig = torch.flip(_sig, dims=[0])
+    _sig = _sig[-(_steps + 1):].clone()            # 取末 4 点
+    _pre = [round(float(v), 4) for v in _sig.tolist()]
+    _sig = _bsai_h3_sigma_refiner(_sig, 1, 0.7, 0.0, "cosine")
+    _split = max(1, min(int(_sig.shape[0]) - 2, int(_BSAI_SL20_TRANSITION_STEP)))
+    print(f"[H3 Extender] v14.404 SelfLift20{(' ' + tag) if tag else ''}: "
+          f"beta(3,0.55) σ={_pre} -> H3SigmaRefiner(1,0.7,cosine) σ="
+          f"{[round(float(v), 4) for v in _sig.tolist()]} | transition_step={_split} -> "
+          f"低清腿 {_split} 步 / 高清腿 {int(_sig.shape[0]) - 1 - _split} 步", flush=True)
+    return _sig, _split
+
+
 # ============================================================
 # Rhythm Music 档: 音乐卡点节奏(移植自 A_LibrosaBeatCue / A_TextInjectCue)。
 # 完整歌曲在后端用 librosa 分析一次并缓存; 每段按其起止秒数生成卡点指令,
@@ -4970,6 +5001,81 @@ try:
         pass
 except Exception:
     _FF_UPSCALER_MOD = None
+
+# ============================================================
+# v14.404: SelfLift 渐进低分辨率腿 + 一致性提升端点(progressive_sample)桥接
+# ----------------------------------------------------------------------------
+# 参考流 #679 SelfLiftAvatarH3Sampler 真正省显存的机制不在工厂普通二采路径里:
+#   ① 低分辨率腿在 0.5x 低清 latent 跑 transition_step 步;
+#   ② 切点处低清 x0 经 VAE 解码 -> paired_lifts(latent 提升 + 像素提升) ->
+#      artifact_aware_consistency_lift 融合得到高清干净端点 z0_high, 再按
+#      σ_k/σ_next 重做噪声缩放 + 一步 Euler 得 resume latent;
+#   ③ 高清腿在目标分辨率跑剩余步数。
+# 工厂旧 SelfLift 二采把一采半噪 latent 直接 3D 放大到高清网格续算, 缺的正是
+# 第②段一致性提升端点; 24GB 卡整段高清前向 delegate 驻留 16.3GB 后第 1 大步
+# 权重换页 OOM。这里把移植包 ported/selflift_avatar 的完整引擎按**独立顶层包名**
+# 惰性加载, 规避 vendor/selflift_avatar(global 精简目录, 无 nodes/selflift/
+# h3_upscaler)已被 sys.modules 缓存导致的同名包目录冲突。
+# ============================================================
+_BSAI_PROG_MOD = None          # 成功后缓存 selflift 引擎 nodes 模块
+_BSAI_PROG_LOAD_ERR = None     # 加载失败原因(仅记录, 二采回退普通路径)
+_BSAI_PROG_PKG_NAME = "bsai_selflift_prog"
+# 移植包子模块按依赖顺序逐个按文件加载(相对导入以独立包名前缀解析)。
+_BSAI_PROG_SUBMODULES = [
+    "diagnostics", "avatar_masks", "selflift", "h3_upscaler", "avatar_sampling",
+    "h3_tiling", "h3_global_tiling", "h3_stream_attention", "h3_ram_attention",
+    "h3_prepared_weights", "h3_output_chunking", "spatial_anchor", "tiling_ui",
+    "h3_tst", "nodes",
+]
+
+
+def _bsai_load_progressive_engine():
+    """惰性加载 ported/selflift_avatar 渐进采样引擎(独立包名隔离 vendor 冲突)。
+
+    返回引擎 nodes 模块(含 progressive_sample / SelfLiftAvatarH3Sampler);
+    失败返回 None, 调用处回退工厂普通二采路径。模块加载只做一次, 缓存复用。
+    """
+    global _BSAI_PROG_MOD, _BSAI_PROG_LOAD_ERR
+    if _BSAI_PROG_MOD is not None:
+        return _BSAI_PROG_MOD
+    if _BSAI_PROG_LOAD_ERR is not None:
+        return None
+    try:
+        import os as _os_p, sys as _sys_p, types as _types_p
+        import importlib.util as _ilu_p
+        _fac_dir = _os_p.path.dirname(_os_p.path.abspath(__file__))
+        _pkgdir = _os_p.path.join(_fac_dir, "ported", "selflift_avatar")
+        if not _os_p.path.isdir(_pkgdir):
+            raise FileNotFoundError(f"ported selflift_avatar 目录不存在: {_pkgdir}")
+        # 已加载过同名独立包则直接复用
+        _pkg = _sys_p.modules.get(_BSAI_PROG_PKG_NAME)
+        if _pkg is None:
+            _pkg = _types_p.ModuleType(_BSAI_PROG_PKG_NAME)
+            _pkg.__path__ = [_pkgdir]
+            _sys_p.modules[_BSAI_PROG_PKG_NAME] = _pkg
+        for _sub in _BSAI_PROG_SUBMODULES:
+            _mod_name = f"{_BSAI_PROG_PKG_NAME}.{_sub}"
+            if _mod_name in _sys_p.modules:
+                continue
+            _mod_path = _os_p.path.join(_pkgdir, f"{_sub}.py")
+            if not _os_p.path.isfile(_mod_path):
+                raise FileNotFoundError(f"移植子模块缺失: {_mod_path}")
+            _spec = _ilu_p.spec_from_file_location(_mod_name, _mod_path)
+            _mod = _ilu_p.module_from_spec(_spec)
+            _sys_p.modules[_mod_name] = _mod
+            _spec.loader.exec_module(_mod)
+        _nodes = _sys_p.modules[f"{_BSAI_PROG_PKG_NAME}.nodes"]
+        if not hasattr(_nodes, "progressive_sample"):
+            raise AttributeError("progressive_sample 未在移植 nodes 模块中暴露")
+        _BSAI_PROG_MOD = _nodes
+        print("[H3 Extender] v14.404 渐进低分辨率腿引擎已加载 "
+              f"(独立包名 {_BSAI_PROG_PKG_NAME}, ported/selflift_avatar)")
+        return _BSAI_PROG_MOD
+    except Exception as _pe:
+        _BSAI_PROG_LOAD_ERR = f"{type(_pe).__name__}: {_pe}"
+        print(f"[H3 Extender] v14.404 渐进引擎加载失败(二采将回退普通路径): "
+              f"{_BSAI_PROG_LOAD_ERR}", flush=True)
+        return None
 
 # v14.250: 官方 ComfyUI-MiniMaxH3_LatentUpscaler 的 conditioning 放大函数
 # (upscale_minimax_conditioning) —— 在二采 latent 放大到 2x 时, 必须同步
@@ -6666,7 +6772,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                one_shot_trim_frames=0,
                # v14.419: 本段脚本计划内硬切点的成片帧号列表(分镜时间码 × FPS),
                # 防护检测时作为白名单排除, 不参与漂移硬切判定。
-               planned_out_frames=None):
+               planned_out_frames=None,
+               # v14.404: 主 video VAE, 供 SelfLift 渐进腿一致性提升端点做低清 x0
+               # VAE 解码/像素锚点重编码用; 普通二采路径不使用。
+               vae=None):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -19209,6 +19318,7 @@ class BSAIH3FilmFactory:
                     # v14.238 MiniMaxH3 Director 极速双采移植参数
                     refine_sampler=refine_sampler,
                     refine_sigmas=refine_sigmas,
+                    vae=vae,
                 )
             except comfy.model_management.InterruptProcessingException:
                 _send_extender_progress(
