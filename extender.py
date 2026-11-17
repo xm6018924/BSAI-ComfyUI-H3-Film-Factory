@@ -5208,7 +5208,50 @@ def _ff_video_hw(samples):
     return None
 
 
-def _ff_detect_latent_hard_cut(samples, pixel_thr=1.6, lf_thr=1.8, trim_frames=0):
+_PLANNED_CUT_TS_RE = re.compile(r"(\d{1,2}):(\d{2}(?:[.,]\d{1,3})?)")
+# 硬切/跳镜类转场动词(蒙太奇切点, 设计意图)。
+_PLANNED_HARD_CUT_RE = re.compile(
+    r"hard-cut|straight cut|insert cut|match cut|match-on-action|eyeline-match|"
+    r"flash cut|reaction cut|j-cut|l-cut|jump cut|cross-cutting|jump|snap|wipe",
+    re.IGNORECASE)
+# 柔和过渡(渐变/叠化/淡入淡出)不算硬切, 不进白名单。
+_PLANNED_SOFT_TRANSITION_RE = re.compile(
+    r"dissolve|fade-?out|fade in|cross-fade|soft fade", re.IGNORECASE)
+
+
+def _ff_parse_planned_cut_secs(prompt_text):
+    """v14.419: 从本段分镜文本解析脚本**明确写出**的硬切/跳镜切点(段内秒)。
+
+    卡点舞蹈 MV 的每个 CLIP 正文里用 `[Shot N] At 00:0X.XXX, ... cut ...`
+    排了多个段内蒙太奇切点; 这些是导演计划内的镜头切换, 不是"场景整体漂移"。
+    防护检测器只看 latent 差分、读不到这张时刻表, 会把合法切点误判成漂移硬切。
+    这里把硬切类切点抽出来交给防护做白名单; dissolve/fade 等柔和过渡排除在外。
+
+    返回段内秒(升序去重, 剔除异常越界值)。
+    """
+    secs = []
+    for line in str(prompt_text or "").splitlines():
+        _mts = _PLANNED_CUT_TS_RE.search(line)
+        if not _mts:
+            continue
+        # 转场类型只看时间码之后的**首个分句**(到首个逗号/句号为止) —— 主句写的是
+        # 本段转场方式; 后面分句里人物"dissolve into the dark"等动作描述不算转场。
+        _rest = line[_mts.end():].lstrip(" ,")
+        _clause = re.split(r"[,.]", _rest, maxsplit=1)[0]
+        if _PLANNED_SOFT_TRANSITION_RE.search(_clause):
+            continue
+        if not _PLANNED_HARD_CUT_RE.search(_clause):
+            continue
+        for mm, ss in _PLANNED_CUT_TS_RE.findall(line):
+            try:
+                secs.append(int(mm) * 60 + float(ss.replace(",", ".")))
+            except Exception:
+                continue
+    return sorted({round(s, 3) for s in secs if 0.0 <= s < 60.0})
+
+
+def _ff_detect_latent_hard_cut(samples, pixel_thr=1.6, lf_thr=1.8, trim_frames=0,
+                               planned_out_frames=None):
     """v14.317: 在一采 latent 序列里找"场景整体换掉"的硬切点。
 
     判据(用**真实一采 latent** 标定, 见 tools/audit_one_shot_latent.py 的相位口径):
@@ -5275,6 +5318,51 @@ def _ff_detect_latent_hard_cut(samples, pixel_thr=1.6, lf_thr=1.8, trim_frames=0
                 _gf = _row * 17.0 / 5.0
                 out.append({"row": _row, "gen_frame": _gf, "out_frame": _gf - _trim,
                             "dr": _dr, "lr": _lr})
+        # v14.419: 计划内切点白名单 —— 脚本分镜里明确写出的蒙太奇硬切是设计意图,
+        # 不是场景漂移; 这些成片帧号附近的命中不进"漂移硬切"判定。白名单只覆盖
+        # 分镜文本里带时间码的硬切, 未写进脚本的漂移跳场仍会被拦下。
+        try:
+            _wl_on = str(os.environ.get("BSAI_H3_CUT_WL", "1")).strip().lower() \
+                not in ("0", "false", "off")
+        except Exception:
+            _wl_on = True
+        if _wl_on and out:
+            _wl = []
+            try:
+                _wl = [float(f) for f in (planned_out_frames or [])]
+            except Exception:
+                _wl = []
+            if _wl:
+                # v14.419+: 计划切点按镜头段做区间归属(Voronoi)。H3 的时间轴不是逐帧
+                # 锁定的, 模型常会把某个计划切镜提前/延后若干帧落地(本轮 Shot5 提前
+                # ~7 帧、Shot6 提前 ~33 帧), 固定 ±3 帧点窗覆盖不到。每个计划切点
+                # 负责「到相邻两切点中点为止」的成片帧段; 落在任一段区间内的命中都按
+                # 导演计划切镜排除。时刻表之外的漂移跳场仍落在区间之外、照常拦截。
+                _wl = sorted(float(f) for f in _wl)
+                _total_out = _t * 17.0 / 5.0 - _trim
+
+                def _in_planned_window(fr):
+                    for _k, _f in enumerate(_wl):
+                        _left = 0.0 if _k == 0 else (_wl[_k - 1] + _f) * 0.5
+                        _right = (_total_out if _k == len(_wl) - 1
+                                  else (_f + _wl[_k + 1]) * 0.5)
+                        if _left <= fr <= _right:
+                            return True
+                    return False
+
+                _kept, _dropped = [], []
+                for _h in out:
+                    if _in_planned_window(_h["out_frame"]):
+                        _dropped.append(_h)
+                    else:
+                        _kept.append(_h)
+                if _dropped:
+                    print(f"[H3 Extender] v14.419 计划内切点白名单: 排除 "
+                          f"{len(_dropped)} 处脚本已写切点 "
+                          f"row={[h['row'] for h in _dropped]} "
+                          f"(≈成片帧 {[round(h['out_frame']) for h in _dropped]}), "
+                          f"按导演计划切镜, 不计入场景漂移硬切", flush=True)
+                out = _kept
         return out
     except Exception as _e:
         print(f"[H3 Extender] v14.317 硬切检测异常(忽略): {_e}")
@@ -6551,7 +6639,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                refine_no_temp_chunk=False,
                # v14.317: 本段 motion context 裁掉的上下文帧数 —— 只用于把
                # latent 行号换算成成片帧号(日志用), 不参与采样。
-               one_shot_trim_frames=0):
+               one_shot_trim_frames=0,
+               # v14.419: 本段脚本计划内硬切点的成片帧号列表(分镜时间码 × FPS),
+               # 防护检测时作为白名单排除, 不参与漂移硬切判定。
+               planned_out_frames=None):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
 
@@ -7175,7 +7266,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     if bool(globals().get("_VIGGLE_ACTIVE", False)):
         _cut_retries = 0
     if _cut_guard_on:
-        _cut_hits = _ff_detect_latent_hard_cut(samples, _cut_pthr, _cut_lthr, one_shot_trim_frames)
+        _cut_hits = _ff_detect_latent_hard_cut(
+            samples, _cut_pthr, _cut_lthr, one_shot_trim_frames,
+            planned_out_frames=planned_out_frames)
         if _cut_hits:
             _cut_best = samples
             _cut_best_hits = _cut_hits
@@ -7218,7 +7311,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 if _cut_samples is None:
                     break
                 _cut_new = _ff_detect_latent_hard_cut(
-                    _cut_samples, _cut_pthr, _cut_lthr, one_shot_trim_frames)
+                    _cut_samples, _cut_pthr, _cut_lthr, one_shot_trim_frames,
+                    planned_out_frames=planned_out_frames)
                 print(f"[H3 Extender] v14.317 硬切拦截: seed={_cut_seed} 重采样完成, "
                       f"剩余硬切 {len(_cut_new)} 处(原 {len(_cut_best_hits)} 处)", flush=True)
                 if len(_cut_new) < len(_cut_best_hits):
@@ -15762,6 +15856,27 @@ class BSAIH3FilmFactory:
             print("[H3 Extender] v14.414 二采不重绘: 关闭高低噪切分, 一采归一为完整 beta 8 步 "
                   "全曲线去噪到 σ=0(二采仅 3D 超分放大, 不跑低噪收尾腿), 避免半噪草稿被超分解码成马赛克",
                   flush=True)
+        # v14.420: 环境变量强制二采 latent 放大倍率(24GB 卡 x2.0 二采真重绘 OOM 兜底)。
+        # 背景: 6+2/常规双采档在 24GB 上把 int8 DiT 驻留后, x2.0(120x68) 二采即便空间
+        # 分块仍 OOM(本轮第三次实测: 4 tile / 9 tile 兜底均爆), 只能回退半噪骨架。设
+        # BSAI_H3_REFINE_FACTOR=1.0 让二采在一采同尺寸 latent(60x34, 与一采同足迹,
+        # 已实测可跑)上跑完低噪收尾腿; =1.5 用 90x50 折中。<=1.0 时摘除 3D upscaler,
+        # 避免 v1.44 把 factor<=1.0 自动抬回 1.5。未设置时完全不影响既有档位/大显存卡。
+        try:
+            _ff_env_factor = str(os.environ.get("BSAI_H3_REFINE_FACTOR", "")).strip()
+            if _ff_env_factor:
+                _ff_env_f = float(_ff_env_factor)
+                if 0.5 <= _ff_env_f <= 2.0:
+                    refine_upscale_factor = _ff_env_f
+                    if _ff_env_f <= 1.0 and refine_upscaler_model \
+                            and not str(refine_upscaler_model).startswith("("):
+                        refine_upscaler_model = "(bilinear interpolation, no model)"
+                    print(f"[H3 Extender] v14.420 环境倍率覆盖: 二采 factor -> {_ff_env_f:.2f} "
+                          f"(BSAI_H3_REFINE_FACTOR; 24GB 显存兜底, 二采在 "
+                          f"{'一采同尺寸 latent' if _ff_env_f <= 1.0 else '降倍率 latent'} 上真重绘)",
+                          flush=True)
+        except Exception as _ffe:
+            print(f"[H3 Extender] v14.420 环境倍率覆盖解析失败(可忽略): {_ffe}")
         # v14.279: 唯一权威配方日志 —— 打印在所有管道/速度档覆盖之后, 保证
         # "日志声明 == 实际实跑", 不再出现渲染管道档声明 12/6 实跑 8/4 的分歧。
         print(f"[H3 Extender] v14.279 EFFECTIVE-RECIPE: pipeline={_rp_mode or '(none)'} "
@@ -18993,6 +19108,18 @@ class BSAIH3FilmFactory:
                     _release_text_encoder(clip, tag=f"clip{i + 1}/{len(clips)}")
                 except Exception as _te_rel_err:
                     print(f"[H3 Extender] v14.214 文本编码器释放异常(忽略): {_te_rel_err}")
+                # v14.419: 解析本段分镜里脚本计划内的硬切点(段内秒 → 成片帧), 交给
+                # 硬切防护做白名单 —— 蒙太奇切镜是导演计划, 不是场景漂移, 不应触发
+                # 换 seed 重采样。先取原始分镜, 取不到再退回条件化后的提示词。
+                _planned_secs = _ff_parse_planned_cut_secs(
+                    cfg.get("prompt") if isinstance(cfg, dict) else "")
+                if not _planned_secs:
+                    _planned_secs = _ff_parse_planned_cut_secs(_clip_prompt_for_cond)
+                _planned_out_frames = [round(s * float(FPS), 3) for s in _planned_secs]
+                if _planned_out_frames:
+                    print(f"[H3 Extender] v14.419 clip{i + 1} 计划内切点: "
+                          f"{[round(s, 3) for s in _planned_secs]}s -> "
+                          f"成片帧 {[round(f) for f in _planned_out_frames]}", flush=True)
                 sampled = _sample_h3(
                     sampling_model,
                     positive,
@@ -19031,6 +19158,7 @@ class BSAIH3FilmFactory:
                                             and not locals().get("_os2k_recipe", False)),
                     refine_no_temp_chunk=bool(_rp_no_temp_chunk),
                     one_shot_trim_frames=int(trim_frames or 0),
+                    planned_out_frames=_planned_out_frames,
                     omni_8step_mode=omni_8step_mode,
                     hyperflow_mode=bool(_rp_hyperflow),
                     honor_manual_steps=(str(speed_preset) == "custom"),

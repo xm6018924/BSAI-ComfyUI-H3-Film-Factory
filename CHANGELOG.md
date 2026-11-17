@@ -4,6 +4,46 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.420 (2026-11-17) — 环境变量强制二采 latent 倍率，24GB 卡真重绘 OOM 兜底 / Env-forced refine latent scale: 24GB OOM fallback for true refine repaint
+
+**背景（实测定位）**
+
+6+2 / 常规双采档在 24GB 卡上把 int8 DiT 驻留后，x2.0（120×68）二采即便空间分块仍 OOM（4 tile / 9 tile 兜底均爆），只能回退半噪骨架。新增环境变量 `BSAI_H3_REFINE_FACTOR` 强制二采 latent 放大倍率，作为低显存兜底。
+
+**改动**
+
+- 设置 `BSAI_H3_REFINE_FACTOR=1.0`：二采在一采同尺寸 latent（60×34，同足迹，已实测可跑）上跑完低噪收尾腿；`=1.5` 用 90×50 折中；取值钳制在 0.5–2.0。
+- factor ≤ 1.0 时摘除 3D upscaler（`(bilinear interpolation, no model)`），避免 v1.44 把 factor ≤ 1.0 自动抬回 1.5。
+- 未设置该环境变量时完全不影响既有档位与大显存卡；解析失败仅打印可忽略告警。
+
+**边界**
+
+- 该变量是 OOM 兜底，不改变默认配方；默认不设置即维持原倍率。
+- 仅覆盖二采 latent 倍率与 upscaler 选择，不改动一采采样与提示词条件。
+
+### v14.419 (2026-11-17) — 硬切防护识别脚本计划内蒙太奇切点，消除 MV 分镜段内切镜被误判为场景漂移而重采样 / Hard-cut guard recognizes scripted in-clip montage cuts; stops false-positive seed re-sampling on planned MV shot transitions
+
+**问题（实测定位，非推测）**
+
+Rhythm MV v15 clip0 一采首掷后，v14.317 硬切防护检出 4 处“硬切”并换 seed 重采样；重采样 1/2、2/2 后点位与差分完全不变（条件驱动，非噪声运气）。逐帧对齐卡点总表：唯一打印的命中 row27≈成片帧 92≈3.83s，正是分镜 Shot3 insert cut 3.742s；4 处命中对应 P01 脚本计划内的段内切镜（1.867 / 3.742 / 7.494 / 8.900 / 12.651s）。
+
+**成因（链条完整）**
+
+v14.317 防护做在结果层，只看 latent 帧间差分与低频差，读不到分镜文本里的切点时刻表。卡点 MV 每个 CLIP 正文用 `[Shot N] At 00:0X.XXX, …cut…` 排了多个导演计划内的蒙太奇切镜；近景↔特写/中景的合法切镜同样改变大面积构图与明暗，低频项越线，被误判成“场景整体漂移硬切”。这类切点由提示词条件固定决定，换 seed 改不掉，所以两次重采样点位指标原样复现，白白多跑整轮 8 步采样。
+
+**改动**
+
+- 新增 `_ff_parse_planned_cut_secs`：从本段分镜文本解析带时间码的硬切/跳镜切点（straight / insert / match / flash / reaction / J / L / jump / wipe / cross-cutting 等）；dissolve、fade-out 等柔和过渡按主句分句排除。
+- 检测器 `_ff_detect_latent_hard_cut` 新增 `planned_out_frames` 白名单：计划切点按相邻切点中点划分镜头段区间（Voronoi），命中落进任一计划段区间即记为“导演计划切镜”，不计入漂移硬切；区间归属容忍模型把切镜提前/延后若干帧落地；未写进时刻表的漂移跳场仍落在区间之外、照常拦截。
+- `_sample_h3` 与主循环调用处把本段计划切点（段内秒 × FPS）串到防护；初检与每次重采样后的复检套用同一张白名单。
+- 环境变量 `BSAI_H3_CUT_WL=0/false/off` 可关闭白名单、回到 v14.317 旧行为。
+
+**边界**
+
+- 白名单只覆盖分镜文本里显式写了时间码的硬切；2026-11-05 那种“入夜胸像→落日海滩”未计划跨场景漂移，帧上无时间码，落在计划段区间之外仍会被检出并重采样。
+- 区间归属按“最近计划切点”划分（相邻切点中点为界）；若未计划漂移恰好落进某计划镜头段区间内，仍可能被一并豁免。环境变量 `BSAI_H3_CUT_WL=0/false/off` 可关闭白名单、回到 v14.317 严格旧行为。
+- 切点时刻取自分镜原始 `cfg["prompt"]`；叠化/淡变等柔和过渡不进白名单。
+
 ### v14.418 (2026-11-17) — 回退二采“重复逆缩放”，修复 SplitSigmas 分腿档成片整屏 latent 格彩色马赛克 / Revert the double inverse-noise rescale in the split-sigma refine handoff: fixes the full-frame latent-grid mosaic
 
 **问题（实测定位，非推测）**
