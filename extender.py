@@ -250,6 +250,26 @@ try:
 except Exception:
     _FF_REFINE_CONTENT_MIN = 0.85
 _FF_REFINE_CONTENT_MIN = max(0.0, min(1.0, _FF_REFINE_CONTENT_MIN))
+# v14.421: 二采空闲显存定档兜底(24GB 卡)。
+# 背景: v14.383 闭环曾在 free 1.9<->7.5GB 间振荡, 3 次迭代后停在 free=2.7GB(低于安全
+# 下限), 二采真实 tile 前向激活/工作区无空间, 触发 nvlddmkm 153 GPU 复位(两次实测)。
+# 这里把定档下限/目标/迭代次数提成可配 env: 默认 free 下限 3.5GB、目标 4.0GB、5 次迭代,
+# 低于下限时单调抬 reserve(多卸 DiT), 不在同一定档回合里又降回; 未设置时大显存卡不受影响。
+try:
+    _FF_REFINE_FREE_FLOOR_GB = float(os.environ.get("BSAI_H3_REFINE_FREE_FLOOR_GB", "3.5"))
+except Exception:
+    _FF_REFINE_FREE_FLOOR_GB = 3.5
+_FF_REFINE_FREE_FLOOR_GB = max(1.5, min(8.0, _FF_REFINE_FREE_FLOOR_GB))
+try:
+    _FF_REFINE_FREE_TARGET_GB = float(os.environ.get("BSAI_H3_REFINE_FREE_TARGET_GB", "4.0"))
+except Exception:
+    _FF_REFINE_FREE_TARGET_GB = 4.0
+_FF_REFINE_FREE_TARGET_GB = max(_FF_REFINE_FREE_FLOOR_GB, min(9.0, _FF_REFINE_FREE_TARGET_GB))
+try:
+    _FF_REFINE_FREE_ITERS = int(os.environ.get("BSAI_H3_REFINE_FREE_ITERS", "5"))
+except Exception:
+    _FF_REFINE_FREE_ITERS = 5
+_FF_REFINE_FREE_ITERS = max(1, min(8, _FF_REFINE_FREE_ITERS))
 
 # ── v14.79: 删除 v14.78 的 _patch_h3_audio_row_pad 死代码 ──
 # 那段 "补零/截断 cond_audio_rows" 的 monkey-patch 从定义起就没有任何调用点,
@@ -5407,10 +5427,14 @@ def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
             # v14.417 (2026-11-17): 「块太碎」也要合并。
             # 实测代价模型: 每块 forward 都要把整份 int8 权重(本片 19.5GB)在 GPU 上
             # 重新流一遍, 所以块数直接乘在搬运成本上; 而每块 tokens 只按块内面积算。
-            # 请求 4 块(100k/块)在 200k/块 以内的安全区里纯属浪费:
-            # 2 块(165k/块)把 forward 数与权重流次数直接砍半, 重叠重复计算也少。
-            # 200k/块 上限依据: v14.149 实机 334k/块 可跑(399s/步), 200k 仍留余量。
-            _soft = 200000
+            # v14.421: 每块 token 合并上限从 200k 收到 110k(env BSAI_H3_TILE_TOKEN_CAP 可覆盖)。
+            # 24GB 卡上 200k/块 的单块激活 + Sol-Attn 工作区在低 free 时把显存顶到 GPU 复位;
+            # 110k/块 把单块峰值压下来, 代价是权重流次数略增(换稳定优先)。
+            try:
+                _soft = int(os.environ.get("BSAI_H3_TILE_TOKEN_CAP", "110000"))
+            except Exception:
+                _soft = 110000
+            _soft = max(40000, min(450000, _soft))
             _den_soft = _soft / float(_t164 * _minhw) - 2 * _ov
             _merge_on = str(os.environ.get("BSAI_H3_TILE_MERGE", "1")).strip().lower() not in (
                 "0", "false", "off", "no")
@@ -5420,7 +5444,7 @@ def _ff_auto_refine_tile_count(samples, requested, overlap_px, max_tiles=8):
                 if _n_soft < _req:
                     _per_soft = _t164 * _minhw * (_axis // _n_soft + 2 * _ov)
                     print(f"[H3 Extender] v14.417 分块合并: 请求 n_tiles={_req}({_per_req:,}/块) "
-                          f"-> {_n_soft} 块({_per_soft:,}/块 <= 200k) —— "
+                          f"-> {_n_soft} 块({_per_soft:,}/块 <= {_soft//1000}k) —— "
                           f"forward 与权重流次数 -{(_req - _n_soft) / _req * 100:.0f}%, 缩短二采墙钟",
                           flush=True)
                     return _n_soft
@@ -8336,14 +8360,24 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _tok383 = 0
                         if _tiled383:
                             try:
+                                import gc as _gc383
                                 _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
                                 _it383 = 0
-                                while _it383 < 3 and (_free383 < 3.0 or _free383 > 6.2):
+                                _floor383 = _FF_REFINE_FREE_FLOOR_GB
+                                _tgt383 = _FF_REFINE_FREE_TARGET_GB
+                                _ceiling383 = max(6.2, _tgt383 + 2.2)
+                                _starved383 = _free383 < _floor383
+                                while _it383 < _FF_REFINE_FREE_ITERS and (_free383 < _floor383 or _free383 > _ceiling383):
                                     _it383 += 1
-                                    if _free383 < 3.0:
-                                        _d383 = (3.8 - _free383)
+                                    if _free383 < _floor383:
+                                        # 低于安全下限: 单调抬 reserve(多卸 DiT), 本回合不再降回,
+                                        # 避免旧版在 1.9<->7.5GB 间振荡后停在 free=2.7GB 触发 GPU 复位。
+                                        _d383 = (_tgt383 - _free383)
+                                        _starved383 = True
                                     else:
-                                        _d383 = -min(_free383 - 3.8, 2.5)
+                                        if _starved383:
+                                            break
+                                        _d383 = -min(_free383 - _tgt383, 2.5)
                                     _new383 = max(2.5, min(10.0, _r_reserve_gb + _d383))
                                     if abs(_new383 - _r_reserve_gb) < 0.2:
                                         break
@@ -8351,12 +8385,22 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                     _mm3.EXTRA_RESERVED_VRAM = int(_new383 * 1024 ** 3)
                                     _mm3.load_models_gpu([model])
                                     _torch3.cuda.synchronize()
+                                    _gc383.collect()
+                                    _torch3.cuda.empty_cache()
                                     _r_reserve_gb = _new383
                                     _res383 = model.loaded_size() / 1024 ** 3
                                     _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
-                                    print(f"[H3 Extender] v14.383 二采自由显存闭环 {_it383}/3: "
+                                    print(f"[H3 Extender] v14.383 二采自由显存闭环 {_it383}/{_FF_REFINE_FREE_ITERS}: "
                                           f"reserve={_r_reserve_gb:.1f}GB resident={_res383:.1f}GB "
-                                          f"free={_free383:.1f}GB (目标 3.8GB, 带 3.0-6.2GB)")
+                                          f"free={_free383:.1f}GB (目标 {_tgt383:.1f}GB, 下限 {_floor383:.1f}GB)")
+                                # 定档后再回收一次 cached 池并重测; 仍低于下限则醒目告警, 避免前向触发 GPU 复位。
+                                _gc383.collect()
+                                _torch3.cuda.empty_cache()
+                                _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                                if _free383 < _floor383:
+                                    print(f"[H3 Extender] v14.421 二采显存头告警: 定档后 free={_free383:.1f}GB "
+                                          f"< 下限 {_floor383:.1f}GB, 前向存在 GPU 复位风险; 可再降 "
+                                          f"BSAI_H3_REFINE_FACTOR 或开启 NO_REDRAW 纯超分", flush=True)
                                 print(f"[H3 Extender] v14.383 二采驻留定档: reserve={_r_reserve_gb:.1f}GB "
                                       f"resident={model.loaded_size()/1024**3:.1f}GB "
                                       f"free={_free383:.1f}GB (分块 {_tok383//1000}k tokens/块几何, "

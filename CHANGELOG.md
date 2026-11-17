@@ -4,6 +4,23 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.421 (2026-11-17) — 二采空闲显存定档加固 + 收紧分块合并，防 GPU 153 复位 / Refine free-VRAM settle hardening & tighter tile merge to prevent GPU 153 reset
+
+**背景（实测定位）**
+
+24GB 卡上二采两次触发 `nvlddmkm` 事件 153（GPU 故障/复位），进程在二采真实 tile 前向被杀，主日志无 Python 堆栈。复盘两条链条：① v14.383 自由显存闭环在 free 1.9↔7.5GB 间振荡，3 次迭代后停在 free=2.7GB，低于安全下限，前向激活/Sol-Attn 工作区无空间；② v14.417 把请求 4 块合并成 2 块，单块冲到 ~151k tokens，单块峰值激活翻倍。
+
+**改动**
+
+- 二采空闲显存定档改为可配 env：`BSAI_H3_REFINE_FREE_FLOOR_GB`（默认 3.5GB 下限）、`BSAI_H3_REFINE_FREE_TARGET_GB`（默认 4.0GB 目标）、`BSAI_H3_REFINE_FREE_ITERS`（默认 5 次迭代）。
+- 低于下限时单调抬 reserve（多卸 DiT），同一回合不再降回，消除旧版振荡；定档后 `gc.collect()` + `empty_cache()` 回收 cached 池并重测空闲，仍低于下限则打印醒目显存头告警。
+- 分块合并每块 token 上限改为 env `BSAI_H3_TILE_TOKEN_CAP`，默认 110k（原 200k），压低单块激活峰值；代价是权重流次数略增，稳定优先。
+
+**边界**
+
+- 未设置这些环境变量时默认值生效；大显存卡空闲充足，定档闭环不会额外卸权重，行为与既往一致。
+- 仅作用于二采显存定档与空间分块粒度，不改一采采样、提示词条件与二采倍率配方。
+
 ### v14.420 (2026-11-17) — 环境变量强制二采 latent 倍率，24GB 卡真重绘 OOM 兜底 / Env-forced refine latent scale: 24GB OOM fallback for true refine repaint
 
 **背景（实测定位）**
