@@ -85,22 +85,22 @@ class A_LibrosaBeatCue:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "audio": ("AUDIO", {"forceInput": True, "tooltip": "输入完整歌曲，同一首歌只分析一次并缓存。"}),
-                "clip_index": ("INT", {"forceInput": True, "min": 1, "tooltip": "当前段号，从 SeedNode 接入。"}),
-                "performer_name": ("STRING", {"default": "Chi Heng", "tooltip": "提示词中使用的歌手名，换项目时改这里。"}),
-                "beats_per_bar": ("INT", {"default": 4, "min": 1, "max": 16, "tooltip": "每小节拍数，4/4 拍填 4。"}),
-                "cue_mode": (["downbeats_only", "all_beats"], {"tooltip": "卡点模式，只标强拍或标出每一拍。"}),
-                "grid_duration": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 15.0, "step": 0.1, "tooltip": "兜底用：只有当分镜文本和外部起止都没接时，才按这个固定时长算。"}),
-                "motion_cycle_sec": ("FLOAT", {"default": 6.0, "min": 2.0, "max": 12.0, "step": 0.5, "tooltip": "速度：一次完整左右来回所需秒数，平移和倾角共用；数字越大越慢，越小越快。"}),
-                "sway_percent": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 10.0, "step": 0.5, "tooltip": "相机左右小幅平移幅度，占画面宽度百分比，0 关闭平移。"}),
-                "roll_degrees": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 20.0, "step": 0.5, "tooltip": "相机左右倾角（度），0 关闭倾角。"}),
-                "time_offset": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01, "tooltip": "整体提前或延后所有节拍点（秒）。"}),
-                "camera_breathing": ("BOOLEAN", {"default": True, "tooltip": "是否加入手持呼吸运镜（左右漂移+倾角）。"}),
+                "audio": ("AUDIO", {"forceInput": True, "tooltip": "The full song; analyzed once per audio and cached."}),
+                "clip_index": ("INT", {"forceInput": True, "min": 1, "tooltip": "Current clip index, fed from the SeedNode."}),
+                "performer_name": ("STRING", {"default": "Chi Heng", "tooltip": "Performer name used in the prompt; change per project."}),
+                "beats_per_bar": ("INT", {"default": 4, "min": 1, "max": 16, "tooltip": "Beats per bar; set 4 for 4/4 time."}),
+                "cue_mode": (["downbeats_only", "all_beats"], {"tooltip": "Cue mode: mark downbeats only, or every beat."}),
+                "grid_duration": ("FLOAT", {"default": 8.0, "min": 0.1, "max": 15.0, "step": 0.1, "tooltip": "Fallback: fixed segment length used only when neither the prompt text nor external start/duration is wired."}),
+                "motion_cycle_sec": ("FLOAT", {"default": 6.0, "min": 2.0, "max": 12.0, "step": 0.5, "tooltip": "Speed: seconds for one full left-right sweep; shared by pan and roll. Larger is slower, smaller is faster."}),
+                "sway_percent": ("FLOAT", {"default": 2.5, "min": 0.0, "max": 10.0, "step": 0.5, "tooltip": "Small horizontal camera pan as a percentage of frame width; 0 disables pan."}),
+                "roll_degrees": ("FLOAT", {"default": 5.0, "min": 0.0, "max": 20.0, "step": 0.5, "tooltip": "Camera roll in degrees; 0 disables roll."}),
+                "time_offset": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.01, "tooltip": "Shift all beat points earlier or later (seconds)."}),
+                "camera_breathing": ("BOOLEAN", {"default": True, "tooltip": "Add a handheld breathing camera (drift + roll)."}),
             },
             "optional": {
-                "prompt_source": ("STRING", {"forceInput": True, "tooltip": "分镜大文本；接入后每段时长自动跟随提示词，各段可不一样长。推荐接这个。"}),
-                "start_time_sec": ("FLOAT", {"forceInput": True, "tooltip": "高级用法：直接由外部节点喂当前段起点（秒），普通使用留空。"}),
-                "clip_duration_sec": ("FLOAT", {"forceInput": True, "tooltip": "高级用法：直接由外部节点喂当前段时长（秒），普通使用留空。"}),
+                "prompt_source": ("STRING", {"forceInput": True, "tooltip": "Storyboard text; when connected each segment duration follows the prompt and segments may differ in length. Recommended."}),
+                "start_time_sec": ("FLOAT", {"forceInput": True, "tooltip": "Advanced: feed the current segment start (seconds) directly from an external node; leave empty for normal use."}),
+                "clip_duration_sec": ("FLOAT", {"forceInput": True, "tooltip": "Advanced: feed the current segment duration (seconds) directly from an external node; leave empty for normal use."}),
             },
         }
 
@@ -215,10 +215,10 @@ class A_TextInjectCue:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "prompt_source": ("STRING", {"forceInput": True, "multiline": True, "tooltip": "原始分镜大文本，从 PrimitiveString 接入。"}),
-                "beat_cue_text": ("STRING", {"forceInput": True, "tooltip": "节拍节点输出的卡点指令。"}),
-                "clip_index": ("INT", {"forceInput": True, "min": 1, "tooltip": "当前段号，从 SeedNode 接入。"}),
-                "enable": ("BOOLEAN", {"default": True, "tooltip": "注入总开关，关闭后输出原始文本。"}),
+                "prompt_source": ("STRING", {"forceInput": True, "multiline": True, "tooltip": "Original storyboard text, fed from a PrimitiveString."}),
+                "beat_cue_text": ("STRING", {"forceInput": True, "tooltip": "Beat-cue instruction output by the beat node."}),
+                "clip_index": ("INT", {"forceInput": True, "min": 1, "tooltip": "Current clip index, fed from the SeedNode."}),
+                "enable": ("BOOLEAN", {"default": True, "tooltip": "Master switch; when off the original text is output unchanged."}),
             }
         }
 
@@ -265,6 +265,6 @@ NODE_CLASS_MAPPINGS = {
     "A_TextInjectCue": A_TextInjectCue,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "A_LibrosaBeatCue": "[A] Librosa Beat Cue (节奏卡点)",
-    "A_TextInjectCue": "[A] H3 Beat Cue Inject (卡点注入)",
+    "A_LibrosaBeatCue": "[A] Librosa Beat Cue",
+    "A_TextInjectCue": "[A] H3 Beat Cue Inject",
 }

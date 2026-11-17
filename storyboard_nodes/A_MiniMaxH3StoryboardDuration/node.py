@@ -150,7 +150,7 @@ class A_MiniMaxH3StoryboardDuration:
                     {
                         "forceInput": True,
                         "multiline": True,
-                        "tooltip": "按分段标记模板切分；默认 ===== promptN =====。",
+                        "tooltip": "Split by the segment-marker template; default is ===== promptN =====.",
                     },
                 ),
                 "length": (
@@ -160,7 +160,7 @@ class A_MiniMaxH3StoryboardDuration:
                         "min": 5,
                         "max": 3600,
                         "step": 17,
-                        "tooltip": "所选段未写明时长时使用的兜底帧数。",
+                        "tooltip": "Fallback frame count used when the selected segment has no explicit duration.",
                     },
                 ),
                 "clip_index": (
@@ -170,7 +170,7 @@ class A_MiniMaxH3StoryboardDuration:
                         "min": 1,
                         "max": MAX_CLIPS,
                         "step": 1,
-                        "tooltip": "按分段标记出现顺序选择；标记编号重复时也按顺序计数。",
+                        "tooltip": "Select by segment-marker order; duplicate marker numbers are still counted in appearance order.",
                     },
                 ),
                 "video_duration_sec": (
@@ -180,7 +180,7 @@ class A_MiniMaxH3StoryboardDuration:
                         "min": 0.0,
                         "max": 86400.0,
                         "step": 0.1,
-                        "tooltip": "仅在只有一个 prompt 段且段内没有显式时长时作为兜底。",
+                        "tooltip": "Fallback only when there is a single prompt segment and no explicit duration inside it.",
                     },
                 ),
             },
@@ -190,7 +190,7 @@ class A_MiniMaxH3StoryboardDuration:
                     {
                         "forceInput": True,
                         "default": DEFAULT_SEGMENT_MARKER,
-                        "tooltip": "可连接字符串节点自定义分段标记；模板中的 N 表示序号，不含 N 时按出现顺序编号。",
+                        "tooltip": "Optional string input to override the segment marker; N in the template is the index, and without N segments are numbered in appearance order.",
                     },
                 ),
             },
@@ -250,7 +250,7 @@ class A_MiniMaxH3SegmentCount:
                     {
                         "forceInput": True,
                         "multiline": True,
-                        "tooltip": "整段官方提示词；段数即分段标记出现次数。",
+                        "tooltip": "The full official prompt; the segment count equals the number of segment markers.",
                     },
                 ),
             },
@@ -260,7 +260,7 @@ class A_MiniMaxH3SegmentCount:
                     {
                         "forceInput": True,
                         "default": DEFAULT_SEGMENT_MARKER,
-                        "tooltip": "与时长解析节点保持一致，不接则用默认标记。",
+                        "tooltip": "Keep consistent with the duration parser node; uses the default marker when unconnected.",
                     },
                 ),
             },
@@ -309,7 +309,7 @@ class A_MiniMaxH3AutoChainAll:
                         "forceInput": True,
                         "min": -9223372036854775807,
                         "max": 9223372036854775807,
-                        "tooltip": "接 SeedNode 的 seed；它同时是片段序号的来源。",
+                        "tooltip": "Seed from the SeedNode; it also drives the clip index.",
                     },
                 ),
                 "segment_count": (
@@ -318,16 +318,16 @@ class A_MiniMaxH3AutoChainAll:
                         "forceInput": True,
                         "min": 0,
                         "max": MAX_CLIPS,
-                        "tooltip": "接「分镜段数统计」节点，决定排到第几段为止。",
+                        "tooltip": "Connect the segment-count node; it decides how far the chain runs.",
                     },
                 ),
                 "enable": (
                     "BOOLEAN",
                     {
                         "default": True,
-                        "label_on": "自动续排 开",
-                        "label_off": "自动续排 关",
-                        "tooltip": "关掉后就是普通的单段渲染，不会再自动排下一段。",
+                        "label_on": "Auto-chain: On",
+                        "label_off": "Auto-chain: Off",
+                        "tooltip": "When off this is a normal single-segment render; the next segment is not chained automatically.",
                     },
                 ),
             },
@@ -336,7 +336,7 @@ class A_MiniMaxH3AutoChainAll:
                     ANY_TYPE,
                     {
                         "forceInput": True,
-                        "tooltip": "接一个末端输出（比如 4K 索引切换），让本段真的跑完再排下一段；不接就是提交后立刻续排。",
+                        "tooltip": "Connect a downstream output (e.g. a 4K index switch) so this segment fully finishes before the next one; when unconnected the next segment chains immediately after submit.",
                     },
                 ),
             },
@@ -404,7 +404,7 @@ NODE_CLASS_MAPPINGS = {
     "A_MiniMaxH3AutoChainAll": A_MiniMaxH3AutoChainAll,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "A_MiniMaxH3StoryboardDuration": "[A] MiniMax H3 官方提示词时长解析",
-    "A_MiniMaxH3SegmentCount": "[A] MiniMax H3 分镜段数统计",
-    "A_MiniMaxH3AutoChainAll": "[A] 全段自动续排（一次运行跑完全部分镜）",
+    "A_MiniMaxH3StoryboardDuration": "[A] MiniMax H3 Official Prompt Duration Parser",
+    "A_MiniMaxH3SegmentCount": "[A] MiniMax H3 Storyboard Segment Count",
+    "A_MiniMaxH3AutoChainAll": "[A] Auto-Chain All Segments (run the full storyboard in one pass)",
 }

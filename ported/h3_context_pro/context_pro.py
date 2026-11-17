@@ -41,6 +41,40 @@ FPS = 24
 FRAME_RESCALE = float(mm.FRAME_RESCALE)
 AUDIO_HZ = 40.0
 
+# Legacy input-key aliases: old workflows serialize Chinese widget/port keys.
+# ComfyUI passes only keys declared in INPUT_TYPES, so each legacy Chinese key is
+# also registered as an optional input, then normalized to its English internal
+# name at the entry point. Enum native values are preserved (persisted in old
+# workflows and used as branch criteria).
+_LEGACY_KEY_ALIASES = {
+    "条件化": "conditioning",
+    "潜空间": "latent",
+    "衔接模式": "transition_mode",
+    "模式": "mode",
+    "启用上下文": "enable_context",
+    "存储位置": "storage_dir",
+    "片段序号": "clip_index",
+    "上下文长度": "context_length",
+    "音频上下文长度": "audio_context_length",
+    "原音频": "original_audio",
+    "上下文图像": "context_image",
+    "上下文音频": "context_audio",
+    "上下文潜空间": "context_latent",
+    "手动上传": "manual_upload",
+    "裁剪帧数": "trim_frames",
+    "保存到本地": "save_local",
+    "衔接余量": "transition_margin",
+}
+
+
+def _normalize_inputs(kwargs):
+    """Map legacy Chinese input keys onto the English internal names (first wins)."""
+    out = dict(kwargs)
+    for legacy, canonical in _LEGACY_KEY_ALIASES.items():
+        if legacy in out and canonical not in out:
+            out[canonical] = out[legacy]
+    return out
+
 # 可干净裁剪的整组窗口长度：一个 VRF 组 = 5 个潜空间步 = 17 个像素帧；
 # 非整组裁剪会让剩余潜空间的起点落在周期中间，导致画面闪烁。
 VIDEO_RUN_GRID = (68, 51, 34, 17, 5)
@@ -1032,20 +1066,20 @@ def _read_mp4(path, clip_index=None):
     return out
 
 
-def _load_context_media(存储位置, 片段序号=1):
+def _load_context_media(storage_dir, clip_index=1):
     """按 存储位置+片段序号 加载本地尾段媒体：序号 0（首片段）返回 first_clip 空标记；
     >0 按 存储位置/clip_%05d.mp4 加载，未找到时返回 file_not_found 空标记。
     两种空标记调用方均直通、不裁头。"""
     try:
-        idx = int(片段序号)
+        idx = int(clip_index)
     except (TypeError, ValueError):
         raise ValueError("h3_motion_context: 片段序号必须是整数，得到 %r"
-                         % (片段序号,))
+                         % (clip_index,))
     if idx == 0:
         return {CONTEXT_EMPTY_MARKER: True,
                 CONTEXT_EMPTY_REASON: "first_clip"}
     try:
-        path = _clip_file_path(存储位置, idx)
+        path = _clip_file_path(storage_dir, idx)
     except FileNotFoundError:
         # 兜底：主「存储位置」目录缺失（参数错位）时，扫描 output 目录实际保存位置
         path = _find_clip_in_output(idx)
@@ -1056,33 +1090,33 @@ def _load_context_media(存储位置, 片段序号=1):
     return _load_media_file(path, clip_index=idx)
 
 
-def _context_latent_fingerprint(存储位置, 片段序号, 手动上传, 潜空间模式=False):
+def _context_latent_fingerprint(storage_dir, clip_index, manual_upload, latent_mode=False):
     """IS_CHANGED 缓存指纹：手动上传用文件指纹；片段序号常量 0 输出确定性 0；
     否则对存储目录全部尾段媒体做综合指纹（内容变→指纹变→下游重跑；同内容→命中）；
     异常统一返回 NaN 保守重跑。潜空间模式下改为对 latent_*.safetensors 做指纹，
     并用对应的目录兜底扫描。"""
-    if (手动上传 or "").strip():
+    if (manual_upload or "").strip():
         try:
-            path = _resolve_manual_media_path(手动上传)
+            path = _resolve_manual_media_path(manual_upload)
             st = os.stat(path)
             return "manual:%s:%s:%s" % (path, st.st_mtime_ns, st.st_size)
         except Exception:
             return float("NaN")
     try:
-        if int(片段序号) == 0:
+        if int(clip_index) == 0:
             return 0
     except (TypeError, ValueError):
         pass
     try:
-        fp = _dir_fingerprint(_build_latent_load_path(存储位置)
-                              if 潜空间模式 else _build_load_path(存储位置))
+        fp = _dir_fingerprint(_build_latent_load_path(storage_dir)
+                              if latent_mode else _build_load_path(storage_dir))
     except Exception:
         return float("NaN")
     # 与加载时的兜底扫描保持一致：主存储位置目录不存在（参数错位）时，
     # 改扫 output 目录下实际保存的文件做指纹，避免缓存漏跑/误缓存
     if fp.startswith("missing"):
-        alt = (_find_latent_in_output(片段序号) if 潜空间模式
-               else _find_clip_in_output(片段序号))
+        alt = (_find_latent_in_output(clip_index) if latent_mode
+               else _find_clip_in_output(clip_index))
         if alt:
             try:
                 st = os.stat(alt)
@@ -1096,7 +1130,7 @@ def _context_latent_fingerprint(存储位置, 片段序号, 手动上传, 潜空
 # 潜空间模式：本地 latent 存取（存储位置目录下 latent_%05d_.safetensors）
 # ============================================================================
 
-def _load_context_latent(存储位置, 片段序号=1, 手动上传=""):
+def _load_context_latent(storage_dir, clip_index=1, manual_upload=""):
     """上下文潜空间端口未连接时，按 存储位置+片段序号+手动上传 加载本地潜空间。
 
     - 手动上传非空：优先加载该文件，完全忽略存储位置与片段序号
@@ -1108,7 +1142,7 @@ def _load_context_latent(存储位置, 片段序号=1, 手动上传=""):
     if _st_load is None:
         raise RuntimeError("h3_motion_context: safetensors is not "
                            "available; cannot load latents.")
-    manual_path = _resolve_manual_media_path(手动上传)
+    manual_path = _resolve_manual_media_path(manual_upload)
     if manual_path is not None:
         data = _st_load(manual_path)
         if "video" not in data or "audio" not in data:
@@ -1118,15 +1152,15 @@ def _load_context_latent(存储位置, 片段序号=1, 手动上传=""):
                 "Save Latent node instead?" % manual_path)
         return {"samples": [data["video"], data["audio"]]}
     try:
-        idx = int(片段序号)
+        idx = int(clip_index)
     except (TypeError, ValueError):
         raise ValueError("h3_motion_context: 片段序号必须是整数，得到 %r"
-                         % (片段序号,))
+                         % (clip_index,))
     if idx == 0:
         return {"samples": [], CONTEXT_EMPTY_MARKER: True,
                 CONTEXT_EMPTY_REASON: "first_clip"}
     try:
-        path = _resolve_latent_path(_build_latent_load_path(存储位置), idx)
+        path = _resolve_latent_path(_build_latent_load_path(storage_dir), idx)
     except FileNotFoundError:
         # 主「存储位置」解析失败：兜底扫描 output 目录。可能「存储位置」
         # 参数因工作流错位而错误（如被保存为 1 而非 H3-Mubu），但文件
@@ -1146,7 +1180,7 @@ def _load_context_latent(存储位置, 片段序号=1, 手动上传=""):
             CONTEXT_CLIP_INDEX_KEY: idx}
 
 
-def _save_av_latent(latent, 存储位置, 片段序号):
+def _save_av_latent(latent, storage_dir, clip_index):
     """将 AV 潜空间保存为 {存储位置}/latent_%05d_.safetensors。
 
     重新生成同一片段会覆盖自身的废弃文件，不会堆叠新文件。
@@ -1158,13 +1192,13 @@ def _save_av_latent(latent, 存储位置, 片段序号):
     video = video.cpu().contiguous()
     audio = audio.cpu().contiguous()
     # 文件前缀固定为 latent，用户只能设置存储目录
-    full_prefix = os.path.join(存储位置, "latent")
+    full_prefix = os.path.join(storage_dir, "latent")
     folder, filename, _, _, _ = folder_paths.get_save_image_path(
         full_prefix, folder_paths.get_output_directory())
     os.makedirs(folder, exist_ok=True)
     # 片段序号 2 -> latent_00002_.safetensors
     path = os.path.join(folder, "%s_%05d_.safetensors"
-                        % (filename, int(片段序号)))
+                        % (filename, int(clip_index)))
     _st_save({"video": video, "audio": audio}, path,
              metadata={"format": "h3_motion_context_av_v1"})
 
@@ -1198,12 +1232,12 @@ def _tail_portion_latent(delivered, tail_len):
     return out
 
 
-def _build_latent_load_path(存储位置):
+def _build_latent_load_path(storage_dir):
     """把用户输入的存储位置转换为内部路径前缀（存储位置/latent）。
 
     用户只设置目录名（如 H3-Mubu），文件前缀 latent 内部固定、不可改。
     """
-    loc = (存储位置 or "").strip().strip('"').strip("'")
+    loc = (storage_dir or "").strip().strip('"').strip("'")
     if not loc:
         loc = "H3-Mubu"
     return os.path.join(loc, "latent")
@@ -1308,77 +1342,114 @@ class H3ContextInjectPro:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "条件化": ("CONDITIONING", {
-                    "tooltip": "正向条件化。本节点向其追加关键帧引导后输出，"
-                               "可与官方 Add Guide 等 H3 条件节点串联。"}),
-                "潜空间": ("LATENT", {
-                    "tooltip": "本片段的 H3 AV 潜空间（采样器或空 latent 节点"
-                               "输出）。仅读取形状（时长/分辨率/音频轨长度），"
-                               "不修改其内容。"}),
-                "衔接模式": (["视频图像", "潜空间"], {
+                "conditioning": ("CONDITIONING", {
+                    "tooltip": "Positive conditioning. This node appends keyframe "
+                               "guides to it and outputs the result; can be chained "
+                               "with official Add Guide and other H3 conditioning nodes."}),
+                "latent": ("LATENT", {
+                    "tooltip": "This clip's H3 AV latent (sampler or empty latent "
+                               "node output). Only its shape is read (duration / "
+                               "resolution / audio track length); content is not modified."}),
+                "transition_mode": (["视频图像", "潜空间"], {
                     "default": "视频图像",
-                    "tooltip": "衔接数据路径二选一。视频图像——把上一片段"
-                               "尾部的媒体文件（.mp4）解码后经视频 VAE 编码为"
-                               "本片段开头的关键帧引导，与官方 Add Guide 同"
-                               "路径，分辨率可不同（按本片段缩放）。潜空间"
-                               "——直接从上一片段的 H3 AV 潜空间切片（.safetensors，"
-                               "跳过解码/重编码，无质量损失），但要求两片段"
-                               "分辨率一致、窗口须为整 VRF 组（17 的倍数）。"}),
-                "模式": (["上传", "端口", "自动索引"], {
+                    "tooltip": "Transition data path, two options. video_image — "
+                               "decode the previous clip's tail media (.mp4), encode "
+                               "it through the video VAE as the opening keyframe "
+                               "guide, same path as the official Add Guide; "
+                               "resolution may differ (scaled to this clip). latent — "
+                               "slice directly from the previous clip's H3 AV latent "
+                               "(.safetensors), skipping decode/re-encode with no "
+                               "quality loss, but both clips must share resolution and "
+                               "the window must be a whole VRF group (multiple of 17)."}),
+                "mode": (["上传", "端口", "自动索引"], {
                     "default": "自动索引",
-                    "tooltip": "上下文来源三选一：上传——仅用手动上传的媒体"
-                               "文件；端口——仅用「上下文图像」「上下文音频」"
-                               "（视频图像模式）或「上下文潜空间」（潜空间"
-                               "模式）端口的连线（如直接连上一片段「H3 运动"
-                               "裁剪」的输出）；自动索引——按 存储位置+"
-                               "片段序号 自动加载本地保存的尾段媒体。"}),
-                "启用上下文": ("BOOLEAN", {
+                    "tooltip": "Context source, three options. upload — only use the "
+                               "manually uploaded media file. port — only use the "
+                               "context image / context audio (video_image mode) or "
+                               "context latent (latent mode) port link (e.g. directly "
+                               "connect the previous clip's H3 motion trim output). "
+                               "auto_index — load the saved tail media locally by "
+                               "storage_dir + clip_index."}),
+                "enable_context": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "总开关。关闭时条件化直通、不固定任何引导，"
-                               "输出 \"0:尾段长度\"——本片段完全独立生成，"
-                               "但「运动裁剪」的尾段仍按两窗口较大值保存，"
-                               "供下一片段衔接。"}),
-                "存储位置": ("STRING", {
+                    "tooltip": "Master switch. When off the conditioning passes "
+                               "through with no fixed guide and outputs \"0:tail "
+                               "length\" — this clip is generated fully independently, "
+                               "but the trim node still saves the tail at the larger "
+                               "of the two windows for the next clip to reuse."}),
+                "storage_dir": ("STRING", {
                     "default": "H3-Mubu",
-                    "tooltip": "自动索引模式下加载的目录名（ComfyUI 输出"
-                               "文件夹下的子目录）。与「H3 运动裁剪」的"
-                               "「存储位置」一致即可对应加载。"}),
-                "片段序号": ("INT", {
+                    "tooltip": "Directory name loaded in auto_index mode "
+                               "(subfolder under the ComfyUI output folder). Keep it "
+                               "identical to the trim node's storage_dir to match "
+                               "the saved file."}),
+                "clip_index": ("INT", {
                     "default": 1, "min": 0, "max": 9999,
-                    "tooltip": "自动索引模式下加载的片段序号：设为上一片段"
-                               "「H3 运动裁剪」保存时使用的相同序号即可对应"
-                               "加载（clip_00002.mp4 这类文件）。0 表示"
-                               "链条第一个片段，不加载、直通。"}),
-                "上下文长度": (["5", "22"], {
+                    "tooltip": "Clip index loaded in auto_index mode: use the same "
+                               "index as the previous clip's trim save to match the "
+                               "loaded file (clip_00002.mp4 style). 0 means the first "
+                               "clip in the chain: no load, pass through."}),
+                "context_length": (["5", "22"], {
                     "default": "5",
-                    "tooltip": "固定到本片段开头的画面帧数。"}),
-                "音频上下文长度": (["5", "22"], {
+                    "tooltip": "Number of frames fixed to the opening of this clip."}),
+                "audio_context_length": (["5", "22"], {
                     "default": "5",
-                    "tooltip": "从上一片段尾部固定的音频时长（按帧数换算）。"}),
+                    "tooltip": "Audio duration fixed from the previous clip's tail "
+                               "(converted by frame count)."}),
             },
             "optional": {
                 "VAE": ("VAE", {
-                    "tooltip": "H3 视频 VAE。把上一片段尾帧编码为关键帧 latent。"}),
+                    "tooltip": "H3 video VAE. Encodes the previous clip's tail frame "
+                               "into a keyframe latent."}),
                 "audio_vae": ("VAE", {
-                    "tooltip": "H3 音频 VAE。把上一片段尾部的音频波形编码为关键帧音频潜空间。"}),
-                "原音频": ("AUDIO", {
-                    "tooltip": "从 TrimAudioDuration 切好的原始 FLAC 段音频。"
-                               "第一段(片段序号=0)原样输出；第二段起按上下文长度"
-                               "裁掉开头对应秒数，与画面对齐。透传给「H3 运动裁剪 V2」。"}),
+                    "tooltip": "H3 audio VAE. Encodes the previous clip's tail audio "
+                               "waveform into a keyframe audio latent."}),
+                "original_audio": ("AUDIO", {
+                    "tooltip": "Original FLAC audio segment cut by TrimAudioDuration. "
+                               "The first clip (clip_index=0) is passed through as-is; "
+                               "from the second clip the opening seconds matching the "
+                               "context length are trimmed to align with the picture. "
+                               "Passed through to the H3 motion trim V2."}),
+                # Hidden/unlinked context ports used by port mode (kept here so an
+                # old workflow that links them still passes the input through).
+                "context_image": ("IMAGE", {"tooltip": "Context image port (port mode)."}),
+                "context_audio": ("AUDIO", {"tooltip": "Context audio port (port mode)."}),
+                "context_latent": ("LATENT", {"tooltip": "Context latent port (latent mode)."}),
+                "manual_upload": ("STRING", {"tooltip": "Manual upload path (upload mode)."}),
+                "transition_margin": ("INT", {"default": 0, "min": 0, "max": 9999, "tooltip": "Transition margin in frames."}),
+                # Legacy Chinese input-key aliases: registered as optional inputs so
+                # old saved workflows that serialize these keys still deliver values.
+                # The entry point normalizes them onto the English internal names.
+                "条件化": ("CONDITIONING", {}),
+                "潜空间": ("LATENT", {}),
+                "衔接模式": (["视频图像", "潜空间"], {}),
+                "模式": (["上传", "端口", "自动索引"], {}),
+                "启用上下文": ("BOOLEAN", {}),
+                "存储位置": ("STRING", {}),
+                "片段序号": ("INT", {}),
+                "上下文长度": (["5", "22"], {}),
+                "音频上下文长度": (["5", "22"], {}),
+                "原音频": ("AUDIO", {}),
+                "上下文图像": ("IMAGE", {}),
+                "上下文音频": ("AUDIO", {}),
+                "上下文潜空间": ("LATENT", {}),
+                "手动上传": ("STRING", {}),
+                "衔接余量": ("INT", {}),
             },
         }
 
     RETURN_TYPES = ("CONDITIONING", "STRING", "AUDIO", "INT", "LATENT")
-    RETURN_NAMES = ("条件化", "裁剪帧数", "原音频", "上下文帧数", "扩展潜空间")
+    RETURN_NAMES = ("conditioning", "trim_frames", "original_audio", "context_frames", "extended_latent")
     FUNCTION = "apply"
     CATEGORY = "Yuan Tool/MiniMax"
-    DESCRIPTION = ("把上一片段尾部的画面与音频固定为本片段开头的引导，"
-                   "支持两条数据路径：「视频图像」模式全面对齐官方 Add Guide "
-                   "for MiniMax H3（图像经视频 VAE 编码、音频经音频 VAE 编码，"
-                   "锚定在第 0 帧并追加进正向条件化）；「潜空间」模式直接从"
-                   "上一片段 AV 潜空间尾部切片，跳过解码/重编码。上下文来源"
-                   "支持 上传/端口/自动索引。裁剪帧数输出为字符串\"状态:长度\""
-                   "（如 1:22），供「H3 运动裁剪」解析。")
+    DESCRIPTION = ("Fixes the previous clip's tail picture and audio as the opening "
+                   "guide of this clip. Two data paths: video_image mode fully aligns "
+                   "with the official Add Guide for MiniMax H3 (image encoded by the "
+                   "video VAE, audio by the audio VAE, anchored at frame 0 and appended "
+                   "to positive conditioning); latent mode slices directly from the "
+                   "previous clip's AV latent tail, skipping decode/re-encode. Context "
+                   "source supports upload / port / auto_index. trim_frames is output as "
+                   "a \"state:length\" string (e.g. 1:22) for the trim node to parse.")
 
     # ── 几何守卫（20261115）──────────────────────────────────────────
     # 条件化链上可能残留上游（尤其一采）留下的关键帧/引用潜空间：它们的空间网格
@@ -1454,65 +1525,79 @@ class H3ContextInjectPro:
                   "（条件化残留与本次潜空间 %dx%d 不一致）" % (dropped_kf, dropped_ref, tw, th), flush=True)
         return cleaned, dropped_kf, dropped_ref
 
-    def apply(self, 条件化, 潜空间, 启用上下文=True, 模式="自动索引",
-              存储位置="H3-Mubu", 片段序号=1, 上下文长度="5",
-              音频上下文长度="5", 衔接模式="视频图像", VAE=None, audio_vae=None,
-              原音频=None):
-        if 衔接模式 == "潜空间":
+    def apply(self, conditioning, latent, enable_context=True, mode="自动索引",
+              storage_dir="H3-Mubu", clip_index=1, context_length="5",
+              audio_context_length="5", transition_mode="视频图像", VAE=None,
+              audio_vae=None, original_audio=None, **kwargs):
+        kwargs = _normalize_inputs(kwargs)
+        conditioning = kwargs.get("conditioning", conditioning)
+        latent = kwargs.get("latent", latent)
+        enable_context = kwargs.get("enable_context", enable_context)
+        mode = kwargs.get("mode", mode)
+        storage_dir = kwargs.get("storage_dir", storage_dir)
+        clip_index = kwargs.get("clip_index", clip_index)
+        context_length = kwargs.get("context_length", context_length)
+        audio_context_length = kwargs.get("audio_context_length", audio_context_length)
+        transition_mode = kwargs.get("transition_mode", transition_mode)
+        original_audio = kwargs.get("original_audio", original_audio)
+        manual_upload = kwargs.get("manual_upload", "")
+        context_image = kwargs.get("context_image", None)
+        context_audio = kwargs.get("context_audio", None)
+        if transition_mode == "潜空间":
             raise ValueError("V2 节点仅支持「视频图像」衔接模式")
         # 注入前先剔除网格不匹配的关键帧/引用块，避免模型打包行数错位
-        条件化, _, _ = self._guard_cond_geometry(条件化, 潜空间)
+        conditioning, _, _ = self._guard_cond_geometry(conditioning, latent)
         # 引导窗口与音频窗口的请求值；无上下文/直通路径下，尾段保存长度
         # 仍按两窗口较大值输出，保证下一片段有可衔接的媒体文件
-        g_req = _snap_guide_frames(int(上下文长度 or 0))
-        a_req = int(音频上下文长度 or 0)
+        g_req = _snap_guide_frames(int(context_length or 0))
+        a_req = int(audio_context_length or 0)
         idle_tail = max(g_req, a_req)
         # --- V2 新增：原音频裁剪 ---
         # V2: 原音频直接透传，不裁剪（时长对齐由 Trim V2 节点负责）
-        out_audio = 原音频
-        if not 启用上下文:
-            return {"result": (条件化, "0:%d" % idle_tail, out_audio, int(上下文长度), 潜空间), "ui": {
+        out_audio = original_audio
+        if not enable_context:
+            return {"result": (conditioning, "0:%d" % idle_tail, out_audio, int(context_length), latent), "ui": {
                 "h3_hint": "上下文已关闭，直通"}}
         # 上下文来源由「模式」决定：上传（只用上传文件）/ 端口（只用连线）/ 自动索引
-        if 模式 == "上传":
-            if not (手动上传 or "").strip():
+        if mode == "上传":
+            if not (manual_upload or "").strip():
                 raise ValueError(
                     "h3_motion_context: 「上传」模式下需先通过「上传上下文」"
                     "按钮上传媒体文件（.mp4），或填写「手动上传」路径。")
-            media = _load_media_file(_resolve_manual_media_path(手动上传),
+            media = _load_media_file(_resolve_manual_media_path(manual_upload),
                                      clip_index=None)
             hint = "已上传上下文文件"
-        elif 模式 == "端口":
-            if 上下文图像 is None:
+        elif mode == "端口":
+            if context_image is None:
                 raise ValueError(
                     "h3_motion_context: 「端口」模式下「上下文图像」"
                     "端口必须连接。")
             waveform = None
             sample_rate = 32000
-            if isinstance(上下文音频, dict):
-                waveform = 上下文音频.get("waveform")
-                sample_rate = int(上下文音频.get("sample_rate", 32000))
-            media = {"pixels": 上下文图像, "waveform": waveform,
+            if isinstance(context_audio, dict):
+                waveform = context_audio.get("waveform")
+                sample_rate = int(context_audio.get("sample_rate", 32000))
+            media = {"pixels": context_image, "waveform": waveform,
                      "sample_rate": sample_rate}
             hint = "已关联上下文"
         else:  # 自动索引
-            media = _load_context_media(存储位置, 片段序号)
+            media = _load_context_media(storage_dir, clip_index)
             if media.get(CONTEXT_EMPTY_MARKER):
                 reason = media.get(CONTEXT_EMPTY_REASON, "first_clip")
                 if reason == "file_not_found":
                     detail = media.get(CONTEXT_EMPTY_REASON_DETAIL, "?")
-                    return {"result": (条件化, "0:%d" % idle_tail, out_audio, int(上下文长度), 潜空间), "ui": {
+                    return {"result": (conditioning, "0:%d" % idle_tail, out_audio, int(context_length), latent), "ui": {
                         "h3_hint": "未找到片段 %s 文件" % detail}}
-                return {"result": (条件化, "0:%d" % idle_tail, out_audio, int(上下文长度), 潜空间), "ui": {
+                return {"result": (conditioning, "0:%d" % idle_tail, out_audio, int(context_length), latent), "ui": {
                     "h3_hint": "片段\"0\"，直通"}}
             hint = "已关联片段 %s 文件" % media.get(
                 CONTEXT_CLIP_INDEX_KEY, "?")
 
         # 仅读取本片段形状：按通道数识别视频流，兼容 NestedTensor 与普通元组；
         # 纯视频 latent（无音频流）也允许，此时不做音频轨长度裁剪
-        video = _video_from_latent(潜空间)
+        video = _video_from_latent(latent)
         audio_stream = None
-        for part in _streams_from_latent(潜空间):
+        for part in _streams_from_latent(latent):
             candidate = part if part.ndim != 4 else part.unsqueeze(0)
             if candidate.ndim == 5 and candidate.shape[1] == 24:
                 continue
@@ -1582,7 +1667,7 @@ class H3ContextInjectPro:
                     "h3_motion_context: 「音频上下文长度」大于 0，但当前"
                     "上下文%s无音频可用。「端口」模式需连接「上下文音频」，"
                     "或把「音频上下文长度」设为 0。"
-                    % ("" if 模式 == "端口" else "文件"))
+                    % ("" if mode == "端口" else "文件"))
             if audio_vae is None:
                 raise ValueError(
                     "h3_motion_context: 「音频上下文长度」大于 0 时需连接 "
@@ -1615,69 +1700,70 @@ class H3ContextInjectPro:
 
         # 追加进正向条件化（与官方 Add Guide 相同：读取已有列表、追加、
         # 整表写回，可与官方引导节点自由混用）
-        keyframes = list(条件化[0][1].get("minimax_keyframes", []))
+        keyframes = list(conditioning[0][1].get("minimax_keyframes", []))
         keyframes.append(keyframe)
         out = node_helpers.conditioning_set_values(
-            条件化, {"minimax_keyframes": keyframes})
+            conditioning, {"minimax_keyframes": keyframes})
         if a > 0:
             hint += "（含音频）"
         # 「往后加」核心：扩展潜空间，总长度 = 上下文帧 + 原内容，
         # 后置裁剪掉上下文后，原内容时长保持不变（不会变短）
-        extended_latent = _extend_latent_with_context(潜空间, cut)
+        extended_latent = _extend_latent_with_context(latent, cut)
         hint += "，潜空间已扩展%d帧" % cut
-        return {"result": (out, "1:%d" % cut, out_audio, int(上下文长度), extended_latent), "ui": {
+        return {"result": (out, "1:%d" % cut, out_audio, int(context_length), extended_latent), "ui": {
             "h3_hint": hint}}
 
-    def _apply_latent(self, 条件化, 潜空间, 启用上下文, 模式, 存储位置, 片段序号,
-                      上下文长度, 音频上下文长度, 衔接余量, audio_vae,
-                      上下文潜空间, 手动上传):
+    def _apply_latent(self, conditioning, latent, enable_context, mode, storage_dir,
+                      clip_index, context_length, audio_context_length, transition_margin,
+                      audio_vae, context_latent, manual_upload, original_audio=None):
         """潜空间衔接：直接从上一片段的 AV 潜空间切片，不做解码/重编码。
 
         要求分辨率一致、窗口为整 VRF 组；内部锚点与关键帧/引用共存由布局、载荷两补丁支持。
         """
-        if not 启用上下文:
+        out_audio = original_audio
+        if not enable_context:
             # 直通：尾段保存长度固定一个整组（17 帧）
-            return {"result": (条件化, "0:17", None, int(上下文长度)), "ui": {
+            return {"result": (conditioning, "0:17", out_audio, int(context_length)), "ui": {
                 "h3_hint": "上下文已关闭，直通"}}
         # 上下文来源由「模式」决定：上传（只用上传文件）/ 端口（只用连线）/ 自动索引
-        if 模式 == "上传":
-            if not (手动上传 or "").strip():
+        if mode == "上传":
+            if not (manual_upload or "").strip():
                 raise ValueError(
                     "h3_motion_context: 「上传」模式下需先通过「上传上下文」"
                     "按钮上传 .safetensors 潜空间文件，或填写「手动上传」路径。")
-            上下文潜空间 = _load_context_latent(存储位置, 片段序号, 手动上传)
-        elif 模式 == "端口":
-            if 上下文潜空间 is None:
+            context_latent = _load_context_latent(storage_dir, clip_index, manual_upload)
+        elif mode == "端口":
+            if context_latent is None:
                 raise ValueError(
                     "h3_motion_context: 「端口」模式下「上下文潜空间」"
                     "端口必须连接。")
         else:  # 自动索引
-            上下文潜空间 = _load_context_latent(存储位置, 片段序号, "")
+            context_latent = _load_context_latent(storage_dir, clip_index, "")
         # 第一个片段：上下文潜空间带空标记（片段序号 0 / 文件未找到），
         # 无前序上下文，条件化直通、裁 0，并在节点下方显示提示
-        if isinstance(上下文潜空间, dict) and 上下文潜空间.get(
+        if isinstance(context_latent, dict) and context_latent.get(
                 CONTEXT_EMPTY_MARKER):
-            reason = 上下文潜空间.get(CONTEXT_EMPTY_REASON, "first_clip")
+            reason = context_latent.get(CONTEXT_EMPTY_REASON, "first_clip")
             if reason == "file_not_found":
-                detail = 上下文潜空间.get(CONTEXT_EMPTY_REASON_DETAIL, "?")
-                return {"result": (条件化, "0:17", None, int(上下文长度)), "ui": {
+                detail = context_latent.get(CONTEXT_EMPTY_REASON_DETAIL, "?")
+                return {"result": (conditioning, "0:17", out_audio, int(context_length)), "ui": {
                     "h3_hint": "未找到片段 %s 文件" % detail}}
-            return {"result": (条件化, "0:17", None, int(上下文长度)), "ui": {
+            return {"result": (conditioning, "0:17", out_audio, int(context_length)), "ui": {
                 "h3_hint": "片段\"0\"，直通"}}
 
-        video = _video_from_latent(潜空间)
+        video = _video_from_latent(latent)
         latent_t = int(video.shape[2])
         width = int(video.shape[4]) * 16
         height = int(video.shape[3]) * 16
         frame_count = _pixel_frames(latent_t)
 
         # 潜空间不可缩放：直接从上片段 AV latent 切片视频尾部（跳过解码/编码）
-        src_video = _video_from_latent(上下文潜空间)
+        src_video = _video_from_latent(context_latent)
         if (int(src_video.shape[4]) * 16 != width
                 or int(src_video.shape[3]) * 16 != height):
             # 分辨率不一致时无法在同一 latent 网格上拼接前段画面/声音，
             # 跳过上下文，本次作为独立片段直通（效果等同重启链条）
-            return {"result": (条件化, "0:17", None, int(上下文长度)), "ui": {
+            return {"result": (conditioning, "0:17", out_audio, int(context_length)), "ui": {
                 "h3_hint": "分辨率不一致，已跳过"}}
         _ensure_layout_patch()
         if int(src_video.shape[1]) != int(video.shape[1]):
@@ -1687,7 +1773,7 @@ class H3ContextInjectPro:
                 % (int(src_video.shape[1]), int(video.shape[1])))
 
         available = _pixel_frames(int(src_video.shape[2]))
-        n = min(int(上下文长度), available)
+        n = min(int(context_length), available)
         if n < 5:
             raise ValueError(
                 "h3_motion_context: 上下文潜空间仅有 %d 帧，不足最小引导窗 5 帧。"
@@ -1696,10 +1782,10 @@ class H3ContextInjectPro:
         n = next((g for g in VIDEO_RUN_GRID if g <= n), 0)
 
         # 衔接余量：在锚定窗之外、可见剪起点之前多留一段整组长度的沉降区
-        margin = int(衔接余量 or 0)
+        margin = int(transition_margin or 0)
         # 裁剪量取画面窗、音频窗、画面窗+衔接余量 的较大值并吸附整组
         trim_frames = next((g for g in VIDEO_RUN_GRID
-                            if g <= max(n, int(音频上下文长度), n + margin)), 0)
+                            if g <= max(n, int(audio_context_length), n + margin)), 0)
         if trim_frames < 5:
             raise RuntimeError(
                 "h3_motion_context: 无法从 VIDEO_RUN_GRID 选出裁剪长度，"
@@ -1720,12 +1806,12 @@ class H3ContextInjectPro:
                 "h3_motion_context: %d 帧窗口不是整数个潜空间步。"
                 "VIDEO_RUN_GRID 已与 VAE 不匹配；拒绝渲染以避免接缝错位。" % n)
 
-        blocks, offsets, covered = _video_tail_from_latent(上下文潜空间, n)
+        blocks, offsets, covered = _video_tail_from_latent(context_latent, n)
         span = covered
         indices = ([o - span for o in offsets] if ANCHOR_MODE == "before"
                    else list(offsets))
         # 追加到已有 keyframes（而非整表替换），可与其他关键帧节点混用
-        existing_keyframes = list(条件化[0][1].get("minimax_keyframes", []))
+        existing_keyframes = list(conditioning[0][1].get("minimax_keyframes", []))
         keyframes = existing_keyframes + [
             {"resolved_frame_index": 0, MC_KEY: p, "latent": blk}
             for p, blk in zip(indices, blocks)
@@ -1737,9 +1823,9 @@ class H3ContextInjectPro:
         # 固定真实编码的静音，避免固定画面诱导模型带出上一片段的声音
         audio_ref = None
         audio_silent = False
-        if int(音频上下文长度) > 0:
+        if int(audio_context_length) > 0:
             audio_latent, ref_audio_t = _audio_tail_from_latent(
-                上下文潜空间, int(音频上下文长度))
+                context_latent, int(audio_context_length))
             audio_ref = {"kind": "audio", "ref_audio_t": ref_audio_t,
                          "audio_latent": audio_latent}
         elif audio_vae is not None:
@@ -1749,7 +1835,7 @@ class H3ContextInjectPro:
                              audio_vae, ref_audio_t)}
             audio_silent = True
         # 只有关键帧与引用需要共存时才安装载荷补丁
-        if audio_ref is not None or (条件化 and 条件化[0][1].get("minimax_refs")):
+        if audio_ref is not None or (conditioning and conditioning[0][1].get("minimax_refs")):
             _ensure_payload_patch()
         if audio_ref is not None:
             if AUDIO_MODE == "timeline":
@@ -1759,33 +1845,39 @@ class H3ContextInjectPro:
                 end_coord = int(round(end_frame * FRAME_RESCALE))
                 audio_ref[MC_AUDIO_KEY] = end_coord / FRAME_RESCALE
             # APPEND 而非赋值：Ref2VA 条件化可能已携带图自身的引用块
-            out = node_helpers.conditioning_set_values(条件化, values)
+            out = node_helpers.conditioning_set_values(conditioning, values)
             out = node_helpers.conditioning_set_values(
                 out, {"minimax_refs": [audio_ref]}, append=True)
         else:
             # 音频上下文为 0 且未连接音频 VAE：不安装音频引用，模型自由生成
-            out = node_helpers.conditioning_set_values(条件化, values)
+            out = node_helpers.conditioning_set_values(conditioning, values)
 
         trim = trim_frames if ANCHOR_MODE == "head" else 0
         trim_str = ("1:%d" % trim) if trim > 0 else "0:17"
-        clip_idx = (上下文潜空间.get(CONTEXT_CLIP_INDEX_KEY)
-                    if isinstance(上下文潜空间, dict) else None)
+        clip_idx = (context_latent.get(CONTEXT_CLIP_INDEX_KEY)
+                    if isinstance(context_latent, dict) else None)
         hint = (("已关联片段 %s 文件" % clip_idx) if clip_idx is not None
                 else "已关联上下文")
         if audio_silent:
             hint += "，音频上下文=静音"
-        return {"result": (out, trim_str, out_audio, int(上下文长度)), "ui": {"h3_hint": hint}}
+        return {"result": (out, trim_str, out_audio, int(context_length)), "ui": {"h3_hint": hint}}
 
     @classmethod
-    def IS_CHANGED(cls, 模式="自动索引", 存储位置="H3-Mubu", 片段序号=1,
-                   手动上传="", 衔接模式="视频图像", **kwargs):
+    def IS_CHANGED(cls, mode="自动索引", storage_dir="H3-Mubu", clip_index=1,
+                   manual_upload="", transition_mode="视频图像", **kwargs):
         # IS_CHANGED 只能拿 widget 值、无法感知端口连线：端口模式返回 0、按输入数据
         # 变化正常重跑；上传/自动索引模式按本地文件指纹判定（潜空间模式扫
         # latent_*.safetensors，视频图像模式扫 clip_*.mp4）。**kwargs 兼容其余端口值。
-        if 模式 == "端口":
+        kwargs = _normalize_inputs(kwargs)
+        mode = kwargs.get("mode", mode)
+        storage_dir = kwargs.get("storage_dir", storage_dir)
+        clip_index = kwargs.get("clip_index", clip_index)
+        manual_upload = kwargs.get("manual_upload", manual_upload)
+        transition_mode = kwargs.get("transition_mode", transition_mode)
+        if mode == "端口":
             return 0
-        return _context_latent_fingerprint(存储位置, 片段序号, 手动上传,
-                                           潜空间模式=(衔接模式 == "潜空间"))
+        return _context_latent_fingerprint(storage_dir, clip_index, manual_upload,
+                                           latent_mode=(transition_mode == "潜空间"))
 
 
 # ============================================================================
@@ -1806,66 +1898,83 @@ class H3ContextTrimPro:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "潜空间": ("LATENT", {
-                    "tooltip": "H3 采样器的 AV 潜空间（同时含视频流与音频"
-                               "流）。「视频图像」模式解码后裁切，「潜空间」"
-                               "模式直接在其上裁切。"}),
-                # 「衔接模式」放在第一个 widget，与「H3 运动上下文」的同名参数位置一致
-                "衔接模式": (["视频图像", "解码模式", "潜空间"], {
+                "latent": ("LATENT", {
+                    "tooltip": "The H3 sampler's AV latent (carries both video and "
+                               "audio streams). Decoded then cropped in video_image "
+                               "mode; cropped directly on the latent in latent mode."}),
+                # transition_mode is placed as the first widget, matching the context
+                # node's same-named parameter position.
+                "transition_mode": (["视频图像", "解码模式", "潜空间"], {
                     "default": "视频图像",
-                    "tooltip": "数据处理路径三选一。视频图像——解码为图像+音频"
-                               "后再裁切，输出 IMAGE+AUDIO，尾段存 .mp4，"
-                               "分辨率可与下一片段不同；解码模式——与视频图像"
-                               "同源但只解码不裁切：输出整段 IMAGE+AUDIO，"
-                               "不裁头也不存盘，「裁剪帧数」端口随「片段序号」"
-                               "「保存到本地」「存储位置」一并隐藏（该选项"
-                               "仅本节点有，与「H3 运动上下文」的衔接模式无"
-                               "需一致）；潜空间——直接裁切 AV 潜空间，输出"
-                               " LATENT，尾段存 .safetensors，无质量损失但"
-                               "要求两片段分辨率一致。"}),
-                "片段序号": ("INT", {
+                    "tooltip": "Processing path, three options. video_image — decode "
+                               "to image+audio then crop, output IMAGE+AUDIO, save the "
+                               "tail as .mp4; resolution may differ from the next clip. "
+                               "decode_only — same source but decode only, no crop: "
+                               "outputs the whole IMAGE+AUDIO, neither cropping the head "
+                               "nor saving to disk; the trim_frames port together with "
+                               "clip_index / save_local / storage_dir are hidden by the "
+                               "front end (this option is node-specific and need not match "
+                               "the context node's transition_mode). latent — crop the "
+                               "AV latent directly, output LATENT, save the tail as "
+                               ".safetensors, no quality loss but both clips must share "
+                               "resolution."}),
+                "clip_index": ("INT", {
                     "default": 1, "min": 1, "max": 9999,
-                    "tooltip": "本片段在链条中的序号。「视频图像」模式设为2"
-                               "保存到 clip_00002.mp4，「潜空间」模式保存到"
-                               "latent_00002_.safetensors，重复生成覆盖原"
-                               "文件；下一片段「H3 运动上下文」的「片段序号」"
-                               "设相同值即可对应加载。"}),
-                "保存到本地": ("BOOLEAN", {
+                    "tooltip": "This clip's index in the chain. video_image mode 2 "
+                               "saves to clip_00002.mp4; latent mode saves to "
+                               "latent_00002_.safetensors, repeated generations overwrite "
+                               "the original file; the next clip's context node uses the "
+                               "same clip_index to match the loaded file."}),
+                "save_local": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "尾段保存总开关。开启按裁剪帧数长度保存尾段"
-                               "（1:22→22帧，0:22→22帧，未启用也保存供"
-                               "衔接）；关闭仅输出、不生成文件，不影响输出"
-                               "端口。「裁剪帧数」端口未接入时不裁切也不"
-                               "保存，本开关不生效。"}),
-                "存储位置": ("STRING", {
+                    "tooltip": "Tail-save master switch. On: save the tail at the "
+                               "trim-frames length (1:22→22 frames, 0:22→22 frames; even "
+                               "when disabled it is saved for the next clip to reuse). "
+                               "Off: output only, no file is generated, output ports are "
+                               "unaffected. When the trim_frames port is not connected, "
+                               "neither cropping nor saving happens and this switch does "
+                               "not apply."}),
+                "storage_dir": ("STRING", {
                     "default": "H3-Mubu",
-                    "tooltip": "保存在 ComfyUI 输出文件夹下的子目录名。"
-                               "下一片段「H3 运动上下文」使用相同的存储位置"
-                               "即可对应加载。"}),
+                    "tooltip": "Subfolder name under the ComfyUI output directory. The "
+                               "next clip's context node uses the same storage_dir to "
+                               "match the loaded file."}),
             },
             "optional": {
-                # forceInput 输入在前端不会生成同名 widget（只建数据端口），端口未接入时
-                # 该字段根本不会出现在执行提示里——声明为 required 会被判定「缺必填输入」
-                # 直接报错。故放 optional：未接入时后端拿到 None，按「未接入」处理（不裁
-                # 头、不保存尾段、不报错）。放在 optional 首位，使数据端口序号保持为
-                # 潜空间(0)/裁剪帧数(1)/VAE(2)/audio_vae(3)，旧工作流的连线不错位。
-                "裁剪帧数": ("STRING", {
+                # forceInput inputs produce no same-name widget on the front end (only a
+                # data port); when the port is not linked the field is absent from the
+                # execution prompt — declaring it required would raise a missing-input
+                # error. So it stays optional: when unlinked the backend gets None and
+                # treats it as unlinked (no head crop, no tail save, no error). Placed
+                # first in optional so the data-port order stays latent(0)/trim_frames
+                # (1)/VAE(2)/audio_vae(3), and old workflow links do not shift.
+                "trim_frames": ("STRING", {
                     "forceInput": True,
-                    "tooltip": "强制输入端口（不可改），连接「H3 运动上下文」"
-                               "的裁剪帧数输出：1:22=启用上下文（头部裁22帧、"
-                               "尾段保存22帧）；0:22=未启用/首片段（不裁头、"
-                               "尾段仍保存22帧供衔接）。也兼容纯数字（按启用"
-                               "语义：裁头与尾段等长）。未接入时不裁头、不"
-                               "保存尾段（等于不保存本地），也不会报错。"}),
+                    "tooltip": "Force input port (read-only), connected to the context "
+                               "node's trim-frames output: 1:22 = context enabled (crop "
+                               "22 head frames, save 22 tail frames); 0:22 = disabled / "
+                               "first clip (no head crop, still save 22 tail frames to "
+                               "reuse). A bare number also works (enabled semantics: head "
+                               "crop and tail equal that value). Unlinked: no head crop, "
+                               "no tail save (equal to not saving locally), no error."}),
                 "VAE": ("VAE", {
-                    "tooltip": "H3 视频 VAE（仅「视频图像」模式使用）。把 AV "
-                               "潜空间的视频流解码为像素帧。"}),
+                    "tooltip": "H3 video VAE (video_image mode only). Decodes the latent "
+                               "video stream into pixel frames."}),
                 "audio_vae": ("VAE", {
-                    "tooltip": "H3 音频 VAE（仅「视频图像」模式使用）。把 AV "
-                               "潜空间的音频流解码为波形。"}),
-                "原音频": ("AUDIO", {
-                    "tooltip": "从「H3 运动上下文 V2」透传的裁好的原始 FLAC 音频。"
-                               "本节点原样输出，接给 VHS 视频合成的 audio 输入。"}),
+                    "tooltip": "H3 audio VAE (video_image mode only). Decodes the latent "
+                               "audio stream into a waveform."}),
+                "original_audio": ("AUDIO", {
+                    "tooltip": "Trimmed original FLAC audio passed through from the "
+                               "context node V2. Output as-is and feed to the VHS video "
+                               "composite audio input."}),
+                # Legacy Chinese input-key aliases, optional, for old saved workflows.
+                "潜空间": ("LATENT", {}),
+                "衔接模式": (["视频图像", "解码模式", "潜空间"], {}),
+                "片段序号": ("INT", {}),
+                "保存到本地": ("BOOLEAN", {}),
+                "存储位置": ("STRING", {}),
+                "裁剪帧数": ("STRING", {"forceInput": True}),
+                "原音频": ("AUDIO", {}),
             },
         }
 
@@ -1873,22 +1982,31 @@ class H3ContextTrimPro:
     # 潜空间：LATENT）。此处声明为 AnyType 通配，避免静态声明与实际输出槽
     # 不一致；隐含模式（未加载前端脚本）下第 0 槽即潜空间输出。
     RETURN_TYPES = ("*", "*", "AUDIO")
-    RETURN_NAMES = ("图像", "音频", "原音频")
+    RETURN_NAMES = ("image", "audio", "original_audio")
     FUNCTION = "trim"
     OUTPUT_NODE = True
     CATEGORY = "Yuan Tool/MiniMax"
-    DESCRIPTION = ("按「H3 运动上下文」输出的裁剪帧数字符串\"状态:长度\"对 H3 "
-                   "采样器的 AV 潜空间做两段式裁切，尾段存盘供下一片段衔接。"
-                   "「视频图像」模式解码为图像+音频后按像素裁切，输出"
-                   "图像/音频；「潜空间」模式直接按整 VRF 组裁切，输出潜空间；"
-                   "「解码模式」只解码不裁切，输出整段图像/音频。")
+    DESCRIPTION = ("Two-stage crop of the H3 sampler's AV latent by the trim-frames "
+                   "string \"state:length\" output by the context node; the tail is "
+                   "saved for the next clip to reuse. video_image mode decodes to "
+                   "image+audio then crops by pixels, outputting image/audio; latent mode "
+                   "crops directly by whole VRF group, outputting latent; decode_only mode "
+                   "decodes without cropping, outputting the whole image/audio.")
 
-    def trim(self, 潜空间, 裁剪帧数=None, 片段序号=1, 保存到本地=True,
-             存储位置="H3-Mubu", 衔接模式="视频图像", VAE=None, audio_vae=None,
-             原音频=None):
-        if 衔接模式 == "潜空间":
-            return (self._trim_latent(潜空间, 裁剪帧数, 片段序号,
-                                      保存到本地, 存储位置),)
+    def trim(self, latent, trim_frames=None, clip_index=1, save_local=True,
+             storage_dir="H3-Mubu", transition_mode="视频图像", VAE=None, audio_vae=None,
+             original_audio=None, **kwargs):
+        kwargs = _normalize_inputs(kwargs)
+        latent = kwargs.get("latent", latent)
+        trim_frames = kwargs.get("trim_frames", trim_frames)
+        clip_index = kwargs.get("clip_index", clip_index)
+        save_local = kwargs.get("save_local", save_local)
+        storage_dir = kwargs.get("storage_dir", storage_dir)
+        transition_mode = kwargs.get("transition_mode", transition_mode)
+        original_audio = kwargs.get("original_audio", original_audio)
+        if transition_mode == "潜空间":
+            return (self._trim_latent(latent, trim_frames, clip_index,
+                                      save_local, storage_dir, original_audio),)
         if VAE is None:
             raise ValueError(
                 "h3_motion_context: 「视频图像」衔接模式需要连接 VAE（H3 视频"
@@ -1902,14 +2020,14 @@ class H3ContextTrimPro:
         # 「解码模式」：只走「视频图像」的解码段，不裁头、不存盘。前端在此模式已移除
         # 「裁剪帧数」输入端口并隐藏「片段序号」「保存到本地」「存储位置」，故这里
         # 不读这些参数，原样输出整段图像+音频。
-        if 衔接模式 == "解码模式":
-            return self._decode_only(潜空间, VAE, audio_vae)
+        if transition_mode == "解码模式":
+            return self._decode_only(latent, VAE, audio_vae, original_audio)
         # 解析裁剪帧数字符串"状态:长度"："1:22"→裁头22帧且尾段存22帧；"0:22"→不裁头、
         # 尾段仍存22帧供衔接；兼容纯数字手填输入（按启用语义：n=tail=该值）。
         # 端口未接入：forceInput 输入由前端直接建数据端口、没有同名 widget，未连线时
         # 该字段不会出现在执行提示里，后端收到 None → 归一化为空串，落到下面的纯数字
         # 分支得 n=tail=0：不裁头、不保存尾段（等于不保存本地），也不会报错。
-        s = "" if 裁剪帧数 is None else str(裁剪帧数).strip()
+        s = "" if trim_frames is None else str(trim_frames).strip()
         if ":" in s:
             state_str, _, len_str = s.partition(":")
             try:
@@ -1933,7 +2051,7 @@ class H3ContextTrimPro:
         n = max(0, n)
         tail = max(0, tail)
         # 像素域裁切：任意帧数均可，无需吸附整组（无 VRF 相位约束）
-        pixels, wave, sample_rate = self._decode_av(潜空间, VAE, audio_vae)
+        pixels, wave, sample_rate = self._decode_av(latent, VAE, audio_vae)
         total = int(pixels.shape[0])
         if n >= total:
             raise ValueError(
@@ -1944,10 +2062,10 @@ class H3ContextTrimPro:
         delivered_pixels = pixels[n:]
         delivered_wave = wave[..., audio_cut:]
         # V2: 按原音频时长裁掉画面末尾多余帧，保证画面=音频时长（无缝拼接）
-        if 原音频 is not None:
+        if original_audio is not None:
             try:
-                _owf = 原音频.get("waveform")
-                _osr = int(原音频.get("sample_rate", 32000))
+                _owf = original_audio.get("waveform")
+                _osr = int(original_audio.get("sample_rate", 32000))
                 if _owf is not None and _osr > 0:
                     _audio_sec = float(_owf.shape[-1]) / float(_osr)
                     _target_frames = int(round(_audio_sec * FPS))
@@ -1964,7 +2082,7 @@ class H3ContextTrimPro:
                 pass
         # 第二次裁切（受「保存到本地」开关控制）：在交付部分尾部按解析长度再切后段存盘，
         # 供下一片段「H3 运动上下文」取尾部窗口；交付帧数不足时保存整个交付部分。
-        if 保存到本地 and tail > 0:
+        if save_local and tail > 0:
             t_frames = min(tail, total - n)
             tail_pixels = delivered_pixels[delivered_pixels.shape[0] - t_frames:]
             tail_samples = int(round(t_frames / float(FPS) * sample_rate))
@@ -1972,16 +2090,16 @@ class H3ContextTrimPro:
             tail_wave = (delivered_wave[..., delivered_wave.shape[-1] - tail_samples:]
                          if tail_samples > 0 else delivered_wave[..., :0])
             _save_av_media(tail_pixels, tail_wave, sample_rate,
-                           存储位置, 片段序号)
+                           storage_dir, clip_index)
         return (delivered_pixels,
                 {"waveform": delivered_wave, "sample_rate": sample_rate},
-                原音频)
+                original_audio)
 
-    def _decode_av(self, 潜空间, VAE, audio_vae):
+    def _decode_av(self, latent, VAE, audio_vae):
         """AV 潜空间 → 像素帧与波形（「视频图像」与「解码模式」共用的解码段）。
 
         返回 (pixels [T,H,W,3], wave [B,2,L], sample_rate)。"""
-        video, audio = _split_av_streams(潜空间)
+        video, audio = _split_av_streams(latent)
         # 解码：视频流 → [T,H,W,3] 像素帧；音频流 → [1,2,L] 波形
         # （VAE 包装器 decode 返回 [B,L,2]，movedim 回 ComfyUI AUDIO
         # 约定的 [B,声道,样本]）
@@ -1996,20 +2114,20 @@ class H3ContextTrimPro:
             wave = wave[None].movedim(1, -1)  # [L,2] → [1,2,L]
         return pixels, wave, sample_rate
 
-    def _decode_only(self, 潜空间, VAE, audio_vae):
+    def _decode_only(self, latent, VAE, audio_vae, original_audio=None):
         """「解码模式」：把整段 AV 潜空间解码为图像+音频，不裁切、不存盘。"""
-        pixels, wave, sample_rate = self._decode_av(潜空间, VAE, audio_vae)
-        return (pixels, {"waveform": wave, "sample_rate": sample_rate}, 原音频)
+        pixels, wave, sample_rate = self._decode_av(latent, VAE, audio_vae)
+        return (pixels, {"waveform": wave, "sample_rate": sample_rate}, original_audio)
 
-    def _trim_latent(self, 潜空间, 裁剪帧数=None, 片段序号=1,
-                     保存到本地=True, 存储位置="H3-Mubu"):
+    def _trim_latent(self, latent, trim_frames=None, clip_index=1,
+                     save_local=True, storage_dir="H3-Mubu", original_audio=None):
         # 「潜空间」模式：不解码，直接在 AV 潜空间上裁切。解析裁剪帧数字符串
         # "状态:长度"："1:34"=启用上下文 → 头部裁 34 帧、尾段保存 34 帧；
         # "0:17"=未启用/无上下文 → 不裁头、尾段仍保存 17 帧供衔接。
         # 兼容纯数字输入（手填）→ 按启用语义：n=tail=该值
         # 端口未接入（后端收到 None）→ 归一化为空串：n=tail=0，不裁头、不保存尾段，
         # 也不会报错。
-        s = "" if 裁剪帧数 is None else str(裁剪帧数).strip()
+        s = "" if trim_frames is None else str(trim_frames).strip()
         if ":" in s:
             state_str, _, len_str = s.partition(":")
             try:
@@ -2036,7 +2154,7 @@ class H3ContextTrimPro:
         n -= n % 17
         tail = max(0, tail)
         tail -= tail % 17
-        video, audio = _split_av_streams(潜空间)
+        video, audio = _split_av_streams(latent)
         total = _pixel_frames(int(video.shape[2]))
         if n >= total:
             raise ValueError(
@@ -2060,24 +2178,24 @@ class H3ContextTrimPro:
         if have > want:
             audio = audio[..., :want]
         # 保持输入的流容器类型：NestedTensor 或普通 list
-        samples = 潜空间["samples"]
+        samples = latent["samples"]
         new_samples = (NestedTensor([video, audio])
                        if getattr(samples, "is_nested", False)
                        else [video, audio])
-        out = dict(潜空间)
+        out = dict(latent)
         out["samples"] = new_samples
         # 第二次裁切（保存与否仅由「保存到本地」开关控制）：在第一次裁头
         # 结果的尾部按解析出的长度再切一段（保留后段）保存到本地，供下一
         # 片段「H3 运动上下文」取尾部窗口（连线传入或本地自动加载）。未启用
         # 上下文（"0:17"）时裁 0 帧但尾段仍保存 17 帧，保证链条任何配置下
         # 下一片段都有可衔接的上下文文件
-        if 保存到本地 and tail > 0:
+        if save_local and tail > 0:
             _save_av_latent(_tail_portion_latent(out, tail),
-                            存储位置, 片段序号)
-        return (out, 原音频)
+                            storage_dir, clip_index)
+        return (out, original_audio)
 
 
-def _save_av_media(pixels, waveform, sample_rate, 存储位置, 片段序号):
+def _save_av_media(pixels, waveform, sample_rate, storage_dir, clip_index):
     """把尾段媒体（像素帧+音频波形）混流存为 {输出}/{存储位置}/clip_%05d.mp4。
 
     视频用 libx264 无损模式（yuv444p + crf 0），音频用 aac；同一片段重复生成会覆盖。
@@ -2089,11 +2207,11 @@ def _save_av_media(pixels, waveform, sample_rate, 存储位置, 片段序号):
     if waveform is not None and waveform.ndim == 2:
         waveform = waveform[None]
     has_audio = waveform is not None and int(waveform.shape[-1]) > 0
-    loc = (存储位置 or "").strip().strip('"').strip("'") or "H3-Mubu"
+    loc = (storage_dir or "").strip().strip('"').strip("'") or "H3-Mubu"
     clip_dir = os.path.join(folder_paths.get_output_directory(), loc)
     os.makedirs(clip_dir, exist_ok=True)
     path = os.path.join(clip_dir, "%s_%05d%s" % (CLIP_FILE_PREFIX,
-                                                 int(片段序号),
+                                                 int(clip_index),
                                                  CLIP_FILE_EXT))
     # 原子写：先写同目录临时文件，编码成功后再 os.replace 覆盖目标——
     # 读取方永远不会读到半截文件；失败时旧文件保留
@@ -2163,9 +2281,9 @@ def _save_av_media(pixels, waveform, sample_rate, 存储位置, 片段序号):
 # 存储位置/文件名解析（约定：存储位置目录下 clip_%05d.mp4）
 # ============================================================================
 
-def _clip_file_path(存储位置, idx):
+def _clip_file_path(storage_dir, idx):
     """返回 clip_%05d.mp4 绝对路径（不存在抛 FileNotFoundError，由调用方兜底扫描 output 目录）。"""
-    loc = (存储位置 or "").strip().strip('"').strip("'") or "H3-Mubu"
+    loc = (storage_dir or "").strip().strip('"').strip("'") or "H3-Mubu"
     path = os.path.join(folder_paths.get_output_directory(), loc,
                         "%s_%05d%s" % (CLIP_FILE_PREFIX, int(idx),
                                        CLIP_FILE_EXT))
@@ -2205,9 +2323,9 @@ def _find_clip_in_output(idx):
     return None
 
 
-def _build_load_path(存储位置):
+def _build_load_path(storage_dir):
     """存储位置参数 → 目录级指纹前缀（用户只设目录名，clip 前缀内部固定、不可改）。"""
-    loc = (存储位置 or "").strip().strip('"').strip("'") or "H3-Mubu"
+    loc = (storage_dir or "").strip().strip('"').strip("'") or "H3-Mubu"
     return os.path.join(loc, CLIP_FILE_PREFIX)
 
 
@@ -2283,12 +2401,12 @@ async def _yuan_h3_motion_upload_latent(request):
                                      response_name=_response_name)
 
 
-def _resolve_manual_media_path(手动上传):
+def _resolve_manual_media_path(manual_upload):
     """解析「手动上传」媒体路径为绝对路径（空输入返回 None）。
 
     支持 input:/output:/temp: 前缀与绝对路径；无前缀时依次在 input、output 目录查找。
     """
-    p = (手动上传 or "").strip().strip('"').strip("'")
+    p = (manual_upload or "").strip().strip('"').strip("'")
     if not p:
         return None
     candidates = []
@@ -2324,6 +2442,6 @@ NODE_CLASS_MAPPINGS = {
     "H3ContextTrimPro": H3ContextTrimPro,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "H3ContextInjectPro": "H3 上下文注入 Pro(口型对齐)",
-    "H3ContextTrimPro": "H3 输出裁剪 Pro(口型对齐)",
+    "H3ContextInjectPro": "H3 Context Inject Pro (lip-sync aligned)",
+    "H3ContextTrimPro": "H3 Context Trim Pro (lip-sync aligned)",
 }

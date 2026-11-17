@@ -19,23 +19,23 @@ class H3SigmaRefiner:
         return {
             "required": {
                 "sigmas": ("SIGMAS", {
-                    "tooltip": "输入的原始噪声序列。"
+                    "tooltip": "Input original noise schedule."
                 }),
                 "extra_steps": ("INT", {
                     "default": 1, "min": 0, "max": 15, "step": 1,
-                    "tooltip": "在低噪点区间额外增加的细节平滑步数。"
+                    "tooltip": "Extra detail-smoothing steps added in the low-noise range."
                 }),
                 "start_at_sigma": ("FLOAT", {
                     "default": 0.7, "min": 0.0, "max": 20.0, "step": 0.01,
-                    "tooltip": "启动细节加步的 Sigma 阈值。H3 推荐设在 2.0 ~ 3.5 之间。"
+                    "tooltip": "Sigma threshold where the extra detail steps start. H3 recommended 2.0 ~ 3.5."
                 }),
                 "end_at_sigma": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 5.0, "step": 0.01,
-                    "tooltip": "结束细化的 Sigma 边界（默认 0.0）。"
+                    "tooltip": "Sigma boundary where refinement ends (default 0.0)."
                 }),
                 "spacing": (["cosine", "linear", "exponential"], {
                     "default": "cosine",
-                    "tooltip": "插值分布曲线。cosine（余弦）在趋近于 0 时分布更密，消噪效果最丝滑。"
+                    "tooltip": "Interpolation curve. cosine packs denser steps near 0 for the smoothest denoise."
                 }),
             }
         }
@@ -44,7 +44,7 @@ class H3SigmaRefiner:
     RETURN_NAMES = ("sigmas",)
     FUNCTION = "refine_sigmas"
     CATEGORY = "YCNodes-MiniMax-H3/scheduler"
-    DESCRIPTION = "针对 H3 视频模型高动态场景优化。在低噪点区（低 Sigma）局部加密采样步长，消解运动物体的边缘像素颗粒。"
+    DESCRIPTION = "Optimized for H3 video high-motion scenes. Densifies sampler steps in the low-noise range (low Sigma) to remove edge pixel grain on moving subjects."
 
     def refine_sigmas(self, sigmas, extra_steps, start_at_sigma, end_at_sigma, spacing):
         if extra_steps <= 0:

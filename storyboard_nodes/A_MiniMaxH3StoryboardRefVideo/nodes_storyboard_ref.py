@@ -35,7 +35,7 @@ SEGMENT_MARKER_INPUT = (
     {
         "forceInput": True,
         "default": DEFAULT_SEGMENT_MARKER,
-        "tooltip": "可连接字符串节点自定义标记；默认 ===== prompt_N =====，也兼容 promptN。prompt_N、clip_N 或 {N} 中的 N 表示序号；不含序号占位符时按出现顺序编号。",
+        "tooltip": "Connect a string node to customize the marker; default ===== prompt_N =====, promptN also supported. The N in prompt_N, clip_N or {N} is the index; without an index placeholder segments are numbered in appearance order.",
     },
 )
 
@@ -300,19 +300,19 @@ class A_MiniMaxH3OfficialRefPromptSegment:
             "required": {
                 "full_reference_prompt": (
                     "STRING",
-                    {"forceInput": True, "multiline": True, "tooltip": "按 prompt_N 外层标记切分；也兼容 promptN。"},
+                    {"forceInput": True, "multiline": True, "tooltip": "Split by the outer prompt_N markers; promptN also supported."},
                 ),
                 "clip_index": (
                     "INT",
-                    {"default": 1, "min": 1, "max": MAX_CLIPS, "step": 1, "tooltip": "按分段标记出现顺序选择完整提示词段；标记编号重复时仍按出现顺序计数。"},
+                    {"default": 1, "min": 1, "max": MAX_CLIPS, "step": 1, "tooltip": "Select the full prompt segment by marker appearance order; duplicate marker numbers are still counted in appearance order."},
                 ),
                 "video_duration_sec": (
                     "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 86400.0, "step": 0.1, "tooltip": "仅在只有一个 prompt 段且提示词中没有显式时长时作为兜底；多段提示词的时长从各自文本中提取。"},
+                    {"default": 0.0, "min": 0.0, "max": 86400.0, "step": 0.1, "tooltip": "Fallback only when there is a single prompt segment with no explicit duration; multi-segment durations are extracted from each segment's text."},
                 ),
                 "fallback_length_frames": (
                     "INT",
-                    {"default": DEFAULT_FALLBACK_FRAMES, "min": 5, "max": 3600, "step": 17, "tooltip": "该 prompt 段没有显式时长时使用的兜底帧数。"},
+                    {"default": DEFAULT_FALLBACK_FRAMES, "min": 5, "max": 3600, "step": 17, "tooltip": "Fallback frame count when this prompt segment has no explicit duration."},
                 ),
             },
             "optional": {"segment_marker": SEGMENT_MARKER_INPUT},
@@ -364,49 +364,49 @@ class A_MiniMaxH3StoryboardRefVideo:
         for index in range(MAX_REF_VIDEOS):
             optional[f"ref_video_{index}"] = (
                 "IMAGE",
-                {"tooltip": f"官方 <Video {index + 1}> 对应的视频帧；排在素材库视频之后。"},
+                {"tooltip": f"Video frames for the official <Video {index + 1}>; placed after library videos."},
             )
         for index in range(MAX_REF_VIDEOS):
             optional[f"ref_video_audio_{index}"] = (
                 "AUDIO",
-                {"tooltip": f"对应 ref_video_{index} 的音轨；只有 subject_definitions 显式将 <Audio N> 绑定到此视频时才使用。"},
+                {"tooltip": f"Audio track paired with ref_video_{index}; used only when subject_definitions explicitly binds <Audio N> to this video."},
             )
         for index in range(MAX_REF_AUDIOS):
             optional[f"ref_audio_{index}"] = (
                 "AUDIO",
-                {"tooltip": f"独立官方 <Audio N> 引用；素材库音频之后按顺序排列。"},
+                {"tooltip": f"Standalone official <Audio N> reference; ordered after library audios."},
             )
         optional["segment_marker"] = SEGMENT_MARKER_INPUT
         return {
             "required": {
-                "clip": ("CLIP", {"tooltip": "MiniMax H3 文本编码器（Qwen3VL MiniMax）。"}),
-                "vae": ("VAE", {"tooltip": "MiniMax H3 视频 VAE。"}),
-                "audio_vae": ("VAE", {"tooltip": "MiniMax H3 音频 VAE。"}),
+                "clip": ("CLIP", {"tooltip": "MiniMax H3 text encoder (Qwen3VL MiniMax)."}),
+                "vae": ("VAE", {"tooltip": "MiniMax H3 video VAE."}),
+                "audio_vae": ("VAE", {"tooltip": "MiniMax H3 audio VAE."}),
                 "prompt_source": (
                     "STRING",
-                    {"forceInput": True, "multiline": True, "tooltip": "按 prompt_N 外层标记选择完整六章节提示词；支持 BSAI @图N 资产源编号并转换为本段连续 H3 引用标签。"},
+                    {"forceInput": True, "multiline": True, "tooltip": "Select the full six-section prompt by outer prompt_N markers; BSAI @图N asset source ids are converted to consecutive H3 reference labels in this segment."},
                 ),
                 "asset_library": (
                     "ASSET_LIBRARY",
-                    {"forceInput": True, "tooltip": "接入 BSAI Asset Library。@图N 按源编号查图，再按本段首次出现顺序映射为连续 <Picture N>；内部 H3 编号独立于源 @图N。"},
+                    {"forceInput": True, "tooltip": "Connect the BSAI Asset Library. @图N looks up the image by source id, then maps to consecutive <Picture N> in first-appearance order; internal H3 numbering is independent of the source @图N."},
                 ),
                 "width": ("INT", {"default": 480, "min": 32, "max": 4096, "step": 32}),
                 "height": ("INT", {"default": 832, "min": 32, "max": 4096, "step": 32}),
                 "length": (
                     "INT",
-                    {"default": DEFAULT_FALLBACK_FRAMES, "min": 5, "max": 3600, "step": 17, "tooltip": "所选 prompt 段未写明时长时使用的兜底帧数。"},
+                    {"default": DEFAULT_FALLBACK_FRAMES, "min": 5, "max": 3600, "step": 17, "tooltip": "Fallback frame count when the selected prompt segment states no duration."},
                 ),
                 "ref_image_size": (
                     ["match", "max"],
-                    {"default": "max", "tooltip": "参考图缩放模式。"},
+                    {"default": "max", "tooltip": "Reference-image scaling mode."},
                 ),
                 "clip_index": (
                     "INT",
-                    {"default": 1, "min": 1, "max": MAX_CLIPS, "step": 1, "tooltip": "按分段标记出现顺序选择完整 CLIP；每段保留完整提示词。"},
+                    {"default": 1, "min": 1, "max": MAX_CLIPS, "step": 1, "tooltip": "Select the full CLIP by marker appearance order; each segment keeps its full prompt."},
                 ),
                 "video_duration_sec": (
                     "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 86400.0, "step": 0.1, "tooltip": "优先读取各段 detailed_description 的 [Recommended duration]；该值仅供单段未写时长时兜底。"},
+                    {"default": 0.0, "min": 0.0, "max": 86400.0, "step": 0.1, "tooltip": "Prefer the [Recommended duration] in each segment's detailed_description; this value only backs off when a single segment states no duration."},
                 ),
             },
             "optional": optional,
@@ -487,14 +487,14 @@ class A_MiniMaxH3StoryboardViewer:
             "required": {
                 "prompt_source": (
                     "STRING",
-                    {"forceInput": True, "multiline": True, "tooltip": "按 prompt_N 标记切分；支持 BSAI @图N 源索引与六章节官方提示词。"},
+                    {"forceInput": True, "multiline": True, "tooltip": "Split by prompt_N markers; supports BSAI @图N source ids and the six-section official prompt."},
                 ),
-                "expand": ("BOOLEAN", {"default": False, "tooltip": "预览默认折叠；看板内支持逐段或全部展开。"}),
+                "expand": ("BOOLEAN", {"default": False, "tooltip": "Preview collapsed by default; the board expands segments individually or all at once."}),
             },
             "optional": {
                 "asset_library": (
                     "ASSET_LIBRARY",
-                    {"forceInput": False, "tooltip": "按源 @图N 或官方 <Picture N>/<Video N> 索引显示素材缩略图。"},
+                    {"forceInput": False, "tooltip": "Show asset thumbnails indexed by source @图N or official <Picture N>/<Video N>."},
                 ),
                 "segment_marker": SEGMENT_MARKER_INPUT,
             },
@@ -515,7 +515,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "A_MiniMaxH3OfficialRefPromptSegment": "[A] MiniMax H3 官方参考提示词逐段提取",
-    "A_MiniMaxH3StoryboardRefVideo": "[A] MiniMax H3 官方参考生视频 (Full Ref2VA)",
-    "A_MiniMaxH3StoryboardViewer": "[A] MiniMax H3 官方参考提示词预览看板",
+    "A_MiniMaxH3OfficialRefPromptSegment": "[A] MiniMax H3 Official Ref Prompt Segment Extractor",
+    "A_MiniMaxH3StoryboardRefVideo": "[A] MiniMax H3 Official Ref Video (Full Ref2VA)",
+    "A_MiniMaxH3StoryboardViewer": "[A] MiniMax H3 Official Ref Prompt Preview Board",
 }

@@ -297,9 +297,9 @@ def progressive_sample(low_res_model, positive, negative, vae, latent_image, sam
     # 提前给出明确报错, 免得整条 prompt 在深层 traceback 里中断。
     if len(streams) < 2 and _model_needs_audio_stream(model):
         raise ValueError(
-            "selflift-Avatar: 当前模型是 FLOW_AV(MiniMax H3 音视频双流), 但 latent_image 只有 1 条视频流; "
-            "请把 latent_image 接到 LTXVConcatAVLatent 的输出(同时含 video_latent + audio_latent), "
-            "不要再接 LTXVSeparateAVLatent 的 video_latent 单流。"
+            "selflift-Avatar: this model is FLOW_AV (MiniMax H3 audio-video dual stream), but latent_image carries only 1 video stream; "
+            "connect latent_image to the output of LTXVConcatAVLatent (containing both video_latent + audio_latent), "
+            "not the single-stream video_latent of LTXVSeparateAVLatent."
         )
     hires_base = high_res_model if high_res_model is not None else model
     _validate_sampling(hires_base.get_model_object("model_sampling"), sampler)
@@ -576,9 +576,9 @@ class SelfLiftAvatarH3Sampler:
             "w_max": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05, "tooltip": "Correction-strength ceiling. Keep at 1.0 for the H3 SelfLift-zero diagnostic."}),
             "upscaler_model": _upscaler_input(),
         }, "optional": {
-            "high_res_model": ("MODEL", {"tooltip": "高分辨率阶段模型 / High-resolution model. Used after the resolution lift. If disconnected, uses low_res_model. Both stages must use compatible architecture, latent format, sampling parameterization, VAE and conditioning."}),
-            "highres_tiling": ("BOOLEAN", {"default": False, "label_on": "高分辨率省显存：开启", "label_off": "高分辨率省显存：关闭", "tooltip": "Experimental high-resolution memory saving. Choose Spatial for crop tiles, or Global stream/Global for full-sequence chunking that preserves cross-tile attention context. Spatial supports only video=1 everywhere / audio=0 everywhere; global modes keep arbitrary full-sequence masks."}),
-            "tiling_mode": (["auto", "manual"], {"default": "auto", "tooltip": "Spatial mode only. auto 自动: choose 1–8 tiles using memory estimates. manual 手动: use tiling_tiles, no automatic increase."}),
+            "high_res_model": ("MODEL", {"tooltip": "High-resolution stage model. Used after the resolution lift. If disconnected, uses low_res_model. Both stages must use compatible architecture, latent format, sampling parameterization, VAE and conditioning."}),
+            "highres_tiling": ("BOOLEAN", {"default": False, "label_on": "High-res memory saving: On", "label_off": "High-res memory saving: Off", "tooltip": "Experimental high-resolution memory saving. Choose Spatial for crop tiles, or Global stream/Global for full-sequence chunking that preserves cross-tile attention context. Spatial supports only video=1 everywhere / audio=0 everywhere; global modes keep arbitrary full-sequence masks."}),
+            "tiling_mode": (["auto", "manual"], {"default": "auto", "tooltip": "Spatial mode only. auto: choose 1–8 tiles using memory estimates. manual: use tiling_tiles, no automatic increase."}),
             "tiling_tiles": ([2, 4, 6, 8], {"default": 2, "tooltip": "Spatial mode only. Manual tiles: 2, 4, 6, 8. Ignored in auto mode. Small dimensions can reduce the effective count."}),
             "tiling_axis": (["auto", "width", "height"], {"default": "auto", "tooltip": "Spatial mode only. auto = longer patch-grid side; width = left/right strips; height = top/bottom strips; audio/time are not split."}),
             "highres_tiling_mode": (["spatial", "global_stream", "global", "global_ram"], {"default": "spatial", "tooltip": "Memory-saving strategy. spatial: crop tiles with an automatic full-frame low-resolution anchor, content-aware cuts and seam diagnostics. global_stream: full-sequence context, GPU head groups, requires native SLA/sol-attn (VSA not adapted). global: full-sequence dense-compatible path; higher VRAM. global_ram: full-sequence host-RAM staging; slower. Global modes preserve the complete video/audio mask on the packed sequence."}),
@@ -606,14 +606,14 @@ class SelfLiftAvatarH3Sampler:
                 logging.warning("SelfLift H3: rho > 0 with an external upscaler is a hybrid experiment; select upscaler_model=none to test the paper's SelfLift-zero direct route")
             lifter = lambda z, hw: h3_upscaler.learned_latent_lift(z, hw, upscaler_model)
         if not highres_tiling:
-            summary = "OFF / 高分辨率省显存已关闭"
+            summary = "OFF: high-res memory saving disabled"
         elif highres_tiling_mode == "spatial":
-            summary = "Preparing / 准备中: spatial + full-frame low-res anchor | {} | axis={} | tiles={}\nActual plan appears at high-resolution preparation / 高清阶段准备时显示实际方案".format(
+            summary = "Preparing: spatial + full-frame low-res anchor | {} | axis={} | tiles={}\nActual plan appears at high-resolution preparation".format(
                 tiling_mode, tiling_axis, tiling_tiles if tiling_mode == "manual" else "auto")
         else:
             cache = (f" | weight_cache={float(highres_weight_cache_gb):.1f} GiB"
                      if highres_tiling_mode == "global_stream" else "")
-            summary = "Preparing / 准备中: {} | token_chunk={}{}\nFull-sequence masks / 全序列遮罩: enabled".format(
+            summary = "Preparing: {} | token_chunk={}{}\nFull-sequence masks: enabled".format(
                 highres_tiling_mode, highres_token_chunk, cache)
         last_plan = None
 
@@ -626,7 +626,7 @@ class SelfLiftAvatarH3Sampler:
             nonlocal summary, last_plan
             last_plan = plan
             summary = format_plan(plan)
-            send_status("RUNNING / 高清采样中\n" + summary)
+            send_status("RUNNING / high-res sampling\n" + summary)
 
         send_status(summary)
         diagnostics = {}
@@ -645,16 +645,16 @@ class SelfLiftAvatarH3Sampler:
                                         tiling_overlap=spatial_overlap,
                                         diagnostics_out=diagnostics)
         except Exception:
-            send_status("FAILED / 运行失败：以下不是成功结果；详见错误报告\n" + summary)
+            send_status("FAILED / run failed: the following is not a successful result; see the error report\n" + summary)
             raise
         if highres_tiling and last_plan is None:
-            summary = "NOT RUN / 本次未执行高清分块规划（例如空采样日程）"
+            summary = "NOT RUN / no high-res tiling plan was computed this run (e.g. empty schedule)"
         seams = diagnostics.get("seams") or []
         if seams:
             values = [float(item.get("relative_diff", 0.0)) for item in seams]
-            summary += (f"\nSeam diag / 接缝差异: {len(seams)} boundaries | "
+            summary += (f"\nSeam diag: {len(seams)} boundaries | "
                         f"mean={sum(values) / len(values):.4f} | max={max(values):.4f}")
-        summary = "DONE / 上次运行完成\n" + summary
+        summary = "DONE / last run completed\n" + summary
         ui = {"selflift_tiling": [summary], "selflift_tiling_plan": [last_plan]}
         if diagnostics:
             ui["selflift_seam_diag"] = [diagnostics]
@@ -676,8 +676,8 @@ class SelfLiftAvatarH3SpatialAnchoredSampler(SelfLiftAvatarH3Sampler):
         optional = schema["optional"]
         optional["highres_tiling"] = ("BOOLEAN", {
             "default": True,
-            "label_on": "空间分块：开启",
-            "label_off": "空间分块：关闭",
+            "label_on": "Spatial tiling: On",
+            "label_off": "Spatial tiling: Off",
             "tooltip": "TEST node: spatial tiling only. Disable for a direct full-frame control run.",
         })
         optional["tiling_mode"] = (["manual", "auto"], {
@@ -727,16 +727,16 @@ class SelfLiftAvatarH3SpatialAnchoredSampler(SelfLiftAvatarH3Sampler):
             lifter = lambda z, hw: h3_upscaler.learned_latent_lift(z, hw, upscaler_model)
 
         if not highres_tiling:
-            summary = "OFF / 空间分块已关闭（全帧对照）"
+            summary = "OFF: spatial tiling disabled (full-frame control)"
         elif spatial_anchor == "lowres_global":
-            summary = ("Preparing / 准备中: spatial + full-frame low-res anchor | "
+            summary = ("Preparing: spatial + full-frame low-res anchor | "
                        "{} | axis={} | tiles={} | overlap={}\n"
-                       "Actual plan appears at high-resolution preparation / 高清阶段准备时显示实际方案").format(
+                       "Actual plan appears at high-resolution preparation").format(
                            tiling_mode, tiling_axis,
                            tiling_tiles if tiling_mode == "manual" else "auto",
                            tiling_overlap)
         else:
-            summary = ("Preparing / 准备中: spatial control (anchor off) | "
+            summary = ("Preparing: spatial control (anchor off) | "
                        "{} | axis={} | tiles={} | overlap={}").format(
                            tiling_mode, tiling_axis,
                            tiling_tiles if tiling_mode == "manual" else "auto",
@@ -757,7 +757,7 @@ class SelfLiftAvatarH3SpatialAnchoredSampler(SelfLiftAvatarH3Sampler):
             nonlocal summary, last_plan
             last_plan = plan
             summary = format_plan(plan)
-            send_status("RUNNING / 高清采样中\n" + summary)
+            send_status("RUNNING / high-res sampling\n" + summary)
 
         send_status(summary)
         diagnostics = {}
@@ -772,16 +772,16 @@ class SelfLiftAvatarH3SpatialAnchoredSampler(SelfLiftAvatarH3Sampler):
                 diagnostics_out=diagnostics,
             )
         except Exception:
-            send_status("FAILED / 运行失败：以下不是成功结果；详见错误报告\n" + summary)
+            send_status("FAILED / run failed: the following is not a successful result; see the error report\n" + summary)
             raise
         if highres_tiling and last_plan is None:
-            summary = "NOT RUN / 本次未执行高清分块规划（例如空采样日程）"
+            summary = "NOT RUN / no high-res tiling plan was computed this run (e.g. empty schedule)"
         seams = diagnostics.get("seams") or []
         if seams:
             values = [float(item.get("relative_diff", 0.0)) for item in seams]
-            summary += (f"\nSeam diag / 接缝差异: {len(seams)} boundaries | "
+            summary += (f"\nSeam diag: {len(seams)} boundaries | "
                         f"mean={sum(values) / len(values):.4f} | max={max(values):.4f}")
-        summary = "DONE / 上次运行完成\n" + summary
+        summary = "DONE / last run completed\n" + summary
         ui = {"selflift_tiling": [summary], "selflift_tiling_plan": [last_plan]}
         if diagnostics:
             ui["selflift_seam_diag"] = [diagnostics]
@@ -810,7 +810,7 @@ class SelfLiftAvatarImageSampler:
             "w_max": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
             "latent_upsample": (["nearest", "bilinear"], {"default": "nearest", "tooltip": "Interpolation for the direct latent lift (paper: nearest)."}),
         }, "optional": {
-            "high_res_model": ("MODEL", {"tooltip": "高分辨率阶段模型 / High-resolution model. Used after the resolution lift. If disconnected, uses low_res_model. Both stages must use compatible architecture, latent format, sampling parameterization, VAE and conditioning."}),
+            "high_res_model": ("MODEL", {"tooltip": "High-resolution model. Used after the resolution lift. If disconnected, uses low_res_model. Both stages must use compatible architecture, latent format, sampling parameterization, VAE and conditioning."}),
         }}
 
     RETURN_TYPES = ("LATENT",)
@@ -833,7 +833,7 @@ class SelfLiftAvatarH3TST:
             "model": ("MODEL",),
             "tau": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.05,
                               "tooltip": "Homeostatic correction strength; 0.2 is the paper setting. 0 disables correction while keeping the diagnostic active."}),
-            "log_diagnostics": ("BOOLEAN", {"default": True, "label_on": "诊断日志：开启", "label_off": "诊断日志：关闭",
+            "log_diagnostics": ("BOOLEAN", {"default": True, "label_on": "Diagnostic log: On", "label_off": "Diagnostic log: Off",
                                             "tooltip": "Log per-forward Spectral Tension and correction statistics to the console. Note: TST is skipped with a warning when highres_tiling is enabled on the SelfLift sampler."}),
         }}
 

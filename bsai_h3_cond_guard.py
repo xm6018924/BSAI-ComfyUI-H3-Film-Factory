@@ -117,45 +117,63 @@ def guard_conditioning(cond, latent, verbose=True):
     return cleaned, dropped_kf, dropped_ref
 
 
+# Legacy Chinese input keys kept so older saved workflows keep wiring after the
+# English-only rename. The node entry point normalizes them into the English keys.
+_LEGACY_KEYS = {
+    "条件化": "conditioning",
+    "潜空间": "latent",
+    "严格模式": "strict_mode",
+}
+
+
 class BSAI_H3_CondGeometryGuard:
-    """二采前把条件化里的关键帧/引用块对齐到放大后的潜空间网格。"""
+    """Align conditioning keyframes/refs to the upscaled latent grid before refine."""
 
     CATEGORY = "A-BSAI/H3"
     FUNCTION = "run"
     RETURN_TYPES = ("CONDITIONING",)
-    RETURN_NAMES = ("条件化",)
+    RETURN_NAMES = ("conditioning",)
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "条件化": ("CONDITIONING", {"tooltip": "二采要用的条件化（一采透传下来的那份）。"}),
-                "潜空间": ("LATENT", {"tooltip": "二采实际要采样的潜空间，就地给目标网格。"}),
+                "conditioning": ("CONDITIONING", {"tooltip": "The conditioning carried over from the first pass for the second pass."}),
+                "latent": ("LATENT", {"tooltip": "The latent actually sampled in the second pass; its target grid is taken from here."}),
             },
             "optional": {
-                "严格模式": (
+                "strict_mode": (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "label_on": "严格：网格不符就报错",
-                        "label_off": "宽松：剔除不匹配的关键帧",
-                        "tooltip": "打开后不做剔除，直接抛中文错误，方便排查到底哪里几何不一致。",
+                        "label_on": "Strict: error on grid mismatch",
+                        "label_off": "Relaxed: drop mismatched keyframes",
+                        "tooltip": "When enabled, mismatches raise an error instead of dropping the offending keyframes, to help locate the geometry inconsistency.",
                     },
                 ),
             },
         }
 
-    def run(self, 条件化, 潜空间, 严格模式=False):
-        cleaned, dropped_kf, dropped_ref = guard_conditioning(条件化, 潜空间, verbose=not 严格模式)
-        if 严格模式 and (dropped_kf or dropped_ref):
-            th, tw = _target_hw(潜空间)
+    def run(self, conditioning=None, latent=None, strict_mode=False, **kwargs):
+        # Normalize legacy Chinese widget/input keys from older saved workflows.
+        for legacy, eng in _LEGACY_KEYS.items():
+            if eng not in kwargs and legacy in kwargs:
+                kwargs[eng] = kwargs[legacy]
+        conditioning = kwargs.get("conditioning", conditioning)
+        latent = kwargs.get("latent", latent)
+        strict_mode = kwargs.get("strict_mode", strict_mode)
+
+        cleaned, dropped_kf, dropped_ref = guard_conditioning(conditioning, latent, verbose=not strict_mode)
+        if strict_mode and (dropped_kf or dropped_ref):
+            th, tw = _target_hw(latent)
             raise RuntimeError(
-                "条件化与潜空间网格不一致：目标 %dx%d，其中 %d 个关键帧、%d 个引用块对不上。"
-                "把本节点切回「宽松」会自动剔除这些关键帧。"
+                "Conditioning and latent grid mismatch: target %dx%d; %d keyframes "
+                "and %d reference blocks do not match. Switch this node back to relaxed "
+                "mode to drop those keyframes automatically."
                 % (tw, th, dropped_kf, dropped_ref)
             )
         return (cleaned,)
 
 
 NODE_CLASS_MAPPINGS = {"BSAI_H3_CondGeometryGuard": BSAI_H3_CondGeometryGuard}
-NODE_DISPLAY_NAME_MAPPINGS = {"BSAI_H3_CondGeometryGuard": "H3 条件化几何守卫（二采前校正关键帧网格）"}
+NODE_DISPLAY_NAME_MAPPINGS = {"BSAI_H3_CondGeometryGuard": "H3 Cond Geometry Guard (refine-grid keyframe correction)"}

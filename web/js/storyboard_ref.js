@@ -106,14 +106,14 @@ function recommendedDurationSeconds(text) {
         if (match) matches.push({ index: i, seconds: Number(match[1]) });
     }
     const metadataLines = lines.filter((line) => line.toLowerCase().includes("[recommended duration]"));
-    if (metadataLines.length > 1) throw new Error("[Recommended duration] 必须且只能出现一次。");
+    if (metadataLines.length > 1) throw new Error("[Recommended duration] must appear exactly once.");
     if (!matches.length) {
-        if (metadataLines.length) throw new Error("[Recommended duration] 必须写成 [Recommended duration]: N seconds。");
+        if (metadataLines.length) throw new Error("[Recommended duration] must be written as [Recommended duration]: N seconds.");
         return null;
     }
-    if (matches.length !== 1) throw new Error("[Recommended duration] 必须且只能出现一次。");
+    if (matches.length !== 1) throw new Error("[Recommended duration] must appear exactly once.");
     const firstContent = lines.findIndex((line) => line.length > 0);
-    if (matches[0].index !== firstContent) throw new Error("[Recommended duration] 必须是 detailed_description: 后的第一行。");
+    if (matches[0].index !== firstContent) throw new Error("[Recommended duration] must be the first line after detailed_description:");
     return matches[0].seconds;
 }
 
@@ -209,7 +209,7 @@ function parseStoryboard(text, videoDurationSec = 0, fallbackFrames = 124, marke
         if (!headers.length) {
             const legacy = splitLegacyStoryboard(raw);
             if (legacy && legacy.blocks.length) {
-                if (legacy.blocks.length > MAX_CLIPS) throw new Error(`prompt 段数超过上限 ${MAX_CLIPS}。`);
+                if (legacy.blocks.length > MAX_CLIPS) throw new Error(`More than the ${MAX_CLIPS} segment limit.`);
                 const clips = legacy.blocks.map((block, i) => {
                     const scene = legacySceneSnippet(block.text);
                     let durationSec = legacyBlockSeconds(block.text);
@@ -243,13 +243,13 @@ function parseStoryboard(text, videoDurationSec = 0, fallbackFrames = 124, marke
                 prompt: raw.slice(header.index + header[0].length, headers[i + 1]?.index ?? raw.length).trim(),
             }))
             : [{ label: 1, marker: "", prompt: raw.trim() }];
-        if (promptSegments.length > MAX_CLIPS) throw new Error(`prompt 段数超过上限 ${MAX_CLIPS}。`);
+        if (promptSegments.length > MAX_CLIPS) throw new Error(`More than the ${MAX_CLIPS} segment limit.`);
 
         const clips = [];
         for (const segment of promptSegments) {
             const { label, marker, prompt } = segment;
-            if (label < 1) throw new Error("prompt 标记编号必须从 1 开始。");
-            if (!prompt) throw new Error(`分区标记 ${marker || `#${label}`} 后没有提示词内容。`);
+            if (label < 1) throw new Error("prompt marker numbering must start at 1.");
+            if (!prompt) throw new Error(`No prompt content after marker ${marker || `#${label}`}.`);
 
             let durationSec = recommendedDurationSeconds(prompt);
             if (durationSec == null) durationSec = maxExplicitDurationSeconds(prompt);
@@ -498,7 +498,7 @@ function buildAssetThumb(ref, library) {
         width: "40px", height: "40px", flexShrink: "0", position: "relative", overflow: "hidden",
         border: "1px solid #45484f", borderRadius: "4px", background: "#141519", boxSizing: "border-box",
     });
-    box.title = filename || (ref.tag + "（素材库中缺失）");
+    box.title = filename || (ref.tag + " (missing from library)");
     if (filename && (ref.kind === "images" || ref.kind === "videos")) {
         const image = document.createElement("img");
         image.loading = "lazy";
@@ -506,14 +506,14 @@ function buildAssetThumb(ref, library) {
         image.src = assetUrl(library?.prefix || "/absai", ref.kind, filename);
         image.onerror = () => {
             image.remove();
-            box.textContent = ref.kind === "videos" ? "▶" : "缺失";
+            box.textContent = ref.kind === "videos" ? "▶" : "N/A";
             box.style.display = "grid";
             box.style.placeItems = "center";
             box.style.color = "#777";
         };
         box.appendChild(image);
     } else {
-        box.textContent = ref.kind === "audios" ? "♫" : "缺失";
+        box.textContent = ref.kind === "audios" ? "♫" : "N/A";
         box.style.display = "grid";
         box.style.placeItems = "center";
         box.style.color = "#777";
@@ -521,7 +521,7 @@ function buildAssetThumb(ref, library) {
     row.appendChild(box);
     const label = el("span", { minWidth: "0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "#aab" });
     label.textContent = ref.tag;
-    label.title = filename || "素材库中未找到对应文件";
+    label.title = filename || "No matching file in the library";
     row.appendChild(label);
     if (ref.count > 1) {
         const count = el("span", { marginLeft: "auto", padding: "1px 4px", borderRadius: "4px", background: "#b32626", color: "#fff", fontSize: "10px", flexShrink: "0" });
@@ -538,7 +538,7 @@ function renderReferencedAssets(panel, refs, library) {
     panel.appendChild(title);
     if (!refs.length) {
         const empty = el("div", { padding: "8px 2px", color: "#666", textAlign: "center", fontSize: "10px" });
-        empty.textContent = "暂无引用";
+        empty.textContent = "No references";
         panel.appendChild(empty);
         return;
     }
@@ -551,7 +551,7 @@ function buildInlineAsset(ref, filename, prefix) {
         width: "22px", height: "22px", borderRadius: "3px", overflow: "hidden", margin: "0 2px 1px 1px",
         border: "1px solid #555", background: "#141519", position: "relative", boxSizing: "border-box",
     });
-    box.title = filename || (ref.tag + "（素材库中缺失）");
+    box.title = filename || (ref.tag + " (missing from library)");
     if (filename && (ref.kind === "images" || ref.kind === "videos")) {
         const image = document.createElement("img");
         image.loading = "lazy";
@@ -609,7 +609,7 @@ function buildClipCard(clip, orderIndex, selected, library, viewer) {
     head.setAttribute("role", "button");
     head.tabIndex = 0;
     head.setAttribute("aria-expanded", String(!collapsed));
-    head.title = `${collapsed ? "展开" : "折叠"} ${clip.label || `prompt_${String(orderIndex).padStart(2, "0")}`}；同时选择此分镜`;
+    head.title = `${collapsed ? "Expand" : "Collapse"} ${clip.label || `prompt_${String(orderIndex).padStart(2, "0")}`}; select this shot too`;
     stopCanvasPointerEvents(head);
     const toggleClip = (event) => {
         event.stopPropagation();
@@ -632,7 +632,7 @@ function buildClipCard(clip, orderIndex, selected, library, viewer) {
     const title = el("span", { flex: "1", minWidth: "0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
     title.textContent = clip.label || `===== prompt_${String(orderIndex).padStart(2, "0")} =====`;
     const duration = el("span", { color: clip.overLimit ? "#ff7070" : C.sub, fontWeight: "400", fontSize: "12px", whiteSpace: "nowrap", pointerEvents: "none" });
-    duration.textContent = clip.sec.toFixed(3) + "秒  ·  " + clip.frames + "帧" + (clip.overLimit ? "  ·  超过15秒上限" : "");
+    duration.textContent = clip.sec.toFixed(3) + "s  ·  " + clip.frames + " frames" + (clip.overLimit ? "  ·  over 15s limit" : "");
     head.append(arrow, title, duration);
     card.appendChild(head);
 
@@ -681,7 +681,7 @@ function buildGlobalCard(globalText, library, viewer) {
     head.setAttribute("role", "button");
     head.tabIndex = 0;
     head.setAttribute("aria-expanded", String(!collapsed));
-    head.title = `${collapsed ? "展开" : "折叠"} 全局提示词（全片通用规则，不参与分镜选择）`;
+    head.title = `${collapsed ? "Expand" : "Collapse"} global prompt (film-wide rules, not part of shot selection)`;
     stopCanvasPointerEvents(head);
     const toggle = (event) => {
         event.stopPropagation();
@@ -698,9 +698,9 @@ function buildGlobalCard(globalText, library, viewer) {
     const arrow = el("span", { color: "#a8d9b0", width: "16px", flexShrink: "0", textAlign: "center" });
     arrow.textContent = collapsed ? "▸" : "▾";
     const title = el("span", { flex: "1", minWidth: "0", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
-    title.textContent = "全局提示词 · 整体风格 / 统一运镜 / 景别策略 / 角色档案 / 道具档案 / 人声分布";
+    title.textContent = "Global prompt · overall style / unified camera / shot-size strategy / character roster / props roster / vocal distribution";
     const tag = el("span", { color: "#8ecf98", fontWeight: "400", fontSize: "11px", whiteSpace: "nowrap", pointerEvents: "none" });
-    tag.textContent = "全片通用";
+    tag.textContent = "Film-wide";
     head.append(arrow, title, tag);
     card.appendChild(head);
 
@@ -753,7 +753,7 @@ function renderBoard(viewer) {
 
     if (!clips.length) {
         const tip = el("span", { color: "#e0a050" });
-        tip.textContent = text ? "⚠ " + (parsed?.error || "提示词格式无效。") : "⚠ 请接入完整提示词；分段标记示例：===== prompt_01 =====";
+        tip.textContent = text ? "⚠ " + (parsed?.error || "Invalid prompt format.") : "⚠ Connect the full prompt; marker example: ===== prompt_01 =====";
         bar.appendChild(tip);
         root.appendChild(bar);
     } else {
@@ -766,17 +766,17 @@ function renderBoard(viewer) {
         const total = el("span", { whiteSpace: "nowrap", color: C.sub });
         const totalSeconds = clips.reduce((sum, clip) => sum + (Number.isFinite(clip.sec) ? clip.sec : 0), 0);
         const globalText = parsed?.globalText || "";
-        total.textContent = `共 ${clips.length} 条分镜提示词 · 合计 ${totalSeconds.toFixed(2)} 秒`
-            + (globalText ? " · 全局提示词 1 段" : "")
-            + (parsed?.legacy ? " · [分镜N] 格式" : "");
+        total.textContent = `${clips.length} shot prompt(s) · ${totalSeconds.toFixed(2)}s total`
+            + (globalText ? " · 1 global prompt segment" : "")
+            + (parsed?.legacy ? " · [Shot N] legacy format" : "");
         const button = el("button", {
             padding: "5px 10px", border: "1px solid #45484f", borderRadius: "4px", cursor: "pointer",
             background: "#2a2c33", color: "#c9d7ea", fontSize: "11px", whiteSpace: "nowrap",
         });
         button.type = "button";
         const boardOpen = getBoardOpen(viewer);
-        button.textContent = boardOpen ? "收起看板" : "展开看板";
-        button.title = boardOpen ? "隐藏全部分镜卡片" : "显示全部分镜卡片";
+        button.textContent = boardOpen ? "Hide board" : "Show board";
+        button.title = boardOpen ? "Hide all shot cards" : "Show all shot cards";
         stopCanvasPointerEvents(button);
         button.addEventListener("click", (event) => {
             event.stopPropagation();
@@ -790,8 +790,8 @@ function renderBoard(viewer) {
             background: "#2a2c33", color: "#c9d7ea", fontSize: "11px", whiteSpace: "nowrap",
         });
         btnAll.type = "button";
-        btnAll.textContent = allOpen ? "全部折叠" : "全部展开";
-        btnAll.title = allOpen ? "折叠所有分镜提示词" : "展开所有分镜提示词";
+        btnAll.textContent = allOpen ? "Collapse all" : "Expand all";
+        btnAll.title = allOpen ? "Collapse all shot prompts" : "Expand all shot prompts";
         stopCanvasPointerEvents(btnAll);
         btnAll.addEventListener("click", (event) => {
             event.stopPropagation();
@@ -830,12 +830,12 @@ function renderPackStatus(node) {
     });
     if (!n) {
         line.style.color = "#e0a050";
-        line.textContent = text ? `⚠ ${parsed?.error || "提示词格式无效。"}` : "⚠ 未接入完整官方提示词";
+        line.textContent = text ? `⚠ ${parsed?.error || "Invalid prompt format."}` : "⚠ Full official prompt not connected";
     } else {
         const idx = getClipIndex(node);
         const outOfRange = idx > n;
         const currentLabel = parsed.clips[idx - 1]?.label || `===== prompt_${String(idx).padStart(2, "0")} =====`;
-        line.textContent = `共 ${n} 条分镜提示词 · 当前 ${currentLabel}（索引 ${idx}）` + (outOfRange ? `（超出范围 1~${n}）` : "");
+        line.textContent = `${n} shot prompt(s) · current ${currentLabel} (index ${idx})` + (outOfRange ? ` (out of range 1~${n})` : "");
         if (outOfRange) line.style.color = "#ff8080";
     }
     root.appendChild(line);

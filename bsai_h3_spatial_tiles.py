@@ -109,7 +109,7 @@ def clamp_n_tiles(raw: Any) -> int:
         n = int(raw if raw is not None else 2)
     except (TypeError, ValueError):
         n = 2
-    return max(1, min(8, n))
+    return max(1, min(16, n))
 
 
 def clamp_tile_overlap(raw: Any) -> int:

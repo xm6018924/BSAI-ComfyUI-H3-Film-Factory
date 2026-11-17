@@ -22,22 +22,22 @@ class H3DynamicCFGScheduler:
     def INPUT_TYPES(s):
         return {
             "required": {
-                "model": ("MODEL", {"tooltip": "输入的 MiniMax H3 视频模型。"}),
+                "model": ("MODEL", {"tooltip": "Input MiniMax H3 video model."}),
                 "cfg_low": ("FLOAT", {
                     "default": 0.9, "min": 0.5, "max": 2.0, "step": 0.05,
-                    "tooltip": "高 sigma（早期构图）时的 CFG。建议 0.8~0.95，过低构图会散。"
+                    "tooltip": "CFG at high sigma (early composition). Suggested 0.8~0.95; too low and the composition falls apart."
                 }),
                 "cfg_high": ("FLOAT", {
                     "default": 1.1, "min": 0.5, "max": 2.0, "step": 0.05,
-                    "tooltip": "低 sigma（后期细节）时的 CFG。建议 1.05~1.2，过高会过饱和。"
+                    "tooltip": "CFG at low sigma (late detail). Suggested 1.05~1.2; too high and colors over-saturate."
                 }),
                 "start_at_sigma": ("FLOAT", {
                     "default": 3.0, "min": 0.0, "max": 20.0, "step": 0.1,
-                    "tooltip": "开始动态调度的 Sigma 阈值。之上用采样器原始 CFG。"
+                    "tooltip": "Sigma threshold where dynamic scheduling starts. Above this the sampler's original CFG is kept."
                 }),
                 "end_at_sigma": ("FLOAT", {
                     "default": 0.0, "min": 0.0, "max": 5.0, "step": 0.1,
-                    "tooltip": "结束动态调度的 Sigma 阈值。"
+                    "tooltip": "Sigma threshold where dynamic scheduling ends."
                 }),
             }
         }
@@ -46,7 +46,7 @@ class H3DynamicCFGScheduler:
     RETURN_NAMES = ("model",)
     FUNCTION = "patch"
     CATEGORY = "YCNodes-MiniMax-H3/scheduler"
-    DESCRIPTION = "根据去噪阶段动态调整 CFG：早期低 CFG 保构图，后期高 CFG 提细节。"
+    DESCRIPTION = "Adjusts CFG dynamically by denoising stage: low CFG early to preserve composition, high CFG late to bring out detail."
 
     def patch(self, model, cfg_low, cfg_high, start_at_sigma, end_at_sigma):
         patched_model = model.clone()

@@ -112,7 +112,7 @@ function memoryMode(node) {
 }
 
 function choices(node) {
-    if (!memoryEnabled(node)) return "设置 / Settings: OFF（高分辨率省显存关闭）";
+    if (!memoryEnabled(node)) return "Settings: OFF (high-resolution VRAM-saving disabled)";
     const m = memoryMode(node);
     if (m === "spatial") {
         const mode = read(node, "tiling_mode", "auto");
@@ -123,23 +123,23 @@ function choices(node) {
             overlap != null ? `overlap=${overlap}` : null,
         ].filter(Boolean).join(" | ");
         const suffix = extras ? ` | ${extras}` : "";
-        return `设置 / Settings: spatial | ${mode} | axis=${read(node, "tiling_axis", "auto")} | tiles=${mode === "manual" ? read(node, "tiling_tiles", 2) : "auto (1–8)"}${suffix}`;
+        return `Settings: spatial | ${mode} | axis=${read(node, "tiling_axis", "auto")} | tiles=${mode === "manual" ? read(node, "tiling_tiles", 2) : "auto (1–8)"}${suffix}`;
     }
     const cacheValue = read(node, "highres_weight_cache_gb", 4);
     const cacheText = typeof cacheValue === "number" ? cacheValue.toFixed(1) : cacheValue;
     const cache = m === "global_stream" ? ` | cache=${cacheText} GiB` : "";
-    return `设置 / Settings: ${m} | token_chunk=${read(node, "highres_token_chunk", 4096)}${cache}`;
+    return `Settings: ${m} | token_chunk=${read(node, "highres_token_chunk", 4096)}${cache}`;
 }
 
 function actualCount(node) {
-    if (!memoryEnabled(node)) return "实际分块数量 / Actual tiles: 关闭，不分块 / OFF";
+    if (!memoryEnabled(node)) return "Actual tiles: OFF (no tiling)";
     const plan = node.selfliftTilingPlan;
     if (plan?.kind === "global") {
-        return `全局上下文 / Global context: ${plan.mode ?? memoryMode(node)}（无空间块 / no spatial tiles）`;
+        return `Global context: ${plan.mode ?? memoryMode(node)} (no spatial tiles)`;
     }
     const count = plan?.tiles;
-    if (!Number.isInteger(count) || count < 1) return "实际分块数量 / Actual tiles: 待估算 / pending (高清准备阶段确定)";
-    return `实际分块数量 / Actual tiles: ${count} 块${count === 1 ? "（整图，不拆分 / no split）" : ""}`;
+    if (!Number.isInteger(count) || count < 1) return "Actual tiles: pending (determined at high-resolution preparation)";
+    return `Actual tiles: ${count}` + (count === 1 ? " (single frame, no split)" : "");
 }
 
 function setHidden(widget, hidden) {
@@ -186,7 +186,7 @@ function display(node, text, plan) {
         // Explicit null resets a previous run; undefined supports older cached UI text.
         node.selfliftTilingPlan = plan ?? null;
         if (plan === undefined) {
-            const match = String(text).match(/Effective \/ 实际:\s*(\d+)/);
+            const match = String(text).match(/Effective:\s*(\d+)/);
             if (match) node.selfliftTilingPlan = { tiles: Number(match[1]) };
         }
         if (plan === null && node.selfliftSeamCanvas) {
@@ -195,7 +195,7 @@ function display(node, text, plan) {
         }
     }
     refreshVisibility(node);
-    box.value = actualCount(node) + "\n" + choices(node) + "\n" + (node.selfliftTilingLast || "未运行 / Not run. Actual plan appears at high-resolution preparation.\nSpatial controls apply only to the spatial mode; token chunk/cache apply only to global modes.");
+    box.value = actualCount(node) + "\n" + choices(node) + "\n" + (node.selfliftTilingLast || "Not run. Actual plan appears at high-resolution preparation.\nSpatial controls apply only to the spatial mode; token chunk/cache apply only to global modes.");
     node.setDirtyCanvas?.(true, true);
 }
 
@@ -211,7 +211,7 @@ app.registerExtension({
             ].includes(nodeData.name);
             const box = document.createElement("textarea");
             box.readOnly = true;
-            box.setAttribute("aria-label", "selflift-Avatar high-resolution memory plan / 高分辨率省显存方案");
+            box.setAttribute("aria-label", "selflift-Avatar high-resolution memory plan");
             box.style.cssText = "width:100%;height:100%;box-sizing:border-box;resize:none;overflow:auto;font:12px/1.45 monospace;color:var(--input-text,#ddd);background:var(--comfy-input-bg,#222);border:1px solid var(--border-color,#555);padding:6px;";
             this.selfliftTilingPanel = box;
             this.addDOMWidget("selflift_tiling_plan", "selflift-tiling-status", box, { serialize: false });
@@ -234,7 +234,7 @@ app.registerExtension({
                 const node = this;
                 widget.callback = function () {
                     const value = callback?.apply(this, arguments);
-                    display(node, "设置已修改 / Settings changed. Run again to compute a new plan.");
+                    display(node, "Settings changed. Run again to compute a new plan.");
                     return value;
                 };
             }
