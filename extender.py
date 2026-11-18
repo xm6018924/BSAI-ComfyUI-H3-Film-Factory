@@ -552,6 +552,44 @@ def _release_dynamic_vram(tag=""):
             _mm81.free_memory(1e30, _mm81.get_torch_device(), for_dynamic=True)
         except Exception:
             pass
+        # v14.427: free_memory(for_dynamic=True) 对 dynamic 模型 memory_to_free=0
+        # 直接跳过(model_management.py L910-914), 一采后 vbar 里驻留的量化权重
+        # (实测 10.88GB) 不会被页出, 二采前 device_free 被压到 ~11GB。
+        # 这里对注册中的 dynamic 模型显式 partially_unload(offload, 1e32):
+        # 走 vbar.free_memory 页出驻留页到 CPU hostbuf, 不做 m.to(cpu), 不触发
+        # comfy_kitchen _handle_to 原生崩溃; 二采 forward 按 unit 缺页 fault 回搬。
+        # 非 dynamic 量化模型不触碰 partially_unload(其 m.to(cpu) 会崩溃), 保持
+        # 原摘除/GC 路径。
+        try:
+            for _lm81 in list(getattr(_mm81, "current_loaded_models", []) or []):
+                try:
+                    _m81 = getattr(_lm81, "model", None)
+                    if _m81 is None:
+                        continue
+                    if not _m81.is_dynamic():
+                        continue
+                    try:
+                        _before81 = int(_m81.loaded_size())
+                    except Exception:
+                        _before81 = 0
+                    if _before81 <= 1024 * 1024:
+                        continue
+                    _m81.partially_unload(_m81.offload_device, 1e32)
+                    try:
+                        _t81.cuda.synchronize()
+                    except Exception:
+                        pass
+                    try:
+                        _after81 = int(_m81.loaded_size())
+                    except Exception:
+                        _after81 = 0
+                    print(f"[H3 Extender] v14.427 dynamic vbar 页出[{tag}]: "
+                          f"{type(_m81).__name__} loaded {_before81/1024**3:.2f}GB "
+                          f"-> {_after81/1024**3:.2f}GB")
+                except Exception as _du81:
+                    print(f"[H3 Extender] v14.427 dynamic 页出跳过(可忽略): {_du81}")
+        except Exception:
+            pass
     except Exception:
         pass
     try:
@@ -7651,6 +7689,33 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] Refine 二采前显存状态(v1.43 保留diffusion): "
                       f"allocated={_a:.2f}GB reserved={_r:.2f}GB "
                       f"device_free={_free_gb:.2f}GB/{_total_gb:.2f}GB")
+                # v14.426 临时只读盘点: 列出二采前 current_loaded_models 逐模型
+                # 类名/驻留大小, 并对照 torch allocated/reserved 与物理 free,
+                # 定位非 PyTorch allocator 记账的显存占用(量化 staged/aimdo/pinned)。
+                try:
+                    _clm_dbg = getattr(_mm, "current_loaded_models", []) or []
+                    print(f"[H3 Extender] v14.426 二采前模型清单: 共 {len(_clm_dbg)} 个", flush=True)
+                    for _li, _lm_d in enumerate(_clm_dbg):
+                        try:
+                            _md = getattr(_lm_d, "model", None)
+                            _cls = type(_md).__name__ if _md is not None else type(_lm_d).__name__
+                            try:
+                                _ls = _md.loaded_size() / 1024 ** 3 if _md is not None else 0.0
+                            except Exception:
+                                _ls = -1.0
+                            _isd = getattr(_md, "is_dynamic", lambda: False)() if _md is not None else False
+                            print(f"[H3 Extender]   [{_li}] {_cls} dynamic={bool(_isd)} loaded={_ls:.2f}GB", flush=True)
+                        except Exception as _le:
+                            print(f"[H3 Extender]   [{_li}] <inspect failed: {_le}>", flush=True)
+                    for _buf_attr in ("STREAM_AIMDO_CAST_BUFFERS",):
+                        _bufs = getattr(_mm, _buf_attr, None)
+                        if isinstance(_bufs, dict):
+                            print(f"[H3 Extender]   {_buf_attr} 条目={len(_bufs)}", flush=True)
+                    _non_alloc = _total_gb - _free_gb - _r
+                    print(f"[H3 Extender]   非allocator占用≈{_non_alloc:.2f}GB "
+                          f"(物理占用 {_total_gb - _free_gb:.2f} - torch reserved {_r:.2f})", flush=True)
+                except Exception as _vd:
+                    print(f"[H3 Extender] v14.426 模型清单盘点失败(可忽略): {_vd}", flush=True)
             except Exception as _ve:
                 print(f"[H3 Extender] Refine 二采前显存清理失败(可忽略): {_ve}")
 
@@ -7660,6 +7725,26 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 _release_dynamic_vram("refine")
             except Exception as _rv81:
                 print(f"[H3 Extender] v1.81 二采前显存释放异常(可忽略): {_rv81}")
+
+            # v14.427 释放后复核: 页出后 device_free 与各模型 loaded 应明显回落。
+            try:
+                import torch as _torch2d
+                import comfy.model_management as _mm2d
+                _f2d, _t2d = _torch2d.cuda.mem_get_info()
+                _clm2d = getattr(_mm2d, "current_loaded_models", []) or []
+                _ls2d = []
+                for _lm2d in _clm2d:
+                    try:
+                        _md2d = getattr(_lm2d, "model", None)
+                        _ls2d.append((type(_md2d).__name__ if _md2d is not None else type(_lm2d).__name__,
+                                       bool(getattr(_md2d, "is_dynamic", lambda: False)()),
+                                       (_md2d.loaded_size() / 1024 ** 3) if _md2d is not None else 0.0))
+                    except Exception:
+                        _ls2d.append(("?", False, -1.0))
+                print(f"[H3 Extender] v14.427 二采前释放后: device_free={_f2d/1024**3:.2f}GB/{_t2d/1024**3:.2f}GB "
+                      f"模型={[(c, d, round(s, 2)) for c, d, s in _ls2d]}", flush=True)
+            except Exception as _vd2d:
+                print(f"[H3 Extender] v14.427 释放后复核失败(可忽略): {_vd2d}", flush=True)
 
             # v1.47 (2026-09-13 fix #6 二采卡死根治)
             # 问题(实锤, 与 BSAI-H3-MotionFix v2.9 记录的卡死同根因):
@@ -7736,7 +7821,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # 分块二采把 attention workspace 从 x2.0 的 4.5GB 压到 ~1.1GB,
                 # 24GB 卡足以原地跑满原倍率; 只有分块也放不下时才真正降档。
                 _auto_tiled = False
-                if (not tiled_refine) and (not _prog_enabled) and (_chosen2 is None or _chosen2 < _orig_f - 1e-6):
+                # v14.432: 整段直采档(_refine_wholeframe/env BSAI_H3_REFINE_WHOLEFRAME)
+                # 不被显存预算自动翻回分块; 真 OOM 由 v1.92 fallback 兜底。
+                _wf_budget = bool(locals().get("_refine_wholeframe", False)) or \
+                    str(os.environ.get("BSAI_H3_REFINE_WHOLEFRAME", "")).lower() in ("1", "true", "yes")
+                if (not tiled_refine) and (not _prog_enabled) and (not _wf_budget) and (_chosen2 is None or _chosen2 < _orig_f - 1e-6):
                     _ws_tiled_tbl = {1.0: 0.8, 1.5: 0.9, 2.0: 1.1}
                     _ws_tiled = _ws_tiled_tbl.get(round(_orig_f, 1), 1.1)
                     if min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tiled - 3.0 >= 10.0:
@@ -7898,7 +7987,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _resized14 = 0
                             for _kf14 in _kfs:
                                 _kl14 = _kf14.get("latent")
-                                if _kl14 is not None and _kl14.ndim == 5 \
+                                if _kl14 is None:
+                                    # 占位/空槽关键帧(无画面 latent)不进入二采保留链,
+                                    # 避免脏 None 块带到二采 conditioning 触发下游崩溃。
+                                    continue
+                                if _kl14.ndim == 5 \
                                         and tuple(_kl14.shape[-2:]) != _tgt_hw14:
                                     try:
                                         _kl14 = torch.nn.functional.interpolate(
@@ -8837,7 +8930,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # dense 门. 分块成功时每块 ~262k tokens 已在 Sol-Attn 健康区, 不需要
             # dense 回退. 同时显式清理 transformer_options 里可能从上个 clip 残留
             # 的 sol_max_tokens.
-            if _r_call_tok > _r_gate_limit and _r_restore_tiles is None and refine_mem_mode != "global":
+            # v14.432: 整段直采开关 —— 档内 _refine_wholeframe=True 或 env
+            # BSAI_H3_REFINE_WHOLEFRAME=1 时跳过方案A token 门的自动分块包装,
+            # 二采整帧一次前向(最快, 无块间权重换页); OOM 仍由 v1.92 fallback 兜底。
+            _wf = bool(locals().get("_refine_wholeframe", False)) or \
+                str(os.environ.get("BSAI_H3_REFINE_WHOLEFRAME", "")).lower() in ("1", "true", "yes")
+            if _r_call_tok > _r_gate_limit and _r_restore_tiles is None and refine_mem_mode != "global" and not _wf:
                 try:
                     import os as _os_t3, importlib.util as _ilu_t3
                     _tiles_path3 = _os_t3.path.join(_os_t3.path.dirname(_os_t3.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -9124,6 +9222,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                           f"σ={[round(float(v), 4) for v in _r_sigmas.tolist()]}", flush=True)
 
                     with _aimdo_disabled():
+                        # v14.425: 高清腿 spatial plan 回调直打 stdout(引擎内部是
+                        # logging.info, 后端 --verbose WARNING 过滤后看不到), 便于实测
+                        # 核对块数/切轴/显存估算, 判断慢速瓶颈是块内串行还是权重换页。
+                        def _prog_tiling_plan_cb(_plan, _cli=print):
+                            try:
+                                _cli(f"[H3 Extender] v14.425 渐进高清腿 tiling plan: {_plan}", flush=True)
+                            except Exception:
+                                pass
                         _prog_out = _prog_mod.progressive_sample(
                             low_res_model=_refine_model,
                             positive=_prog_pos,
@@ -9152,6 +9258,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             spatial_anchor_mode="off",
                             tiling_overlap=None,
                             diagnostics_out=None,
+                            on_tiling_plan=_prog_tiling_plan_cb,
                         )
                     _r_samples = _prog_out["samples"]
                     print(f"[H3 Extender] v14.404 渐进二采完成: 低清腿 {_prog_transition} 步 + "
@@ -9908,7 +10015,11 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     # latent), 快照就是这张半噪底图; 拿"已去噪的终图"和它比结构相似度, 等于用
     # 噪声当基准, 正确的二采反而会被判成换画面并回退到半噪底(比不跑二采更糟)。
     # 该档的连续性由"两段共享同一条 8 步 beta 曲线 + 切点 σ 直送"本身保证。
-    if _refine_base_snapshot is not None and not _FF_SPLIT_SIGMA_MODE:
+    # v14.425: 渐进低分辨率腿档(_prog_enabled)与 6+2 切分档同口径 —— 一采止于切点 σ
+    # 的半噪骨架, 快照基准是半噪底; 拿已去噪终图跟它比低通余弦会把正确的二采误判成
+    # 换画面并回退半噪底(比不跑二采更糟), 故一并跳过本闸门。连续性由渐进引擎自身的
+    # 低清端点一致性提升 + 整条共享 σ 曲线保证。
+    if _refine_base_snapshot is not None and not (_FF_SPLIT_SIGMA_MODE or _prog_enabled):
         try:
             _g_m, _g_n = _ff_extract_members(samples)
             _g_v = _g_m[0] if _g_m else None
@@ -14975,12 +15086,15 @@ class BSAIH3FilmFactory:
                 # 二采就是这条曲线的后半段, 所以 denoise 夹取/结构闸门都不适用
                 # (见 _FF_SPLIT_SIGMA_MODE 的两处例外)。
                 steps, refine_steps = 6, 2
-                tile_count, refine_denoise = 16, 0.45
+                tile_count, refine_denoise = 1, 0.45
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
-                tiled_refine = True
-                tile_overlap = 128
+                # v14.432: 整段直采(最快) —— 跳过方案A token 门自动分块, 二采整帧前向;
+                # 关档内空间包装, OOM 由 v1.92 fallback 兜底。
+                _refine_wholeframe = True
+                tiled_refine = False
+                tile_overlap = 0
                 _rp_no_temp_chunk = True
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
@@ -15063,13 +15177,21 @@ class BSAIH3FilmFactory:
                 # 卡点节奏: 全曲 librosa 节拍分析一次, 每段按起止秒数生成卡点指令
                 #   前置到该段提示词(参数照源 #513: Bai Lin / 4 拍小节 / 强拍 /
                 #   grid 14.0 / cycle 6.0 / sway 2.5 / roll 2.0 / offset 0 / 呼吸运镜)。
+                # v14.430: 对齐参考《卡点舞蹈MV工作流 v2.1-修复》极速2采(#610): 二采
+                #   euler 低噪2步 + SplitSigmas 低腿σ, 3D 放大后整段直采, 参考链无任何
+                #   空间分块包装 -> 本档关掉 tiled_refine(原 tile=16/overlap128 的 15块×2步
+                #   分块是 FF 自加的显存保护, 参考工作流靠 LowVRAMAttention/ChunkFF 补丁
+                #   整段跑通且更快)。时间分块仍由 _rp_no_temp_chunk + _FF_SPLIT_SIGMA_MODE
+                #   双重关闭, 二采整段一次。
                 steps, refine_steps = 6, 2
-                tile_count, refine_denoise = 16, 0.45
+                tile_count, refine_denoise = 1, 0.45
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
-                tiled_refine = True
-                tile_overlap = 128
+                # v14.432: 整段直采开关(跳过方案A token 门自动分块)
+                _refine_wholeframe = True
+                tiled_refine = False
+                tile_overlap = 0
                 _rp_no_temp_chunk = True
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
@@ -15135,6 +15257,7 @@ class BSAIH3FilmFactory:
                       f"euler + BasicGuider CFG 1.0, shift 12/3; "
                       f"二采起点 σ={_rh_sig0:.4f}(切点直送), 3D latent 放大 x{float(refine_upscale_factor):.1f} "
                       f"(align {int(refine_align_to)}px, upscaler={refine_upscaler_model}); "
+                      "二采整段直采(无空间分块/无时间分块, v14.430 对齐参考 v2.1 极速2采); "
                       "librosa 节拍卡点提示词注入已启用(全曲分析一次)")
             elif _rp_mode == "BSAI极速一采 (6+2高低噪, 0.5MP→3D放大x2→1080p)":
                 # v14.407 (2026-11-15): 「BSAI极速一采」—— 1 采节点与参数逐项照
@@ -15152,12 +15275,14 @@ class BSAIH3FilmFactory:
                 # 本档 = 6 步高噪 + 2 步低噪续采，二采前 3D latent x2.0(align 32)，
                 # 放大不计步 => 总 8 NFE，直接产出 1 采成品(源 #488「AI造梦湿」)。
                 steps, refine_steps = 6, 2
-                tile_count, refine_denoise = 16, 0.45
+                tile_count, refine_denoise = 1, 0.45
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
-                tiled_refine = True
-                tile_overlap = 128
+                # v14.432: 整段直采(最快) —— 跳过方案A token 门自动分块, 关档内空间包装
+                _refine_wholeframe = True
+                tiled_refine = False
+                tile_overlap = 0
                 _rp_no_temp_chunk = True
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
@@ -15220,12 +15345,14 @@ class BSAIH3FilmFactory:
                 # 二采用 **lms**(源 #638 KSamplerSelect) 吃同一条 8 步 beta 的
                 # 低噪尾段(2 点)，BasicGuider CFG 1.0。输出对应源 #641。
                 steps, refine_steps = 6, 2
-                tile_count, refine_denoise = 16, 0.45
+                tile_count, refine_denoise = 1, 0.45
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
-                tiled_refine = True
-                tile_overlap = 128
+                # v14.432: 整段直采(最快) —— 跳过方案A token 门自动分块, 关档内空间包装
+                _refine_wholeframe = True
+                tiled_refine = False
+                tile_overlap = 0
                 _rp_no_temp_chunk = True
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
@@ -15250,33 +15377,43 @@ class BSAIH3FilmFactory:
                       f"3D latent 放大 x{float(refine_upscale_factor):.1f} align {int(refine_align_to)}; "
                       "照源 v1.5.3 #639/#638 lms 二采链路")
             elif _rp_mode == "BSAI极速二采 (euler beta 4步 0.55)":
-                # v14.407: 源 #676「BSAI极速二采 4 步」—— 二采不是切分尾段，而是
-                # 独立 BasicScheduler(beta / 4 步 / denoise 0.55)（源 #663），
-                # 采样器复用 euler（源 #676 接 #506）。输出对应源 #678。
-                steps, refine_steps = 6, 4
-                tile_count, refine_denoise = 16, 0.55
+                # v14.431: 对齐参考《卡点舞蹈MV工作流 v2.1-修复》活跃二采链 #610 ——
+                # 二采 euler 吃同一条 8 步 beta 的低噪尾段(2 步, 切点 σ 直送), 不再用
+                # v1.5.3 的独立 beta 4 步/0.55 全重绘(原 #663); 一采仍 6 步 euler 高噪段。
+                steps, refine_steps = 6, 2
+                tile_count, refine_denoise = 1, 0.45
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
-                tiled_refine = True
-                tile_overlap = 128
+                # v14.432: 整段直采(最快) —— 跳过方案A token 门自动分块, 关档内空间包装
+                _refine_wholeframe = True
+                tiled_refine = False
+                tile_overlap = 0
                 _rp_no_temp_chunk = True
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
                 scheduler = "bsai6plus2_high"
                 if str(sampler_name) != "euler":
                     sampler_name = "euler"
-                    print("[H3 Extender] v14.407 BSAI极速二采: 一采强制 euler(切分契约)")
+                    print("[H3 Extender] v14.431 BSAI极速二采: 一采强制 euler(切分契约)")
                 refine_sampler = "euler"
                 _dff_first_mp, _dff_target_mp = 0.5, 2.0
                 _director_fast_active = True
-                # v14.420 对齐: 独立 BasicScheduler(beta/4/0.55) 全重绘, 不是高低噪切分尾段,
-                # 也不走断点续算; 置 False(与 v2.0 Turbo 新档同口径), 内容锁/地板夹取正常生效。
-                _FF_SPLIT_SIGMA_MODE = False
-                print("[H3 Extender] 🚀 v14.407 BSAI极速二采 (渲染管道): "
-                      f"6 步高噪(euler) + {refine_steps} 步二采(euler, beta 4 步, denoise {refine_denoise}); "
+                # v14.431: 走高低噪切分尾段(同 #610), _FF_SPLIT_SIGMA_MODE=True 让内容锁/
+                # 结构闸门跳过, 切点 σ 由 _bsai_6plus2_split 直送。
+                if refine_sigmas is None:
+                    try:
+                        _tb_hi, _tb_lo = _bsai_6plus2_split(model, tag="极速二采 低噪段")
+                        refine_sigmas = _tb_lo
+                        refine_denoise = float(_tb_lo[0])
+                    except Exception as _tb_err:
+                        print(f"[H3 Extender] v14.431 BSAI极速二采: 切分曲线计算失败"
+                              f"({type(_tb_err).__name__}: {_tb_err}), 回退内部 beta 链路")
+                _FF_SPLIT_SIGMA_MODE = True
+                print("[H3 Extender] 🚀 v14.431 BSAI极速二采 (渲染管道): "
+                      f"6 步高噪(euler) + {refine_steps} 步低噪(euler, 切点 σ 直送); "
                       f"3D latent 放大 x{float(refine_upscale_factor):.1f} align {int(refine_align_to)}; "
-                      "照源 v1.5.3 #663 BasicScheduler(beta,4,0.55) 极速二采链路")
+                      "对齐参考 v2.1 #610 活跃二采链 euler 低噪 2 步")
             elif _rp_mode == "BSAI SelfLift二采 (lcm + refiner 0.7)":
                 # v14.408: 精确还原源 v1.5.3 #679 SelfLiftAvatarH3Sampler（此前 v14.407
                 # 只做了「1 步 lcm + denoise 0.7」近似，且误把 highres_tiling 当成 global）。
@@ -15295,6 +15432,8 @@ class BSAIH3FilmFactory:
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
+                # v14.432: 整段直采(最快) —— 跳过方案A token 门自动分块
+                _refine_wholeframe = True
                 tiled_refine = False
                 tile_overlap = 128
                 _rp_no_temp_chunk = True
@@ -15342,8 +15481,10 @@ class BSAIH3FilmFactory:
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
-                tiled_refine = True
-                tile_overlap = 128
+                # v14.432: 整段直采(最快) —— 跳过方案A token 门自动分块, 关档内空间包装
+                _refine_wholeframe = True
+                tiled_refine = False
+                tile_overlap = 0
                 _rp_no_temp_chunk = True
                 shift_video, shift_audio = 12.0, 3.0
                 denoise = 1.0
@@ -15372,6 +15513,8 @@ class BSAIH3FilmFactory:
                 refine_enable = True
                 refine_upscale_factor = 2.0
                 refine_align_to = 32
+                # v14.432: 整段直采(最快) —— 渐进档同样跳过方案A token 门自动分块
+                _refine_wholeframe = True
                 tiled_refine = False
                 tile_overlap = 128
                 _rp_no_temp_chunk = True
@@ -15885,6 +16028,8 @@ class BSAIH3FilmFactory:
                 else:
                     refine_enable = True
                     _sp_tiled = (_sp_sel == _SP_TILED)
+                    # v14.432: 非真分块档位整段直采(最快) —— 跳过方案A token 门自动分块
+                    _refine_wholeframe = not _sp_tiled
                     tiled_refine = _sp_tiled
                     tile_count = 2 if _sp_tiled else tile_count
                     tile_overlap = 128 if _sp_tiled else tile_overlap
@@ -15894,10 +16039,12 @@ class BSAIH3FilmFactory:
                         _FF_SPLIT_SIGMA_MODE = True
                         _sp_sig = "lms 低噪 2 步(同族切分)"
                     elif _sp_sel == _SP_TURBO:
-                        refine_sampler, refine_steps, refine_denoise = "euler", 4, 0.55
+                        # v14.431: 对齐参考 #610 活跃二采链 —— euler 低噪 2 步切点续采,
+                        # 不再用独立 beta 4 步/0.55 全重绘; 低腿 σ 由下方切分块注入。
+                        refine_sampler, refine_steps, refine_denoise = "euler", 2, 0.45
                         refine_sigmas = None
-                        _FF_SPLIT_SIGMA_MODE = False
-                        _sp_sig = "euler beta 4 步 denoise 0.55(独立曲线)"
+                        _FF_SPLIT_SIGMA_MODE = True
+                        _sp_sig = "euler 低噪 2 步(同族切分, 对齐 #610)"
                     elif _sp_sel == _SP_SELF:
                         refine_sampler, refine_steps, refine_denoise = "lcm", 2, 0.4721
                         _FF_SPLIT_SIGMA_MODE = True
@@ -15922,7 +16069,7 @@ class BSAIH3FilmFactory:
                         print(f"[H3 Extender] v14.408 2采管线: 未识别档位 {_sp_sel!r}, 沿用主档二采配方", flush=True)
                         _sp_sig = "未识别档位 (沿用主档)"
                     # 低噪段从"一采所用的那条曲线"切出来, 保证 1采+2采连续
-                    if _sp_sel not in (_SP_TURBO, _SP_SELF20) and refine_sigmas is None:
+                    if _sp_sel != _SP_SELF20 and refine_sigmas is None:
                         try:
                             if str(scheduler) in ("bsai_selflift_high", "bsai_selflift_low"):
                                 _sp_hi, _sp_lo = _bsai_selflift_split(model, tag="1采+2采 低噪段")
@@ -17369,7 +17516,6 @@ class BSAIH3FilmFactory:
                 _last = clips[-1]
                 _new_clip = dict(_last)
                 _new_clip["id"] = f"{str(_last.get('id', 'clip'))}_auto_ext"
-                _new_clip["duration"] = float(_duration_to_frames(_extra_dur)) / float(FPS)
                 # 画面延续上一个分镜: 保留原 prompt — lip 模式下提示词净化会抹掉
                 # 唱歌/说话描述, 口型完全由音频驱动, 画面沿用上一分镜构图/场景。
                 _new_clip["prompt"] = _last.get("prompt", "")
@@ -17388,6 +17534,41 @@ class BSAIH3FilmFactory:
                 if clip_ref_plans is not None:
                     clip_ref_plans.append(dict(clip_ref_plans[-1]))
                     print(f"[H3 Extender] v14.189 clip_ref_plans 同步扩展: {len(clip_ref_plans)-1} 条 -> {len(clip_ref_plans)} 条 (继承最后一条)")
+
+                # v14.425: 超长续镜 CLIP 层时间分块兜底。
+                # 根因: 单条 lip 音频远超分镜时, 上面只追加**一个**延续 CLIP 承载全部
+                # 多余音频(实测 167s 音频 → 单段 154.20s / 3706 净帧, latent T=1097,
+                # audio 6213 帧); 一采整段一次 guider.sample, activation 随 T 线性膨胀,
+                # int8 线性层首步即 OOM(已占 17.53GB / 请求 22.71GB / free 0)。
+                # 一采是纯噪声起步, 引擎内部做段间续链(尾帧回填/加噪衔接)风险高; 改为在
+                # CLIP 层把这一条超长续镜按 H3 单镜头窗口(默认 15s, 17k+5 帧网格对齐)
+                # 拆成多段, 复用现有 22 帧 motion-context 衔接链(段头锁上一段尾帧)与
+                # _split_lip_audio_by_clips 音频切分(ctx_on 段自动带头部音频重叠)。
+                # 开关: BSAI_H3_AUTOEXT_SEG_SEC=0 关闭拆段(退回旧的单段续镜行为)。
+                try:
+                    _autoext_seg_cap = float(os.environ.get("BSAI_H3_AUTOEXT_SEG_SEC", "15.0"))
+                except Exception:
+                    _autoext_seg_cap = 15.0
+                if _autoext_seg_cap > 0.05 and _extra_dur > _autoext_seg_cap + 0.05:
+                    _n_seg = max(2, min(MAX_CLIPS, int(math.ceil((_extra_dur - 0.02) / _autoext_seg_cap))))
+                    _seg_frames = _align_frame_count(int(round(_extra_dur / float(_n_seg) * FPS)))
+                    _seg_dur = float(_seg_frames) / float(FPS)
+                    _ext_idx = len(clips) - 1
+                    clips[_ext_idx]["duration"] = _seg_dur
+                    for _k in range(1, _n_seg):
+                        _nc = copy.deepcopy(clips[_ext_idx])
+                        _nc["id"] = f"{str(_last.get('id', 'clip'))}_auto_ext_{_k + 1}"
+                        _nc["duration"] = _seg_dur
+                        _nc["validated"] = False
+                        _nc["seed_mode"] = "randomize"
+                        clips.append(_nc)
+                        if clip_ref_plans is not None:
+                            clip_ref_plans.append(dict(clip_ref_plans[-1]))
+                    _sum_frames = sum(int(round(c.get("duration", 0.0) * FPS)) for c in clips)
+                    print(f"[H3 LipSync] v14.425 超长续镜兜底拆分: 多余 {_extra_dur:.2f}s → "
+                          f"{_n_seg} 段 × {_seg_dur:.2f}s({_seg_frames} 帧, 17k+5 网格), "
+                          f"段间 {_ctx_frames} 帧 context 续链; BSAI_H3_AUTOEXT_SEG_SEC="
+                          f"{_autoext_seg_cap:g}s")
                 print(f"[H3 LipSync] ✅ 对口型音频 {_lip_total_dur:.2f}s > 分镜总时长 "
                       f"{_sum_clip_dur:.2f}s → 自动追加延续分镜 CLIP +{_new_clip['duration']:.2f}s "
                       f"(id={_new_clip['id']}), 外部音频完整性已保证")

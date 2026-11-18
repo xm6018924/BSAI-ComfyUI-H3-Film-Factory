@@ -203,15 +203,28 @@ def _tile_payload(payload, context, video, audio, axis, start, end):
     if payload.get("keyframes"):
         keyframes = []
         for keyframe in payload["keyframes"]:
-            latent = keyframe["latent"]
+            latent = keyframe.get("latent") if isinstance(keyframe, dict) else None
+            if latent is None:
+                # 上下文占位关键帧(无画面 latent)在打包分块时跳过; 下游
+                # conditioning 已按其索引/语义单独保留, 不带 latent 不应参与
+                # 空间切片或 cond_video_latents 构造。
+                continue
             if latent.shape[-2:] != (height, width):
                 raise ValueError("SelfLift: tiled H3 keyframes must match the target latent height and width")
             region = latent.narrow(axis, start, end - start)
             keyframes.append({**keyframe, "latent": comfy.ldm.common_dit.pad_to_patch_size(
                 region, (1, 2, 2)).contiguous()})
         tiled["keyframes"] = keyframes
-        if not payload.get("refs"):
-            tiled["cond_video_latents"] = [keyframe["latent"] for keyframe in keyframes]
+        # v14.428: cond_video_latents 必须与 PackedLayout 的 ~img_update 行序一致,
+        # 顺序为 keyframes latents + refs latents (同 comfy/model_base._cond_latents)。
+        # 此前仅在无 refs 时重建 kf 列表, refs 存在时沿用 payload 里未随 tile 裁剪的
+        # 旧 cvl, 行数与 tile 布局不符, _embed_and_pack 索引赋值 shape mismatch。
+        cvl_new = [kf["latent"] for kf in keyframes if kf.get("latent") is not None]
+        for _ref in payload.get("refs") or []:
+            if isinstance(_ref, dict) and "latent" in _ref and _ref["latent"] is not None:
+                cvl_new.append(_ref["latent"])
+        if cvl_new:
+            tiled["cond_video_latents"] = cvl_new
     tile_height = end - start if axis == 3 else height
     tile_width = end - start if axis == 4 else width
     layout = _packed_layout((context.shape[1], video.shape[2], (tile_height + 1) // 2 * 2,
@@ -325,7 +338,10 @@ def _condition_elements(condition, tile_height, tile_width, channels):
     text = condition.get("cross_attn")
     elements = text.shape[-2] * channels * 4 if text is not None else 0
     for keyframe in condition.get("minimax_keyframes") or []:
-        shape = keyframe["latent"].shape
+        shape = (keyframe.get("latent") if isinstance(keyframe, dict) else None)
+        if shape is None:
+            continue
+        shape = shape.shape
         elements += shape[1] * shape[2] * tile_height * tile_width
     for reference in condition.get("minimax_refs") or []:
         latent = reference.get("latent")

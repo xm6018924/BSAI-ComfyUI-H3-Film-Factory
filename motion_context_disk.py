@@ -1779,10 +1779,14 @@ def _vae_decode_edge_pad(vae, v, pad_rows=8):
     return vae.decode(v)
 
 
-def _write_image_frames(proc, images, batch_frames=64):
+def _write_image_frames(proc, images, batch_frames=64, despeckle=True):
     """v1.69: batch 8->64——362 帧 1080p raw 传输 2.2GB, 大 batch 减少 Python
     循环/pipe 小写次数, 缓解 CPU/内存压力下的编码瓶颈(实测 132s -> 预期 ~50s).
-    v1.70: uint8 CPU tensor 直写快路径(async encode 预转产物, 不再逐批转换)."""
+    v1.70: uint8 CPU tensor 直写快路径(async encode 预转产物, 不再逐批转换).
+    v14.429: despeckle 开关 —— 预览 uint8 快路径在 _decode_single_clip_to_blob
+    L3393 已逐批去过彩点, 这里再跑第二轮 CPU despeckle 是纯重复(1080p ~102ms/帧,
+    内存压力下退化到 ~0.75s/帧), 把写帧压到 0.02x; 预览路径传 despeckle=False
+    跳过重复层。其余 final-decode 路径输入是 VAE 直出 float, 仍需去彩点, 保持默认 True。"""
     if proc.stdin is None:
         raise RuntimeError("Disk Final Decode: ffmpeg stdin is closed.")
     n = int(images.shape[0])
@@ -1792,8 +1796,11 @@ def _write_image_frames(proc, images, batch_frames=64):
         for i in range(0, n, int(batch_frames)):
             part = images[i:i + int(batch_frames)]
             for s in range(0, int(part.shape[0]), _dp):
+                _chunk = part[s:s + _dp]
+                if despeckle:
+                    _chunk = _despeckle_frames(_chunk)
                 proc.stdin.write(
-                    _despeckle_frames(part[s:s + _dp]).contiguous().numpy().tobytes(order="C")
+                    _chunk.contiguous().numpy().tobytes(order="C")
                 )
             del part
         return
@@ -1803,7 +1810,9 @@ def _write_image_frames(proc, images, batch_frames=64):
             part.detach().float().clamp(0.0, 1.0)
         )
         for s in range(0, int(part.shape[0]), _dp):
-            sub = _despeckle_frames(part[s:s + _dp])
+            sub = part[s:s + _dp]
+            if despeckle:
+                sub = _despeckle_frames(sub)
             sub = sub.mul(255.0).add_(0.5).to(torch.uint8).cpu().contiguous()
             proc.stdin.write(sub.numpy().tobytes(order="C"))
             del sub
@@ -3214,32 +3223,74 @@ def _decode_single_clip_to_blob(
         except Exception as _pre_err:
             print(f"[H3 Extender]   v14.283 预检查跳过(可忽略): {_pre_err}")
 
-        # --- 主 decode + OOM 重试 ---
+        # --- 主 decode + 多级兜底 (v14.433) ---
+        # v14.283 旧逻辑: 只 GC+empty_cache 原样重试一次, 对 "CUDA invalid argument"
+        # (VAE patcher 被二采清理弹出/权重与 z 设备不一致/整段几何异常) 无效, 重试同样
+        # 失败后直接 raise -> preview blob 缺失, clip 预览窗口空白。
+        # 兜底链: ①原样 decode; ②GC+empty_cache 原样重试; ③强制 force_full_load 重载
+        # VAE patcher 后重试; ④沿 T 轴分块逐段 decode 再拼接(绕整段几何/峰值);
+        # 全部失败才 raise(调用方已捕获, 不影响主渲染)。
         _vae_tile_backup = None
         video = None
-        try:
-            # v14.283: 优先尝试原样 decode; OOM/RuntimeError 自动缩小 tile_t 重试
-            video = vae.decode(v)
-        except (RuntimeError, torch.cuda.OutOfMemoryError) as _vae_err:
-            _err_s = str(_vae_err).lower()
-            _is_oom = "oom" in _err_s or "out of memory" in _err_s or "cuda error" in _err_s or "invalid argument" in _err_s
-            if not _is_oom:
-                raise
-            print(f"[H3 Extender]   v14.283 decode OOM: {str(_vae_err)[:200]}")
-            print(f"[H3 Extender]   v14.283 → torch.cuda.empty_cache() + gc.collect() 后重试")
-            import gc
+
+        def _gc_empty():
+            import gc as _gc_f
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            gc.collect()
+            _gc_f.collect()
+
+        def _reload_vae_full():
             try:
+                import comfy.model_management as _mm_f
+                _p = getattr(vae, "patcher", None)
+                if _p is not None:
+                    _mm_f.load_models_gpu([_p], memory_required=0, force_full_load=True)
+                    print("[H3 Extender]   v14.433 VAE patcher force_full_load 重载完成")
+            except Exception as _rl:
+                print(f"[H3 Extender]   v14.433 VAE 重载跳过(可忽略): {_rl}")
+
+        def _chunk_decode(_v, _chunk=24):
+            # 非causal整段失败时沿 T 轴切块逐段 decode 再拼接(预览级, 块间轻微
+            # 时间上下文损失可接受), 同时压低单段激活峰值。输出 [B,3,T,H,W],
+            # 沿 T 维(dim=2)拼接。
+            _Tz = int(_v.shape[2])
+            _outs = []
+            for _s in range(0, _Tz, _chunk):
+                _e = min(_Tz, _s + _chunk)
+                _part = vae.decode(_v[:, :, _s:_e, :, :].contiguous())
+                if _part.ndim == 4:
+                    _part = _part.unsqueeze(0)
+                _outs.append(_part)
+            return torch.cat(_outs, dim=2)
+
+        _attempts = 0
+        _last_err = None
+        while video is None and _attempts < 4:
+            _attempts += 1
+            try:
+                if _attempts == 2:
+                    print("[H3 Extender]   v14.433 兜底2: GC+empty_cache 后原样重试")
+                    _gc_empty()
+                elif _attempts == 3:
+                    print("[H3 Extender]   v14.433 兜底3: 强制重载 VAE patcher 后重试")
+                    _gc_empty()
+                    _reload_vae_full()
+                elif _attempts == 4:
+                    print("[H3 Extender]   v14.433 兜底4: T 轴分块 decode 拼接")
+                    _gc_empty()
+                    video = _chunk_decode(v.contiguous())
+                    break
                 video = vae.decode(v)
-                print(f"[H3 Extender]   v14.283 OOM 重试成功")
-            except Exception as _e2:
-                print(f"[H3 Extender]   v14.283 OOM 重试也失败: {str(_e2)[:200]} —— 进程即将崩溃, 但 validated=True 已 commit, "
-                      f"下次重跑会自动从本段 latent 续渲, 不会丢失已采样段")
-                raise
-            # 注意: 进程级 crash(TDR/segfault) 不在 try/except 范围内, 但 validated=True
-            # 已在 join() 时写入 manifest, 重跑会自动续渲
+            except Exception as _vae_err:
+                _last_err = _vae_err
+                print(f"[H3 Extender]   v14.433 decode 第{_attempts}次失败: {str(_vae_err)[:200]}")
+                _gc_empty()
+                if _attempts >= 4:
+                    print("[H3 Extender]   v14.433 全部兜底失败 —— preview 跳过(主渲染已 commit, "
+                          "不丢失已采样段)")
+                    raise
+        if video is None and _last_err is not None:
+            raise _last_err
     finally:
         if _od_overridden:
             vae.output_device = _od_prev
@@ -3476,7 +3527,7 @@ def _decode_single_clip_to_blob(
 
             log_f = open(video_log, "wb")
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=log_f)
-            _write_image_frames(proc, video_u8)
+            _write_image_frames(proc, video_u8, despeckle=False)
             _finish_process(proc, log_f, video_log, "H3 clip preview encoder")
             proc = None
             log_f = None

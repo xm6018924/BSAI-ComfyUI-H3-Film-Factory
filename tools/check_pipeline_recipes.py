@@ -142,7 +142,8 @@ def main():
           "and not _FF_SPLIT_SIGMA_MODE:" in src
           and "_r_denoise < _FF_REFINE_FLOOR_DENOISE" in src)
     check("BSAI6+2: 结构相似度闸门对该档让位", 
-          "if _refine_base_snapshot is not None and not _FF_SPLIT_SIGMA_MODE:" in src)
+          "if _refine_base_snapshot is not None and not _FF_SPLIT_SIGMA_MODE:" in src
+          or "if _refine_base_snapshot is not None and not (_FF_SPLIT_SIGMA_MODE or _prog_enabled):" in src)
     check("BSAI6+2: 每轮进入 extend 复位切分标志",
           "global _FF_SPLIT_SIGMA_MODE" in src and "_FF_SPLIT_SIGMA_MODE = False" in src)
     check("BSAI6+2: 二采 fallback 重跑仍走低噪段",
