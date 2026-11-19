@@ -1269,6 +1269,8 @@ const BSAI_BILINGUAL_LABELS = {
     "one_shot_clip_duration": "One-shot target seconds per segment (0 disables auto CLIP split; with a song, CLIP count = song duration / this value)",
     "one_shot_sampling": "One-shot sampling preset (single-pass seamless = skip refine, zero seam drift, recommended turbo 8-step LoRA + beta 6-8 steps / dual-pass HD = keep refine for 2K but seams may drift / v14.215 dual-pass seamless 8+4 = keep the refine pass and repair the inter-segment anchor so the join stays seamless / v14.272 dual-pass seamless 2K (8+4) = same seamless chain with a pinned 8+4 recipe, the refine scale is derived so the output width lands on 2560)",
     "render_pipeline": "Render pipeline (all model recipes are selected here, v14.184): Sol-H3 Self-Lift dual-pass (default) -> FastH3-Trim (8+4) -> FastH3 4-step VSA (4+2) -> Turbo-v4 (6+4, shift 12/3) -> DMAD 4-step (4+2, lcm) -> action combo (8+4, euler) -> 4K direct secret sauce (self-lift 6+3, latent x2.0 -> DLSS5 pixel upscale to 4K) -> FastH3 Omni 8-step single-pass (skips refine; switch the loader to the Omni model + VSA) -> dual-pass 2K (8+4, latent not upscaled + HyperVAE 2x decode -> 2x pixels -> 2K, audio refine inherits w33 0.7) -> live commerce fully automatic (12+4 one-click tier: audio_context_length=0 + context off from clip2; manual parameters are ignored) -> H25 Hybrid 8-Step Multi-Ref (v14.223, BV1dygg6EE6W: H25 Hybrid = base FL2VA + overlay Ref2VA, Block Range Additive 25-49, + LightX2V 8-step FL2V accel LoRA; 8-step single-pass euler/simple shift 12/3 denoise 1.0, refine skipped; Loader=minimax_h3_hybrid_fl2va_ref2va_b25-49-int8, accel-LoRA=minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16). ACC 8-step 8+4 (v14.387): the 8-step acceleration LoRA under H3加速\ACC (Ref2VA variant MiniMax-H3-Ref2VA-Acc-8Step_comfyui_pdd-T8 / FL2VA variant MiniMax-H3-FL2VA-Acc-8Step_comfy), strength 1.0 + euler/simple + shift 12/3, 8 first-pass steps + 4 refine steps (the refine is pure super-resolution since v14.384), never stack a second acceleration LoRA.",
+    "render_pipeline_enable": "Render pipeline master switch (v14.422, default OFF): OFF = all recipe tiers locked, only the manual 1st/2nd-pass parameter rows render; ON = unlocks the Pipeline quick button and every one-click recipe tier (Live Commerce / Video Recast / Viggle)",
+    "manual_override_enable": "Manual override expand (v14.423, default OFF): ON = expand the full manual panel and bypass the recipe chain (expanded values win); independent of the PIPE switch. LoRA mounting / model loader / CFG / VSA-SegAttention stay external to this node",
     "first_pass_pipeline": "1st pass pipeline (Follow = obey render_pipeline; otherwise this 1st pass is paired with any 2nd pass below)",
     "second_pass_pipeline": "2nd pass pipeline (Follow = obey render_pipeline; Off = 1st pass only / direct single-pass output)",
     "refine_sampler": "Refine sampler (v14.238 Director port: independent second-pass sampler; inherit = follow first-pass sampler; Director fast tier defaults to euler while the first pass runs res_multistep)",
@@ -7312,11 +7314,14 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     });
     refreshViggle();
     quickBar.append(viggleBtn);
+    // v14.422: 渲染管线总开关 —— 捕获配方档按钮引用, OFF 时统一禁用。
+    let rpQuickBtn = null;
     for (const def of QUICK_DEFS) {
         const w = node.widgets.find((x) => x.name === def.key);
         const C = QUICK_CATEGORIES[QUICK_CAT[def.key]] || QUICK_CATEGORIES.flow;
         const shades = def.cycle ? (def.tints ? h3QuickTintedShades(def.tints) : h3QuickShades(C, def.cycle.length)) : null;
         const btn = document.createElement("button");
+        if (def.key === "render_pipeline") rpQuickBtn = btn;
         btn.style.cssText = "position:relative;overflow:hidden;font-size:9px;line-height:1.15;padding:2px 7px 3px 9px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;border:1px solid " + C.border + ";border-left:3px solid " + C.color + ";transition:background .12s,border-color .12s,box-shadow .12s;";
         const lab = document.createElement("span");
         const sub = document.createElement("span");
@@ -7430,6 +7435,71 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         quickBar.append(btn);
     }
 
+    // ── v14.422 渲染管线总开关（Master switch，放在快捷条最前）──────────────
+    // 默认 OFF：render_pipeline 全部配方档（Pipeline 下拉 / 直播带货 / 视频替换 /
+    // Remix / Viggle 一键档）一律禁用，后端也跳过配方覆盖，只走参数区一采/二采
+    // 手动链路；ON：解锁全部配方档。状态写入后端布尔 widget render_pipeline_enable，
+    // 随工作流保存。旧前端/未重启场景下 widget 缺失时仅本地预览，按钮标题给出提示。
+    const masterW = node.widgets && node.widgets.find((x) => x && x.name === "render_pipeline_enable");
+    const masterBtn = document.createElement("button");
+    masterBtn.style.cssText = "position:relative;overflow:hidden;font-size:9px;line-height:1.15;padding:2px 8px 3px 10px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;border:1px solid #7a4a52;border-left:3px solid #b06a74;transition:background .12s,border-color .12s,box-shadow .12s;flex-shrink:0;";
+    const mLab = document.createElement("span");
+    const mSub = document.createElement("span");
+    mLab.style.cssText = "font-weight:800;letter-spacing:.04em;color:#d8aab2;white-space:nowrap;";
+    mSub.style.cssText = "font-size:7px;color:#a9858d;opacity:.7;white-space:nowrap;";
+    masterBtn.append(mLab, mSub);
+    let masterOn = masterW ? Boolean(masterW.value) : false;
+    const gateBtns = [rpQuickBtn, liveSellBtn, videoRecastBtn, viggleBtn].filter(Boolean);
+    function setGateDisabled(btn, off) {
+        if (!btn) return;
+        btn.disabled = off;
+        btn.style.opacity = off ? ".32" : "";
+        btn.style.pointerEvents = off ? "none" : "";
+        btn.style.filter = off ? "grayscale(.75)" : "";
+    }
+    function refreshMaster() {
+        if (masterW) masterOn = Boolean(masterW.value);
+        mLab.textContent = masterOn ? "PIPE ON" : "PIPE OFF";
+        mSub.textContent = masterOn ? "recipes unlocked" : "manual 1st/2nd pass";
+        masterBtn.style.background = masterOn ? "#1a5c2e" : "#3a2226";
+        masterBtn.style.border = "1px solid " + (masterOn ? "#3fae6a" : "#7a4a52");
+        masterBtn.style.borderLeft = "3px solid " + (masterOn ? "#4ade80" : "#b06a74");
+        masterBtn.style.boxShadow = masterOn ? "0 0 0 1px #3fae6a, 0 0 8px #4ade8055" : "none";
+        mLab.style.color = masterOn ? "#eafff1" : "#d8aab2";
+        mSub.style.color = masterOn ? "#86efac" : "#a9858d";
+        masterBtn.title = masterOn
+            ? "Render pipeline master switch: ON — all recipe tiers (Pipeline dropdown / Live Commerce / Video Recast / Viggle) are unlocked."
+            : "Render pipeline master switch: OFF (default) — all recipe tiers disabled; only the manual 1st/2nd-pass parameter rows render."
+              + (masterW ? "" : "\n⚠️ Backend widget missing — restart ComfyUI so render_pipeline_enable loads; state is preview-only.");
+        for (const b of gateBtns) setGateDisabled(b, !masterOn);
+        // 门控变化后同步三个一键档的高亮(它们只按 render_pipeline 值算底色, 不影响禁用态)
+        try { refreshLiveSell(); } catch (e) {}
+        try { refreshVideoRecast(); } catch (e) {}
+        try { refreshViggle(); } catch (e) {}
+    }
+    masterBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        masterOn = !masterOn;
+        if (masterW) {
+            masterW.value = masterOn;
+            if (typeof masterW.callback === "function") { try { masterW.callback(masterOn); } catch (e) {} }
+        }
+        refreshMaster();
+        try { node.setDirtyCanvas(true, true); } catch (e) {}
+    });
+    // 参数区原生 checkbox 改动(直接操作行)也刷新门控
+    if (masterW && !masterW.__h3MasterHook) {
+        masterW.__h3MasterHook = true;
+        const _mc = masterW.callback;
+        masterW.callback = function () {
+            try { refreshMaster(); } catch (e) {}
+            if (typeof _mc === "function") _mc.apply(this, arguments);
+        };
+    }
+    refreshMaster();
+    // 放在 "Quick" 标题之后、第一个配方按钮之前
+    quickBar.insertBefore(masterBtn, quickTitle.nextSibling);
+
     // v14.135: 颜色图例（放在按钮行末尾，自动换行时不挡按钮）
     try {
         const legend = document.createElement("span");
@@ -7513,6 +7583,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             const _oc = rpw.callback;
             rpw.callback = function () {
                 try { syncOmniRefineRows(node); } catch (e) {}
+                try { syncManualPanel(); } catch (e) {}
                 try { refreshLiveSell(); } catch (e) {}
                 if (typeof _oc === "function") _oc.apply(this, arguments);
             };
@@ -7524,11 +7595,138 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             const _sc = spw.callback;
             spw.callback = function () {
                 try { syncOmniRefineRows(node); } catch (e) {}
+                try { syncManualPanel(); } catch (e) {}
                 if (typeof _sc === "function") _sc.apply(this, arguments);
             };
         }
         syncOmniRefineRows(node);
     } catch (e) {}
+
+    // ── v14.423 手动展开面板（展开即覆盖配方，后端旁路由 manual_override_enable 驱动）──
+    // 展开 ON：managed 配方行先全显，再按组折叠；组 chips 可单独收起/展开。
+    // 收起：恢复 syncOmniRefineRows 的现状隐藏。与 PIPE 总开关独立。
+    const manualW = node.widgets && node.widgets.find((x) => x && x.name === "manual_override_enable");
+    let manualOn = manualW ? Boolean(manualW.value) : false;
+    const MANUAL_GROUPS = {
+        first_pass: { label: "一采", keys: ["steps", "sampler_name", "scheduler", "denoise", "dual_track_shift", "shift_video", "shift_audio", "context_length", "audio_context_length", "resolution_mode", "megapixels", "width", "height", "ref_image_size", "one_shot_mode", "one_shot_sampling"] },
+        second_pass: { label: "二采", keys: ["refine_enable", "refine_steps", "refine_denoise", "refine_upscale_factor", "refine_upscaler_model", "refine_sampler", "refine_align_to", "refine_audio_denoise", "refine_lipsync_mode", "tiled_refine", "tile_count", "tile_overlap", "refine_mem_mode", "selflift_tst_enable", "selflift_tst_tau"] },
+        accel_cache: { label: "加速/缓存", keys: ["block_cache", "block_cache_threshold", "block_cache_device", "cache_dit", "ref_cache"] },
+        context_audio: { label: "上下文/音频", keys: ["env_audio_enable", "env_audio_gain", "semantic_bridge_enable", "semantic_bridge_adapter", "semantic_bridge_alpha", "semantic_bridge_magnitude_match", "face_lock_mode"] },
+        upscale: { label: "超分", keys: ["upscale_per_clip", "upscale_final", "upscale_mode", "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch", "upscale_fp16", "upscale_face_restore"] },
+        output: { label: "输出", keys: ["output_mode", "output_image_audio", "filename_prefix", "pause_enable", "clip_select_enable"] },
+    };
+    const groupCollapsed = {};
+    const manualPanel = document.createElement("div");
+    manualPanel.style.cssText = "display:none;flex-basis:100%;flex-wrap:wrap;gap:4px;align-items:center;padding:2px 0;";
+    const manualChips = {};
+    // 折叠组的行键清单。注意: 非 managed 的行直接写 options.hidden 在 nodes2
+    // 前端不生效, 必须走 applyHiddenParamRows(widgetValueStore 同步 + DOM 兜底),
+    // 所以这里只算键, 不显隐。
+    const collapsedKeys = () =>
+        Object.keys(MANUAL_GROUPS)
+            .filter((gk) => groupCollapsed[gk])
+            .flatMap((gk) => MANUAL_GROUPS[gk].keys);
+    // 先把全部组内行强制放回(未折叠的行不在 managed 宇宙, applyHiddenParamRows
+    // 不会主动放回, 否则上一轮藏掉的行展开后仍消失)。
+    const showAllGroupRows = () => {
+        for (const gk of Object.keys(MANUAL_GROUPS)) {
+            for (const k of MANUAL_GROUPS[gk].keys) {
+                const w = node.widgets && node.widgets.find((x) => x && x.name === k);
+                if (w) setWidgetRowHidden(node, w, false);
+            }
+        }
+    };
+    const refreshChips = () => {
+        for (const [gk, chip] of Object.entries(manualChips)) {
+            const off = !!groupCollapsed[gk];
+            chip.style.background = off ? "rgba(120,120,120,.18)" : "rgba(234,179,8,.28)";
+            chip.style.borderColor = off ? "rgba(150,150,150,.4)" : "#eab308";
+            chip.style.opacity = off ? ".55" : "1";
+            chip.textContent = (off ? "▸ " : "▾ ") + MANUAL_GROUPS[gk].label;
+        }
+    };
+    const syncManualPanel = () => {
+        if (manualW) manualOn = Boolean(manualW.value);
+        if (!manualOn) {
+            showAllGroupRows();
+            try { syncOmniRefineRows(node); } catch (e) {}
+            manualPanel.style.display = "none";
+            return;
+        }
+        // 展开 ON：先全组放回，再经 applyHiddenParamRows 折叠选中组；
+        // render_pipeline 下拉保持隐藏(展开即旁路配方, 避免误导)。
+        showAllGroupRows();
+        applyHiddenParamRows(node, collapsedKeys().concat(["render_pipeline"]));
+        manualPanel.style.display = "flex";
+        refreshChips();
+    };
+    for (const gk of Object.keys(MANUAL_GROUPS)) {
+        const chip = document.createElement("button");
+        chip.style.cssText = "font-size:8px;padding:2px 8px;border-radius:4px;cursor:pointer;color:#fde68a;border:1px solid #eab308;background:rgba(234,179,8,.28);font-family:inherit;";
+        chip.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            groupCollapsed[gk] = !groupCollapsed[gk];
+            showAllGroupRows();
+            applyHiddenParamRows(node, collapsedKeys().concat(["render_pipeline"]));
+            refreshChips();
+            try { node.setDirtyCanvas(true, true); } catch (e) {}
+        });
+        manualChips[gk] = chip;
+        manualPanel.append(chip);
+    }
+    // 展开开关按钮（琥珀色，区别于 PIPE 绿/红）
+    const manualBtn = document.createElement("button");
+    manualBtn.style.cssText = "position:relative;overflow:hidden;font-size:9px;line-height:1.15;padding:2px 8px 3px 10px;border-radius:4px;cursor:pointer;display:flex;flex-direction:column;align-items:center;font-family:inherit;border:1px solid #7a5a12;border-left:3px solid #eab308;transition:background .12s,border-color .12s,box-shadow .12s;flex-shrink:0;";
+    const mlab = document.createElement("span");
+    const msub = document.createElement("span");
+    mlab.style.cssText = "font-weight:800;letter-spacing:.04em;color:#fde68a;white-space:nowrap;";
+    msub.style.cssText = "font-size:7px;color:#d8b86a;opacity:.7;white-space:nowrap;";
+    manualBtn.append(mlab, msub);
+    const refreshManualBtn = () => {
+        const on = manualW ? Boolean(manualW.value) : manualOn;
+        mlab.textContent = on ? "MANUAL ON" : "MANUAL OFF";
+        msub.textContent = on ? "recipe bypassed" : "recipe active";
+        manualBtn.style.background = on ? "#7a5a12" : "#3a3320";
+        manualBtn.style.border = "1px solid " + (on ? "#eab308" : "#7a5a12");
+        manualBtn.style.borderLeft = "3px solid #eab308";
+        manualBtn.style.boxShadow = on ? "0 0 0 1px #eab308, 0 0 8px #eab30855" : "none";
+        mlab.style.color = on ? "#fff7e0" : "#fde68a";
+        msub.style.color = on ? "#fde68a" : "#d8b86a";
+        manualBtn.title = on
+            ? "Manual override ON: recipe chain bypassed, expanded panel values win. LoRA/model loader/CFG/VSA stay external."
+            : "Manual override OFF: selected recipe tier applies. Click to expand the full manual panel and bypass the recipe.";
+    };
+    manualBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        manualOn = !manualOn;
+        if (manualW) {
+            manualW.value = manualOn;
+            if (typeof manualW.callback === "function") { try { manualW.callback(manualOn); } catch (e) {} }
+        }
+        // 首次展开：单采档默认收起二采区
+        if (manualOn && Object.keys(groupCollapsed).length === 0) {
+            const rpw = node.widgets && node.widgets.find((x) => x && x.name === "render_pipeline");
+            const rpv = String((rpw && rpw.value) || "");
+            if (/Omni|QAD|Transparent|PRISM|PDMD 2-step|PTD|HyperFlow/i.test(rpv)) groupCollapsed.second_pass = true;
+        }
+        refreshManualBtn();
+        syncManualPanel();
+        try { node.setDirtyCanvas(true, true); } catch (e) {}
+    });
+    if (manualW && !manualW.__h3ManualHook) {
+        manualW.__h3ManualHook = true;
+        const _mc = manualW.callback;
+        manualW.callback = function () {
+            try { refreshManualBtn(); syncManualPanel(); } catch (e) {}
+            if (typeof _mc === "function") _mc.apply(this, arguments);
+        };
+    }
+    refreshManualBtn();
+    // v14.423: manualPanel 必须先 append 进 quickBar, insertBefore 的参考节点
+    // 才是其子节点, 否则抛 NotFoundError(insertBefore refNode not a child)。
+    quickBar.append(manualPanel);
+    quickBar.insertBefore(manualBtn, manualPanel);
+    syncManualPanel();
 
     // ── Draggable divider between global prompt and CLIP cards ──
     // Drag to fix the global prompt section height (px); double-click to
@@ -8476,6 +8674,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 会重新冒出来。applyHiddenParamRows 幂等（同时把不该藏的行放回），
         // 重复调用无副作用。
         try { applyHiddenParamRows(this, this.__h3HiddenRowKeys); } catch (e) {}
+        // v14.423: 载入工作流后重放手动展开态(展开 ON 时 managed 行不能被重新藏掉)
+        try { syncManualPanel(); } catch (e) {}
 
         // v2.111: 默认改为「展开CLIP」状态(之前默认收起)。这里只置标记 +
         // 保证宽度下限, 不再套用收起态的固定视口(v2.105 的默认行为);
