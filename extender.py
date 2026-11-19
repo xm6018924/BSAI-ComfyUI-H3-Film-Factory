@@ -681,6 +681,41 @@ def _release_text_encoder(clip, tag=""):
         pass
 
 
+def _ff_purge_dead_loaded_models(label=""):
+    """v14.434: 清扫 current_loaded_models 里已卸载的空壳 LoadedModel。
+
+    ComfyUI model_unload() 把 real_model 置 None(弱引用销毁), 正常由卸载流程
+    pop 条目; 当 BSAI 自定义摘除按 `is model`/`id in target` 匹配而身份不符
+    (delegate clone / wrapper / model 引用已丢) 时, 空壳残留列表。后续
+    load_models_gpu -> cleanup_models_gc -> is_dead() 调 `self.real_model()`
+    对 None 报 TypeError: 'NoneType' object is not callable, 整链崩溃。
+    这里把 real_model 不可调用(None)或 model 引用已丢的空壳安全 pop, 不动
+    正常已加载条目(real_model=weakref.ref 可调用, model=ModelPatcher)。
+    返回摘除数量。
+    """
+    try:
+        import comfy.model_management as _mm_purge
+        _clm = getattr(_mm_purge, "current_loaded_models", None)
+        if not _clm:
+            return 0
+        _removed = 0
+        for _i in range(len(_clm) - 1, -1, -1):
+            try:
+                _lm = _clm[_i]
+                _rm = getattr(_lm, "real_model", "MISSING")
+                _mdl = getattr(_lm, "model", None)
+                if (not callable(_rm)) or _mdl is None:
+                    _clm.pop(_i)
+                    _removed += 1
+            except Exception:
+                pass
+        if _removed > 0 and label:
+            print(f"[H3 Extender] v14.434 清扫死条目{label}: 摘除 {_removed} 个空壳 LoadedModel")
+        return _removed
+    except Exception:
+        return 0
+
+
 def _ff_unregister_model(model, label=""):
     """v14.175 (2026-10-23): 从 current_loaded_models 摘除指定模型的 LoadedModel。
 
@@ -7423,6 +7458,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     except Exception as _vge:
         print(f"[H3 Extender] v14.352 cond 释放挂载失败(忽略): {_vge}", flush=True)
 
+    # v14.434: 采样前清扫残留空壳 LoadedModel(real_model=None/model=None),
+    # 防 prepare_sampling->load_models_gpu->cleanup_models_gc->is_dead() 调
+    # self.real_model() 报 'NoneType' object is not callable。
+    _ff_purge_dead_loaded_models("采样前")
     try:
         samples = guider.sample(
             noise,
@@ -8534,21 +8573,42 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                         print(f"[H3 Extender] v14.145 Sol-Attn 已挂载, 走 KJNodes head 分组稀疏路径")
                                 except Exception:
                                     pass
+                                # v14.435: delegate 整块驻留前显存门控。non-dynamic 驻留后
+                                # prepare_sampling 还要把 LoRA adapter 常驻 GPU + 采样 activation;
+                                # 24GB 卡驻留全量(~19.5GB)后余量装不下 LoRA/activation, 挂 LoRA
+                                # 即 OOM(实测 clip=0: resident 16.2GB 后 lora qkv_proj 220MB
+                                # 分配失败 23.72/23.86GB, fallback 仍 OOM, 二采回退半噪骨架被排除)。
+                                # 余量不足时不硬驻留, 保持 _refine_model=model 走 DynamicVRAM 流式
+                                # (一采同路径可跑, LoRA 随层换页非常驻), 宁可慢也要跑通。
+                                _delegate_ok = True
                                 try:
-                                    _ext_resv_orig = _mm3.EXTRA_RESERVED_VRAM
+                                    _free_pre_dyn = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                                    _delegate_total_gb = _r_delegate_dyn.model_size() / 1024 ** 3
+                                    # 驻留最坏占全量; 留 LoRA 常驻 ~3.5GB + activation/workspace
+                                    # ~1.5GB + 安全余量 ~1.5GB。
+                                    if _free_pre_dyn - _delegate_total_gb < 6.5:
+                                        _delegate_ok = False
+                                        print(f"[H3 Extender] v14.435 显存不足: free={_free_pre_dyn:.1f}GB "
+                                              f"delegate全量={_delegate_total_gb:.1f}GB, 驻留后余量<6.5GB"
+                                              f"(LoRA+activation), 回退 DynamicVRAM 流式二采(不硬驻留防OOM)")
                                 except Exception:
-                                    _ext_resv_orig = None
-                                _mm3.EXTRA_RESERVED_VRAM = int(_r_resv_dyn * 1024 ** 3)
-                                _mm3.load_models_gpu([_r_delegate_dyn])
-                                _torch3.cuda.synchronize()
-                                try:
-                                    _res2d = _r_delegate_dyn.loaded_size() / 1024 ** 3
-                                    print(f"[H3 Extender] v14.145 DynamicVRAM 二采改用 non-dynamic delegate 驻留(KJNodes补丁重建): "
-                                          f"resident={_res2d:.1f}GB / total={_r_delegate_dyn.model_size()/1024**3:.1f}GB "
-                                          f"reserve={_r_resv_dyn:.1f}GB")
-                                except Exception:
-                                    pass
-                                _refine_model = _r_delegate_dyn
+                                    _delegate_ok = True
+                                if _delegate_ok:
+                                    try:
+                                        _ext_resv_orig = _mm3.EXTRA_RESERVED_VRAM
+                                    except Exception:
+                                        _ext_resv_orig = None
+                                    _mm3.EXTRA_RESERVED_VRAM = int(_r_resv_dyn * 1024 ** 3)
+                                    _mm3.load_models_gpu([_r_delegate_dyn])
+                                    _torch3.cuda.synchronize()
+                                    try:
+                                        _res2d = _r_delegate_dyn.loaded_size() / 1024 ** 3
+                                        print(f"[H3 Extender] v14.145 DynamicVRAM 二采改用 non-dynamic delegate 驻留(KJNodes补丁重建): "
+                                              f"resident={_res2d:.1f}GB / total={_r_delegate_dyn.model_size()/1024**3:.1f}GB "
+                                              f"reserve={_r_resv_dyn:.1f}GB")
+                                    except Exception:
+                                        pass
+                                    _refine_model = _r_delegate_dyn
                             except Exception as _de142:
                                 _refine_model = model
                                 print(f"[H3 Extender] v14.145 non-dynamic delegate 创建失败, 回退 DynamicVRAM 流式: {_de142}")
@@ -9603,6 +9663,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                     _r_clm.pop(_ri)
                         except Exception:
                             pass
+                        # v14.434: 身份匹配可能漏(delegate clone/wrapper/model 已丢),
+                        # 补清扫 real_model=None/model=None 的空壳, 防下次采样 cleanup 崩。
+                        _ff_purge_dead_loaded_models("二采卸载后")
                         # v14.248: 断开采样器/guider/latent 对 delegate 的强引用
                         _r_guider = None
                         _r_sampler = None
@@ -9976,7 +10039,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # 能量几乎全在高频(整体 > 1.8×低通)。真·平滑场景三者不会同时成立。
                 _grid_gray = (_clpdisp < 0.12 and _cdisp < 0.68
                               and _cdisp > 1.8 * _clpdisp)
-                if (_cdisp < 0.30 and _clpdisp < 0.15) or _grid_gray:
+                # v14.433: 高幅超幅兜底 —— 与塌陷相反的失败模式: 二采被重复逆缩放/
+                # 分块相位漂移把 latent 抬到 std≈2.0(健康终态≈1.0, v14.418 自检
+                # >1.8 即告警), VAE 解码即整屏 latent 格彩色马赛克糊片(2026-11-18
+                # clip1 实测 std=1.954/通道内2.018)。整体 std > 1.8 判定超幅,
+                # 同样换回一采备份(软但干净), 不把炸幅 latent commit 进链。
+                _gstd = float(_cv.float().std())
+                _high_amp = _gstd > 1.8
+                if (_cdisp < 0.30 and _clpdisp < 0.15) or _grid_gray or _high_amp:
                     _pre_v, _pre_nst = _ff_extract_members(_pre_up)
                     if _pre_v:
                         _pre_hw = tuple(_pre_v[0].shape[-2:])
@@ -9984,15 +10054,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         _refine_fallback_hw = (int(_pre_hw[0]), int(_pre_hw[1]))
                         if _FF_SPLIT_SIGMA_MODE:
                             _refine_fallback_half_noise = True
-                        print(f"[H3 Extender] ⚠ 二采 latent 塌陷"
-                              f"({'网格灰场' if _grid_gray else '整体塌陷'}, clip={clip_index} "
-                              f"通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}), "
+                        _reason = ('高幅超幅(重复逆缩放/分块漂移)' if _high_amp
+                                   else '网格灰场' if _grid_gray else '整体塌陷')
+                        print(f"[H3 Extender] ⚠ 二采 latent {_reason}"
+                              f"(clip={clip_index} 整体std={_gstd:.3f} 通道内std={_cdisp:.3f}, "
+                              f"4x4低通std={_clpdisp:.3f}), "
                               f"已自动回退一采 latent {_pre_hw[1]}x{_pre_hw[0]}")
                         _send_extender_warning(
                             owner_id,
-                            f"Refine collapsed into a gray frame (in-channel std={_cdisp:.3f}); "
-                            f"reverted to the first-pass latent. Consider lowering "
-                            f"refine_denoise / refine_steps, or turning refine off",
+                            f"Refine over-amplified latent (overall std={_gstd:.3f}, "
+                            f"channel std={_cdisp:.3f}); reverted to the first-pass latent. "
+                            f"Check refine sigma continuation / spatial tiling.",
                             clip_index=clip_index,
                         )
                     else:
@@ -10000,7 +10072,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                               f"但一采备份无效, 无法回退")
                 else:
                     print(f"[H3 Extender] v14.206 二采 latent 健康: clip={clip_index} "
-                          f"通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}")
+                          f"整体std={_gstd:.3f} 通道内std={_cdisp:.3f}, 4x4低通std={_clpdisp:.3f}")
         except Exception as _coll_err:
             print(f"[H3 Extender] 二采 latent 塌陷检测失败(可忽略): {_coll_err}")
 
@@ -14274,6 +14346,11 @@ class BSAIH3FilmFactory:
         _render_pipeline = _RENDER_PIPELINE_EN2ZH.get(_render_pipeline, _render_pipeline)
         # v14.211: 「FastH3 Omni × SelfLift 超分」是 Omni 的渐进双采版, 不走单采强制(保留二采)。
         omni_8step_mode = _render_pipeline.startswith("FastH3 Omni") and "SelfLift" not in _render_pipeline
+        # v14.437 一镜到底独立: one_shot=on 时 Omni 前置块不接管一采(步数/denoise/refine开关),
+        # 一镜到底采样参数由其内置固定配方块独占决定, 外部 FastH3 Omni 选择被屏蔽;
+        # 同时把 omni_8step_mode 复位 False, 避免下游分辨率钳制(17153)与采样传参(19956)泄漏。
+        if one_shot_enabled:
+            omni_8step_mode = False
         if omni_8step_mode:
             # ① 跳过二采 —— 一采 latent 直接解码, 单采直出
             refine_enable = False
@@ -14374,7 +14451,9 @@ class BSAIH3FilmFactory:
         # 分块/audio_context=0）。音频接线差异（三口用/不用）在下方音频接线段
         # 按 _ls_mode 强制处理。旧「直播带货（全自动）」档等价 02，历史不变。
         _ls_mode = _livestream_voice_mode_of(_rp_mode)
-        if _ls_mode:
+        # v14.437 一镜到底独立: one_shot=on 时不把直播配音别名到直播带货全自动档,
+        # 该档采样配方不接管一镜到底。
+        if _ls_mode and not one_shot_enabled:
             _rp_mode = "直播带货（全自动）"
         # v14.182: HyperVAE 2x 像素翻倍因子 —— 仅「双采2K」档在分支内置 2.0,
         # 其余档保持 1.0 (声明输出尺寸 = 实际解码像素, 不放大)。
@@ -14392,7 +14471,11 @@ class BSAIH3FilmFactory:
         # 理应自动 enable refine_enable——之前被行 6686 显式排除(作为"无管道"回退),
         # 导致用户选了默认管道但 UI toggle refine_enable=false 时二采被跳过。
         # 现在把默认管道也纳入 handler, 显式开 refine_enable 并保留用户其余参数。
-        if _rp_mode:
+        # v14.437 一镜到底独立: one_shot=on 时整个渲染管道分派(含 first/second_pass
+        # 双下拉覆盖)整体跳过 —— 46 个配方档的步数/二采/调度/shift/分辨率接管/音频/
+        # 分块/显存一律不接管一镜到底, 采样参数由一镜到底内置固定配方块独占决定。
+        _rp_handled = False
+        if _rp_mode and not one_shot_enabled:
             _rp_handled = True
             if _rp_mode == "Sol-H3 Self-Lift 双采 (默认)":
                 # v14.210: 默认管道 = 双采, 强制 enable refine.
@@ -16024,6 +16107,22 @@ class BSAIH3FilmFactory:
                 _rp_no_temp_chunk = True
                 if _sp_sel == _SP_OFF:
                     refine_enable = False
+                    # v14.436 (2026-11-19): 单采直出(2采Off)禁止停在 beta 切分高噪腿 ——
+                    # 6+2/SelfLift 高噪腿只跑到切点 σ(≈0.72)的半噪骨架, samples 被逆缩放
+                    # 放大 ~3.58x, 本应由低噪二采腿入口 noise_scaling 乘回; 2采关闭后无人
+                    # 乘回, 超幅半噪直 VAE 解码 = 整屏彩噪马赛克。单采直出改完整去噪曲线
+                    # (一采本身走到 σ=0), 保证任何管线选「2采Off」单采出片都高清。
+                    if _FF_SPLIT_SIGMA_MODE:
+                        _FF_SPLIT_SIGMA_MODE = False
+                        _sp_off_fixed = []
+                        if str(scheduler) == "bsai6plus2_high":
+                            scheduler = "beta"
+                            _sp_off_fixed.append("bsai6plus2_high→beta 完整曲线")
+                        elif str(scheduler) == "bsai_selflift_high":
+                            scheduler = "cosine"
+                            _sp_off_fixed.append("bsai_selflift_high→cosine 完整曲线")
+                        print("[H3 Extender] v14.436 ⚠️ 2采Off 单采直出: 检测到高噪切分腿, "
+                              "已改完整去噪曲线防半噪马赛克 → " + "; ".join(_sp_off_fixed), flush=True)
                     print("[H3 Extender] v14.408 2采管线 = 关闭 → 只跑 1 采直出", flush=True)
                 else:
                     refine_enable = True
@@ -16259,20 +16358,28 @@ class BSAIH3FilmFactory:
                   "(一采 latent 网格 < 目标 latent 网格), 跳过自动 HyperVAE 2x 提速;"
                   "保留二采潜空间放大倍率与原生 VAE, 避免草稿 latent 被 2x 解码铺成方块马赛克")
         _auto_hv2x = False
+        _auto_factor_only = False
         try:
+            # v14.422: 默认双采草稿档与直播带货档拆开。直播档一采跑目标网格,
+            # HyperVAE 2x 只做像素 2x 翻倍, 安全; 默认草稿档一采是半分辨率
+            # 草稿(960x544 / latent 60x34), 若也被 HV2X 32x 直解成 1920x1088,
+            # 缺失的一半空间 token 补不回 -> 整屏规则方块马赛克。故默认档只降
+            # factor 保提速(二采回 218k 健康区), 不装 HV2X, 原生 VAE 解到一采
+            # 同规模, 2K 交 upscale_final 像素超分兜底。
+            _is_live_auto = (_rp_mode == "直播带货（全自动）")
+            _is_default_draft = (_rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)"))
             if (os.environ.get("BSAI_H3_AUTO_HV2X", "1") != "0"
+                    and not one_shot_enabled
                     and not one_shot_dual_2k
                     and bool(refine_enable)
                     and float(refine_upscale_factor or 1.0) > 1.0
                     and not _ff_draft_latent
-                    and (_rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)")
-                         or _rp_mode == "直播带货（全自动）")):
-                # 覆盖默认双采档 + 直播带货(全自动)档。直播带货档原本强制
-                # 3D latent upscaler x2.0(873k tokens -> 24GB 换页 -> 每块 ~400s),
-                # 有 HyperVAE 2x 权重时自动降 factor=1.0(218k tokens, 等价一采规模,
-                # 每步 ~80-90s) + HyperVAE 2x 解码直出 2K, 输出像素与像素契约一致
-                # (一采像素 x2), 无 tiles 接缝。音频配方(12 步/重绘)保持不变。
-                # 4K直出 / FastH3 Omni×SelfLift 等显式配方档保持原样, 不破坏其像素契约。
+                    and (_is_live_auto or _is_default_draft)):
+                # 直播带货(全自动)档: 原本强制 3D latent upscaler x2.0(873k tokens ->
+                # 24GB 换页 -> 每块 ~400s), 有 HyperVAE 2x 权重时自动降 factor=1.0
+                # (218k tokens, 等价一采规模, 每步 ~80-90s) + HV2X 解码直出 2K,
+                # 输出像素与契约一致(一采像素 x2), 无 tiles 接缝, 音频配方不变。
+                # 4K直出 / FastH3 Omni×SelfLift 等显式配方档保持原样, 不破坏像素契约。
                 _hv2x_probe = None
                 for _hv2x_dir in folder_paths.get_folder_paths("vae"):
                     for _hv2x_file in os.listdir(_hv2x_dir):
@@ -16283,16 +16390,28 @@ class BSAIH3FilmFactory:
                     if _hv2x_probe:
                         break
                 if _hv2x_probe:
-                    _hv2x_decl = 2.0
-                    _auto_hv2x = True
                     _r_new_factor = 1.0
                     if refine_upscaler_model and not str(refine_upscaler_model).startswith("("):
                         refine_upscaler_model = "(bilinear interpolation, no model)"
-                    print(f"[H3 Extender] v14.221 自动提速(含直播带货档): 检测到 HyperVAE 2x 权重 "
-                          f"({os.path.basename(_hv2x_probe)}), 二采 factor "
-                          f"{float(refine_upscale_factor or 1.0):.1f} -> 1.0 (latent 不放大, 由 "
-                          f"HyperVAE 2x 解码直出 2K, 二采 token 873k->218k 回 Sol-Attn 健康区, "
-                          f"每步 ~80-90s)。设 BSAI_H3_AUTO_HV2X=0 可关闭。")
+                    if _is_live_auto:
+                        _hv2x_decl = 2.0
+                        _auto_hv2x = True
+                        print(f"[H3 Extender] v14.221 自动提速(直播带货档): 检测到 HyperVAE 2x 权重 "
+                              f"({os.path.basename(_hv2x_probe)}), 二采 factor "
+                              f"{float(refine_upscale_factor or 1.0):.1f} -> 1.0 (latent 不放大, 由 "
+                              f"HyperVAE 2x 解码直出 2K, 二采 token 873k->218k 回 Sol-Attn 健康区, "
+                              f"每步 ~80-90s)。设 BSAI_H3_AUTO_HV2X=0 可关闭。")
+                    else:
+                        # 默认草稿档: 只降 factor 保提速, 不装 HV2X (避免 60x34 草稿
+                        # 被 32x 直解铺成方块); _hv2x_decl 保持 1.0, 原生 VAE 解码,
+                        # 2K 由 upscale_final(RelayVSR/realesr) 像素超分兜底。
+                        _auto_factor_only = True
+                        _hv2x_decl = 1.0
+                        print(f"[H3 Extender] v14.422 默认双采档提速(不启用 HV2X): 二采 factor "
+                              f"{float(refine_upscale_factor or 1.0):.1f} -> 1.0 (latent 不放大, 二采 "
+                              f"token 873k->218k 回 Sol-Attn 健康区, 每步 ~80-90s); 原生 VAE 解到 "
+                              f"一采同规模, 不做 HV2X 直解(防草稿 latent 铺成方块)。要 2K 请开 "
+                              f"upscale_final(RelayVSR/realesr) 像素超分。设 BSAI_H3_AUTO_HV2X=0 可关闭。")
                     refine_upscale_factor = _r_new_factor
         except Exception as _hv2x_auto_err:
             print(f"[H3 Extender] v14.221 自动提速探测失败(可忽略): {_hv2x_auto_err}")
@@ -16302,7 +16421,7 @@ class BSAIH3FilmFactory:
         # 与原生 VAE 完全一致(权重含完整 encoder, encoder_unchanged=True), decode
         # 路径自动输出 2x 像素。权重自动探测 models/vae 中 hyper*2x* 文件;
         # 加载失败回退原生 vae 并降级提示(不崩)。
-        if _rp_mode == "双采2K（HyperVAE 2x 解码）" or _auto_hv2x:
+        if not one_shot_enabled and (_rp_mode == "双采2K（HyperVAE 2x 解码）" or _auto_hv2x):
             _hv2x_path = None
             try:
                 for _hv_dir in folder_paths.get_folder_paths("vae"):
@@ -16342,6 +16461,12 @@ class BSAIH3FilmFactory:
             else:
                 print(f"[H3 Extender] ⚠️ v14.182 双采2K: models/vae 未探测到 HyperVAE 2x 权重 "
                       f"(hyperVAEKrea2Minimax_v20MinimaxX2Upscale.safetensors), 回退原生 VAE 解码(像素 1x, 档位不生效)")
+        # v14.437 一镜到底独立: one_shot=on 时速度预设基础档(极速/均衡/精细/VDN/
+        # FastH3-Trim/Turbo/DMAD/武戏/Omni/QAD 遗留值)整体不接管一镜到底 —— 置 custom
+        # 使下方整条速度档 if/elif 链不命中, 步数/二采/分块/denoise/shift/采样器由
+        # 一镜到底内置固定配方块独占决定。
+        if one_shot_enabled:
+            speed_preset = "custom"
         if speed_preset == "极速":
             # v1.85: 二采 2->3 步 + denoise 0.55->0.5. 写实动态(打斗)场景 2 步二采
             # 在 55% 重噪下收敛不足导致画面发糊, 3 步收敛更好保留高频细节.
@@ -16437,7 +16562,8 @@ class BSAIH3FilmFactory:
         # TILED 低噪续跑)若 widget 选了 spatial, 不得被任何旁支逻辑提升成 global 全序列 dense ——
         # 整段 ~791k tokens dense attention 在 24GB 上两次 OOM, 回退后把停在半噪 σ 的一采骨架
         # 当成品解码, 成片即逐令牌方块马赛克。widget 显式选 global 时不干预。
-        if (not _widget_wanted_global
+        if (not one_shot_enabled
+                and not _widget_wanted_global
                 and refine_mem_global
                 and _rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)")):
             refine_mem_global = False
@@ -16483,6 +16609,39 @@ class BSAIH3FilmFactory:
                           flush=True)
         except Exception as _ffe:
             print(f"[H3 Extender] v14.420 环境倍率覆盖解析失败(可忽略): {_ffe}")
+        # ===== v14.437 一镜到底内置固定配方(独立块) =====
+        # one_shot=on 时, 外部 render_pipeline 分派 / speed_preset 基础档 /
+        # first_pass / second_pass 双下拉 / Omni 前置 / 直播别名 已在上方全部短路
+        # 跳过; 此处按 one_shot_sampling 四档写死采样配方, 一镜到底自决, 不受任何
+        # 其他渲染管线影响。二采倍率 / 空间分块 / 显存模式 / 分辨率画布不由本块接管:
+        # 2K 档走自身 180k token 预算折减 + global 全上下文(16258 块), 其余档沿用
+        # 面板设定, 外部档不得改写。
+        if one_shot_enabled:
+            if one_shot_single_pass:
+                # 单采无缝(推荐) —— Motion Context V2 标准: 8 步蒸馏 + beta + euler +
+                # shift 12/3, denoise 1.0 完整去噪, 跳过二采, 链式 latent 不重绘零漂移。
+                steps, sampler_name, scheduler = 8, "euler", "beta"
+                denoise = 1.0
+                shift_video, shift_audio = 12.0, 3.0
+                refine_enable = False
+                refine_audio_denoise = 0.0
+            elif one_shot_seamless_dual or (one_shot_sampling.startswith("双采")
+                                            and not one_shot_single_pass):
+                # 双采无缝(8+4) / 双采无缝 2K(8+4) / 双采高清(接缝风险):
+                # 一采 8 步 + 二采 4 步 denoise 0.45, euler, shift 12/3, 开二采。
+                # 2K 档的倍率折减/global/不分块由 16258 后备块单独处理; 双采高清的
+                # 内容锁闸门(结构相似度)在采样循环内夹 denoise, 此处只给基准 0.45。
+                steps, refine_steps, refine_denoise = 8, 4, 0.45
+                sampler_name = "euler"
+                shift_video, shift_audio = 12.0, 3.0
+                refine_enable = True
+                refine_audio_denoise = 0.0
+            print("[H3 Extender] v14.437 🎬 一镜到底内置固定配方已接管(外部 render/speed/"
+                  f"first/second/omni/直播别名 已屏蔽) 档={one_shot_sampling}: "
+                  f"一采 {int(steps)} 步 {sampler_name}/{scheduler} denoise={float(denoise):.2f} "
+                  f"shift={float(shift_video):g}-{float(shift_audio):g} | "
+                  f"二采 enable={refine_enable} steps={int(refine_steps)} "
+                  f"denoise={float(refine_denoise):.2f} audio={float(refine_audio_denoise):.2f}")
         # v14.279: 唯一权威配方日志 —— 打印在所有管道/速度档覆盖之后, 保证
         # "日志声明 == 实际实跑", 不再出现渲染管道档声明 12/6 实跑 8/4 的分歧。
         print(f"[H3 Extender] v14.279 EFFECTIVE-RECIPE: pipeline={_rp_mode or '(none)'} "
@@ -17336,9 +17495,10 @@ class BSAIH3FilmFactory:
         # 实测教训：1 个 15s 分镜 + 225s lip_audio → LipSync 先把分镜扩成
         # 15.08s + 209.77s 两段，替换档再建计划（时间轴对不上，找不到源画面），
         # 209.77s 单段 = 5088 帧 → H3 一采 OOM。
-        if ((_rp_mode == "视频替换 (V2V 人物替换)"
-             or (_rp_mode == "视频角色替换+动作迁移" and _remix_lock_audio()))
-                and (lip_audio is not None or _lip_voice is not None)):
+        if (not one_shot_enabled
+                and ((_rp_mode == "视频替换 (V2V 人物替换)"
+                      or (_rp_mode == "视频角色替换+动作迁移" and _remix_lock_audio()))
+                     and (lip_audio is not None or _lip_voice is not None))):
             print(f"[{'H3 Remix' if _rp_mode != '视频替换 (V2V 人物替换)' else 'H3 Recast'}] "
                   "⚠️ 本档锁定源视频原声，已剔除 "
                   f"{'lip_audio' if lip_audio is not None else ''}"
@@ -17595,8 +17755,11 @@ class BSAIH3FilmFactory:
         # (45s 源视频 → 3 × 15s / remix → 每段净 204 帧)，loop_end 才能在后面的
         # 循环里覆盖到补齐的段。
         _recast_plan = None
-        _remix_mode = (_rp_mode == "视频角色替换+动作迁移")
-        _viggle_mode = (_rp_mode in _VIGGLE_RP_LABELS)
+        # v14.437 一镜到底独立: one_shot=on 时 V2V 替换/Remix/Viggle 整模式不激活,
+        # 渲染管道短路后旧的"选替换档即退出一镜到底"动作已不再执行, 此处显式屏蔽,
+        # 避免替换计划与一镜到底无缝链冲突。
+        _remix_mode = (not one_shot_enabled and _rp_mode == "视频角色替换+动作迁移")
+        _viggle_mode = (not one_shot_enabled and _rp_mode in _VIGGLE_RP_LABELS)
         _rp_tag = ("H3 Viggle" if _viggle_mode
                    else ("H3 Remix" if _remix_mode else "H3 Recast"))
         if _viggle_mode:
@@ -17605,7 +17768,8 @@ class BSAIH3FilmFactory:
             print(f"[H3 Viggle] v14.355 换脸开关: "
                   f"{'开 (model=' + _viggle_faceswap_model + ')' if _viggle_faceswap_on else '关（面板未勾选，出片后不换脸）'}",
                   flush=True)
-        if (_rp_mode == "视频替换 (V2V 人物替换)" or _remix_mode or _viggle_mode):
+        if (not one_shot_enabled
+                and (_rp_mode == "视频替换 (V2V 人物替换)" or _remix_mode or _viggle_mode)):
             try:
                 if _viggle_mode:
                     # v14.349: 段间 motion context 在 Viggle 档必崩 —— 上一段 context

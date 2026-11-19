@@ -4,6 +4,101 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.437 (2026-11-19) — 一镜到底管线完全独立，外部 render/speed/first/second/omni 全屏蔽 / One-shot pipeline fully isolated; external render/speed/first/second/omni overrides suppressed
+
+**问题**：`one_shot_mode=on`（一镜到底）时，渲染管道 render_pipeline 分派、速度预设 speed_preset 基础档、一采/二采双下拉（first_pass/second_pass）、FastH3 Omni 前置块仍会接管一镜到底的步数/二采/调度/shift/分辨率接管/音频/分块/显存，一镜到底与其他渲染管线混在一起、参数被改写。
+
+**改动（one_shot=on 时整体短路外部覆盖，采样由一镜到底内置固定配方块独占）**：
+- Omni 前置块（~14352）：one_shot 时复位 `omni_8step_mode=False`，不再强制 8 步/denoise1.0/跳二采，也不泄漏到下游分辨率钳制(17153)与采样传参(19966)。
+- 直播别名（~14456）：one_shot 时不把直播配音别名到「直播带货（全自动）」档。
+- render_pipeline 大分派（~14478，含 first/second_pass 双下拉覆盖、46 个配方档的步数/二采/调度/shift/Director 0.5MP→2MP 分辨率接管/音频重绘/分块/显存/HyperVAE）：one_shot 时整体跳过，`_rp_handled=False`。
+- speed_preset 基础档链（~16468）：one_shot 时置 `custom`，整条极速/均衡/精细/VDN/遗留配方档 if/elif 不命中。
+- 自动 HV2X/factor 护栏（~16372）、HV2X VAE 加载（~16424）、v14.413 内存档复位（~16565）：one_shot 时不触发，二采倍率/显存模式由一镜到底自决。
+- V2V 替换/Remix/Viggle 整模式（~17498/17761/17771）：one_shot 时不激活，替换计划不与无缝链冲突，lip_audio 不被误剔除。
+- **新增内置固定配方块（~16619）**：按 `one_shot_sampling` 四档写死——单采无缝=8 步/euler/beta/denoise1.0/shift12-3/关二采/音频锁0；双采无缝8+4/2K8+4/双采高清=一采8步+二采4步/denoise0.45/euler/shift12-3/开二采/音频锁0。2K 档的 180k token 预算折减 + global 全上下文 + 假倍率跳过二采、双采高清内容锁闸门、段头锚点修复等一镜到底自身机制全部保留。
+- 推翻 v14.279「2K 档 render 配方优先」：render 短路后 `_rp_handled=False`，2K 回归后备自决 8+4/0.45/euler。
+- `one_shot=off`（分镜模式）零影响：所有新增条件均为 `and not one_shot_enabled` / `if one_shot_enabled`，off 时等价改动前。
+
+### v14.436 (2026-11-19) — 2采Off 单采直出高噪腿兜底，修一采纯彩噪马赛克 / Single-pass half-noise fallback guard, fixes 1st-pass pure-color-noise mosaic
+
+**背景（实测定位）**
+
+V3.0 工作流节点250 配 `first_pass=Fast Draft 6步βsplit`（6+2/SelfLift 高噪切分腿，σ 止于切点 ≈0.7207 半噪骨架）+ `second_pass=Off`（二采关闭）。高噪腿收尾时 ComfyUI sampler 内部 `inverse_noise_scaling(σ=0.7207, samples)` 把 samples 放大 ~3.58×；正常由低噪二采腿入口 `noise_scaling(σ_cut)` 乘回，二采 Off 后无人乘回，超幅半噪直接 VAE 解码 → 整屏彩噪方块（非模糊/低清）。参考修复版一采虽是同款高噪6步腿，但永远接二采低噪2步收尾，故不出噪。
+
+**改动**
+
+- `_SP_OFF`（2采关闭）分支加兜底：检测到 `_FF_SPLIT_SIGMA_MODE=True`（高噪切分腿）时自动复位——`bsai6plus2_high → beta 完整曲线`、`bsai_selflift_high → cosine 完整曲线`、关切分标志，让一采本身走到 σ=0；并打印 v14.436 告警。保证任何管线选「2采Off」单采直出都不再半噪马赛克。
+- 不动双采/切分续采配方；双采（6+2 复刻参考#610）路径不受影响。
+
+**配套（工作流JSON，未改代码）**
+
+- 噪点工作流节点250：render_pipeline 切到「BSAI 6+2 High/Low-Noise Split Sampling」，first_pass/second_pass 改 Follow render_pipeline，复刻参考世界版活跃链#610（一采高噪6步 + 二采 euler 低噪2步切点直送）。
+
+**二采4条链路对齐核对（render_pipeline 主档层，已全部一致，无需改代码）**
+
+- 编号0 = 第40档「BSAI 6+2 High/Low-Noise Split」(15138)：euler 高噪6步 + 低噪2步切点直送 ✓（=参考#610）。
+- 编号1 = 「BSAI Standard 2nd Pass (lms low-sigma 2-step)」(15415)：lms 切点低噪2步 ✓（=参考#639）。
+- 编号2 = 「BSAI Turbo v2.0 2nd Pass (euler beta 3-step 0.55)」(15547)：独立 euler β3步 denoise0.55、SPLIT=False ✓（=参考#676，非切分尾段）。
+- 编号3 = 「BSAI SelfLift v2.0 2nd Pass (euler + refiner 0.7, 2+2)」(15576)：progressive 低清腿2步+高清腿2步 ✓（=参考#679）。
+
+**全管线一采排查**
+
+- 所有高噪切分腿 render 主档（6+2/Rhythm Music/极速一采/标准二采/极速二采/SelfLift二采/分块二采）均 `refine_enable=True`，正常双采，不裸奔。
+- 唯一半噪裸奔路径 = second_pass 下拉选 Off（SP_OFF）且一采为高噪切分腿（6+2/SelfLift high，或 first_pass 下拉 Fast6/Self5）；已由本次 v14.436 兜底统一改完整去噪曲线。
+- second_pass 下拉短名 `_SP_TURBO`（切分低噪2步）是覆盖微调层，与 render 主档4链独立；用主档选链路即可，未改动。
+
+**边界**
+
+- 模型侧（DMAD LoRA0.8 / hybrid b25-49 int8 / SigmaShift 12/3 / Sol-Attn）由 Loader/全局提供，不在节点250；缺失只影响风格，不会噪。
+
+### v14.435 (2026-11-19) — delegate 驻留前显存门控，修二采挂 LoRA OOM 回退半噪骨架 / Pre-residency VRAM gate, fixes refine LoRA OOM fallback to half-noise skeleton
+
+**背景（实测定位）**
+
+24GB 卡 6+2 二采：一采 DynamicVRAM 流式成功；二采 v14.145 强制 non-dynamic delegate 整块驻留 resident=16.2GB（reserve=5.0），prepare_sampling 挂 LoRA adapter 时 `lora diffusion_model.blocks.0.attn.qkv_proj.weight` 220MB 分配失败（23.72/23.86GB，Free=0）；v1.92 fallback 重驻留后仍 OOM（13.58+11.13GB），本段回退一采半噪骨架、标记 UNVALIDATED 排除出最终合并。
+
+**改动**
+
+- delegate `load_models_gpu` 驻留前加显存门控：`free − delegate全量 < 6.5GB`（LoRA 常驻 ~3.5 + activation/workspace ~1.5 + 余量 ~1.5）时不硬驻留，保持 `_refine_model=model` 走 DynamicVRAM 流式（一采同路径，LoRA 随层换页非常驻），宁可慢也要跑通。
+- 大显存卡 free 充足仍放行 delegate 驻留提速；门控失败仅跳过驻留，已绑的 KJNodes 补丁不影响。
+
+**边界**
+
+- 不改采样/配方；流式二采较慢（历史 637s/it）但不 OOM、不丢段。
+- 配套降 token/显存可设 `BSAI_H3_REFINE_FACTOR=1.0`（env 可逆，试跑期间勿跑直播档）。
+
+### v14.434 (2026-11-19) — 清扫卸载空壳 LoadedModel，修 clip 间 `NoneType object is not callable` 崩溃 / Purge dead LoadedModel stubs, fixes inter-clip NoneType crash
+
+**背景（实测定位）**
+
+链式渲染 clip[0] 完成后，clip[2] 一采在 `guider.sample → prepare_sampling → load_models_gpu → cleanup_models_gc → is_dead()` 崩 `TypeError: 'NoneType' object is not callable`。根因：ComfyUI `model_unload()` 把 `real_model` 置 None（弱引用销毁），正常由卸载流程 pop 条目；BSAI 自定义摘除按 `is model` / `id in target` 匹配，遇 delegate clone / tiled wrapper / model 引用已丢时漏 pop，空壳残留 `current_loaded_models`，`is_dead()` 调 `self.real_model()` 对 None 报错。
+
+**改动**
+
+- 新增 `_ff_purge_dead_loaded_models()`：从 `current_loaded_models` 摘除 `real_model` 不可调用(None)或 `model is None` 的空壳，保留正常条目（real_model=weakref.ref 可调用、model=ModelPatcher）。
+- 两处接线：`_sample_h3` 采样前清扫；二采 v14.248 delegate 卸载收尾补清扫。
+
+**边界**
+
+- 只移除卸载空壳，不误删已加载模型；纯防御性兜底，不改采样/配方。
+- 不影响 `BSAI_H3_REFINE_FACTOR` env 倍率覆盖与其他档位。
+
+### v14.422 (2026-11-18) — 默认双采草稿档禁用 HV2X 直解，修整屏方块马赛克 / Default draft double-pass disables HV2X direct decode, fixes full-frame block mosaic
+
+**背景（实测定位）**
+
+现场 clip=0（Sol-H3 Self-Lift 默认双采，一采 8 步 960×544 草稿、二采 4 步）：v14.221 检测到 HyperVAE2x 权重后把二采 `factor 2.0→1.0`（latent 停在 60×34），再由 HV2X 解码头把半分辨率草稿 32× 直解成 1920×1088。HV2X 只做 pixel_shuffle 像素翻倍，补不回潜空间缺失的一半空间 token，60×34 草稿被铺成整屏规则方块。二采 std=1.087 健康、内容闸门 0.994 保留二采，排除半噪骨架/OOM，纯属解码错配。
+
+**改动**
+
+- v14.221 自动提速按档位拆开：直播全自动档（一采跑目标网格）维持 `factor=1.0 + HV2X 2x` 直出 2K；**默认双采草稿档只降 factor=1.0 保提速**（二采回 218k Sol-Attn 健康区、~80-90s/步），但不装 HV2X、`_hv2x_decl=1.0`，原生 VAE 解到一采同规模，2K 交 `upscale_final`（RelayVSR/realesr）像素超分兜底。
+- 环境变量 `BSAI_H3_AUTO_HV2X=0` 仍可整体关闭自动降级。
+
+**边界**
+
+- 显式「双采2K（HyperVAE 2x 解码）」配方档、4K 直出、FastH3 Omni×SelfLift 等显式配方档不受影响。
+- 默认档走此路径成片为一采同规模（960×544），要 2K 需开 `upscale_final`；命中日志已打印指引。
+
 ### v14.421 (2026-11-17) — 二采空闲显存定档加固 + 收紧分块合并，防 GPU 153 复位 / Refine free-VRAM settle hardening & tighter tile merge to prevent GPU 153 reset
 
 **背景（实测定位）**
