@@ -8328,6 +8328,19 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                             _need_auto270 = (_t_cand226 >= 200)
                         else:
                             _need_auto270 = (_t_cand226 >= 200) or (_per_tile226 > _tok_tgt270)
+                        # v14.438: 整段直采硬开关(档内 _refine_wholeframe=True 或 env
+                        # BSAI_H3_REFINE_WHOLEFRAME=1)优先级高于 v14.390 真重绘强制分块。
+                        # 显式要求整段一次时跳过 v14.270 自动时间分块 —— 各段独立 seed
+                        # 逐段采样正是段间接缝模糊/闪烁/碎纹的来源; 整帧一次前向无接缝。
+                        # 真 OOM 仍由 v1.92 fallback 兜底, 本开关只负责不主动切时间块。
+                        if (bool(locals().get("_refine_wholeframe", False)) or
+                                str(os.environ.get("BSAI_H3_REFINE_WHOLEFRAME", "")).lower()
+                                in ("1", "true", "yes")):
+                            if _need_auto270:
+                                print("[H3 Extender] v14.438 BSAI_H3_REFINE_WHOLEFRAME=1 整段直采: "
+                                      "跳过 v14.270 自动时间分块, 二采整帧一次前向(无段间独立seed/接缝)",
+                                      flush=True)
+                            _need_auto270 = False
                         if _need_auto270:
                             if _per_tile226 > 0:
                                 _seg_n226 = max(2, int(math.ceil(_per_tile226 / max(1.0, _tok_tgt270))))
@@ -13780,6 +13793,16 @@ class BSAIH3FilmFactory:
                 "tooltip": "v14.423 Manual override expand (default OFF). ON = expand the full manual parameter panel and the recipe chain is bypassed (expanded manual values win over the selected tier); independent of the PIPE master switch. Backend bypass = PIPE OFF OR expand ON. LoRA mounting, model loader, CFG/guidance, VSA/SegAttention and in-tier hardcoded rules live outside this node and are not covered.",
             },
         )
+        # v14.439: 整段直采开关(默认关)。追加在 optional 最末尾, 零位移: 勾选=二采整帧
+        # 一次前向, 跳过 v14.270 按 token 预算的自动时间分块(不逐段独立 seed/无接缝闪烁);
+        # 与 env BSAI_H3_REFINE_WHOLEFRAME=1 等效, 可把整段直采固化进工作流(不依赖 bat)。
+        optional["refine_wholeframe"] = (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": "v14.439 Whole-frame refine (default OFF). ON = the 2nd pass samples the whole clip in one forward pass, skipping v14.270's automatic temporal chunking by token budget (no per-segment independent seed, no seam flicker / block artifacts); whole-frame forward, real OOM handled by fallback. Equivalent to env BSAI_H3_REFINE_WHOLEFRAME=1; pins whole-frame mode into the workflow without the bat env.",
+            },
+        )
         # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
         # 让旧版工作流(71 项)载入时尾部错位/NaN。改为"档位化"：
         #   下拉「Viggle Remake 视频改写 (6步 换人/增删改)」     = 纯 Viggle 出片，不换脸(默认)
@@ -14487,6 +14510,9 @@ class BSAIH3FilmFactory:
             temporal_chunk_tokens = 0
         # v14.152: 兼容老工作流 'global_inherit' 等历史字符串 — 非数字一律取默认 8
         temporal_overlap_tokens = _safe_int(kwargs.get("temporal_overlap_tokens"), 8)
+        # v14.439 面板"整段直采"开关: 勾选=二采整帧一次前向, 跳过 v14.270 自动时间分块,
+        # 不依赖 bat 环境变量, 可把整段直采固化进工作流。档内 _refine_wholeframe=True 仍叠加生效。
+        _refine_wholeframe = bool(kwargs.get("refine_wholeframe", False))
         # v2.19 Semantic-Bridge 语义桥(可开可关, 默认关). 小 MLP 残差混合 cond token.
         _sb_enable = bool(kwargs.get("semantic_bridge_enable", False))
         _sb_adapter_raw = kwargs.get("semantic_bridge_adapter", "")
@@ -16446,7 +16472,13 @@ class BSAIH3FilmFactory:
             # factor 保提速(二采回 218k 健康区), 不装 HV2X, 原生 VAE 解到一采
             # 同规模, 2K 交 upscale_final 像素超分兜底。
             _is_live_auto = (_rp_mode == "直播带货（全自动）")
-            _is_default_draft = (_rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)"))
+            # v14.438 fix: bypass(渲染管道总开关=关 或 手动展开=开)时 _rp_mode 被 14526 归一为空,
+            # 空串曾被当作"默认草稿档"命中本自动提速护栏, 把用户面板手填的 refine_upscale_factor=2.0
+            # 悄悄压成 1.0(latent 不放大, 原生 VAE 解回一采 960x544, 二采放大失效)。
+            # 手动链路(_recipe_bypass)尊重面板 factor, 不参与自动降倍率; 仅真正选了默认双采档/未选档
+            # 且非 bypass 时才允许自动提速。
+            _is_default_draft = ((_rp_mode in ("", "Sol-H3 Self-Lift 双采 (默认)", "(none)"))
+                                 and not _recipe_bypass)
             if (os.environ.get("BSAI_H3_AUTO_HV2X", "1") != "0"
                     and not one_shot_enabled
                     and not one_shot_dual_2k
