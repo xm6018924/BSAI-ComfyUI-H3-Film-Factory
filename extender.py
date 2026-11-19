@@ -19929,9 +19929,16 @@ class BSAIH3FilmFactory:
                                         # 分镜模式(场景可跳变): 头部渐进锁 keep, 0.0→1.0
                                         # 线性渐降, 首步完全保持(无缝进入), 逐步放开重绘,
                                         # 前几步从上一段尾平滑转向新场景, 无重影/崩坏帧
+                                        # v14.441 (实验): 分镜渐进锁曲线开头 0.0→0.70 起步、
+                                        # t² 加速到 1.0 —— 旧 0.0 完全 keep 使段头开头帧一采
+                                        # 不重绘 → 柔焦, 二采低噪腿(σ0=0.4381/2步)补不回;
+                                        # 0.25 实测太弱(高噪 euler 下近乎保持, 输出不变); 开头
+                                        # 提到 0.70 给 70% 去噪自由度, 锚点仍由 _vv2 赋值延续,
+                                        # 接缝风险可控(实验性, 可回退)。
                                         for _k in range(_n_head):
-                                            _mv[:, :, _k] = _k / max(1, _n_head - 1)
-                                        _lock_desc = "渐进锁keep(0→1)"
+                                            _t = _k / max(1, _n_head - 1)
+                                            _mv[:, :, _k] = 0.70 + 0.30 * (_t * _t)
+                                        _lock_desc = "渐进锁keep(0.70→1·t²)"
                                     latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mv, _ma))
                                     _mode_tag = "一镜到底" if one_shot_enabled else "分镜衔接"
                                     print(f"[H3 Extender] v14.188 {_mode_tag}: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"

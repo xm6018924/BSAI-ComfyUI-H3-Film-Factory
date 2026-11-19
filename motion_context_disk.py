@@ -5154,10 +5154,19 @@ class MiniMaxH3MotionContextDiskFinalDecode:
         print(f"[H3 Final Decode] export() CALLED: nonce={cache.get('exec_nonce','N/A') if isinstance(cache, dict) else 'N/A'}")
         data_path, manifest_path, manifest = _load_manifest(cache)
         print(f"[H3 Final Decode] manifest loaded: {manifest_path} segments={len(manifest.get('segments',[]))} updated_at={manifest.get('updated_at','N/A')}")
-        if abs(float(manifest["fps"]) - float(fps)) > 1e-6:
+        _mfps = float(manifest["fps"])
+        _nfps = float(fps)
+        if abs(_mfps - _nfps) > 0.5:
             raise ValueError(
-                f"Disk Final Decode fps is {manifest['fps']}, export requested {fps}."
+                f"Disk Final Decode fps is {_mfps}, export requested {_nfps} "
+                f"(差异>0.5fps, 请把 Final Decode 节点 fps 与渲染帧率对齐)."
             )
+        if abs(_mfps - _nfps) > 1e-6:
+            # v14.442: 节点 fps(如手填 24.336) 与 manifest 记录的真实渲染帧率(24.0)
+            # 小差异不再抛错阻断导出 —— 音画以 manifest 渲染帧率为准, 采用 _mfps。
+            print(f"[H3 Final Decode] fps 小差异: 节点={_nfps} vs manifest渲染={_mfps}, "
+                  f"采用 manifest 渲染帧率(音画以渲染为准)")
+            fps = _mfps
         segments = [dict(x) for x in manifest.get("segments", [])]
         if not segments:
             raise ValueError("Disk Final Decode: empty cache.")
