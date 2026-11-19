@@ -605,6 +605,50 @@ def _release_dynamic_vram(tag=""):
         pass
 
 
+def _vram_preflight_guard(tag=""):
+    """v14.426 统一显存预检守卫：所有重负载入口(TE 编码 / 一采 / 二采)共用。
+
+    三件套:
+      1. _release_dynamic_vram(tag): cleanup_prefetch_queues + cleanup_malloc_graph
+         释放 DynamicVRAM staged/vbar 权重, free_memory(for_dynamic=True) 跳过动态
+         量化模型 detach(不触发 ck access violation);
+      2. 清 aimdo cast buffer(v1.93 同款, 一采加载期累积的常驻 GPU 缓冲);
+      3. set_per_process_memory_fraction(1.0) 无条件解除 16GiB 上限, 并打印
+         mem_get_info 真实 free + torch allocated 供日志核对。
+
+    此前三处入口各写一套且版本不一(二采有 staged 释放、一采只有 fraction、
+    TE 编码前两者都缺), 某条管线漏防即 OOM。统一后新增管线直接调本函数。
+    """
+    try:
+        _release_dynamic_vram(tag)
+    except Exception as _e_g:
+        print(f"[H3 Extender] v14.426 staged 池释放失败[{tag}](忽略): {_e_g}")
+    try:
+        import comfy.model_management as _cmm_g
+        _rel_aimdo = 0
+        for _k_aimdo in list(getattr(_cmm_g, "STREAM_AIMDO_CAST_BUFFERS", {}) or {}):
+            try:
+                _cmm_g.STREAM_AIMDO_CAST_BUFFERS.pop(_k_aimdo)
+                _rel_aimdo += 1
+            except Exception:
+                pass
+        if _rel_aimdo:
+            import gc as _gc_g
+            _gc_g.collect()
+            print(f"[H3 Extender] v14.426 释放 aimdo cast buffer x{_rel_aimdo} [{tag}]")
+    except Exception:
+        pass
+    try:
+        import torch as _tg
+        _tg.cuda.set_per_process_memory_fraction(1.0)
+        _f_g, _t_g = _tg.cuda.mem_get_info()
+        print(f"[H3 Extender] v14.426 预检[{tag}]: fraction=1.0 "
+              f"free={_f_g/1024**3:.2f}GB/{_t_g/1024**3:.2f}GB "
+              f"torch_alloc={_tg.cuda.memory_allocated()/1024**3:.2f}GB")
+    except Exception as _e_f:
+        print(f"[H3 Extender] v14.426 fraction/诊断失败[{tag}](忽略): {_e_f}")
+
+
 def _release_text_encoder(clip, tag=""):
     """v14.214 (2026-10-26): 采样前强制释放文本编码器(TE)在 GPU 上的权重。
 
@@ -4251,6 +4295,11 @@ def _make_ref2va_conditioning(
                 pass
         _gc.collect()
         _cmm.soft_empty_cache(force=True)
+        # v14.426: TE 编码前统一预检(staged 池 + aimdo buffer 释放, fraction=1.0,
+        # 真实 free 诊断)。实测(2026-11-19 clip[1]): fraction 已为 1.0 但一采流式
+        # 采样后 staged 池/prefetch 队列不随 ComfyUI unload 释放, 物理 free 被占 ~7GB,
+        # TE 14.96GB 全量驻留后 843MiB 激活即 OOM(free according to CUDA=0)。
+        _vram_preflight_guard("te-cond")
     except Exception:
         pass
     # v1.24: TE 计算临时切 bf16——ComfyUI sd1_clip forward 把 dtype hardcode 为 float32，
@@ -7176,11 +7225,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print("[H3 Extender] 已禁用异步 offload (NUM_STREAMS=0, 同步搬运防量化权重竞态闪退)", flush=True)
         except Exception:
             pass
-        # v1.81: 一采前也释放 DynamicVRAM staged, 保证一采起始显存充足 (4090 保险)。
-        try:
-            _release_dynamic_vram("pass1")
-        except Exception:
-            pass
+        # v1.81/v14.426: 一采前统一预检(staged 池 + aimdo buffer 释放, fraction=1.0,
+        # 真实 free 诊断), 保证一采起始显存充足 (4090 保险)。
+        _vram_preflight_guard("pass1")
         _t1.cuda.empty_cache()
         try: _t1.cuda.ipc_collect()
         except Exception: pass
@@ -7195,15 +7242,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
         except Exception: pass
         _cm_u, _cm_t = _commit_gb()
         print(f"[H3 Extender] 一采前显存: OS free={_free_os:.2f}GB / {_tot_os:.1f}GB (allocated={_t1.cuda.memory_allocated()/1024**3:.2f}GB), commit={_cm_u:.1f}/{_cm_t:.1f}GB, reserve->4.0GB")
-        # v1.91: 一采前同样解除 16GB fraction 限制(与二采一致), 避免
-        # staged 15.25GB + workspace 临界超限. 全链路可用物理 23.86GB.
-        try:
-            _cur_frac91b = _t1.cuda.get_per_process_memory_fraction()
-            if _cur_frac91b < 1.0:
-                _t1.cuda.set_per_process_memory_fraction(1.0)
-                print(f"[H3 Extender] v1.91 一采前解除 fraction 限制: {_cur_frac91b:.3f} -> 1.0")
-        except Exception as _e91b:
-            print(f"[H3 Extender] v1.91 一采前 fraction reset 失败: {_e91b}")
+        # v1.91/v14.426: fraction=1.0 已由 _vram_preflight_guard("pass1") 无条件重置,
+        # 此处不再重复; 解除 16GB fraction 限制, 全链路可用物理 23.86GB。
         # v14.186: 显存预算自检 —— 权重装不下时明确告警，避免用户白跑一整轮
         # (实测 19.5GB DiT 在 24GB 卡上不走驻留 → 每步 800s+，而驻留时 100-200s)。
         def _h3_warn_stream_fallback(_total_gb, _free_gb):
@@ -7758,12 +7798,10 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             except Exception as _ve:
                 print(f"[H3 Extender] Refine 二采前显存清理失败(可忽略): {_ve}")
 
-            # v1.81: 二采前强制释放 DynamicVRAM staged 池 (4090 CUDA abort 修复),
-            # 必须在显存预算检查之前, 让预算看到释放后的真实可用显存。
-            try:
-                _release_dynamic_vram("refine")
-            except Exception as _rv81:
-                print(f"[H3 Extender] v1.81 二采前显存释放异常(可忽略): {_rv81}")
+            # v1.81/v14.426: 二采前统一预检(staged 池 + aimdo buffer 释放,
+            # fraction=1.0, 真实 free 诊断), 必须在显存预算检查之前, 让预算看到
+            # 释放后的真实可用显存。
+            _vram_preflight_guard("refine")
 
             # v14.427 释放后复核: 页出后 device_free 与各模型 loaded 应明显回落。
             try:
@@ -9395,12 +9433,9 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                     print(f"[H3 Extender] v1.93 释放 aimdo cast buffer 失败: {_e93}")
                 try:
                     import torch as _t91
-                    _cur_frac91 = _t91.cuda.get_per_process_memory_fraction()
+                    # v14.425: 无条件 set 1.0 (get 被 VRAM-Unlock 恒返回 1.0, 判断失效)
                     _t91.cuda.set_per_process_memory_fraction(1.0)
-                    if _cur_frac91 < 1.0:
-                        print(f"[H3 Extender] v1.91 解除 fraction 限制: {_cur_frac91:.3f} -> 1.0 (二采可用 23.86GB)")
-                    else:
-                        print(f"[H3 Extender] v1.91 fraction 已是 1.0, 无需解除")
+                    print("[H3 Extender] v1.91/v14.425 二采前 fraction 无条件重置为 1.0 (二采可用 23.86GB)")
                 except Exception as _e91:
                     print(f"[H3 Extender] v1.91 fraction reset 失败: {_e91}")
                 # v14.251 (2026-10-29): 二采首步预热 —— 第 1 大步的"初始化税"
@@ -13724,6 +13759,27 @@ class BSAIH3FilmFactory:
             {"default": "Follow render_pipeline (default)",
              "tooltip": "v14.408: 2nd-pass pipeline. Follow = obey the render_pipeline tier (default, zero change). Off = single-pass output from the 1st pass only. Standard/Turbo/SelfLift/Tiled override the refine pass; the low-noise sigma slice is cut from the same curve family the 1st pass uses, so 1st+2nd stay continuous. v2.0 SelfLift = ported progressive_sample low-res leg + consistency-lift endpoint (reference flow #679), euler 2+2."},
         )
+        # v14.422: 渲染管线总开关(默认关)。追加在 optional 最末尾, 不挤占/不移位
+        # 任何既有 widget index, 旧工作流缺该键 -> ComfyUI 填默认 False, 零错位。
+        # OFF = render_pipeline 全部配方档 + 旧速度档遗留配方值一律不生效, 只走
+        # 参数区一采/二采手动链路; ON = 解锁 Pipeline 快捷按钮与全部一键配方档。
+        optional["render_pipeline_enable"] = (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": "v14.422 Render pipeline master switch (default OFF). OFF = every render_pipeline recipe tier and legacy speed-preset recipe value is disabled; only the manual 1st-pass / 2nd-pass parameter rows of this node drive the render (the 1st/2nd-pass pipeline dropdowns in the parameter area still apply). ON = unlocks the Pipeline quick button and all one-click recipe tiers (Live Commerce / Video Recast / Viggle Remake).",
+            },
+        )
+        # v14.423: 手动展开开关(默认关)。与 PIPE 总开关独立: 展开 ON = 展开即覆盖
+        # 配方, 后端旁路整条配方链, 面板内全部手动 widget 值生效; 后端旁路条件 =
+        # PIPE OFF 或 展开 ON。同样追加在 optional 最末尾, 零位移。
+        optional["manual_override_enable"] = (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": "v14.423 Manual override expand (default OFF). ON = expand the full manual parameter panel and the recipe chain is bypassed (expanded manual values win over the selected tier); independent of the PIPE master switch. Backend bypass = PIPE OFF OR expand ON. LoRA mounting, model loader, CFG/guidance, VSA/SegAttention and in-tier hardcoded rules live outside this node and are not covered.",
+            },
+        )
         # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
         # 让旧版工作流(71 项)载入时尾部错位/NaN。改为"档位化"：
         #   下拉「Viggle Remake 视频改写 (6步 换人/增删改)」     = 纯 Viggle 出片，不换脸(默认)
@@ -14141,6 +14197,14 @@ class BSAIH3FilmFactory:
         _prog_transition = 0
         # v14.402: Rhythm Music 卡点注入标志, 每轮复位(仅该档置 True)。
         _rhythm_cue_on = False
+        # v14.422: 渲染管线总开关(默认关)。OFF 时下方三处 _rp_mode/_render_pipeline/
+        # _ls_mode 归一为空, render_pipeline 配方链 / Omni 单采 / 直播带货 / 视频替换 /
+        # Remix / Viggle 全部不命中, 只走参数区一采/二采手动链路; ON 时恢复原样。
+        _pipeline_master_on = bool(kwargs.get("render_pipeline_enable", False))
+        # v14.423: 手动展开开关(默认关)。展开 ON = 展开即覆盖配方, 后端旁路整条链;
+        # 旁路条件 = PIPE OFF 或 展开 ON (两者独立)。
+        _manual_override_on = bool(kwargs.get("manual_override_enable", False))
+        _recipe_bypass = (not _pipeline_master_on) or _manual_override_on
         # v1.21: keys are pure English now, direct kwargs.get()
         run_mode = kwargs.get("run_mode")
         width = kwargs.get("width")
@@ -14227,6 +14291,9 @@ class BSAIH3FilmFactory:
         # 12087-12089 完全一致的归一口径); 12087 处会再赋一次相同的值, 无副作用。
         _rp_mode = str(kwargs.get("render_pipeline", "") or "")
         _rp_mode = _RENDER_PIPELINE_EN2ZH.get(_rp_mode, _rp_mode)
+        # v14.422/423: 旁路(PIPE OFF 或展开 ON) → 预解析也归一空, 换脸工序(_viggle_faceswap_on)一并不命中。
+        if _recipe_bypass:
+            _rp_mode = ""
         # v14.360: 换脸工序由**档位**决定，不占 widget、不改参数位置、不读环境变量。
         # 选「Viggle Remake + 逐帧换脸」档 → 每段出片后换脸；选普通 Viggle 档 → 绝不换脸。
         _viggle_faceswap_on = (_rp_mode == _VIGGLE_RP_FS_LABEL)
@@ -14344,6 +14411,9 @@ class BSAIH3FilmFactory:
         _render_pipeline = str(kwargs.get("render_pipeline", "Sol-H3 Self-Lift Dual-Pass (default)") or "Sol-H3 Self-Lift Dual-Pass (default)")
         # v14.259: 英文标签归一回旧中文内部值(老工作流中文原值不在表中, 原样透传)
         _render_pipeline = _RENDER_PIPELINE_EN2ZH.get(_render_pipeline, _render_pipeline)
+        # v14.422/423: 旁路(PIPE OFF 或展开 ON) → 归一为空, omni_8step_mode 不命中(跳过二采/强制8步/denoise1.0 全免)。
+        if _recipe_bypass:
+            _render_pipeline = ""
         # v14.211: 「FastH3 Omni × SelfLift 超分」是 Omni 的渐进双采版, 不走单采强制(保留二采)。
         omni_8step_mode = _render_pipeline.startswith("FastH3 Omni") and "SelfLift" not in _render_pipeline
         # v14.437 一镜到底独立: one_shot=on 时 Omni 前置块不接管一采(步数/denoise/refine开关),
@@ -14451,6 +14521,15 @@ class BSAIH3FilmFactory:
         # 分块/audio_context=0）。音频接线差异（三口用/不用）在下方音频接线段
         # 按 _ls_mode 强制处理。旧「直播带货（全自动）」档等价 02，历史不变。
         _ls_mode = _livestream_voice_mode_of(_rp_mode)
+        # v14.422/423: 旁路(PIPE OFF 或展开 ON) → 主档归一为空, 配方链 if _rp_mode: 整体跳过;
+        # _ls_mode 置 None(直播带货音频接线强制/步数补偿不生效), 别名回写不复活。
+        if _recipe_bypass:
+            _rp_mode = ""
+            _ls_mode = None
+            _bypass_why = ("渲染管线总开关=关" if not _pipeline_master_on
+                            else "手动展开=开(展开即覆盖配方)")
+            print(f"[H3 Extender] v14.423 配方旁路({_bypass_why}): render_pipeline 全部配方档不生效, "
+                  "按参数区手动参数渲染", flush=True)
         # v14.437 一镜到底独立: one_shot=on 时不把直播配音别名到直播带货全自动档,
         # 该档采样配方不接管一镜到底。
         if _ls_mode and not one_shot_enabled:
@@ -16466,6 +16545,16 @@ class BSAIH3FilmFactory:
         # 使下方整条速度档 if/elif 链不命中, 步数/二采/分块/denoise/shift/采样器由
         # 一镜到底内置固定配方块独占决定。
         if one_shot_enabled:
+            speed_preset = "custom"
+        # v14.422/423: 旁路(PIPE OFF 或展开 ON)时, 速度档里遗留的渲染管道配方值
+        # (FastH3-Trim / FastH3-4步VSA / Turbo-v4 / DMAD-4步 / 武戏组合拳 /
+        # Omni 8步单采 / QAD-v2-8步)同样不生效, 回退 custom 走参数区手动链路;
+        # 基础速度档(极速/均衡/精细/VDN×3)是手动提速档, 不受影响。
+        if _recipe_bypass and speed_preset in (
+                "FastH3-Trim", "FastH3-4步VSA", "Turbo-v4", "DMAD-4步",
+                "武戏组合拳", "FastH3 Omni 8步单采", "QAD-v2-8步"):
+            print(f"[H3 Extender] v14.423 配方旁路: 速度档遗留配方值 "
+                  f"{speed_preset!r} 已忽略, 回退 custom 手动链路", flush=True)
             speed_preset = "custom"
         if speed_preset == "极速":
             # v1.85: 二采 2->3 步 + denoise 0.55->0.5. 写实动态(打斗)场景 2 步二采
@@ -19295,6 +19384,16 @@ class BSAIH3FilmFactory:
                 active_picture_slots,
                 semantic_bridge_pack=sb_pack,
             )
+
+            # v14.424: 条件编码完成即释放 TE。nvfp4_awq 权重仍按 14.96GB 全量驻留,
+            # v14.214 的释放点只在采样前, 长链里前一段编码完 TE 不释放、跨段常驻,
+            # 下一段 ref2va 编码时 free 不足 → OOM(实测 clip[2] 编码阶段 allocated
+            # 16.74GB, 差 843MB)。本段 positive 已算出, TE 不再需要; 下一段编码时
+            # ComfyUI 自动重载 TE(~6s)。
+            try:
+                _release_text_encoder(clip, tag=f"clip{i + 1} cond")
+            except Exception as _te_cond_err:
+                print(f"[H3 Extender] v14.424 条件后释放 TE 异常(忽略, 不影响本段): {_te_cond_err}")
 
             # v14.335 视频人物替换: 把本段源画面 + 源原声编码进 AV latent（半重绘初始化）
             if _recast_seg is not None:

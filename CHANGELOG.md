@@ -4,6 +4,26 @@ All notable changes, bilingual. 所有重要版本双语说明。
 
 > 版本号说明：本批改动的原始编号为 v14.394；因另一批 v14.396~v14.399 已先行推送，rebase 后顺延为 v14.400。代码内日志前缀仍为 v14.394（标记该改动批次），BUILD 为 v14.400。
 
+### v14.438 (2026-11-19) 里程碑 — PIPE 总开关 + MANUAL 手动展开 + OOM 统一预检守卫 / Milestone: PIPE master switch + MANUAL expand + unified VRAM preflight guard
+
+**本里程碑合并两条开发线**：v14.422~v14.426（G 盘工作线：PIPE 开关 / MANUAL 展开 / OOM 根治）与 v14.435~v14.437（C 盘工作线：delegate 驻留门控 / 单采直出高噪腿兜底 / 一镜到底隔离）。
+
+**v14.422 PIPE 渲染管线总开关（`render_pipeline_enable`，默认 OFF）**
+- OFF = 全部 render_pipeline 配方档与速度档遗留配方值失效，仅节点参数区的手动一采/二采链路渲染（参数区内的一采/二采管线双下拉仍生效）；ON = 解锁 Pipeline 快捷按钮与全部一键配方档。
+- 后端旁路：`_recipe_bypass = (not render_pipeline_enable) or manual_override_enable`，覆盖主档分派、Omni 前置块、直播别名、速度档遗留值四处入口。
+- 前端快捷条新增总开关按钮，OFF 时联动禁用配方按钮。
+
+**v14.423 MANUAL 手动展开（`manual_override_enable`，默认 OFF）**
+- 与 PIPE 开关独立：ON = 展开全部一采/二采及非采参数（LoRA、分块、音频上下文等）可手动修改，展开即覆盖配方；PIPE OFF 或展开 ON 任一成立即旁路配方链。
+- 前端「一采区 / 二采区 / 加速缓存 / 上下文音频 / 超分 / 输出」分区 chips 显隐；修复 insertBefore 时序与 chips 点击无反应（走 applyHiddenParamRows 通道）。
+
+**v14.424~v14.426 OOM 根治（24GB 卡 TE 编码/一采/二采三轮实测）**
+- v14.424：条件编码完成即释放 TE，防长链 TE 跨段常驻 14.96GB。
+- v14.425：TE 编码前 / 一采前 / 二采前**无条件** `set_per_process_memory_fraction(1.0)`（VRAM-Unlock 把 get_per_process_memory_fraction 恒返回 1.0，旧 `if <1.0` 判断是死代码）。
+- v14.426：抽取统一守卫 `_vram_preflight_guard(tag)`（`_release_dynamic_vram` 释放 prefetch/malloc graph/staged 池 + 清 STREAM_AIMDO_CAST_BUFFERS + fraction=1.0 + mem_get_info 真实 free 诊断），TE 编码前 / 一采前 / 二采前三入口共用；二采全帧/分块/预热/fallback、一采两条 sample、NPU 外部替换链路、独立超分节点普查无漏防。
+
+**自检**：py_compile OK / quickbar 枚举 SYNC OK / 前端 GUARD OK / JS --check OK；check_pipeline_recipes 3 项为历史基线 FAIL，与本批无关。
+
 ### v14.437 (2026-11-19) — 一镜到底管线完全独立，外部 render/speed/first/second/omni 全屏蔽 / One-shot pipeline fully isolated; external render/speed/first/second/omni overrides suppressed
 
 **问题**：`one_shot_mode=on`（一镜到底）时，渲染管道 render_pipeline 分派、速度预设 speed_preset 基础档、一采/二采双下拉（first_pass/second_pass）、FastH3 Omni 前置块仍会接管一镜到底的步数/二采/调度/shift/分辨率接管/音频/分块/显存，一镜到底与其他渲染管线混在一起、参数被改写。
