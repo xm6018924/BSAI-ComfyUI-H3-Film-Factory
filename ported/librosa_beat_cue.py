@@ -46,7 +46,7 @@ def _durations_from_prompt(raw):
     if not markers:
         m = _REC_DUR_RE.search(text)
         if not m:
-            raise ValueError("分镜文本里找不到 [Recommended duration]，无法跟随提示词时长。")
+            raise ValueError("no [Recommended duration] found in the storyboard text; cannot follow the prompt duration.")
         return [float(m.group(1))]
     durs = []
     for i, mk in enumerate(markers):
@@ -54,13 +54,13 @@ def _durations_from_prompt(raw):
         seg = text[mk.end():seg_end]
         m = _REC_DUR_RE.search(seg)
         if not m:
-            raise ValueError(f"第 {i + 1} 段找不到 [Recommended duration]，无法跟随提示词时长。")
+            raise ValueError(f"segment {i + 1} has no [Recommended duration]; cannot follow the prompt duration.")
         durs.append(float(m.group(1)))
     return durs
 
 
 def _out_of_range(clip_index, n_clips, tempo):
-    msg = f"clip_index={clip_index} 超出当前 {n_clips} 段，已跳过节拍分析。"
+    msg = f"clip_index={clip_index} exceeds the current {n_clips} segment(s); skipped beat analysis."
     cue = f"{CUE_GUARD}, tempo {tempo:.2f} BPM; clip index out of range, no beat cue added."
     return (float(tempo), cue, "", "", 0, msg)
 
@@ -231,10 +231,10 @@ class A_TextInjectCue:
         markers = list(_MARKER_RE.finditer(raw))
         if not markers:
             # graceful: prompt not wired / empty, do not crash the run
-            return (prompt_source, "未检测到分镜段标记（提示词可能没接入），已跳过注入。")
+            return (prompt_source, "no storyboard segment marker detected (prompt may not be connected); skipped injection.")
         if index < 0 or index >= len(markers):
             # graceful: do not crash the run when the loop runs past the available clips
-            return (prompt_source, f"clip_index={clip_index} 超出当前 {len(markers)} 段，已跳过注入。")
+            return (prompt_source, f"clip_index={clip_index} exceeds the current {len(markers)} segment(s); skipped injection.")
 
         seg_start = markers[index].end()
         seg_end = markers[index + 1].start() if index + 1 < len(markers) else len(raw)

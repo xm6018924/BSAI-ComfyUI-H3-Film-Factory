@@ -58,10 +58,10 @@ def _load_image_tensor(path):
 
 def _load_video_frames(path):
     if cv2 is None:
-        raise RuntimeError("opencv-python 未安装，无法加载素材库中的参考视频。")
+        raise RuntimeError("opencv-python is not installed; cannot load the reference video from the asset library.")
     capture = cv2.VideoCapture(path)
     if not capture.isOpened():
-        raise RuntimeError(f"无法打开参考视频：{path}")
+        raise RuntimeError(f"cannot open the reference video: {path}")
     frames = []
     while len(frames) < MAX_VIDEO_FRAMES:
         ok, frame = capture.read()
@@ -70,7 +70,7 @@ def _load_video_frames(path):
         frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     capture.release()
     if not frames:
-        raise RuntimeError(f"参考视频没有可读取的帧：{path}")
+        raise RuntimeError(f"reference video has no readable frames: {path}")
     return torch.from_numpy(np.stack(frames, dtype=np.float32) / 255.0)
 
 
@@ -102,7 +102,7 @@ def _picture_library_for_source_ids(asset_library, source_image_refs):
     for source_index, picture_index in sorted(source_image_refs.items(), key=lambda item: item[1]):
         entry = _find_asset(images, int(source_index))
         if entry is None:
-            raise ValueError(f"@图{source_index} 在 BSAI Asset Library 中没有对应图片。")
+            raise ValueError(f"@图{source_index} has no matching image in the BSAI Asset Library.")
         if isinstance(entry, dict):
             mapped = dict(entry)
             path = _asset_path(entry)
@@ -110,7 +110,7 @@ def _picture_library_for_source_ids(asset_library, source_image_refs):
             path = _asset_path(entry)
             mapped = {"path": path}
         if not path:
-            raise ValueError(f"@图{source_index} 对应素材没有有效文件路径。")
+            raise ValueError(f"@图{source_index} has no valid file path in the asset library.")
         mapped["index"] = int(picture_index)
         mapped_images.append(mapped)
     return {
@@ -129,17 +129,17 @@ def _video_source(index, library_videos, external_videos, external_audio):
     if index <= len(library_videos):
         entry = _find_asset(library_videos, index)
         if entry is None:
-            raise ValueError(f"<Video {index}> 在 BSAI Asset Library 中没有对应视频。")
+            raise ValueError(f"<Video {index}> has no matching video in the BSAI Asset Library.")
         path = _asset_path(entry)
         return _load_video_frames(path), path, external_audio[index - 1]
 
     external_index = index - len(library_videos) - 1
     if external_index < 0 or external_index >= MAX_REF_VIDEOS:
-        raise ValueError(f"<Video {index}> 超出当前参考视频输入范围。")
+        raise ValueError(f"<Video {index}> is outside the current reference-video input range.")
     frames = external_videos[external_index]
     if frames is None:
         raise ValueError(
-            f"<Video {index}> 没有素材库文件或已连接的 ref_video_{external_index}。"
+            f"<Video {index}> has no asset-library file and no connected ref_video_{external_index}."
         )
     soundtrack = external_audio[external_index]
     return frames, None, soundtrack
@@ -153,15 +153,15 @@ def _audio_video_sources(subject_definitions, video_number_max):
         video_number = int(video_number)
         if video_number > video_number_max:
             raise ValueError(
-                f"<Audio {audio_number}> 指向 <Video {video_number}>，"
-                "但该视频没有在提示词中定义。"
+                f"<Audio {audio_number}> points to <Video {video_number}>, "
+                "but that video is not defined in the prompt."
             )
         previous = source_map.get(audio_number)
         if previous is not None and previous != video_number:
-            raise ValueError(f"<Audio {audio_number}> 被绑定到多个参考视频。")
+            raise ValueError(f"<Audio {audio_number}> is bound to more than one reference video.")
         previous_audio = video_map.get(video_number)
         if previous_audio is not None and previous_audio != audio_number:
-            raise ValueError(f"<Video {video_number}> 被绑定到多个 <Audio N> 音轨。")
+            raise ValueError(f"<Video {video_number}> is bound to more than one <Audio N> track.")
         source_map[audio_number] = video_number
         video_map[video_number] = audio_number
     return source_map
@@ -179,17 +179,17 @@ def build_official_clip_refs(prompt, asset_library, ext_videos, ext_video_audios
     audio_numbers = _numbers(prompt, "Audio")
 
     if image_numbers and image_numbers[-1] > MAX_REF_IMAGES:
-        raise ValueError(f"MiniMax H3 支持最多 {MAX_REF_IMAGES} 个图片引用。")
+        raise ValueError(f"MiniMax H3 supports at most {MAX_REF_IMAGES} image references.")
     if video_numbers and video_numbers[-1] > MAX_REF_VIDEOS:
-        raise ValueError(f"MiniMax H3 支持最多 {MAX_REF_VIDEOS} 个视频引用。")
+        raise ValueError(f"MiniMax H3 supports at most {MAX_REF_VIDEOS} video references.")
     if audio_numbers and audio_numbers[-1] > MAX_REF_AUDIOS:
-        raise ValueError(f"MiniMax H3 当前节点支持最多 {MAX_REF_AUDIOS} 个音频引用。")
+        raise ValueError(f"this node supports at most {MAX_REF_AUDIOS} audio references for MiniMax H3.")
 
     ref_images = {}
     for number in range(1, (image_numbers[-1] if image_numbers else 0) + 1):
         entry = _find_asset(images_library, number)
         if entry is None:
-            raise ValueError(f"<Picture {number}> 在 BSAI Asset Library 中没有对应图片。")
+            raise ValueError(f"<Picture {number}> has no matching image in the BSAI Asset Library.")
         ref_images[f"ref_image_{number - 1}"] = _load_image_tensor(_asset_path(entry))
 
     videos = {}
@@ -224,8 +224,8 @@ def build_official_clip_refs(prompt, asset_library, ext_videos, ext_video_audios
                 audio = _load_audio(path)
             else:
                 raise ValueError(
-                    f"<Audio {number}> 定义为 <Video {video_number}> 的同步音轨，"
-                    f"请连接 ref_video_audio_{video_number - len(videos_library) - 1}。"
+                    f"<Audio {number}> is defined as the sync track of <Video {video_number}>; "
+                    f"connect ref_video_audio_{video_number - len(videos_library) - 1}."
                 )
             if can_pair_soundtracks:
                 ref_video_audios[f"ref_video_audio_{video_number - 1}"] = audio
@@ -241,8 +241,8 @@ def build_official_clip_refs(prompt, asset_library, ext_videos, ext_video_audios
                     audio = ext_audios[external_index]
                 else:
                     raise ValueError(
-                        f"<Audio {number}> 没有对应音频。请检查 BSAI Asset Library "
-                        "和 ref_audio 输入。"
+                        f"<Audio {number}> has no matching audio. Check the BSAI Asset Library "
+                        "and the ref_audio input."
                     )
             standalone_index += 1
             ref_audios[f"ref_audio_{number - 1}"] = audio
@@ -260,7 +260,7 @@ def _select_prompt(prompt_source, clip_index, video_duration_sec, fallback_frame
     index = int(clip_index)
     if index < 1 or index > len(segments):
         raise OfficialPromptError(
-            f"clip_index={index} 超出范围；提示词共 {len(segments)} 个 prompt 段，请填写 1~{len(segments)}。"
+            f"clip_index={index} is out of range; the prompt has {len(segments)} segment(s), expected 1~{len(segments)}."
         )
     segment = segments[index - 1]
     duration_sec, duration_source = resolve_prompt_segment_duration(
@@ -323,7 +323,7 @@ class A_MiniMaxH3OfficialRefPromptSegment:
         index = int(clip_index)
         if index < 1 or index > len(segments):
             raise OfficialPromptError(
-                f"clip_index={index} 超出范围；提示词共 {len(segments)} 个 prompt 段，请填写 1~{len(segments)}。"
+                f"clip_index={index} is out of range; the prompt has {len(segments)} segment(s), expected 1~{len(segments)}."
             )
         segment = segments[index - 1]
         selected_prompt = segment["prompt"]
@@ -333,8 +333,8 @@ class A_MiniMaxH3OfficialRefPromptSegment:
         frames = seconds_to_frames(duration_sec)
         total = len(segments)
         status = (
-            f"已提取 {segment['marker'] or '单段完整提示词'}（{index}/{total}），完整六章节提示词原样输出；"
-            f"时长 {duration_sec:.3f}s（{duration_source}），适配帧数 {frames}。"
+            f"Extracted {segment['marker'] or 'single full prompt'} ({index}/{total}); the full six-section prompt is passed through; "
+            f"duration {duration_sec:.3f}s ({duration_source}), {frames} frames."
         )
         return (selected_prompt, 0.0, float(duration_sec), int(frames), int(total), status)
 
@@ -461,10 +461,10 @@ class A_MiniMaxH3StoryboardRefVideo:
             ref_audios=ref_audios,
         )
         status = (
-            f"已打包 {segment_marker_text or '单段完整提示词'}（{selected_index}/{segment_count}）；"
-            f"该段视频时长 {duration_sec:.3f}s（{duration_source}）；"
-            f"{len(ref_images)} 张图、{len(ref_videos)} 个视频、"
-            f"{len(ref_audios) + len(ref_video_audios)} 个音频引用（含 {len(ref_video_audios)} 个视频配对音轨）。"
+            f"Packed {segment_marker_text or 'single full prompt'} ({selected_index}/{segment_count}); "
+            f"this segment is {duration_sec:.3f}s ({duration_source}); "
+            f"{len(ref_images)} image(s), {len(ref_videos)} video(s), "
+            f"{len(ref_audios) + len(ref_video_audios)} audio reference(s) (including {len(ref_video_audios)} paired video audio track(s))."
         )
         return (output[0], output[1], float(duration_sec), selected_prompt, status)
 

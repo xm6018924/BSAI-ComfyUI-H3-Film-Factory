@@ -66,13 +66,46 @@ _LEGACY_KEY_ALIASES = {
     "衔接余量": "transition_margin",
 }
 
+# Legacy enum VALUES (Chinese) -> English option values. Only values that were
+# once persisted in saved graphs are listed; unknown values fall through and are
+# caught by the nodes' VALIDATE_INPUTS.
+_LEGACY_VALUE_ALIASES = {
+    "transition_mode": {
+        "视频图像": "video_image",
+        "潜空间": "latent",
+        "解码模式": "decode",
+    },
+    "mode": {
+        "上传": "upload",
+        "端口": "port",
+        "自动索引": "auto_index",
+    },
+}
+
+
+def _map_enum_value(key, value):
+    """Translate a persisted legacy enum value to its English option value."""
+    table = _LEGACY_VALUE_ALIASES.get(key, {})
+    if isinstance(value, str) and value in table:
+        return table[value]
+    return value
+
 
 def _normalize_inputs(kwargs):
-    """Map legacy Chinese input keys onto the English internal names (first wins)."""
+    """Map legacy Chinese input keys onto the English internal names (first wins).
+
+    Enum VALUES are also normalized: graphs saved while the dropdowns were
+    still Chinese carry `视频图像` / `潜空间` / `解码模式` / `上传` / `端口` /
+    `自动索引`, which are translated to the English option values here.
+    """
     out = dict(kwargs)
     for legacy, canonical in _LEGACY_KEY_ALIASES.items():
         if legacy in out and canonical not in out:
             out[canonical] = out[legacy]
+    for key, table in _LEGACY_VALUE_ALIASES.items():
+        value = out.get(key)
+        if isinstance(value, str) and value in table:
+            out[key] = table[value]
     return out
 
 # 可干净裁剪的整组窗口长度：一个 VRF 组 = 5 个潜空间步 = 17 个像素帧；
@@ -1191,8 +1224,10 @@ def _save_av_latent(latent, storage_dir, clip_index):
     video, audio = _split_av_streams(latent)
     video = video.cpu().contiguous()
     audio = audio.cpu().contiguous()
-    # 文件前缀固定为 latent，用户只能设置存储目录
-    full_prefix = os.path.join(storage_dir, "latent")
+    # 文件前缀固定为 latent，用户只能设置存储目录（已校验在 output 内）
+    loc = _resolve_storage_dir(storage_dir)
+    rel_loc = os.path.relpath(loc, os.path.realpath(folder_paths.get_output_directory()))
+    full_prefix = os.path.join(rel_loc, "latent")
     folder, filename, _, _, _ = folder_paths.get_save_image_path(
         full_prefix, folder_paths.get_output_directory())
     os.makedirs(folder, exist_ok=True)
@@ -1237,10 +1272,7 @@ def _build_latent_load_path(storage_dir):
 
     用户只设置目录名（如 H3-Mubu），文件前缀 latent 内部固定、不可改。
     """
-    loc = (storage_dir or "").strip().strip('"').strip("'")
-    if not loc:
-        loc = "H3-Mubu"
-    return os.path.join(loc, "latent")
+    return os.path.join(_resolve_storage_dir(storage_dir), "latent")
 
 
 def _resolve_latent_path(path, clip_index=1):
@@ -1350,8 +1382,8 @@ class H3ContextInjectPro:
                     "tooltip": "This clip's H3 AV latent (sampler or empty latent "
                                "node output). Only its shape is read (duration / "
                                "resolution / audio track length); content is not modified."}),
-                "transition_mode": (["视频图像", "潜空间"], {
-                    "default": "视频图像",
+                "transition_mode": (["video_image", "latent"], {
+                    "default": "video_image",
                     "tooltip": "Transition data path, two options. video_image — "
                                "decode the previous clip's tail media (.mp4), encode "
                                "it through the video VAE as the opening keyframe "
@@ -1361,8 +1393,8 @@ class H3ContextInjectPro:
                                "(.safetensors), skipping decode/re-encode with no "
                                "quality loss, but both clips must share resolution and "
                                "the window must be a whole VRF group (multiple of 17)."}),
-                "mode": (["上传", "端口", "自动索引"], {
-                    "default": "自动索引",
+                "mode": (["upload", "port", "auto_index"], {
+                    "default": "auto_index",
                     "tooltip": "Context source, three options. upload — only use the "
                                "manually uploaded media file. port — only use the "
                                "context image / context audio (video_image mode) or "
@@ -1525,25 +1557,25 @@ class H3ContextInjectPro:
                   "（条件化残留与本次潜空间 %dx%d 不一致）" % (dropped_kf, dropped_ref, tw, th), flush=True)
         return cleaned, dropped_kf, dropped_ref
 
-    def apply(self, conditioning, latent, enable_context=True, mode="自动索引",
+    def apply(self, conditioning, latent, enable_context=True, mode="auto_index",
               storage_dir="H3-Mubu", clip_index=1, context_length="5",
-              audio_context_length="5", transition_mode="视频图像", VAE=None,
+              audio_context_length="5", transition_mode="video_image", VAE=None,
               audio_vae=None, original_audio=None, **kwargs):
         kwargs = _normalize_inputs(kwargs)
         conditioning = kwargs.get("conditioning", conditioning)
         latent = kwargs.get("latent", latent)
         enable_context = kwargs.get("enable_context", enable_context)
-        mode = kwargs.get("mode", mode)
+        mode = _map_enum_value("mode", kwargs.get("mode", mode))
         storage_dir = kwargs.get("storage_dir", storage_dir)
         clip_index = kwargs.get("clip_index", clip_index)
         context_length = kwargs.get("context_length", context_length)
         audio_context_length = kwargs.get("audio_context_length", audio_context_length)
-        transition_mode = kwargs.get("transition_mode", transition_mode)
+        transition_mode = _map_enum_value("transition_mode", kwargs.get("transition_mode", transition_mode))
         original_audio = kwargs.get("original_audio", original_audio)
         manual_upload = kwargs.get("manual_upload", "")
         context_image = kwargs.get("context_image", None)
         context_audio = kwargs.get("context_audio", None)
-        if transition_mode == "潜空间":
+        if transition_mode == "latent":
             raise ValueError("V2 节点仅支持「视频图像」衔接模式")
         # 注入前先剔除网格不匹配的关键帧/引用块，避免模型打包行数错位
         conditioning, _, _ = self._guard_cond_geometry(conditioning, latent)
@@ -1557,9 +1589,9 @@ class H3ContextInjectPro:
         out_audio = original_audio
         if not enable_context:
             return {"result": (conditioning, "0:%d" % idle_tail, out_audio, int(context_length), latent), "ui": {
-                "h3_hint": "上下文已关闭，直通"}}
+                "h3_hint": "context disabled, pass-through"}}
         # 上下文来源由「模式」决定：上传（只用上传文件）/ 端口（只用连线）/ 自动索引
-        if mode == "上传":
+        if mode == "upload":
             if not (manual_upload or "").strip():
                 raise ValueError(
                     "h3_motion_context: 「上传」模式下需先通过「上传上下文」"
@@ -1567,7 +1599,7 @@ class H3ContextInjectPro:
             media = _load_media_file(_resolve_manual_media_path(manual_upload),
                                      clip_index=None)
             hint = "已上传上下文文件"
-        elif mode == "端口":
+        elif mode == "port":
             if context_image is None:
                 raise ValueError(
                     "h3_motion_context: 「端口」模式下「上下文图像」"
@@ -1587,10 +1619,10 @@ class H3ContextInjectPro:
                 if reason == "file_not_found":
                     detail = media.get(CONTEXT_EMPTY_REASON_DETAIL, "?")
                     return {"result": (conditioning, "0:%d" % idle_tail, out_audio, int(context_length), latent), "ui": {
-                        "h3_hint": "未找到片段 %s 文件" % detail}}
+                        "h3_hint": "clip %s file not found" % detail}}
                 return {"result": (conditioning, "0:%d" % idle_tail, out_audio, int(context_length), latent), "ui": {
-                    "h3_hint": "片段\"0\"，直通"}}
-            hint = "已关联片段 %s 文件" % media.get(
+                    "h3_hint": "clip 0, pass-through"}}
+            hint = "linked clip %s file" % media.get(
                 CONTEXT_CLIP_INDEX_KEY, "?")
 
         # 仅读取本片段形状：按通道数识别视频流，兼容 NestedTensor 与普通元组；
@@ -1667,7 +1699,7 @@ class H3ContextInjectPro:
                     "h3_motion_context: 「音频上下文长度」大于 0，但当前"
                     "上下文%s无音频可用。「端口」模式需连接「上下文音频」，"
                     "或把「音频上下文长度」设为 0。"
-                    % ("" if mode == "端口" else "文件"))
+                    % ("" if mode == "port" else "文件"))
             if audio_vae is None:
                 raise ValueError(
                     "h3_motion_context: 「音频上下文长度」大于 0 时需连接 "
@@ -1705,13 +1737,24 @@ class H3ContextInjectPro:
         out = node_helpers.conditioning_set_values(
             conditioning, {"minimax_keyframes": keyframes})
         if a > 0:
-            hint += "（含音频）"
+            hint += " (with audio)"
         # 「往后加」核心：扩展潜空间，总长度 = 上下文帧 + 原内容，
         # 后置裁剪掉上下文后，原内容时长保持不变（不会变短）
         extended_latent = _extend_latent_with_context(latent, cut)
-        hint += "，潜空间已扩展%d帧" % cut
+        hint += ", latent extended by %d frames" % cut
         return {"result": (out, "1:%d" % cut, out_audio, int(context_length), extended_latent), "ui": {
             "h3_hint": hint}}
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, transition_mode="video_image", mode="auto_index", **kwargs):
+        # Legacy Chinese VALUES are accepted here so graphs saved before the
+        # dropdowns were translated still validate; they are normalized in
+        # `apply()` via `_normalize_inputs`.
+        if transition_mode not in ("video_image", "latent", "视频图像", "潜空间"):
+            return "transition_mode must be video_image or latent (got %r)" % (transition_mode,)
+        if mode not in ("upload", "port", "auto_index", "上传", "端口", "自动索引"):
+            return "mode must be upload, port or auto_index (got %r)" % (mode,)
+        return True
 
     def _apply_latent(self, conditioning, latent, enable_context, mode, storage_dir,
                       clip_index, context_length, audio_context_length, transition_margin,
@@ -1724,15 +1767,15 @@ class H3ContextInjectPro:
         if not enable_context:
             # 直通：尾段保存长度固定一个整组（17 帧）
             return {"result": (conditioning, "0:17", out_audio, int(context_length)), "ui": {
-                "h3_hint": "上下文已关闭，直通"}}
+                "h3_hint": "context disabled, pass-through"}}
         # 上下文来源由「模式」决定：上传（只用上传文件）/ 端口（只用连线）/ 自动索引
-        if mode == "上传":
+        if mode == "upload":
             if not (manual_upload or "").strip():
                 raise ValueError(
                     "h3_motion_context: 「上传」模式下需先通过「上传上下文」"
                     "按钮上传 .safetensors 潜空间文件，或填写「手动上传」路径。")
             context_latent = _load_context_latent(storage_dir, clip_index, manual_upload)
-        elif mode == "端口":
+        elif mode == "port":
             if context_latent is None:
                 raise ValueError(
                     "h3_motion_context: 「端口」模式下「上下文潜空间」"
@@ -1747,9 +1790,9 @@ class H3ContextInjectPro:
             if reason == "file_not_found":
                 detail = context_latent.get(CONTEXT_EMPTY_REASON_DETAIL, "?")
                 return {"result": (conditioning, "0:17", out_audio, int(context_length)), "ui": {
-                    "h3_hint": "未找到片段 %s 文件" % detail}}
+                    "h3_hint": "clip %s file not found" % detail}}
             return {"result": (conditioning, "0:17", out_audio, int(context_length)), "ui": {
-                "h3_hint": "片段\"0\"，直通"}}
+                "h3_hint": "clip 0, pass-through"}}
 
         video = _video_from_latent(latent)
         latent_t = int(video.shape[2])
@@ -1764,7 +1807,7 @@ class H3ContextInjectPro:
             # 分辨率不一致时无法在同一 latent 网格上拼接前段画面/声音，
             # 跳过上下文，本次作为独立片段直通（效果等同重启链条）
             return {"result": (conditioning, "0:17", out_audio, int(context_length)), "ui": {
-                "h3_hint": "分辨率不一致，已跳过"}}
+                "h3_hint": "resolution mismatch, skipped"}}
         _ensure_layout_patch()
         if int(src_video.shape[1]) != int(video.shape[1]):
             raise ValueError(
@@ -1856,25 +1899,25 @@ class H3ContextInjectPro:
         trim_str = ("1:%d" % trim) if trim > 0 else "0:17"
         clip_idx = (context_latent.get(CONTEXT_CLIP_INDEX_KEY)
                     if isinstance(context_latent, dict) else None)
-        hint = (("已关联片段 %s 文件" % clip_idx) if clip_idx is not None
+        hint = (("linked clip %s file" % clip_idx) if clip_idx is not None
                 else "已关联上下文")
         if audio_silent:
-            hint += "，音频上下文=静音"
+            hint += ", audio context = silence"
         return {"result": (out, trim_str, out_audio, int(context_length)), "ui": {"h3_hint": hint}}
 
     @classmethod
-    def IS_CHANGED(cls, mode="自动索引", storage_dir="H3-Mubu", clip_index=1,
-                   manual_upload="", transition_mode="视频图像", **kwargs):
+    def IS_CHANGED(cls, mode="auto_index", storage_dir="H3-Mubu", clip_index=1,
+                   manual_upload="", transition_mode="video_image", **kwargs):
         # IS_CHANGED 只能拿 widget 值、无法感知端口连线：端口模式返回 0、按输入数据
         # 变化正常重跑；上传/自动索引模式按本地文件指纹判定（潜空间模式扫
         # latent_*.safetensors，视频图像模式扫 clip_*.mp4）。**kwargs 兼容其余端口值。
         kwargs = _normalize_inputs(kwargs)
-        mode = kwargs.get("mode", mode)
+        mode = _map_enum_value("mode", kwargs.get("mode", mode))
         storage_dir = kwargs.get("storage_dir", storage_dir)
         clip_index = kwargs.get("clip_index", clip_index)
         manual_upload = kwargs.get("manual_upload", manual_upload)
-        transition_mode = kwargs.get("transition_mode", transition_mode)
-        if mode == "端口":
+        transition_mode = _map_enum_value("transition_mode", kwargs.get("transition_mode", transition_mode))
+        if mode == "port":
             return 0
         return _context_latent_fingerprint(storage_dir, clip_index, manual_upload,
                                            latent_mode=(transition_mode == "潜空间"))
@@ -1904,8 +1947,8 @@ class H3ContextTrimPro:
                                "mode; cropped directly on the latent in latent mode."}),
                 # transition_mode is placed as the first widget, matching the context
                 # node's same-named parameter position.
-                "transition_mode": (["视频图像", "解码模式", "潜空间"], {
-                    "default": "视频图像",
+                "transition_mode": (["video_image", "decode", "latent"], {
+                    "default": "video_image",
                     "tooltip": "Processing path, three options. video_image — decode "
                                "to image+audio then crop, output IMAGE+AUDIO, save the "
                                "tail as .mp4; resolution may differ from the next clip. "
@@ -1993,8 +2036,17 @@ class H3ContextTrimPro:
                    "crops directly by whole VRF group, outputting latent; decode_only mode "
                    "decodes without cropping, outputting the whole image/audio.")
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, transition_mode="video_image", **kwargs):
+        # Legacy Chinese VALUES stay valid for graphs saved before the translation.
+        if transition_mode not in ("video_image", "decode", "latent",
+                                   "视频图像", "解码模式", "潜空间"):
+            return ("transition_mode must be video_image, decode or latent (got %r)"
+                    % (transition_mode,))
+        return True
+
     def trim(self, latent, trim_frames=None, clip_index=1, save_local=True,
-             storage_dir="H3-Mubu", transition_mode="视频图像", VAE=None, audio_vae=None,
+             storage_dir="H3-Mubu", transition_mode="video_image", VAE=None, audio_vae=None,
              original_audio=None, **kwargs):
         kwargs = _normalize_inputs(kwargs)
         latent = kwargs.get("latent", latent)
@@ -2002,9 +2054,9 @@ class H3ContextTrimPro:
         clip_index = kwargs.get("clip_index", clip_index)
         save_local = kwargs.get("save_local", save_local)
         storage_dir = kwargs.get("storage_dir", storage_dir)
-        transition_mode = kwargs.get("transition_mode", transition_mode)
+        transition_mode = _map_enum_value("transition_mode", kwargs.get("transition_mode", transition_mode))
         original_audio = kwargs.get("original_audio", original_audio)
-        if transition_mode == "潜空间":
+        if transition_mode == "latent":
             return (self._trim_latent(latent, trim_frames, clip_index,
                                       save_local, storage_dir, original_audio),)
         if VAE is None:
@@ -2020,7 +2072,7 @@ class H3ContextTrimPro:
         # 「解码模式」：只走「视频图像」的解码段，不裁头、不存盘。前端在此模式已移除
         # 「裁剪帧数」输入端口并隐藏「片段序号」「保存到本地」「存储位置」，故这里
         # 不读这些参数，原样输出整段图像+音频。
-        if transition_mode == "解码模式":
+        if transition_mode == "decode":
             return self._decode_only(latent, VAE, audio_vae, original_audio)
         # 解析裁剪帧数字符串"状态:长度"："1:22"→裁头22帧且尾段存22帧；"0:22"→不裁头、
         # 尾段仍存22帧供衔接；兼容纯数字手填输入（按启用语义：n=tail=该值）。
@@ -2207,8 +2259,8 @@ def _save_av_media(pixels, waveform, sample_rate, storage_dir, clip_index):
     if waveform is not None and waveform.ndim == 2:
         waveform = waveform[None]
     has_audio = waveform is not None and int(waveform.shape[-1]) > 0
-    loc = (storage_dir or "").strip().strip('"').strip("'") or "H3-Mubu"
-    clip_dir = os.path.join(folder_paths.get_output_directory(), loc)
+    loc = _resolve_storage_dir(storage_dir)
+    clip_dir = loc
     os.makedirs(clip_dir, exist_ok=True)
     path = os.path.join(clip_dir, "%s_%05d%s" % (CLIP_FILE_PREFIX,
                                                  int(clip_index),
@@ -2281,12 +2333,52 @@ def _save_av_media(pixels, waveform, sample_rate, storage_dir, clip_index):
 # 存储位置/文件名解析（约定：存储位置目录下 clip_%05d.mp4）
 # ============================================================================
 
+def _unsafe_path_text(text):
+    """Return an error string when raw widget text must be refused as-is.
+
+    Text-only: runs before any join/isdir/listdir/open. A `\\\\host\\share`
+    path on Windows authenticates to that host with the current user's
+    credentials, so network shares never reach the filesystem layer.
+    """
+    value = (text or "").strip().strip('"').strip("'")
+    if not value:
+        return None
+    if value.replace("\\", "/").startswith("//"):
+        return "network shares are not allowed"
+    if any(part == ".." for part in value.replace("\\", "/").split("/")):
+        return "'..' path segments are not allowed"
+    return None
+
+
+def _resolve_storage_dir(storage_dir):
+    """Resolve the storage_dir widget to an absolute directory inside output/.
+
+    Defaults to H3-Mubu when empty; network shares and `..` are refused on the
+    raw text, then the realpath must stay under the output directory.
+    """
+    loc = (storage_dir or "").strip().strip('"').strip("'") or "H3-Mubu"
+    reason = _unsafe_path_text(loc)
+    if reason:
+        raise ValueError("h3_motion_context: storage_dir refused: %s (%r)" % (reason, loc))
+    root = os.path.realpath(folder_paths.get_output_directory())
+    candidate = loc if os.path.isabs(loc) else os.path.join(root, loc)
+    full = os.path.realpath(os.path.normpath(candidate))
+    try:
+        inside = os.path.commonpath([root, full]) == root
+    except ValueError:
+        inside = False
+    if not inside:
+        raise ValueError(
+            "h3_motion_context: storage_dir refused: must stay inside the output "
+            "directory (%r)" % loc)
+    return full
+
+
 def _clip_file_path(storage_dir, idx):
     """返回 clip_%05d.mp4 绝对路径（不存在抛 FileNotFoundError，由调用方兜底扫描 output 目录）。"""
-    loc = (storage_dir or "").strip().strip('"').strip("'") or "H3-Mubu"
-    path = os.path.join(folder_paths.get_output_directory(), loc,
-                        "%s_%05d%s" % (CLIP_FILE_PREFIX, int(idx),
-                                       CLIP_FILE_EXT))
+    loc = _resolve_storage_dir(storage_dir)
+    path = os.path.join(loc, "%s_%05d%s" % (CLIP_FILE_PREFIX, int(idx),
+                                            CLIP_FILE_EXT))
     if not os.path.isfile(path):
         raise FileNotFoundError(
             "h3_motion_context: no clip media for index %d (%s)."
@@ -2325,7 +2417,7 @@ def _find_clip_in_output(idx):
 
 def _build_load_path(storage_dir):
     """存储位置参数 → 目录级指纹前缀（用户只设目录名，clip 前缀内部固定、不可改）。"""
-    loc = (storage_dir or "").strip().strip('"').strip("'") or "H3-Mubu"
+    loc = _resolve_storage_dir(storage_dir)
     return os.path.join(loc, CLIP_FILE_PREFIX)
 
 
@@ -2417,10 +2509,19 @@ def _resolve_manual_media_path(manual_upload):
         ("temp:", folder_paths.get_temp_directory()),
     ):
         if p.startswith(prefix):
-            candidates.append(os.path.join(base, p[len(prefix):].lstrip("/\\")))
+            rest = p[len(prefix):].lstrip("/\\")
+            reason = _unsafe_path_text(rest)
+            if reason:
+                raise ValueError(
+                    "h3_motion_context: manual_upload refused: %s (%r)" % (reason, p))
+            candidates.append(os.path.join(base, rest))
             matched = True
             break
     if not matched:
+        reason = _unsafe_path_text(p)
+        if reason:
+            raise ValueError(
+                "h3_motion_context: manual_upload refused: %s (%r)" % (reason, p))
         if os.path.isabs(p):
             candidates.append(p)
         else:
@@ -2445,3 +2546,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ContextInjectPro": "H3 Context Inject Pro (lip-sync aligned)",
     "H3ContextTrimPro": "H3 Context Trim Pro (lip-sync aligned)",
 }
+
+
+
+
+

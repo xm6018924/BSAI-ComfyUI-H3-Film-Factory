@@ -53,6 +53,24 @@ def _video_path_candidates(value):
     return candidates
 
 
+def _is_network_share_text(text):
+    """True for a UNC path, decided on the raw text only.
+
+    A network share must be refused before any isfile/isdir call: on Windows
+    opening a `\\\\host\\share` path authenticates to that host with the
+    current user's credentials.
+    """
+    if not text:
+        return False
+    value = str(text).strip().strip('"').strip("'")
+    return value.replace("\\", "/").startswith("//")
+
+
+def _has_parent_segment(text):
+    value = str(text or "").strip().strip('"').strip("'")
+    return any(part == ".." for part in value.replace("\\", "/").split("/"))
+
+
 def _resolve_video_path(value, label):
     roots = [
         "",
@@ -64,6 +82,13 @@ def _resolve_video_path(value, label):
     for raw_path in reversed(candidates):
         text = str(raw_path or "").strip().strip('"')
         if not text or os.path.splitext(text)[1].lower() not in _VIDEO_EXTENSIONS:
+            continue
+        # Text-only gate before the filesystem is touched at all.
+        if _is_network_share_text(text):
+            print("[VRGDG Compare] rejected a network-share path for %s: %s" % (label, text))
+            continue
+        if _has_parent_segment(text):
+            print("[VRGDG Compare] rejected a '..' path for %s: %s" % (label, text))
             continue
         for root in roots:
             path = text if not root or os.path.isabs(text) else os.path.join(root, text)

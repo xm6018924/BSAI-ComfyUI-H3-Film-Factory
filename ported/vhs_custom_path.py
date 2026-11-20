@@ -1,8 +1,15 @@
 """
-VHS 增强节点包
-包含两个节点：
-1. Video Combine+ (VHS_VideoCombineCustomPath) - 基于 Video Combine，增加自定义保存路径
-2. Load Video (Custom+Latest) (VHS_LoadVideoCustomLatest) - 基于 LoadVideoPath，增加自定义文件夹自动选最新视频
+VHS enhanced node pack (ported into BSAI Film Factory).
+Two nodes:
+1. Video Combine+ (VHS_VideoCombineCustomPath) - Video Combine plus a custom save path
+2. Load Video (Custom+Latest) (VHS_LoadVideoCustomLatest) - LoadVideoPath plus auto-latest from a folder
+
+Security contract (see ComfyUI-Manager PR #3497 review):
+- every user-supplied path is checked as TEXT before any isdir/listdir/makedirs/
+  copy/isfile call;
+- network shares (UNC, `\\\\host\\share` or `//host/share`) are rejected;
+- `..` segments are rejected;
+- custom_save_path must resolve (realpath) inside ComfyUI's output directory.
 """
 
 import os
@@ -28,17 +35,84 @@ from videohelpersuite.utils import hash_path, validate_path
 from videohelpersuite.logger import logger
 
 
-def resolve_save_dir(path_text):
-    """把 custom_save_path 解析成绝对目录。
+def _is_network_share_text(text):
+    """True when the raw widget text points at a network share (UNC).
 
-    - 绝对路径（含盘符 / 前导分隔符）：原样使用；
-    - 相对路径：以 ComfyUI 的 output 目录为基准拼接，
-      例如 "BSAI-MV\\分块2采" -> <ComfyUI>/output/BSAI-MV/分块2采。
+    Checked on the STRING only, so it runs before any filesystem call and
+    never touches a share (which would leak the Windows session credentials).
     """
-    text = path_text.strip().strip('"').strip("'")
-    if os.path.isabs(text):
-        return os.path.normpath(text)
-    return os.path.normpath(os.path.join(folder_paths.get_output_directory(), text))
+    if not text:
+        return False
+    value = str(text).strip().strip('"').strip("'")
+    if not value:
+        return False
+    # A Windows UNC path may also arrive with forward slashes.
+    return value.replace("\\", "/").startswith("//")
+
+
+def _has_parent_segment(text):
+    value = str(text or "").strip().strip('"').strip("'")
+    return any(part == ".." for part in value.replace("\\", "/").split("/"))
+
+
+def _reject_reason(path_text, what="path"):
+    """Return an error string when the raw text is unsafe, else None."""
+    if _is_network_share_text(path_text):
+        return "%s refused: network shares are not allowed (%s)" % (what, path_text)
+    if _has_parent_segment(path_text):
+        return "%s refused: '..' segments are not allowed (%s)" % (what, path_text)
+    return None
+
+
+def _output_root():
+    return os.path.realpath(folder_paths.get_output_directory())
+
+
+def resolve_save_dir(path_text):
+    """Resolve custom_save_path to an absolute directory inside output/.
+
+    - empty text -> ValueError (the caller decides whether that is fatal);
+    - network share text -> ValueError before touching the filesystem;
+    - `..` segments -> ValueError;
+    - relative text is joined onto the output directory;
+    - the final realpath must stay under output/, otherwise ValueError.
+    """
+    text = str(path_text or "").strip().strip('"').strip("'")
+    if not text:
+        raise ValueError("custom save path is empty")
+    reason = _reject_reason(text, "custom save path")
+    if reason:
+        raise ValueError(reason)
+    candidate = text if os.path.isabs(text) else os.path.join(
+        folder_paths.get_output_directory(), text)
+    full = os.path.realpath(os.path.normpath(candidate))
+    root = _output_root()
+    try:
+        inside = os.path.commonpath([root, full]) == root
+    except ValueError:
+        inside = False
+    if not inside:
+        raise ValueError(
+            "custom save path refused: path must stay inside the output directory (%s)" % text)
+    return full
+
+
+def resolve_read_dir(path_text):
+    """Resolve a read-only folder widget (custom_folder).
+
+    Network shares and `..` are rejected as text; plain local absolute paths
+    stay allowed so existing graphs that read from another local disk keep
+    working.
+    """
+    text = str(path_text or "").strip().strip('"').strip("'")
+    if not text:
+        raise ValueError("folder path is empty")
+    reason = _reject_reason(text, "folder path")
+    if reason:
+        raise ValueError(reason)
+    candidate = text if os.path.isabs(text) else os.path.join(
+        folder_paths.get_output_directory(), text)
+    return os.path.realpath(os.path.normpath(candidate))
 
 
 # ===========================================================================
@@ -46,8 +120,8 @@ def resolve_save_dir(path_text):
 # ===========================================================================
 class VideoCombineCustomPath(VideoCombine):
     """
-    Video Combine 的增强版，新增 custom_save_path 参数。
-    其余参数、行为与原 Video Combine 完全一致。
+    Video Combine with an extra custom_save_path parameter.
+    Every other parameter and behaviour matches the original node.
     """
 
     @classmethod
@@ -64,6 +138,16 @@ class VideoCombineCustomPath(VideoCombine):
     OUTPUT_NODE = True
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
     FUNCTION = "combine_video"
+
+    @classmethod
+    def VALIDATE_INPUTS(s, custom_save_path="", **kwargs):
+        # Text-only pre-check: no join, no realpath, no makedirs on a share.
+        if custom_save_path and str(custom_save_path).strip():
+            try:
+                resolve_save_dir(custom_save_path)
+            except ValueError as exc:
+                return str(exc)
+        return True
 
     def combine_video(self, custom_save_path="", **kwargs):
         # 1. 调用父类方法，正常生成视频到 output 文件夹
@@ -87,9 +171,8 @@ class VideoCombineCustomPath(VideoCombine):
                 break
 
         if audio_file is None:
-            # 没有 -audio 变体说明这次合成没有音轨（audio 输入为空）。
-            # 以前直接跳过 → 视频滞留在 output 根目录、自定义路径里什么都没有。
-            # 现在退而求其次：仍把无音轨视频复制到自定义路径，只把情况打进日志。
+            # No -audio variant means this render had no soundtrack (audio input empty).
+            # Fall back to the silent video instead of leaving it in output/.
             video_exts = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")
             for f in output_files:
                 if f and os.path.splitext(f)[1].lower() in video_exts and os.path.isfile(f):
@@ -97,53 +180,66 @@ class VideoCombineCustomPath(VideoCombine):
                     break
             if audio_file is None:
                 logger.warn(
-                    "[Video Combine+] 既没有带音频(-audio)的合成结果，也没有可用视频文件，"
-                    "跳过自定义保存路径"
+                    "[Video Combine+] no -audio render and no usable video file; "
+                    "skipping the custom save path"
                 )
                 return result
             logger.warn(
-                "[Video Combine+] 本次合成没有音轨（audio 输入为空），"
-                f"将无音轨视频复制到自定义路径: {os.path.basename(audio_file)}"
+                "[Video Combine+] this render has no soundtrack (audio input empty); "
+                "copying the silent video to the custom path: %s"
+                % os.path.basename(audio_file)
             )
 
         if not os.path.isfile(audio_file):
-            logger.error(f"[Video Combine+] 源音频视频文件不存在: {audio_file}")
+            logger.error("[Video Combine+] source video file is missing: %s" % audio_file)
             return result
 
-        # 3. 确保目标文件夹存在（自动创建）；相对路径以 output 目录为基准
-        target_dir = resolve_save_dir(custom_save_path)
-        logger.info(f"[Video Combine+] 自定义保存目录解析: '{custom_save_path.strip()}' -> {target_dir}")
+        # 3. Resolve and create the target folder (must stay inside output/)
+        try:
+            target_dir = resolve_save_dir(custom_save_path)
+        except ValueError as exc:
+            logger.error("[Video Combine+] custom save path rejected: %s" % exc)
+            raise Exception("[Video Combine+] custom save path rejected: %s" % exc)
+        logger.info(
+            "[Video Combine+] custom save dir: '%s' -> %s"
+            % (custom_save_path.strip(), target_dir)
+        )
         try:
             os.makedirs(target_dir, exist_ok=True)
         except Exception as e:
-            logger.error(f"[Video Combine+] 创建目标文件夹失败: {target_dir}\n{e}")
-            raise Exception(f"[Video Combine+] 创建目标文件夹失败: {target_dir}\n{e}")
+            logger.error(
+                "[Video Combine+] failed to create the target folder: %s\n%s" % (target_dir, e))
+            raise Exception(
+                "[Video Combine+] failed to create the target folder: %s\n%s" % (target_dir, e))
 
-        # 4. 自动重命名：同名文件加序号后缀
+        # 4. Auto-rename: append a counter when the name is taken
         base_name = os.path.basename(audio_file)
         name_part, ext_part = os.path.splitext(base_name)
         target_path = os.path.join(target_dir, base_name)
         rename_counter = 1
         while os.path.exists(target_path):
             target_path = os.path.join(
-                target_dir, f"{name_part}_{rename_counter}{ext_part}"
+                target_dir, "%s_%d%s" % (name_part, rename_counter, ext_part)
             )
             rename_counter += 1
 
-        # 5. 复制文件（copy2 保留时间戳等元数据）
+        # 5. Copy the file (copy2 keeps timestamps and metadata)
         try:
             shutil.copy2(audio_file, target_path)
         except Exception as e:
             logger.error(
-                f"[Video Combine+] 复制文件失败:\n  源: {audio_file}\n  目标: {target_path}\n{e}"
+                "[Video Combine+] copy failed:\n  source: %s\n  target: %s\n%s"
+                % (audio_file, target_path, e)
             )
             raise Exception(
-                f"[Video Combine+] 复制文件失败:\n源: {audio_file}\n目标: {target_path}\n{e}"
+                "[Video Combine+] copy failed:\nsource: %s\ntarget: %s\n%s"
+                % (audio_file, target_path, e)
             )
 
-        # 6. 校验复制是否成功（文件存在 + 大小完全一致）
+        # 6. Verify the copy (file exists and size matches)
         if not os.path.isfile(target_path):
-            raise Exception(f"[Video Combine+] 复制校验失败：目标文件不存在 {target_path}")
+            raise Exception(
+                "[Video Combine+] copy verification failed: target is missing %s" % target_path)
 
         src_size = os.path.getsize(audio_file)
         dst_size = os.path.getsize(target_path)
@@ -153,13 +249,13 @@ class VideoCombineCustomPath(VideoCombine):
             except Exception:
                 pass
             raise Exception(
-                f"[Video Combine+] 复制校验失败：文件大小不一致\n"
-                f"  源文件: {src_size} 字节\n  目标文件: {dst_size} 字节"
+                "[Video Combine+] copy verification failed: size mismatch\n"
+                "  source: %d bytes\n  target: %d bytes" % (src_size, dst_size)
             )
 
-        logger.info(f"[Video Combine+] 视频已复制到自定义路径: {target_path}")
+        logger.info("[Video Combine+] video copied to the custom path: %s" % target_path)
 
-        # 7. 复制成功后，删除 output 文件夹中的全部生成文件
+        # 7. Remove the generated files from output/ after a successful copy
         deleted_count = 0
         for f in output_files:
             if f and os.path.isfile(f):
@@ -167,11 +263,12 @@ class VideoCombineCustomPath(VideoCombine):
                     os.remove(f)
                     deleted_count += 1
                 except Exception as e:
-                    logger.warn(f"[Video Combine+] 删除 output 文件失败: {f}\n{e}")
+                    logger.warn(
+                        "[Video Combine+] failed to delete an output file: %s\n%s" % (f, e))
 
-        logger.info(f"[Video Combine+] 已清理 output 中的 {deleted_count} 个文件")
+        logger.info("[Video Combine+] cleaned %d file(s) from output/" % deleted_count)
 
-        # 8. 更新返回结果
+        # 8. Update the returned result
         new_output_files = [target_path]
         result["result"] = ((save_output, new_output_files),)
 
@@ -187,10 +284,10 @@ class VideoCombineCustomPath(VideoCombine):
 # ===========================================================================
 class LoadVideoCustomLatest(LoadVideoPath):
     """
-    基于 LoadVideoPath 扩展，新增：
-    - custom_folder: 自定义文件夹路径，填了就从该文件夹自动选视频
-    - latest_index: 0=最新修改的视频，1=第二新的，2=第三新的...
-    custom_folder 为空时，行为与原 LoadVideoPath 完全一致。
+    LoadVideoPath with:
+    - custom_folder: a folder to pick the video from automatically
+    - latest_index: 0 = newest, 1 = second newest, ...
+    Empty custom_folder keeps the original LoadVideoPath behaviour.
     """
 
     @classmethod
@@ -208,9 +305,9 @@ class LoadVideoCustomLatest(LoadVideoPath):
 
     @staticmethod
     def _find_latest_video(folder, index):
-        """从文件夹中按修改时间降序找到第 index 个视频文件（0=最新）"""
+        """Pick the index-th newest video (0 = newest) from an already vetted folder."""
         if not os.path.isdir(folder):
-            raise Exception(f"[Load Video+] 文件夹不存在: {folder}")
+            raise Exception("[Load Video+] folder does not exist: %s" % folder)
         videos = []
         for f in os.listdir(folder):
             full_path = os.path.join(folder, f)
@@ -223,21 +320,26 @@ class LoadVideoCustomLatest(LoadVideoPath):
         videos.sort(key=lambda x: os.path.getmtime(x), reverse=True)
         if index >= len(videos):
             raise Exception(
-                f"[Load Video+] latest_index={index} 超出范围，"
-                f"文件夹中只有 {len(videos)} 个视频文件"
+                "[Load Video+] latest_index=%d is out of range; "
+                "the folder holds %d video file(s)" % (index, len(videos))
             )
         return videos[index]
 
     def load_video(self, custom_folder="", latest_index=0, **kwargs):
         if custom_folder and custom_folder.strip():
-            video_path = self._find_latest_video(resolve_save_dir(custom_folder), latest_index)
+            try:
+                folder = resolve_read_dir(custom_folder)
+            except ValueError as exc:
+                raise Exception("[Load Video+] %s" % exc)
+            video_path = self._find_latest_video(folder, latest_index)
             if video_path is None:
                 raise Exception(
-                    f"[Load Video+] 文件夹中没有找到视频文件: {custom_folder}"
+                    "[Load Video+] no video file found in folder: %s" % custom_folder
                 )
             kwargs['video'] = video_path
             logger.info(
-                f"[Load Video+] 自动选择视频(第{latest_index}新): {video_path}"
+                "[Load Video+] auto-selected video (newest #%d): %s"
+                % (latest_index, video_path)
             )
         return super().load_video(**kwargs)
 
@@ -245,7 +347,7 @@ class LoadVideoCustomLatest(LoadVideoPath):
     def IS_CHANGED(s, video, custom_folder="", latest_index=0, **kwargs):
         if custom_folder and custom_folder.strip():
             try:
-                video_path = s._find_latest_video(resolve_save_dir(custom_folder), latest_index)
+                video_path = s._find_latest_video(resolve_read_dir(custom_folder), latest_index)
                 if video_path:
                     return hash_path(video_path)
             except Exception:
@@ -255,16 +357,22 @@ class LoadVideoCustomLatest(LoadVideoPath):
     @classmethod
     def VALIDATE_INPUTS(s, video, custom_folder="", latest_index=0, **kwargs):
         if custom_folder and custom_folder.strip():
-            folder = resolve_save_dir(custom_folder)
+            try:
+                folder = resolve_read_dir(custom_folder)
+            except ValueError as exc:
+                return str(exc)
             if not os.path.isdir(folder):
-                return f"文件夹不存在: {folder}"
-            has_video = any(
-                os.path.splitext(f)[1].lower().lstrip('.') in video_extensions
-                for f in os.listdir(folder)
-                if os.path.isfile(os.path.join(folder, f))
-            )
+                return "folder does not exist: %s" % folder
+            try:
+                has_video = any(
+                    os.path.splitext(f)[1].lower().lstrip('.') in video_extensions
+                    for f in os.listdir(folder)
+                    if os.path.isfile(os.path.join(folder, f))
+                )
+            except OSError as exc:
+                return "folder cannot be read: %s (%s)" % (folder, exc)
             if not has_video:
-                return f"文件夹中没有视频文件: {folder}"
+                return "folder holds no video file: %s" % folder
             return True
         return validate_path(video, allow_none=True)
 

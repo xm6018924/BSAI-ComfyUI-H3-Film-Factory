@@ -13658,8 +13658,10 @@ class BSAIH3FilmFactory:
                     "tooltip": f"External prompt override for CLIP {_ci}. If connected and non-empty, replaces CLIP {_ci}'s prompt (duration/refs/timings still come from the clip card). Leave unconnected to use the built-in clip prompt.",
                 },
             )
-        # v14.101: 回退 18:35(v14.84) — tts_model_TTS模型 在 optional 末尾（v2.7.json 一致）
-        optional["tts_model_TTS模型"] = (
+        # v14.443: input name is pure ASCII ("tts_model"); the old Chinese-suffixed
+        # key is still read from kwargs below so older graphs keep working,
+        # though their link has to be re-made once to the new port name.
+        optional["tts_model"] = (
             "INDEX_TTS_MODEL",
             {"forceInput": True, "tooltip": "IndexTTS-2.5 model (connect to the tts_model output of BSAI_IndexTTS2_5Loader). Required in speech mode."},
         )
@@ -14027,9 +14029,21 @@ class BSAIH3FilmFactory:
         asset_audios = []
         if isinstance(asset_library, dict):
             asset_audios = asset_library.get("audios", [])
-        ref_audio_paths = list(speaker_audio_map.values()) if speaker_audio_map else [
-            a.get("path") for a in asset_audios if isinstance(a, dict) and a.get("path")
-        ]
+        # v14.443: never trust asset-library raw paths. The speaker map values are
+        # already resolver-approved, but the fallback used every raw `path` entry
+        # (including entries `_resolve_asset_file` had just rejected), which let
+        # any readable file on the machine become a voice-clone reference. Resolve
+        # each audios entry and keep only the proven ones.
+        if speaker_audio_map:
+            ref_audio_paths = list(speaker_audio_map.values())
+        else:
+            ref_audio_paths = []
+            for _aud in asset_audios:
+                if not isinstance(_aud, dict):
+                    continue
+                _aud_path = _resolve_asset_file(_aud, "audios", label="AutoTTS voice ref")
+                if _aud_path and _aud_path not in ref_audio_paths:
+                    ref_audio_paths.append(_aud_path)
         if not ref_audio_paths:
             print("[H3 AutoTTS] 资产库中没有 @音频N 参考 → 跳过自动对话合成")
             return None
@@ -17695,7 +17709,10 @@ class BSAIH3FilmFactory:
                     print(f"[H3 LipSync] v14.252 音频驱动 clip 切分已生效 (全管道通用, 按音频实际时长切分, 不拉长不缩短)")
         else:
             _lip_voice_dummy = None
-        _tts_model = kwargs.get("tts_model_TTS模型")
+        # v14.443: ASCII port name; the Chinese-suffixed key is a read-only legacy fallback.
+        _tts_model = kwargs.get("tts_model")
+        if _tts_model is None:
+            _tts_model = kwargs.get("tts_model_TTS模型")
         # v14.280: 自动多人对话声音克隆 —— 当 tts_model + 资产库音频参考都在，
         # 且没有外部 lip_audio/lip_voice 驱动时，从分镜脚本提取对话台词，
         # 自动调用 BSAIDialogueVoiceClone 合成完整多说话人对话音频，
@@ -20724,11 +20741,26 @@ class BSAIH3FilmFactory:
                         # v14.355: 双保险第二道 —— 开了才跑，产物 <原名>_faceswap.mp4
                         if _viggle_faceswap_on:
                             try:
-                                _fs_ref = str(os.environ.get("BSAI_H3_VIGGLE_FACESWAP_REF", "") or "")
-                                if not _fs_ref:
+                                # v14.443: the reference face must come from the
+                                # resolved asset root. A raw env/library path let
+                                # any readable image on disk be pasted onto the
+                                # actor, so unresolved values are rejected and the
+                                # original clip is kept.
+                                _fs_ref = None
+                                _fs_env = str(os.environ.get("BSAI_H3_VIGGLE_FACESWAP_REF", "") or "")
+                                if _fs_env:
+                                    _fs_ref = _resolve_asset_file(
+                                        _fs_env, "images",
+                                        label="Viggle face-swap ref (env)")
+                                else:
                                     _fs_imgs = (asset_library or {}).get("images") or []
                                     if _fs_imgs:
-                                        _fs_ref = str(_fs_imgs[0].get("path") or _fs_imgs[0].get("filename") or "")
+                                        _fs_ref = _resolve_asset_file(
+                                            _fs_imgs[0], "images",
+                                            label="Viggle face-swap ref")
+                                if not _fs_ref:
+                                    raise ValueError(
+                                        "face-swap reference was rejected by the asset resolver")
                                 _fs_out = _viggle_faceswap_clip(
                                     str(out_path), _viggle_faceswap_model, _fs_ref or None,
                                     tag=f"clip{si+1}")

@@ -222,7 +222,7 @@ function parseStoryboard(text, videoDurationSec = 0, fallbackFrames = 124, marke
                     }
                     return {
                         num: block.num || i + 1,
-                        label: `[分镜${block.num || i + 1}]${scene ? " " + scene : ""}`,
+                        label: `[Shot ${block.num || i + 1}]${scene ? " " + scene : ""}`,
                         rawLabel: `[分镜${block.num || i + 1}]`,
                         text: block.text,
                         startSec: 0,
@@ -260,7 +260,7 @@ function parseStoryboard(text, videoDurationSec = 0, fallbackFrames = 124, marke
             }
             clips.push({
                 num: label,
-                label: marker ? (hasNumber ? marker : `${marker} ${promptSegments.indexOf(segment) + 1}`) : "完整提示词",
+                label: marker ? (hasNumber ? marker : `${marker} ${promptSegments.indexOf(segment) + 1}`) : "Full prompt",
                 text: prompt,
                 startSec: 0,
                 sec: durationSec,
@@ -977,3 +977,4 @@ app.registerExtension({
         else if (node.comfyClass === PACK_TYPE || node.comfyClass === SEGMENT_TYPE) bindPack(node);
     },
 });
+

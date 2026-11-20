@@ -7609,12 +7609,12 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     const manualW = node.widgets && node.widgets.find((x) => x && x.name === "manual_override_enable");
     let manualOn = manualW ? Boolean(manualW.value) : false;
     const MANUAL_GROUPS = {
-        first_pass: { label: "一采", keys: ["steps", "sampler_name", "scheduler", "denoise", "dual_track_shift", "shift_video", "shift_audio", "context_length", "audio_context_length", "resolution_mode", "megapixels", "width", "height", "ref_image_size", "one_shot_mode", "one_shot_sampling"] },
-        second_pass: { label: "二采", keys: ["refine_enable", "refine_steps", "refine_denoise", "refine_upscale_factor", "refine_upscaler_model", "refine_sampler", "refine_align_to", "refine_audio_denoise", "refine_lipsync_mode", "tiled_refine", "tile_count", "tile_overlap", "refine_mem_mode", "selflift_tst_enable", "selflift_tst_tau"] },
-        accel_cache: { label: "加速/缓存", keys: ["block_cache", "block_cache_threshold", "block_cache_device", "cache_dit", "ref_cache"] },
-        context_audio: { label: "上下文/音频", keys: ["env_audio_enable", "env_audio_gain", "semantic_bridge_enable", "semantic_bridge_adapter", "semantic_bridge_alpha", "semantic_bridge_magnitude_match", "face_lock_mode"] },
-        upscale: { label: "超分", keys: ["upscale_per_clip", "upscale_final", "upscale_mode", "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch", "upscale_fp16", "upscale_face_restore"] },
-        output: { label: "输出", keys: ["output_mode", "output_image_audio", "filename_prefix", "pause_enable", "clip_select_enable"] },
+        first_pass: { label: "First pass", keys: ["steps", "sampler_name", "scheduler", "denoise", "dual_track_shift", "shift_video", "shift_audio", "context_length", "audio_context_length", "resolution_mode", "megapixels", "width", "height", "ref_image_size", "one_shot_mode", "one_shot_sampling"] },
+        second_pass: { label: "Second pass", keys: ["refine_enable", "refine_steps", "refine_denoise", "refine_upscale_factor", "refine_upscaler_model", "refine_sampler", "refine_align_to", "refine_audio_denoise", "refine_lipsync_mode", "tiled_refine", "tile_count", "tile_overlap", "refine_mem_mode", "selflift_tst_enable", "selflift_tst_tau"] },
+        accel_cache: { label: "Accel/Cache", keys: ["block_cache", "block_cache_threshold", "block_cache_device", "cache_dit", "ref_cache"] },
+        context_audio: { label: "Context/Audio", keys: ["env_audio_enable", "env_audio_gain", "semantic_bridge_enable", "semantic_bridge_adapter", "semantic_bridge_alpha", "semantic_bridge_magnitude_match", "face_lock_mode"] },
+        upscale: { label: "Upscale", keys: ["upscale_per_clip", "upscale_final", "upscale_mode", "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch", "upscale_fp16", "upscale_face_restore"] },
+        output: { label: "Output", keys: ["output_mode", "output_image_audio", "filename_prefix", "pause_enable", "clip_select_enable"] },
     };
     const groupCollapsed = {};
     const manualPanel = document.createElement("div");
@@ -9702,3 +9702,4 @@ function renderClipTemplatePanel(container, clip, node, runtime, textarea, clipI
         });
     });
 }
+
