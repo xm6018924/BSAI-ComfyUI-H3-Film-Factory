@@ -9080,17 +9080,65 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # latent tokens 命中病态区, 才需要强制 dense 回退 (KJNodes 分组+
             # SageAttention). 分块成功时 tile 级 token 已在健康区, 稀疏 Sol-Attn
             # 直接跑通, 不注入 sol_max_tokens.
+            # v14.445: 无条件初始化 _chunked_ok/_bsa_bp_cnt, 避免健康区(<=门限)分支
+            # 不进入密集门块时, 9174行 _bsa_skip_vendor 引用未定义变量触发 NameError 致二采崩溃。
+            _chunked_ok = False
+            _bsa_bp_cnt = 0
             if _r_call_tok > _r_gate_limit and _r_restore_tiles is None:
+                # v14.445 (2026-11-20): 核心 sol-attn chunked producer 提速, 替代旧全量 Sol-Attn
+                # 病态 dense 降级。旧 v14.148 方案A: 全量 ck.sol_attn 在 n>=440k 超线性病态,
+                # 故注入 sol_max_tokens 强制 dense, 709k dense 前向 ~209s/步。新方案: 包 ComfyUI
+                # 核心 BlockSparseAttention 的 sol-attn chunked producer(4K切片投影进int8载体,
+                # 不构建全量QKV, 自适应tau选top-k key block, sink_conditioning保text/audio/
+                # reference精确), 709k 走稀疏; 挂载失败兜底回退旧 dense 门, 不更糟。
+                _chunked_ok = False
+                _bsa_bp_cnt = 0
                 try:
-                    _r_to_gate = _refine_model.model_options.get("transformer_options", {})
-                    if isinstance(_r_to_gate, dict):
-                        _r_to_gate["sol_max_tokens"] = _REFINE_MAX_SOL_TOKENS
-                        print(f"[H3 Extender] v14.148 方案A: 二采单次调用 tokens={_r_call_tok:,} > "
-                              f"{_r_gate_limit:,} 且未启用分块, "
-                              f"Sol-Attn 已降级 dense(KJNodes 分组+SageAttention), "
-                              f"绕开病态 kernel(基准: 293k=0.7s 健康 / 440k>45s / 873k>600s)")
-                except Exception as _eg:
-                    print(f"[H3 Extender] v14.148 方案A 注入 sol_max_tokens 失败(可忽略): {_eg}")
+                    _bsa_enable = str(os.environ.get("BSAI_H3_CHUNKED_BSA", "0")).strip().lower() in ("1", "true", "on")
+                    if not _bsa_enable:
+                        raise RuntimeError("BSAI_H3_CHUNKED_BSA=0: chunked producer 默认关闭, 回退 v14.148 dense 门(三轮实测233k规模chunked慢于dense)")
+                    from comfy_extras.nodes_sparse_attention import (
+                        apply_block_sparse_attention as _apply_bsa)
+                    _refine_model = _apply_bsa(
+                        _refine_model,
+                        tau=0.8, topk_ratio=0.0, vsa=False,
+                        start_percent=0.0, end_percent=1.0, min_tokens=12288,
+                        dense_blocks="", sink_conditioning="exact_kv_and_rows",
+                        extra_tokens=256, verbose=True)
+                    _r_clean_bsa = _refine_model.model_options.get("transformer_options", {})
+                    if isinstance(_r_clean_bsa, dict):
+                        _r_clean_bsa.pop("sol_max_tokens", None)
+                    # v14.445 自检: 确认 block_patch / override / diffusion_model 实际落点
+                    _bsa_bp_cnt = 0
+                    try:
+                        _top_bsa = _refine_model.model_options.get("transformer_options", {})
+                        _dit_bsa = _top_bsa.get("patches_replace", {}).get("dit", {})
+                        _bsa_bp_cnt = sum(1 for k in _dit_bsa
+                                      if isinstance(k, tuple) and k[0] == "double_block")
+                        _ov_bsa = _top_bsa.get("optimized_attention_override")
+                        _dm_bsa = _refine_model.get_model_object("diffusion_model")
+                        print(f"[BSA-DIAG] apply自检: block_patch={_bsa_bp_cnt} "
+                              f"override={type(_ov_bsa).__name__} "
+                              f"diffmodel={type(_dm_bsa).__name__}")
+                    except Exception as _diag_e:
+                        print(f"[BSA-DIAG] apply自检失败: {_diag_e}")
+                    _chunked_ok = True
+                    print(f"[H3 Extender] v14.445 核心sol-attn chunked producer已挂载: "
+                          f"tokens={_r_call_tok:,} > {_r_gate_limit:,}, 走4K切片稀疏"
+                          f"(替代旧全量dense降级), sink保条件KV, tau=0.8(微调轮更稀疏)")
+                except Exception as _ebsa:
+                    print(f"[H3 Extender] v14.445 核心chunked producer挂载失败, 兜底旧dense门: {_ebsa}")
+                if not _chunked_ok:
+                    try:
+                        _r_to_gate = _refine_model.model_options.get("transformer_options", {})
+                        if isinstance(_r_to_gate, dict):
+                            _r_to_gate["sol_max_tokens"] = _REFINE_MAX_SOL_TOKENS
+                            print(f"[H3 Extender] v14.148 方案A(兜底): 二采单次调用 tokens={_r_call_tok:,} > "
+                                  f"{_r_gate_limit:,} 且未启用分块, "
+                                  f"Sol-Attn 已降级 dense(KJNodes 分组+SageAttention), "
+                                  f"绕开病态 kernel(基准: 293k=0.7s 健康 / 440k>45s / 873k>600s)")
+                    except Exception as _eg:
+                        print(f"[H3 Extender] v14.148 方案A 注入 sol_max_tokens 失败(可忽略): {_eg}")
             elif _r_restore_tiles is not None:
                 print(f"[H3 Extender] v14.148 方案A: 二采单次调用 tokens={_r_call_tok:,} > "
                       f"{_r_gate_limit:,}, 分块二启用 — tile 级 token 在健康区, "
@@ -9126,7 +9174,15 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 print(f"[H3 Extender] v14.225 二采单次调用 tokens={_r_call_tok:,} 在 Sol-Attn 健康区, "
                       f"跳过 global 包装(避免 attention override 回退 dense + 切 8 块), "
                       f"稀疏 Sol-Attn 直接跑全帧(基准 0.97s/步, 不分块无 overlap 重复)")
-            if refine_mem_mode == "global" and not _skip_global_healthy and not _prog_enabled:
+            # v14.445: chunked producer 且 block_patch 已装到原生 block 时, 跳过 vendor global
+            # 包装 —— vendor 的 _sparse_block 受核心 h3_eligible(bf16/head_dim) 门控会落 dense;
+            # 跳过它后由原生 _run_blocks 消费 block_patch -> h3_sparse_attention -> ck.sol_attn_chunked,
+            # 不经 vendor eligible 门。block_patch 未装则维持 vendor 包装兜底。
+            _bsa_skip_vendor = bool(_chunked_ok and _bsa_bp_cnt > 0)
+            if _bsa_skip_vendor:
+                print(f"[H3 Extender] v14.445 chunked producer已装{_bsa_bp_cnt}个block_patch, "
+                      f"跳过 vendor global 包装, 原生block直连sol_attn_chunked(不走vendor eligible门)")
+            if refine_mem_mode == "global" and not _skip_global_healthy and not _prog_enabled and not _bsa_skip_vendor:
                 try:
                     import os as _os_g, importlib as _ilg
                     import sys as _sys_g
@@ -9639,17 +9695,49 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                   f"[{_st},{_et}) 完成, 累计 T={_acc_v.shape[2]}", flush=True)
                         _r_samples = _ff_wrap_members([_acc_v, _aud_full], _was_nested_tc)
                     else:
-                        with _aimdo_disabled():
-                            _r_samples = _r_guider.sample(
-                            comfy.sample.prepare_empty_noise(samples),
-                            _r_latent["samples"],
-                            _r_sampler,
-                            _r_sigmas,
-                            denoise_mask=_r_latent.get("noise_mask"),
-                            callback=_r_step_cb,
-                            disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
-                            seed=int(seed) + 1,
-                        )
+                        _r_prof = None
+                        if str(os.environ.get("BSAI_H3_PROFILE_REFINE", "0")).strip().lower() in ("1", "true", "on"):
+                            try:
+                                from torch.profiler import profile as _tp_profile, ProfilerActivity as _tp_act
+                                _r_prof = _tp_profile(activities=[_tp_act.CUDA], record_shapes=False)
+                                _r_prof.start()
+                                print("[BSAI-PROF] torch.profiler 已开启(CUDA only), 整段二采采样中...", flush=True)
+                            except Exception as _pe:
+                                print(f"[BSAI-PROF] profiler启动失败(可忽略): {_pe}", flush=True)
+                        try:
+                            with _aimdo_disabled():
+                                _r_samples = _r_guider.sample(
+                                comfy.sample.prepare_empty_noise(samples),
+                                _r_latent["samples"],
+                                _r_sampler,
+                                _r_sigmas,
+                                denoise_mask=_r_latent.get("noise_mask"),
+                                callback=_r_step_cb,
+                                disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+                                seed=int(seed) + 1,
+                            )
+                        finally:
+                            if _r_prof is not None:
+                                try:
+                                    _r_prof.stop()
+                                    import collections as _pc
+                                    _prof_dir = r"C:\BSAI\ComfyUI-BSAI_pro_v43"
+                                    _prof_trace = os.path.join(_prof_dir, "refine_profiler_trace.json")
+                                    _r_prof.export_chrome_trace(_prof_trace)
+                                    _kt = _pc.defaultdict(float)
+                                    for _e in _r_prof.events():
+                                        try:
+                                            if _e.device_type == torch.autograd.DeviceType.CUDA and _e.self_device_time_total > 0:
+                                                _kt[_e.name] += _e.self_device_time_total
+                                        except Exception:
+                                            pass
+                                    print("[BSAI-PROF] ==== CUDA Kernel Top20 (self CUDA time, ms) ====", flush=True)
+                                    for _nm, _tm in sorted(_kt.items(), key=lambda kv: -kv[1])[:20]:
+                                        print(f"[BSAI-PROF] {_tm/1000:9.1f}ms  {_nm[:110]}", flush=True)
+                                    print(f"[BSAI-PROF] chrome trace -> {_prof_trace}", flush=True)
+                                except Exception as _pe2:
+                                    print(f"[BSAI-PROF] profiler导出失败(可忽略): {_pe2}", flush=True)
+
             # v14.418: 二采成品 latent 幅值自检 —— 健康的去噪终态 std 应在 1 附近
             # (同管线历史健康档 1.042); 明显超幅(如 2.2+)说明又被重复逆缩放,
             # 这时 VAE 解码必成整屏 latent 格马赛克, 提前用日志暴露而不是等成片。
@@ -11301,11 +11389,20 @@ def _one_shot_transit_mid_rule(start, end, transit=None):
         # 现统一到脚本正文自己的口径(用户脚本写的是"镜头与主播同一条轨迹、同速同向、正对
         # 正面"): 机位跟她同速同行, 前进凭据由「地面一道接一道后流过画幅下缘」承担。
         "本段机位与镜头机身沿同一条轨迹与他同速同行、同距同高，始终正对画幅里他的正面；"
+        # v14.440: 正面朝向钉死 —— 旧版只写"正对他的正面", 未说镜头在他正前方、
+        # 主体面朝镜头迈步, 配合通用锁把身体钉在行进方向的旧句, 出片全程背影。
+        # 现明确: 主体正面始终朝向镜头、面朝镜头边唱边走, 镜头在他正前方面向他保持等距。
+        "主体正面始终朝向镜头、面朝镜头边唱边走，每一步都朝镜头方向迈出；"
+        "镜头位于主体正前方、面向主体，与他同速保持等距，始终正对他的正面。"
         "取景范围只随本段景别路径连续变化，他因此按景别路径平缓变大或变小。"
         "他与镜头一同向前走，地面因此持续向后流过画幅："
-        "他每一步都是一次干净的向前迈步：抬起的那只脚屈膝向前摆、膝盖领先于脚尖，"
-        "越过支撑脚之后落在更靠近画幅下缘的一道新石缝上，脚跟先着地、鞋尖随后落平；"
-        "落地那一拍画幅下方出现的是鞋面与鞋尖，鞋底与鞋跟朝向地面与画幅下缘。"
+        # v14.439: 旧句「鞋底与鞋跟朝向地面与画幅下缘」是 moonwalk/倒走 cue ——
+        # 鞋底朝镜头且可见只有往后甩腿才成立; 旧句「落在更靠近画幅下缘的新石缝」
+        # 也把落点描述成朝镜头靠近。改为正向正走: 支撑腿蹬地、脚从身后甩到身前、
+        # 鞋头先落身前、画幅里只见鞋面鞋头、鞋底始终藏在脚下。
+        "他每一步都是一次干净的向前迈步：支撑腿蹬地，抬起的那只脚屈膝向前摆、"
+        "膝盖领先于脚尖，整只脚从身后向前甩到身前，鞋头先落到身前的一道新石缝上、"
+        "随后脚跟落平；画幅里始终只看见鞋面与鞋头，鞋底始终朝向脚下。"
         "脚掌踩实之后与它踩住的那道石缝位置完全重合，随后随地面一起从画幅下缘滑出去；"
         f"{_start}的地面石缝与石阶棱线一道接一道向后流过画幅下缘，"
         "他一步跨过一道：一秒之内他跨过三到四道石缝，已经跨过的石缝留在画幅里他的身后。"
@@ -16397,10 +16494,10 @@ class BSAIH3FilmFactory:
                 str(_rp_mode or "").strip() not in ("", "(none)", "custom", "None")
             # v14.394: 选中显式渲染管道配方时, 二采结构(倍率/分块/显存模式/是否
             # 开二采)一律以配方为准; 一镜到底·2K档的"干净优先"全局单次采样约束
-            # (180k token 预算压倍率 / 强制 global 不分块 / 假倍率跳过二采)只在
-            # 未选配方的后备路径生效。旧实现无条件套用这套约束, 把 PIKA 8+2 /
-            # TaoMate / ACC 等配方声明的 x2.0 空间分块二采压成假倍率 x1.02 并整段
-            # 跳过, 出片停在一采 960x544(成片 h3_clip_250_1_1794539887.mp4)。
+            # (180k token 预算压倍率 / 强制 global 不分块)只在未选配方的后备路径生效;
+            # v14.444 起假倍率不再跳过二采(配了二采必跑)。旧实现无条件套用这套约束,
+            # 把 PIKA 8+2 / TaoMate / ACC 等配方声明的 x2.0 空间分块二采压成假倍率 x1.02
+            # 并整段跳过, 出片停在一采 960x544(成片 h3_clip_250_1_1794539887.mp4)。
             _os2k_recipe = _rp_is_recipe279
             if _rp_is_recipe279:
                 print(f"[H3 Extender] v14.279 一镜到底·2K双采: 渲染管道配方优先 "
@@ -17345,11 +17442,12 @@ class BSAIH3FilmFactory:
         # 接缝、无分块噪声, 960x544 一采约 x1.39 -> latent 46x82 = 1312x736。
         # 预算只与倍率平方相关(T·H_lat·W_lat), 这里按最长 clip 的 latent T 估算。
         _os2k_decl_px = None
-        # v14.346/v14.374: 本次二采是否"没有任何几何放大"(倍率被预算压成 x1.0x 的假倍率)。
-        # 为 True 时二采整段跳过 —— 详见下方预算分支里的说明。
+        # v14.444: _os2k_skip_refine 恒 False 保留给旧引用。旧 v14.346/v14.374 在预算把
+        # 倍率压成 x1.0x 假倍率(几何未变)时整段跳过二采 —— 已废弃: 但凡 refine_enable=True
+        # 一律执行二采, 假倍率只影响放大尺寸, 不再构成跳过理由。
         _os2k_skip_refine = False
         # v14.394: 显式配方档(PIKA 8+2 / TaoMate / ACC 等)保留配方倍率与分块策略,
-        # 不走 180k token 预算折减; 预算压倍率 + 假倍率跳过只作用于未选配方的后备路径。
+        # 不走 180k token 预算折减; 预算压倍率只作用于未选配方的后备路径(假倍率 v14.444 起不再跳过二采)。
         if one_shot_dual_2k and not locals().get("_os2k_recipe", False):
             try:
                 # v14.278: 350k 预算把二采推到 1312x736 / 328,164 tokens(健康上限 130k 的
@@ -17379,34 +17477,17 @@ class BSAIH3FilmFactory:
                       f"({_os2k_t}x{_os2k_nh}x{_os2k_nw}={_os2k_t * _os2k_nh * _os2k_nw:,} tokens <= 预算 "
                       f"{_os2k_budget:,}), 整段一次采样(不分块, 无接缝/无碎纹)")
                 _os2k_decl_px = (int(_os2k_nw * 16), int(_os2k_nh * 16))
-                # v14.346 (2026-11-10 fix): 假倍率必须视为「没有二采」。
-                # 预算 180,000 在 12s 一镜到底(87 latent 帧)下只允许 x1.02, 而
-                # align=40px 取整后 latent 仍是 34x60 —— 与一采完全相同。这条"二采"
-                # 于是不含任何放大, 只是把一采 latent 重新加噪到 0.35 再用 **4 步**
-                # 去噪一遍。两个后果都是掉画质:
-                #   ① 底模是 8 步蒸馏(turbo_8step), 4 步是离轨采样, 出来的是
-                #      单元级(16px)花纹而不是细节;
-                #   ② 本插件 tooltip 已写明 denoise<=0.45 的重绘"基本只是把画面抹平"
-                #      —— 一采 8 步的锐度被这条 4 步重绘抹掉。
-                # 实机产物 h3_clip_250_1_1794296265.mp4(960x544) 全片 16px 网格,
-                # 3.79-5.46s Laplacian 方差 0.00057~0.00066(中位 0.00088, 掉 35-50%),
-                # 就是这条无效二采留下的; 它还白烧 6.4 分钟/段(47.7->200.1s/步)。
-                # 处理: 几何未变就不跑二采, 直接输出一采 8 步画面; 并把原因播报出去,
-                # 不再让"2K双采"这个名字骗人(实际输出=一采尺寸)。
+                # v14.444: 不再因「假倍率/几何未变」整段跳过二采。用户要求但凡配了二采
+                # (refine_enable=True) 的管线一律执行二采; 预算把倍率压成 x1.02 时二采仍照常
+                # 跑(同分辨率 denoise 重绘), 绝不静默跳过。_os2k_skip_refine 恒 False 保留给旧
+                # 引用, 本块不再置位。
                 _os2k_base_hw = (max(1, int(resolved_height) // 16),
                                  max(1, int(resolved_width) // 16))
                 if (int(_os2k_nh), int(_os2k_nw)) == _os2k_base_hw:
-                    _os2k_skip_refine = True
-                    print(f"[H3 Extender] ⚠️ v14.346 一镜到底·2K双采: 预算把二采倍率压到 "
-                          f"x{float(refine_upscale_factor):.2f}, 按 align={int(refine_align_to)}px 取整后几何与一采"
-                          f"完全相同(latent {_os2k_base_hw[1]}x{_os2k_base_hw[0]} = "
-                          f"{resolved_width}x{resolved_height}) —— 本次二采没有任何放大, 只会在同分辨率上"
-                          f"用 {int(refine_steps)} 步 denoise {float(refine_denoise):.2f} 重绘一遍(抹平一采锐度), "
-                          f"已整段跳过二采, 输出 = 一采 {int(steps)} 步画面")
-                    print(f"[H3 Extender] ℹ️ v14.346 要真正的 2K: ①开 upscale_final(realesr 像素超分, "
-                          f"当前工作流是关的); ②或把每段时长压到 8s 以内(87->57 latent 帧, tokens 177,480->"
-                          f"116,340)后再开 latent 放大; ③12s 段 + latent x2.0 = 709,920 tokens, 24GB 卡必换页"
-                          f"且满屏碎纹(CHANGELOG v14.276/v14.278 已实测)")
+                    print(f"[H3 Extender] ℹ️ v14.444 一镜到底·2K双采: 预算把二采倍率压到 "
+                          f"x{float(refine_upscale_factor):.2f}(align={int(refine_align_to)}px 取整后几何与一采相同), "
+                          "二采仍照常执行(不再因假倍率跳过); 如需真实 2K 放大请开 upscale_final(realesr) "
+                          "或缩短单段时长后再开 latent 放大")
             except Exception as _os2k_err:
                 print(f"[H3 Extender] v14.276 一镜到底·2K双采: 倍率换算失败, 回退 x1.5 ({_os2k_err})")
                 refine_upscale_factor = 1.5
@@ -18753,11 +18834,8 @@ class BSAIH3FilmFactory:
                                 and (_os_steps != 8 or int(refine_steps) != 4)):
                             print(f"[H3 Extender] ⚠️ v14.272 一镜到底·2K双采: 当前一采 {_os_steps} 步 / 二采 {int(refine_steps)} 步, "
                                   f"该档后备配方为 8+4 (脚本已按配方改写, 若日志仍如此请反馈)")
-                        if _os2k_skip_refine:
-                            print(f"[H3 Extender] ⚠️ v14.346 一镜到底·2K双采: 一采 {int(steps)} 步, "
-                                  f"二采已跳过(倍率=假倍率 x{float(refine_upscale_factor):.2f}, 几何未变), "
-                                  f"输出 {resolved_width}x{resolved_height}")
-                        elif locals().get("_os2k_recipe", False):
+                        # v14.444: 假倍率不再跳过二采, 此处恒为照跑回报。
+                        if locals().get("_os2k_recipe", False):
                             print(f"[H3 Extender] ✅ v14.272 一镜到底·2K双采(配方档): 一采 {int(steps)} 步 + 二采 {int(refine_steps)} 步 "
                                   f"(denoise {float(refine_denoise):.2f}), 二采倍率 x{float(refine_upscale_factor):.2f} / "
                                   f"分块={bool(tiled_refine)} 按渲染管道配方执行")
@@ -19235,7 +19313,7 @@ class BSAIH3FilmFactory:
                 _os_rule += (
                     "\n[摄影机轨迹锁定] 摄影机与主体的相对关系自始至终连续演进："
                     "机位的高度、朝向与距离随同一条轨迹平滑改变，主体在画幅中的位置与"
-                    "大小随运镜连续变化；主体始终朝着行进方向前进，画面里能看见空间"
+                    "大小随运镜连续变化；主体持续向前行走、步幅连贯，画面里能看见空间"
                     "在摄影机移动中逐渐转过去。"
                 )
                 # v14.286: 景别规则(段间连续 / 全片锁死) —— 单一真相源的纯函数。
@@ -19285,9 +19363,12 @@ class BSAIH3FilmFactory:
                 if not _os_locked_size and _os_size_reliable and _os_size_end:
                     _os_prev_size_end = _os_size_end
                 # v14.284: 主体步态锁定 —— 正面走法与背面走法必须一致, 杜绝"倒走"。
+                # v14.440: 删掉"身体钉在行进方向上"的旧句——行进方向沿廊向前时模型就把
+                # 主体摆成背对镜头(全程背影, 与空间规则的"正面朝镜头"对撞)。朝向交由各
+                # 空间规则的正面朝镜头句承担, 这里只锁步态。
                 _os_rule += (
                     "\n[主体步态] 主体以稳定连续的步频持续向前行进，双腿交替迈出完整"
-                    "步幅，步幅与节奏自始至终保持一致，身体朝向与行进方向始终一致。"
+                    "步幅，步幅与节奏自始至终保持一致，身体平稳、不后仰不前倾。"
                     "身体姿态随每一步自然演进，手臂、肩背与头部的动作都从上一步的状态"
                     "平滑变化过来。"
                 )
@@ -19915,7 +19996,22 @@ class BSAIH3FilmFactory:
                                             + torch.randn_like(_src) * _nw
                                         )
                                     else:
-                                        _vv2[:, :, :_n_head] = _src * 0.9 + torch.randn_like(_src) * 0.1
+                                        # v14.443: 分镜段头锚点套一镜到底 v14.282 凸形扰动(8%→20%),
+                                        # 替代旧 _src*0.9+noise*0.1 的 90% 锁死 —— 固定 10% 弱扰动
+                                        # + mask 锁死使段头被钉在上段尾动作, 新动作叠加旧动作 →
+                                        # 下半身斑马条纹糊块(clip3 f0/f4 实测)。凸形扰动让 latent
+                                        # 更多样、打破锁死, 与一镜到底同口径。
+                                        _wv = torch.linspace(
+                                            0.0, 1.0, int(_n_head),
+                                            device=_src.device, dtype=_src.dtype,
+                                        ) ** 2
+                                        _nw = (0.08 + 0.12 * _wv).view(
+                                            1, 1, int(_n_head), 1, 1
+                                        )
+                                        _vv2[:, :, :_n_head] = (
+                                            _src * (1.0 - _nw)
+                                            + torch.randn_like(_src) * _nw
+                                        )
                                     latent["samples"] = comfy.nested_tensor.NestedTensor((_vv2, _aa))
                                     _m_old = latent.get("noise_mask")
                                     if isinstance(_m_old, comfy.nested_tensor.NestedTensor):
@@ -19946,20 +20042,23 @@ class BSAIH3FilmFactory:
                                         # 分镜模式(场景可跳变): 头部渐进锁 keep, 0.0→1.0
                                         # 线性渐降, 首步完全保持(无缝进入), 逐步放开重绘,
                                         # 前几步从上一段尾平滑转向新场景, 无重影/崩坏帧
-                                        # v14.441 (实验): 分镜渐进锁曲线开头 0.0→0.70 起步、
-                                        # t² 加速到 1.0 —— 旧 0.0 完全 keep 使段头开头帧一采
-                                        # 不重绘 → 柔焦, 二采低噪腿(σ0=0.4381/2步)补不回;
-                                        # 0.25 实测太弱(高噪 euler 下近乎保持, 输出不变); 开头
-                                        # 提到 0.70 给 70% 去噪自由度, 锚点仍由 _vv2 赋值延续,
-                                        # 接缝风险可控(实验性, 可回退)。
+                                        # v14.443: 分镜 noise_mask 套一镜到底 v14.282 ——
+                                        # 前 1/3 行轻锁 0.15(timestep 非零, 模型可去噪), 其余
+                                        # 0.3→1.0·t² 更快放开; 打破旧全锁使段头钉在上段状态。
+                                        _n_locked_os = max(1, _n_head // 3)
                                         for _k in range(_n_head):
-                                            _t = _k / max(1, _n_head - 1)
-                                            _mv[:, :, _k] = 0.70 + 0.30 * (_t * _t)
-                                        _lock_desc = "渐进锁keep(0.70→1·t²)"
+                                            if _k < _n_locked_os:
+                                                _mv[:, :, _k] = 0.15
+                                            else:
+                                                _t = (_k - _n_locked_os) / max(
+                                                    1, _n_head - _n_locked_os - 1
+                                                )
+                                                _mv[:, :, _k] = 0.3 + 0.7 * (_t * _t)
+                                        _lock_desc = "分镜凸形锁keep(前1/3轻锁0.15→0.3→1.0·t²)"
                                     latent["noise_mask"] = comfy.nested_tensor.NestedTensor((_mv, _ma))
                                     _mode_tag = "一镜到底" if one_shot_enabled else "分镜衔接"
                                     print(f"[H3 Extender] v14.188 {_mode_tag}: clip[{i+1}] 头部{trim_frames}帧({_n_head}步)"
-                                          f"噪声从上一段尾latent延续(+{8 if one_shot_enabled else 10}%扰动), noise_mask {_lock_desc}")
+                                          f"噪声从上一段尾latent延续(凸形8→20%扰动), noise_mask {_lock_desc}")
                 except Exception as _seed_err:
                     print(f"[H3 Extender] v14.188 重叠区噪声延续失败(可忽略, 回退纯采样): {_seed_err}")
                 if lip_audio is not None:
@@ -20008,29 +20107,10 @@ class BSAIH3FilmFactory:
                                   "接缝零漂移（对齐 Motion Context V2 单遍采样方案）；"
                                   "如需 2K/高清放大请改用「双采高清」档或分镜模式")
                     elif one_shot_dual_2k:
-                        # v14.276: 2K 档二采照跑, 倍数按单次采样 token 预算取。
-                        # v14.346: 但倍率被预算压成假倍率(几何未变)时不许照跑 ——
-                        # 那条二采不含放大, 只有 4 步同分辨率重绘, 纯掉画质(见预算分支)。
-                        if _os2k_skip_refine:
-                            _eff_refine = False
-                            if not _os_pass_notice_done:
-                                _os_pass_notice_done = True
-                                print("[H3 Extender] ✅ v14.346 一镜到底·2K双采：本次预算下二采"
-                                      "没有任何几何放大(倍率=假倍率)，已跳过二采 —— 不再做同分辨率 "
-                                      f"{int(refine_steps)} 步 denoise {float(refine_denoise):.2f} 重绘，"
-                                      f"输出 = 一采 {int(steps)} 步画面({resolved_width}x{resolved_height})")
-                                _send_extender_warning(
-                                    owner,
-                                    "One-shot 2K dual-pass had no upscale this run (the token "
-                                    "budget collapsed the refine factor to x1.0x, geometry "
-                                    "unchanged), so the refine pass was skipped: it would only "
-                                    "re-denoise the same-resolution latent in 4 steps and smear "
-                                    "the first pass. Output equals the 8-step first pass; enable "
-                                    "upscale_final (realesr) for a real 2K master, or shorten each "
-                                    "clip to <=8s to keep single-call tokens in the healthy zone.",
-                                    clip_index=i,
-                                )
-                        elif not _os_pass_notice_done:
+                        # v14.444: 2K 档二采一律照跑 —— 但凡 refine_enable=True, 二采就执行,
+                        # 不再因 token 预算把倍率压成假倍率(几何未变)而把 _eff_refine 关掉。
+                        # (旧 v14.346 在假倍率时整段跳过二采, 违反"配了二采不得跳过"。)
+                        if not _os_pass_notice_done:
                             _os_pass_notice_done = True
                             if locals().get("_os2k_recipe", False):
                                 print("[H3 Extender] ✅ 一镜到底·2K双采(配方档)：二采照跑"
