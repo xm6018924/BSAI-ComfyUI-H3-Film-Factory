@@ -261,6 +261,9 @@ def main():
     check("通用锁已删『身体朝向与行进方向始终一致』(否则与正面朝镜头对撞出背影)",
           "身体朝向与行进方向始终一致" not in open(EXT, "r", encoding="utf-8").read()
           and "主体始终朝着行进方向前进" not in open(EXT, "r", encoding="utf-8").read(), None)
+    check("全局正面朝向锁定已注入[正面朝向锁定](压过正文机位描述, 根治全程背影)",
+          "[正面朝向锁定] 全段主体正面始终朝向镜头、面朝镜头边唱边走"
+          in open(EXT, "r", encoding="utf-8").read(), None)
     check("段中换场: 前进凭据钉在地面(石缝与柱列一道接一道后流过画幅)",
           "一道接一道向后流过画幅下缘" in mid
           and "同样一道接一道向后流过画幅两侧" in mid, mid[:60])
