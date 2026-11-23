@@ -7187,6 +7187,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         preview_x0 = preview_x0.tensors[0]
                     if previewer is not None:
                         img = previewer.decode_latent_to_preview(preview_x0)
+                        # v14.449: Bleh better_previews 的 decode 返回 ImageWrapper, 其
+                        # save() 不写传入 fp 且内部 BytesIO 触发 fileno UnsupportedOperation
+                        # -> broken data stream; 取出底层 PIL 帧, 由本回调自存 JPEG。
+                        _wrapped_frames = getattr(img, "_frames", None)
+                        if _wrapped_frames:
+                            img = _wrapped_frames[0]
                         # v1.46: H3 latent 预览是 latent 格点直接映射(60x34 等),
                         # 不放大则前端看到的就是一张极小的缩略图, 视觉上"糊成一片"。
                         # 放大到实际视频分辨率(LANCZOS 平滑), 让一采预览真实可辨。
@@ -8810,6 +8816,40 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                         print(f"[H3 Extender] v14.383 二采自由显存闭环 {_it383}/{_FF_REFINE_FREE_ITERS}: "
                                               f"reserve={_r_reserve_gb:.1f}GB resident={_res383:.1f}GB "
                                               f"free={_free383:.1f}GB (目标 {_tgt383:.1f}GB, 下限 {_floor383:.1f}GB)")
+                                    # v14.450 (2026-10-20): 分块大token resident 封顶。
+                                    # v14.383 高free打包分支从 free=22GB 一路 pack 到 free=3.8GB /
+                                    # resident 16.2GB, tile 实跑激活把 free 压到 0.18GB, 驻留权重被
+                                    # 挤出, 原始 block 的量化 MLP/attn 权重每层被迫 CPU->GPU 重搬
+                                    # (cast_bias_weight / QuantizedTensor.to_device), GPU 95W 空等
+                                    # PCIe, tile1 >25min 未返回。健康参照: resident10.9/free3.5 ->
+                                    # 108s/块。这里给 resident 封顶 12.5GB, 余量留给 tile 激活与
+                                    # Sol-Attn workspace; 真不够由下方 v14.381 探针自适应抬 reserve。
+                                    if _tiled383 and _tok383 > 300000:
+                                        try:
+                                            # v14.450 迭代压 resident: 目标 <=10.8GB。
+                                            # 单次封顶只把 13.7->13.3 不够, 真实 tile 激活仍把 free
+                                            # 压到 0.3GB 触发换页(实机 91% to_device, tile1 仍卡死)。
+                                            # 健康参照: resident10.9/free3.5 -> 108s/块。
+                                            for _cap_it450 in range(4):
+                                                _res_now450 = model.loaded_size() / 1024 ** 3
+                                                if _res_now450 <= 10.8:
+                                                    break
+                                                _need450 = _res_now450 - 10.8
+                                                _cap_res450 = min(11.5, _r_reserve_gb + _need450 + 0.5)
+                                                _ff_unregister_model(model, label="二采-resident-cap450")
+                                                _mm3.EXTRA_RESERVED_VRAM = int(_cap_res450 * 1024 ** 3)
+                                                _mm3.load_models_gpu([model])
+                                                _torch3.cuda.synchronize()
+                                                _gc383.collect()
+                                                _torch3.cuda.empty_cache()
+                                                _r_reserve_gb = _cap_res450
+                                            _res383 = model.loaded_size() / 1024 ** 3
+                                            _free383 = _torch3.cuda.mem_get_info()[0] / 1024 ** 3
+                                            print(f"[H3 Extender] v14.450 resident 封顶: "
+                                                  f"resident={_res383:.1f}GB reserve={_r_reserve_gb:.1f}GB "
+                                                  f"free={_free383:.1f}GB (大token分块防权重换页, 目标<=10.8)", flush=True)
+                                        except Exception as _ecap450:
+                                            print(f"[H3 Extender] v14.450 resident 封顶失败(可忽略, 走自适应): {_ecap450}")
                                     # 定档后再回收一次 cached 池并重测; 仍低于下限则醒目告警, 避免前向触发 GPU 复位。
                                     _gc383.collect()
                                     _torch3.cuda.empty_cache()
