@@ -1242,6 +1242,8 @@ const BSAI_BILINGUAL_LABELS = {
     "tiled_refine": "Tiled refine toggle (enable when VRAM is low; splits along H/W; off by default)",
     "tile_count": "Spatial tile count (higher = less VRAM but slower; default 4)",
     "tile_overlap": "Tile overlap in pixels (adjacent tiles are blended; default 128)",
+    "spatial_tile_enable": "Spatial tiling master switch (default OFF; turn ON manually). OFF = disable every spatial tile path; ON = restore original tiling logic",
+    "temp_chunk_enable": "Temporal chunking master switch (default OFF; turn ON manually). OFF = disable every temporal chunk path; ON = restore original chunking logic",
     "semantic_bridge_enable": "Semantic Bridge toggle (default off)",
     "semantic_bridge_adapter": "Semantic Bridge weights (place in models/semantic_bridge, about 11MB)",
     "semantic_bridge_alpha": "Semantic Bridge strength (C = H + alpha*(S-H); default 0.15)",
@@ -6907,6 +6909,11 @@ abortBtn.addEventListener("click", (e) => { e.preventDefault(); sendRenderContro
         { key: "upscale_fp16", en: "UpxFP16", desc_en: "Half-precision pixel upscale acceleration (automatic when the GPU/XPU supports it)." },
         { key: "upscale_face_restore", en: "FaceFix", desc_en: "Face restore after upscale (FaceRestore; needs GPFGAN/CodeFormer weights, extra time)." },
         { key: "tiled_refine", en: "Tiled", desc_en: "Second pass samples in tiles along the long spatial axis (attention VRAM drops linearly, prevents OOM hangs). Keep off with plenty of VRAM." },
+        // v14.444 (2026-11-23): 空间/时间分块总开关快捷按钮（布尔，无 cycle）。
+        // 默认 OFF（须手动开）：OFF 时后端入口归一化压过配方档，全管线该类分块
+        // 一律不发生（门控点见 extender.py _sample_h3）；手动 ON 才恢复原逻辑。
+        { key: "spatial_tile_enable", en: "SpTile", desc_en: "Spatial tiling master switch (default OFF; turn ON manually). OFF = every spatial tile path is disabled: tiled_refine/tile_count ignored, and v14.157 VRAM-budget auto-enable, v14.181 token-gate auto-tiling, v14.180 fallback n_tiles=8, and v1.92 OOM-fallback tiled rerun are suppressed; the 2nd pass runs whole-frame. ON = restore all original spatial tiling logic." },
+        { key: "temp_chunk_enable", en: "TmChunk", desc_en: "Temporal chunking master switch (default OFF; turn ON manually). OFF = every temporal chunk path is disabled: temporal_chunk_tokens ignored, and v14.228/v14.270 token-budget auto-chunking and v14.390 redraw override are suppressed; the 2nd pass runs the whole segment at once. ON = restore all original temporal chunking logic." },
         { key: "semantic_bridge_enable", en: "SemBrg", desc_en: "Semantic Bridge (about 11MB small MLP residual mix; makes H3 follow composition/spatial/count cues better)." },
         { key: "semantic_bridge_magnitude_match", en: "MagMatch", desc_en: "Match the Semantic Bridge vector magnitude to the original hidden state (on by default upstream)." },
         // v14.221 (2026-10-26): 保脸由布尔升级为三态枚举。cycle 必须与后端 INPUT_TYPES
@@ -7099,6 +7106,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
         // 画质：二采 / 口型 / 人脸修复 / 分块二采 / 保脸
         refine_enable: "quality", refine_lipsync_mode: "quality",
         upscale_face_restore: "quality", tiled_refine: "quality", face_lock_mode: "quality",
+        // v14.444: 分块总开关归入 speed（显存/速度类，青色）
+        spatial_tile_enable: "speed", temp_chunk_enable: "speed",
         // 加速：速度预设 + 三种缓存
         speed_preset: "speed", block_cache: "speed", ref_cache: "speed", cache_dit: "speed",
         // 超分：逐段 / 全片 / 模式 / FP16
@@ -7564,8 +7573,8 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     const H3_REFINE_ROW_KEYS = [
         "refine_enable", "refine_denoise", "refine_steps", "refine_upscale_factor",
         "refine_upscaler_model", "refine_align_to", "refine_audio_denoise",
-        "refine_lipsync_mode", "tiled_refine", "tile_count", "tile_overlap",
-        "temporal_chunk_tokens", "temporal_overlap_tokens", "refine_mem_mode",
+        "refine_lipsync_mode", "spatial_tile_enable", "tiled_refine", "tile_count", "tile_overlap",
+        "temp_chunk_enable", "temporal_chunk_tokens", "temporal_overlap_tokens", "refine_mem_mode",
     ];
     const syncOmniRefineRows = (nd) => {
         if (!nd) return;
@@ -7610,7 +7619,7 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
     let manualOn = manualW ? Boolean(manualW.value) : false;
     const MANUAL_GROUPS = {
         first_pass: { label: "First pass", keys: ["steps", "sampler_name", "scheduler", "denoise", "dual_track_shift", "shift_video", "shift_audio", "context_length", "audio_context_length", "resolution_mode", "megapixels", "width", "height", "ref_image_size", "one_shot_mode", "one_shot_sampling"] },
-        second_pass: { label: "Second pass", keys: ["refine_enable", "refine_steps", "refine_denoise", "refine_upscale_factor", "refine_upscaler_model", "refine_sampler", "refine_align_to", "refine_audio_denoise", "refine_lipsync_mode", "tiled_refine", "tile_count", "tile_overlap", "refine_mem_mode", "selflift_tst_enable", "selflift_tst_tau"] },
+        second_pass: { label: "Second pass", keys: ["refine_enable", "refine_steps", "refine_denoise", "refine_upscale_factor", "refine_upscaler_model", "refine_sampler", "refine_align_to", "refine_audio_denoise", "refine_lipsync_mode", "spatial_tile_enable", "tiled_refine", "tile_count", "tile_overlap", "temp_chunk_enable", "temporal_chunk_tokens", "temporal_overlap_tokens", "refine_mem_mode", "selflift_tst_enable", "selflift_tst_tau"] },
         accel_cache: { label: "Accel/Cache", keys: ["block_cache", "block_cache_threshold", "block_cache_device", "cache_dit", "ref_cache"] },
         context_audio: { label: "Context/Audio", keys: ["env_audio_enable", "env_audio_gain", "semantic_bridge_enable", "semantic_bridge_adapter", "semantic_bridge_alpha", "semantic_bridge_magnitude_match", "face_lock_mode"] },
         upscale: { label: "Upscale", keys: ["upscale_per_clip", "upscale_final", "upscale_mode", "upscale_engine", "upscale_factor", "upscale_model", "upscale_tile", "upscale_batch", "upscale_fp16", "upscale_face_restore"] },

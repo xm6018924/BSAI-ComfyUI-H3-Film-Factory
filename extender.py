@@ -6920,6 +6920,12 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                tiled_refine=False, tile_count=4, tile_overlap=128,
                refine_mem_mode="spatial",
                temporal_chunk_tokens=0, temporal_overlap_tokens=8,
+               # 2026-11-23 总开关(默认关, 须手动开): temp_chunk_enable=False ->
+               # 全管线时间分块关闭(含 v14.228/v14.270/v14.390 自动切块);
+               # spatial_tile_enable=False -> 全管线空间分块关闭(含 v14.157 显存自动
+               # 启用 / v14.181 token 门自动分块 / v14.180 回退保底 / v1.92 OOM
+               # fallback 分块重跑)。手动置 True 才恢复原有分块逻辑。
+               temp_chunk_enable=False, spatial_tile_enable=False,
                dual_track_shift=True, shift_video=12.0, shift_audio=3.0,
                tst_enable=True, tst_tau=0.2, omni_8step_mode=False,
                honor_manual_steps=False,
@@ -6951,6 +6957,17 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                vae=None):
     if int(steps) < 1:
         raise ValueError("MiniMax H3 Extender: steps must be >= 1.")
+
+    # 2026-11-23 时间/空间分块总开关门控(入口归一化, 压过配方档覆写):
+    # 关 -> 该类分块的所有触发点(用户显式、配方档、自动门、兜底、OOM fallback)
+    # 一律不再发生; 开 -> 完全恢复原有逻辑。
+    _tc_chunk_on = bool(temp_chunk_enable)
+    _sp_tile_on = bool(spatial_tile_enable)
+    if not _tc_chunk_on:
+        temporal_chunk_tokens = 0
+    if not _sp_tile_on:
+        tiled_refine = False
+        tile_count = 1
 
     # v14.250 (2026-10-29): 二采 OOM/塌陷回退标记。回退后的 latent 只是「一采
     # latent 插值放大」, 不是采样产物 —— 在链几何上直接 VAE 解码会得到 16px 周期
@@ -7902,7 +7919,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # 不被显存预算自动翻回分块; 真 OOM 由 v1.92 fallback 兜底。
                 _wf_budget = bool(locals().get("_refine_wholeframe", False)) or \
                     str(os.environ.get("BSAI_H3_REFINE_WHOLEFRAME", "")).lower() in ("1", "true", "yes")
-                if (not tiled_refine) and (not _prog_enabled) and (not _wf_budget) and (_chosen2 is None or _chosen2 < _orig_f - 1e-6):
+                if _sp_tile_on and (not tiled_refine) and (not _prog_enabled) and (not _wf_budget) and (_chosen2 is None or _chosen2 < _orig_f - 1e-6):
                     _ws_tiled_tbl = {1.0: 0.8, 1.5: 0.9, 2.0: 1.1}
                     _ws_tiled = _ws_tiled_tbl.get(round(_orig_f, 1), 1.1)
                     if min(_gpu_free_gb2, _gpu_total_gb2) - _ws_tiled - 3.0 >= 10.0:
@@ -8168,7 +8185,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             #   画面"糊成一片+像素化故障风". 官方 Sol-H3 DualSample 工作流二采正是用
             #   DisableNoise(Noise_EmptyNoise -> prepare_empty_noise 全零噪声) 走同一入口,
             #   此处完全对齐.
-            _use_temporal = (bool(temporal_chunk_tokens) and int(temporal_chunk_tokens) > 0
+            _use_temporal = (_tc_chunk_on and bool(temporal_chunk_tokens) and int(temporal_chunk_tokens) > 0
                              and not refine_single_pass)
             # v14.401: 「BSAI6+2高低噪采样」禁用时间分块 —— 分块路径每段都会重新
             # prepare_noise + CONST 加噪, 把"从切点续算"变成"逐段重画", 且段间各带
@@ -8220,7 +8237,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 else:
                     print("[H3 Extender] v14.281 MV 双采: 按原版 temporal_chunk_tokens=0 "
                           "禁用自动时间分块 -> 整段一次二采(1 段 × 空间分块)", flush=True)
-            if ((_CHUNKED_DENOISE_ON or _redraw390) and not _use_temporal
+            if (_tc_chunk_on and (_CHUNKED_DENOISE_ON or _redraw390) and not _use_temporal
                     and not refine_single_pass
                     and (not refine_no_temp_chunk or _tc_override390)):
                 try:
@@ -8754,7 +8771,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                 if _m383 is not None and getattr(_m383[0], "ndim", 0) >= 4:
                                     _tok383 = (int(_m383[0].shape[2]) * int(_m383[0].shape[-2])
                                                * int(_m383[0].shape[-1]))
-                                    if _tok383 > 130000:
+                                    if _sp_tile_on and _tok383 > 130000:
                                         _tiled383 = True
                             except Exception:
                                 _tok383 = 0
@@ -8868,7 +8885,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                                         # resident 14.4->10.9GB，每条 forward 多搬 3.4GB 权重，
                                         # v14.380 实机二采每块 108.4s。改为按**块几何**判 workspace:
                                         # 单块序列约为全帧的 1/n，workspace 随序列长度缩放。
-                                        _will_tile381 = bool(tiled_refine) or _r_tok_probe250 > 130000
+                                        _will_tile381 = bool(tiled_refine) or (_sp_tile_on and _r_tok_probe250 > 130000)
                                         _ws381 = _ws65
                                         _ntile381 = 1
                                         if _will_tile381 and _r_tok_probe250 > 0:
@@ -9046,7 +9063,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # 二采整帧一次前向(最快, 无块间权重换页); OOM 仍由 v1.92 fallback 兜底。
             _wf = bool(locals().get("_refine_wholeframe", False)) or \
                 str(os.environ.get("BSAI_H3_REFINE_WHOLEFRAME", "")).lower() in ("1", "true", "yes")
-            if _r_call_tok > _r_gate_limit and _r_restore_tiles is None and refine_mem_mode != "global" and not _wf:
+            if _sp_tile_on and _r_call_tok > _r_gate_limit and _r_restore_tiles is None and refine_mem_mode != "global" and not _wf:
                 try:
                     import os as _os_t3, importlib.util as _ilu_t3
                     _tiles_path3 = _os_t3.path.join(_os_t3.path.dirname(_os_t3.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -9225,7 +9242,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
             # v14.275: 时间分块已启用时不再补 spatial 分块保底 —— 每次调用只剩
             # chunk 帧(~236k tokens, 在 Sol-Attn 健康区), 不存在"全序列路径不可用"
             # 的问题; 硬补 8 块反而把画面切成 8 条独立重构图(重影/碎屑)。
-            if _r_global_fallback_tiles and _r_restore_tiles is None and not _use_temporal:
+            if _sp_tile_on and _r_global_fallback_tiles and _r_restore_tiles is None and not _use_temporal:
                 try:
                     import os as _os_t4, importlib.util as _ilu_t4
                     _tiles_path4 = _os_t4.path.join(_os_t4.path.dirname(_os_t4.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
@@ -9953,7 +9970,7 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                 # v1.93 fix: 总是包装 tiles 重跑放大版 samples(120x68)。
                 # 旧逻辑 if not (tile_count>1) 导致 tile_count>1 时跳过包装 ->
                 # 退回 _fb_samples(60x34) 重跑 -> 二采马赛克 + bicubic 拉伸。
-                if True:  # v1.93: always tile-wrap the upscaled samples
+                if _sp_tile_on:  # v1.93: always tile-wrap the upscaled samples (2026-11-23: 空间分块总开关关时跳过, 走原始尺寸兜底)
                     import os as _os_t2, importlib.util as _ilu_t2
                     _tiles_path2 = _os_t2.path.join(_os_t2.path.dirname(_os_t2.path.abspath(__file__)), "bsai_h3_spatial_tiles.py")
                     _tiles_spec2 = _ilu_t2.spec_from_file_location("bsai_h3_spatial_tiles", _tiles_path2)
@@ -13589,7 +13606,7 @@ class BSAIH3FilmFactory:
             ),
             "tiled_refine": (
                 "BOOLEAN",
-                {"default": False, "tooltip": "v1.48 tiled refine (default off). When enabled, refine samples along the long spatial axis in tiles, so activation/attention workspace drops linearly with tile_count, fixing OOM/hang caused by a 21.8GB model + full-frame workspace when external processes squeeze VRAM. Ported from MiniMaxH3 Director spatial tiling (Apache-2.0). Keep off when VRAM is large. Only effective when refine_enable is on."},
+                {"default": False, "tooltip": "v1.48 tiled refine (default off). When enabled, refine samples along the long spatial axis in tiles, so activation/attention workspace drops linearly with tile_count, fixing OOM/hang caused by a 21.8GB model + full-frame workspace when external processes squeeze VRAM. Ported from MiniMaxH3 Director spatial tiling (Apache-2.0). Keep off when VRAM is large. Only effective when refine_enable is on. Requires spatial_tile_enable = on."},
             ),
             "tile_count": (
                 "INT",
@@ -13641,7 +13658,7 @@ class BSAIH3FilmFactory:
             ),
             "temporal_chunk_tokens": (
                 "INT",
-                {"default": 0, "min": 0, "max": 200, "step": 1, "tooltip": "v2.02 temporal chunking (along the T axis, unlike tile_count which is along H/W). 0 = off (default full-segment refine); >0 splits the refine latent along T into token segments of that length with overlap, each run through the existing (spatial-tiled) sampler, with the overlap zones frozen and taken over by smoothstep. Lowers attention/activation peaks to prevent OOM. For T~107, 40~60 is recommended."},
+                {"default": 0, "min": 0, "max": 200, "step": 1, "tooltip": "v2.02 temporal chunking (along the T axis, unlike tile_count which is along H/W). 0 = off (default full-segment refine); >0 splits the refine latent along T into token segments of that length with overlap, each run through the existing (spatial-tiled) sampler, with the overlap zones frozen and taken over by smoothstep. Lowers attention/activation peaks to prevent OOM. For T~107, 40~60 is recommended. Requires temp_chunk_enable = on."},
             ),
             "temporal_overlap_tokens": (
                 "STRING",
@@ -13900,6 +13917,29 @@ class BSAIH3FilmFactory:
             {
                 "default": False,
                 "tooltip": "v14.439 Whole-frame refine (default OFF). ON = the 2nd pass samples the whole clip in one forward pass, skipping v14.270's automatic temporal chunking by token budget (no per-segment independent seed, no seam flicker / block artifacts); whole-frame forward, real OOM handled by fallback. Equivalent to env BSAI_H3_REFINE_WHOLEFRAME=1; pins whole-frame mode into the workflow without the bat env.",
+            },
+        )
+        # v14.444 (2026-11-23): 时间/空间分块总开关(默认关, 须手动开)。追加在
+        # optional 最末尾, 不挤占/不移位任何既有 widget index; 旧工作流缺这两个键
+        # -> ComfyUI 填默认 False(关), 即默认不启用任何分块, 需要时手动点开关打开。
+        # spatial_tile_enable=False -> 全管线空间分块关闭(忽略 tiled_refine/tile_count,
+        # 并禁用 v14.157 显存自动启用 / v14.181 token 门自动分块 / v14.180 回退保底
+        # / v1.92 OOM fallback 分块重跑), 二采整帧一次前向。
+        optional["spatial_tile_enable"] = (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": "v14.444 Spatial tiling master switch (default OFF; turn ON manually). OFF = every spatial tile path in the pipeline is disabled: tiled_refine/tile_count are ignored, and v14.157 VRAM-budget auto-enable, v14.181 token-gate auto-tiling, v14.180 fallback n_tiles=8, and the v1.92 OOM-fallback tiled rerun are all suppressed; the 2nd pass runs whole-frame in one forward. ON = restore all original spatial tiling logic. Old workflows without this key default to OFF.",
+            },
+        )
+        # temp_chunk_enable=False -> 全管线时间分块关闭(忽略 temporal_chunk_tokens,
+        # 并禁用 v14.228/v14.270 token 预算自动切块 / v14.390 真重绘撤销整段一次),
+        # 二采整段一次。
+        optional["temp_chunk_enable"] = (
+            "BOOLEAN",
+            {
+                "default": False,
+                "tooltip": "v14.444 Temporal chunking master switch (default OFF; turn ON manually). OFF = every temporal chunk path in the pipeline is disabled: temporal_chunk_tokens is ignored, and v14.228/v14.270 token-budget auto-chunking and v14.390 redraw override are suppressed; the 2nd pass runs the whole segment at once. ON = restore all original temporal chunking logic. Old workflows without this key default to OFF.",
             },
         )
         # v14.360: 换脸工序**不再追加 widget** —— 追加会改变电影工厂的既有参数位置，
@@ -14578,6 +14618,9 @@ class BSAIH3FilmFactory:
                   "确认 Loader 使用 fasth3_omniref_8step_pruned_int8_convrot.safetensors + BlockSparseAttention(VSA keep_percent=10)。")
         tiled_refine = bool(kwargs.get("tiled_refine", False))
         tile_count = int(kwargs.get("tile_count", 4))
+        # 2026-11-23 时间/空间分块总开关(默认关; 老工作流缺此 widget 视为关, 须手动开)
+        spatial_tile_enable = bool(kwargs.get("spatial_tile_enable", False))
+        temp_chunk_enable = bool(kwargs.get("temp_chunk_enable", False))
         # v14.181 (2026-10-23): 回滚 v14.180 的 overlap 钳制 64px -> 恢复 128px。
         # 实测崩坏(分镜模式, 22:00 渲染): v14.179 声称 overlap 64 的接缝由
         # motion-context keyframe 对齐兜底, 但该兜底仅在一镜到底(one_shot=on)
@@ -20195,6 +20238,8 @@ class BSAIH3FilmFactory:
                     tiled_refine=bool(tiled_refine),
                     tile_count=int(tile_count),
                     tile_overlap=int(tile_overlap),
+                    spatial_tile_enable=bool(spatial_tile_enable),
+                    temp_chunk_enable=bool(temp_chunk_enable),
                     refine_mem_mode=("global" if refine_mem_global else "spatial"),
                     temporal_chunk_tokens=int(temporal_chunk_tokens),
                     temporal_overlap_tokens=int(temporal_overlap_tokens),
