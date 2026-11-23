@@ -7166,6 +7166,40 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
     pbar = comfy.utils.ProgressBar(total_steps)
     _last_sent_step = {"v": -1}
 
+    def _encode_preview_jpeg(_img, quality=60, max_side=1280):
+        """v14.450 预览统一编码入口。
+
+        修两类必然崩的写法：
+        1) 盲放大：旧逻辑只要某一边 <320 就 ×16，遇到 4096×256 这类宽幅
+           预览会得到 65536×4096，直接越过 JPEG 的 65500 像素上限。
+           这里改为“长边 <640 才放大、放大后长边封顶 max_side”，宽高比不变。
+        2) BytesIO + JPEG：Pillow 的 JPEG 编码走 bufsize 分支时会调用
+           fp.fileno()，BytesIO 没有 fd，必然抛 UnsupportedOperation，
+           最终表现就是 OSError: broken data stream when writing image file。
+           改用 tempfile.TemporaryFile（真实 fd，关闭即删），同一份字节再读回。
+        """
+        if _img.mode not in ("RGB", "L"):
+            _img = _img.convert("RGB")
+        _w, _h = _img.size
+        _long = max(_w, _h)
+        if _long <= 0:
+            raise ValueError("empty preview image")
+        if _long < 640:
+            _scale = min(16.0, float(max_side) / float(_long))
+        elif _long > max_side:
+            _scale = float(max_side) / float(_long)
+        else:
+            _scale = 1.0
+        if _scale != 1.0:
+            _img = _img.resize(
+                (max(1, int(_w * _scale)), max(1, int(_h * _scale))),
+                Image.LANCZOS,
+            )
+        with tempfile.TemporaryFile(suffix=".jpg") as _fp:
+            _img.save(_fp, format="JPEG", quality=quality)
+            _fp.seek(0)
+            return _fp.read()
+
     _cb_t0 = {"t": None}
     def _latent_preview_callback(step, x0, x, total_steps_arg):
         # v1.55: 每步耗时诊断——定位第 4 步固定 ~430s 的瓶颈(计算/IO/卸载)
@@ -7193,19 +7227,8 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         _wrapped_frames = getattr(img, "_frames", None)
                         if _wrapped_frames:
                             img = _wrapped_frames[0]
-                        # v1.46: H3 latent 预览是 latent 格点直接映射(60x34 等),
-                        # 不放大则前端看到的就是一张极小的缩略图, 视觉上"糊成一片"。
-                        # 放大到实际视频分辨率(LANCZOS 平滑), 让一采预览真实可辨。
-                        try:
-                            _pv_w, _pv_h = img.size
-                            _pv_scale = 16
-                            if _pv_w < 320 or _pv_h < 320:
-                                img = img.resize(
-                                    (_pv_w * _pv_scale, _pv_h * _pv_scale),
-                                    Image.LANCZOS,
-                                )
-                        except Exception:
-                            pass
+                        if not isinstance(img, Image.Image):
+                            raise TypeError(f"preview decode returned {type(img).__name__}, not a PIL image")
                     else:
                         # Manual fallback: take first 3 channels, normalize to 0-255
                         # Handle 5D video latents by taking the first time step
@@ -7216,17 +7239,14 @@ def _sample_h3(model, conditioning, latent, seed: int, sampler_name: str, schedu
                         t = ((t - t.min()) / (t.max() - t.min() + 1e-8) * 255).clamp(0, 255)
                         t = t.to(device="cpu", dtype=torch.uint8)
                         img = Image.fromarray(t[0].movedim(0, 2).numpy())
-                    buf = io.BytesIO()
-                    img.save(buf, format="JPEG", quality=60)
-                    jpeg_bytes = buf.getvalue()
+                    jpeg_bytes = _encode_preview_jpeg(img, quality=60, max_side=1280)
                     if step == 0 or step == total_steps_arg - 1:
                         print(f"[H3 Extender] latent preview: clip={clip_index} step={step+1}/{total_steps_arg} "
                               f"bytes={len(jpeg_bytes)} previewer={'yes' if previewer else 'manual'}")
                     _send_latent_preview_frame(owner_id, clip_index, step + 1, total_steps_arg, jpeg_bytes)
                 except Exception as _e:
-                    print(f"[H3 Extender] latent preview callback error: {_e}")
-                    import traceback
-                    traceback.print_exc()
+                    # 预览是旁路：任何编码异常只跳过本帧，绝不允许把整条采样链路带崩。
+                    print(f"[H3 Extender] latent preview skipped (clip={clip_index}, step={step}): {_e}")
 
     callback = _latent_preview_callback if owner_id is not None else None
     disable_pbar = not comfy.utils.PROGRESS_BAR_ENABLED
