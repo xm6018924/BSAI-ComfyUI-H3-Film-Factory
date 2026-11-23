@@ -16845,6 +16845,25 @@ class BSAIH3FilmFactory:
             refine_mem_mode = "spatial (tiled, compatible)"
             print("[H3 Extender] v14.413 内存档复位: 默认双采档 widget 为 spatial, "
                   "撤销被静默提升的 global 全上下文 dense, 恢复 spatial 空间分块", flush=True)
+        # v14.446 (2026-11-23): SpTile 空间分块总开关双向驱动二采内存档。
+        # ON  -> global 全上下文让位给 spatial (tiled, compatible): global 与空间分块
+        #        互斥(显式 Tiled 包装 8972 / v14.181 token 门 9066 都要求 mem_mode !=
+        #        global), 不切则 SpTile ON + Tiled ON 仍被 v14.153 global 包装挡掉。
+        # OFF -> spatial (tiled, compatible) 让位给 global 全上下文省显存: 分块关闭时
+        #        退回 dense 全上下文 MLP 分块路径, 不裁空间轴。
+        # 已为 global/已为目标档时不重复改写。
+        if spatial_tile_enable:
+            if refine_mem_global:
+                refine_mem_global = False
+                refine_mem_mode = "spatial (tiled, compatible)"
+                print("[H3 Extender] SpTile ON: 二采内存档 global -> spatial (tiled, compatible), "
+                      "放行空间分块(global 全上下文与分块互斥, 已自动让位)", flush=True)
+        else:
+            if not refine_mem_global:
+                refine_mem_global = True
+                refine_mem_mode = "global (全上下文省显存)"
+                print("[H3 Extender] SpTile OFF: 二采内存档 spatial -> global (全上下文省显存), "
+                      "关闭空间分块, 退回 dense 全上下文路径", flush=True)
         # v14.414: 二采不重绘(纯超分) 与 高低噪切分腿 互斥。
         # 根因: SelfLift / 6+2 切分档把一条去噪曲线劈成「一采高噪腿(止于切点 σ≈0.47)
         # + 二采低噪收尾腿(σ→0)」。二采既然按 BSAI_H3_REFINE_NO_REDRAW 只做 3D 超分、
@@ -16902,15 +16921,21 @@ class BSAIH3FilmFactory:
                 refine_audio_denoise = 0.0
             elif one_shot_seamless_dual or (one_shot_sampling.startswith("双采")
                                             and not one_shot_single_pass):
-                # 双采无缝(8+4) / 双采无缝 2K(8+4) / 双采高清(接缝风险):
-                # 一采 8 步 + 二采 4 步 denoise 0.45, euler, shift 12/3, 开二采。
-                # 2K 档的倍率折减/global/不分块由 16258 后备块单独处理; 双采高清的
-                # 内容锁闸门(结构相似度)在采样循环内夹 denoise, 此处只给基准 0.45。
-                steps, refine_steps, refine_denoise = 8, 4, 0.45
-                sampler_name = "euler"
-                shift_video, shift_audio = 12.0, 3.0
-                refine_enable = True
-                refine_audio_denoise = 0.0
+                if one_shot_sampling.startswith("双采高清"):
+                    # v14.447: 双采高清(接缝风险)=手动档 —— 一采 steps / 二采 steps /
+                    # denoise / sampler / scheduler / shift 全部按面板参数执行, 后端不再
+                    # 写死 8+4; 仅强制开二采。内容锁(结构相似度闸门)仍在采样循环内保留。
+                    refine_enable = True
+                    refine_audio_denoise = 0.0
+                else:
+                    # 双采无缝(8+4) / 双采无缝 2K(8+4):
+                    # 一采 8 步 + 二采 4 步 denoise 0.45, euler, shift 12/3, 开二采。
+                    # 2K 档的倍率折减/global/不分块由 16258 后备块单独处理。
+                    steps, refine_steps, refine_denoise = 8, 4, 0.45
+                    sampler_name = "euler"
+                    shift_video, shift_audio = 12.0, 3.0
+                    refine_enable = True
+                    refine_audio_denoise = 0.0
             print("[H3 Extender] v14.437 🎬 一镜到底内置固定配方已接管(外部 render/speed/"
                   f"first/second/omni/直播别名 已屏蔽) 档={one_shot_sampling}: "
                   f"一采 {int(steps)} 步 {sampler_name}/{scheduler} denoise={float(denoise):.2f} "

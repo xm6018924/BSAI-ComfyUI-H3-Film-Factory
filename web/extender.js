@@ -7436,6 +7436,16 @@ function _h3qkMakeMenu(def, C, w, shades, onPick) {
             } else {
                 w.value = !w.value;
                 if (typeof w.callback === "function") { try { w.callback(w.value); } catch (e) {} }
+                // v14.446: SpTile 总开关联动 refine_mem_mode 下拉显示 —— ON 写 spatial
+                // (tiled, compatible), OFF 写 global (full-context, low VRAM)。后端执行时
+                // 另有兜底强制, 此处负责参数栏同步可见。
+                if (def.key === "spatial_tile_enable") {
+                    const mm = node.widgets.find((x) => x && x.name === "refine_mem_mode");
+                    if (mm) {
+                        mm.value = w.value ? "spatial (tiled, compatible)" : "global (full-context, low VRAM)";
+                        if (typeof mm.callback === "function") { try { mm.callback(mm.value); } catch (e) {} }
+                    }
+                }
                 refresh();
                 try { updateHidden(node, runtime); } catch (e) {}
                 try { node.setDirtyCanvas(true, true); } catch (e) {}
